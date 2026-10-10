@@ -1,7 +1,7 @@
 // A stand-in for the Rust core when the UI runs in a plain browser. It is only good
 // enough to exercise the UI: steady demo grids, play/cue/jump/loop/sync, no audio.
 
-import type { DeckState, EngineState, GridDto, LoadedTrack, TrackSource } from "./types";
+import type { DeckState, EngineState, GridDto, LibTrack, LoadedTrack, TrackSource } from "./types";
 
 type Listener = (p: unknown) => void;
 const listeners = new Map<string, Listener[]>();
@@ -115,14 +115,28 @@ export async function mockInvoke<T>(cmd: string, a: Record<string, any>): Promis
       return r([]);
     case "list_audio_devices":
       return r([]);
-    case "scan_folder":
-      return r([]);
+    case "library_folders":
+      return r(mockFolders);
+    case "add_library_folder":
+      if (!mockFolders.includes(a.path)) mockFolders.push(a.path);
+      return r(mockFolders);
+    case "remove_library_folder":
+      mockFolders = mockFolders.filter((f) => f !== a.path);
+      return r(mockFolders);
+    case "list_subdirs":
+      return r(a.path === "/music" ? [{ name: "house", path: "/music/house", has_children: false }, { name: "disco", path: "/music/disco", has_children: false }] : []);
+    case "scan_library":
+      return r(mockFolders.includes("/music") ? MOCK_TRACKS : []);
+    case "analyse_tracks":
+      for (const id of a.ids as number[]) mockAnalyse(id);
+      return r(null);
     case "save_report":
       console.log("report", a.name, a.json);
       return r(`(browser) ${a.name}.json`);
     case "load_track": {
       const src = a.source as TrackSource;
-      const bpm = src.kind === "demo" ? src.bpm : 124;
+      const lib = src.kind === "track" ? MOCK_TRACKS.find((t) => t.id === src.id) : undefined;
+      const bpm = src.kind === "demo" ? src.bpm : lib?.tag_bpm ?? 124;
       const seconds = src.kind === "demo" ? src.seconds ?? 240 : 240;
       const d = decks[a.deck];
       Object.assign(d, emptyDeck(), {
@@ -130,7 +144,7 @@ export async function mockInvoke<T>(cmd: string, a: Record<string, any>): Promis
         generation: ++generation, volume: d.volume, pfl: d.pfl, sync: d.sync, rate: d.rate,
       });
       const t: LoadedTrack = {
-        title: src.kind === "demo" ? src.title ?? `Demo ${bpm}` : src.path, artist: "mock",
+        title: src.kind === "demo" ? src.title ?? `Demo ${bpm}` : lib?.title ?? "?", artist: lib?.artist ?? "mock",
         duration: seconds, sample_rate: 44100, grid: d.grid, waveform_bins_per_second: 150,
       };
       return r(t);
@@ -144,6 +158,26 @@ export async function mockInvoke<T>(cmd: string, a: Record<string, any>): Promis
       return r(null);
   }
   throw new Error(`mock: unknown command ${cmd}`);
+}
+
+let mockFolders = ["/music"];
+const MOCK_TRACKS: LibTrack[] = [
+  ["house", "Night Drive", "Lumen Collective", 124, "8A"],
+  ["house", "Velvet Theory", "The Pressure Unit", 126, "9A"],
+  ["house", "Static River", "Mira Lane", 123, "7A"],
+  ["disco", "Golden Window", "Haze & Ada", 118, "1B"],
+  ["disco", "Echo Harbour", "Sefa K", 117, "12B"],
+].map(([dir, title, artist, bpm, key], i) => ({
+  id: i + 1, path: `/music/${dir}/${title}.mp3`, title: title as string, artist: artist as string,
+  duration: 300 + i * 17, bpm: null, tag_bpm: bpm as number, key: key as string, grid_source: null,
+}));
+
+function mockAnalyse(id: number) {
+  const ev = (state: string, extra = {}) =>
+    emit("analysis", { track_id: id, state, progress: null, stage: null, bpm: null, grid_source: null, error: null, ...extra });
+  ev("queued");
+  for (let i = 0; i <= 10; i++) setTimeout(() => ev("running", { progress: i / 10, stage: i < 8 ? "finding beats" : "refining beats" }), 300 + i * 400);
+  setTimeout(() => ev("done", { bpm: MOCK_TRACKS.find((x) => x.id === id)?.tag_bpm ?? null, grid_source: "analysis" }), 4800);
 }
 
 function mockControl(group: string, key: string, value: number) {

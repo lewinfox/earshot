@@ -29,10 +29,10 @@ function deckKeys(g: string, keys: Record<string, string>): Record<string, KeyBi
     [keys.reloop]: b("reloop_toggle", "reloop / exit"),
     [keys.slower]: b("rate_temp_down", "nudge slower"),
     [keys.faster]: b("rate_temp_up", "nudge faster"),
-    [keys.h1]: b("hotcue_1_activate", "hot cue 1"),
-    [keys.h2]: b("hotcue_2_activate", "hot cue 2"),
-    [keys.h3]: b("hotcue_3_activate", "hot cue 3"),
-    [keys.h4]: b("hotcue_4_activate", "hot cue 4"),
+    [keys.h1]: b("hotcue_1_activate", "hot cue A"),
+    [keys.h2]: b("hotcue_2_activate", "hot cue B"),
+    [keys.h3]: b("hotcue_3_activate", "hot cue C"),
+    [keys.h4]: b("hotcue_4_activate", "hot cue D"),
   };
 }
 

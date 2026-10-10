@@ -8,6 +8,8 @@ use crate::midi::Midi;
 
 #[derive(Default, Clone)]
 pub struct DeckSlot {
+    /// Library track id, or `None` for a demo track.
+    pub track_id: Option<i64>,
     pub audio: Option<Arc<TrackAudio>>,
     pub grid: Option<Arc<Beatgrid>>,
     pub grid_source: String,

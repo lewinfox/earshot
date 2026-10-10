@@ -59,7 +59,7 @@ export interface WaveFrame {
   loopActive: boolean;
 }
 
-const HOTCUE_COLOURS = ["#3cd36b", "#ff4f4f", "#ffb02e", "#2f9bff", "#c25bff", "#18d2c7", "#ff74c8", "#e6e04a"];
+export const HOTCUE_COLOURS = ["#3cd36b", "#ff4f4f", "#ffb02e", "#2f9bff", "#c25bff", "#18d2c7", "#ff74c8", "#e6e04a"];
 
 export class WaveformView {
   private gl: WebGL2RenderingContext;
@@ -174,7 +174,7 @@ export class WaveformView {
       }
     };
     marker(f.cuePoint, "#ff8c28", "");
-    f.hotcues.forEach((t, i) => t != null && marker(t, HOTCUE_COLOURS[i], String(i + 1)));
+    f.hotcues.forEach((t, i) => t != null && marker(t, HOTCUE_COLOURS[i], "ABCDEFGH"[i]));
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(Math.round(w / 2 - dpr), 0, 2 * dpr, h);
   }
@@ -228,7 +228,14 @@ export class OverviewView {
     this.base = base;
   }
 
-  draw(position: number, duration: number, loopIn: number | null, loopOut: number | null) {
+  draw(
+    position: number,
+    duration: number,
+    loopIn: number | null,
+    loopOut: number | null,
+    cuePoint: number,
+    hotcues: (number | null)[],
+  ) {
     const dpr = window.devicePixelRatio || 1;
     const w = Math.round(this.canvas.clientWidth * dpr);
     const h = Math.round(this.canvas.clientHeight * dpr);
@@ -246,6 +253,18 @@ export class OverviewView {
     }
     ctx.fillStyle = "rgba(0,0,0,0.45)";
     ctx.fillRect(0, 0, (position / duration) * w, h);
+    // Cue and hot cue markers: small triangles along the top edge.
+    const tri = (t: number, colour: string) => {
+      const px = (t / duration) * w;
+      ctx.fillStyle = colour;
+      ctx.beginPath();
+      ctx.moveTo(px - 5 * dpr, 0);
+      ctx.lineTo(px + 5 * dpr, 0);
+      ctx.lineTo(px, 7 * dpr);
+      ctx.fill();
+    };
+    tri(cuePoint, "#ff8c28");
+    hotcues.forEach((t, i) => t != null && tri(t, HOTCUE_COLOURS[i]));
     ctx.fillStyle = "#fff";
     ctx.fillRect((position / duration) * w - dpr, 0, 2 * dpr, h);
   }

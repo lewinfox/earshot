@@ -57,19 +57,47 @@ export interface OutputInfo {
   null: boolean;
 }
 
-export interface ScannedTrack {
+/** A library track from `scan_library` (one row of earshot.db). */
+export interface LibTrack {
+  id: number;
   path: string;
   title: string;
   artist: string;
-  bpm: number | null;
-  key: string | null;
   duration: number | null;
-  has_beats_sidecar: boolean;
+  /** From analysis; null until analysed. */
+  bpm: number | null;
+  tag_bpm: number | null;
+  key: string | null;
+  grid_source: string | null;
+}
+
+export interface Subdir {
+  name: string;
+  path: string;
+  has_children: boolean;
+}
+
+export type AnalysisState = "queued" | "running" | "done" | "error";
+
+export interface AnalysisEvent {
+  track_id: number;
+  state: AnalysisState;
+  /** 0..1 while running. */
+  progress: number | null;
+  stage: string | null;
+  bpm: number | null;
+  grid_source: string | null;
+  error: string | null;
+}
+
+export interface DeckGridEvent {
+  deck: number;
+  grid: GridDto | null;
 }
 
 export type TrackSource =
   | { kind: "demo"; bpm: number; end_bpm?: number; key: string; seed: number; seconds?: number; title?: string }
-  | { kind: "file"; path: string };
+  | { kind: "track"; id: number };
 
 export interface Track {
   id: number;
@@ -85,6 +113,15 @@ export interface Track {
   /** Vibe cluster, for colouring the synthetic library. */
   cluster: number;
   source: TrackSource;
+  /** Library tracks only. */
+  path?: string;
+  duration?: number | null;
+  /** A beatgrid from analysis, a hand fix or a tempo-lock sidecar exists. */
+  analysed?: boolean;
+  analysis?: AnalysisState | null;
+  analysisProgress?: number | null;
+  analysisStage?: string | null;
+  analysisError?: string | null;
 }
 
 export interface MidiEvent {

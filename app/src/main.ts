@@ -2,24 +2,27 @@ import { control, inTauri, invoke, listen } from "./api";
 import { DeckView } from "./deck";
 import { computeLayout, CosmosView, type GraphView, SigmaView } from "./graph";
 import { installKeyboard, keymapHelp, type KeyBinding } from "./keys";
-import { fromScanned, search, syntheticLibrary } from "./library";
+import { fromLibrary, search, syntheticLibrary } from "./library";
 import { FrameStats, gpuInfo } from "./perf";
 import { compatibilityEdges, effectiveKey, type Reference, type Scored, suggest } from "./suggest";
-import type { EngineState, LoadedTrack, MidiEvent, OutputInfo, ScannedTrack, Track, UiControl } from "./types";
+import { FolderTree, type MenuItem, showMenu } from "./tree";
+import type { AnalysisEvent, DeckGridEvent, EngineState, LibTrack, LoadedTrack, MidiEvent, OutputInfo, Track, UiControl } from "./types";
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
 
 // ---- state ---------------------------------------------------------------------------
 
-let scanned: Track[] = [];
+let folders: string[] = [];
 let tracks: Track[] = [];
 let byId = new Map<number, Track>();
-let indexOf = new Map<number, number>();
 let filtered: Track[] = [];
 let suggestions: Scored[] = [];
 let selectedId: number | null = null;
 let focusedPane: "library" | "suggest" = "library";
-let synthCount = 2000;
+/** Synthetic tracks added to the graph, only while the benchmark runs. */
+let synthCount = 0;
+let graphNodes: Track[] = [];
+let graphIndex = new Map<number, number>();
 let layoutMode: "wheel" | "vibe" = "wheel";
 let graphLib: "sigma" | "cosmos" = "sigma";
 let energyDelta = 0;
@@ -29,7 +32,7 @@ const playStarted: (number | null)[] = [null, null];
 let lastStarted: number | null = null;
 let refKey = "";
 
-const decks = [0, 1].map((i) => new DeckView(i, $(`.deck[data-deck="${i}"]`), (d, id) => loadToDeck(d, id)));
+const decks = [0, 1].map((i) => new DeckView(i, $(`.deck[data-deck="${i}"]`), $(`.wave-slot[data-deck="${i}"]`), (d, id) => loadToDeck(d, id)));
 
 // ---- virtual lists ---------------------------------------------------------------------
 
@@ -45,6 +48,8 @@ class VList<T> {
     private render: (item: T, row: HTMLElement, selected: boolean) => void,
     private idOf: (item: T) => number,
     private onPick: (item: T) => void,
+    private onActivate?: (item: T) => void,
+    private onContext?: (item: T, e: MouseEvent) => void,
   ) {
     el.appendChild(this.spacer);
     el.addEventListener("scroll", () => this.draw());
@@ -75,6 +80,12 @@ class VList<T> {
       const row = document.createElement("div");
       row.draggable = true;
       row.addEventListener("click", () => this.select(+row.dataset.i!));
+      row.addEventListener("dblclick", () => this.onActivate?.(this.items[+row.dataset.i!]));
+      row.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        this.select(+row.dataset.i!);
+        this.onContext?.(this.items[+row.dataset.i!], e);
+      });
       row.addEventListener("dragstart", (e) => {
         e.dataTransfer!.setData("text/earshot-track", String(this.idOf(this.items[+row.dataset.i!])));
         e.dataTransfer!.effectAllowed = "copy";
@@ -103,18 +114,40 @@ function rowClasses(row: HTMLElement, t: Track, sel: boolean, base: string) {
   row.className = `row-item ${base}${sel ? " sel" : ""}${onDeck ? " playing" : ""}${played.has(t.id) ? " played" : ""}`;
 }
 
+const mmss = (s: number | null | undefined) =>
+  s == null ? "" : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
+function statusCell(t: Track) {
+  if (t.analysis === "error") return `<span class="st error" title="${esc(t.analysisError ?? "analysis failed")}">✕</span>`;
+  if (t.analysis === "running") return `<span class="st running" title="${esc(t.analysisStage ?? "Analysing")} · ${pct(t.analysisProgress ?? 0)}">●</span>`;
+  if (t.analysis === "queued") return `<span class="st queued" title="Waiting to be analysed">○</span>`;
+  return t.analysed ? `<span class="st done" title="Beatgrid analysed">●</span>` : `<span class="st" title="Not analysed"></span>`;
+}
+
 const libList = new VList<Track>(
   $("#lib-list"),
-  28,
+  26,
   (t, row, sel) => {
-    rowClasses(row, t, sel, "");
-    row.innerHTML = `<span class="t">${esc(t.title)}<small>${esc(t.artist)}</small></span><span class="n">${t.bpm?.toFixed(1) ?? "–"}</span><span class="n">${t.key ?? "–"}</span>`;
+    rowClasses(row, t, sel, "lib-item");
+    row.title = t.path ?? "";
+    row.innerHTML = `${statusCell(t)}<span class="t">${esc(t.title)}</span><span class="a">${esc(t.artist)}</span>
+      <span class="n${t.analysed ? "" : " tag"}" title="${t.analysed ? "Analysed" : "From the file's tag (not analysed)"}">${t.bpm?.toFixed(2) ?? "–"}</span>
+      <span class="n">${t.key ?? "–"}</span><span class="n">${mmss(t.duration)}</span>${
+        t.analysis === "running" ? `<i class="row-prog" style="width:${pct(t.analysisProgress ?? 0)}"></i>` : ""
+      }`;
   },
   (t) => t.id,
   (t) => {
     focusPane("library");
     setSelected(t.id, "list");
   },
+  (t) => loadToDeck(freeDeck(), t.id),
+  (t, e) =>
+    showMenu(e.clientX, e.clientY, [
+      { label: "Load to deck A", action: () => loadToDeck(0, t.id) },
+      { label: "Load to deck B", action: () => loadToDeck(1, t.id) },
+      { label: t.analysed ? "Analyse again" : "Analyse", action: () => analyse([t.id]) },
+    ]),
 );
 
 const pct = (x: number) => `${Math.round(x * 100)}%`;
@@ -153,35 +186,144 @@ focusPane("library");
 // ---- library ---------------------------------------------------------------------------
 
 function rebuildLibrary() {
-  tracks = [...scanned, ...syntheticLibrary(synthCount, 1_000_000)];
   byId = new Map(tracks.map((t) => [t.id, t]));
-  indexOf = new Map(tracks.map((t, i) => [t.id, i]));
-  $("#lib-count").textContent = `${tracks.length.toLocaleString()} tracks${scanned.length ? ` (${scanned.length} from disk)` : ""}`;
   applySearch();
   rebuildGraph();
 }
 
+/** Tracks in the selected folder (and its subfolders), filtered by the search box. */
 function applySearch() {
-  filtered = search(tracks, $<HTMLInputElement>("#search").value);
+  const dir = tree.selected;
+  const inScope = dir == null ? tracks : tracks.filter((t) => t.path?.startsWith(`${dir}/`));
+  filtered = search(inScope, $<HTMLInputElement>("#search").value);
   libList.set(filtered, filtered.findIndex((t) => t.id === selectedId));
+  $("#lib-title").textContent = dir == null ? "All tracks" : dir.split("/").pop() || dir;
+  $("#lib-title").title = dir ?? "";
+  $("#lib-count").textContent = `${filtered.length.toLocaleString()}${filtered.length !== inScope.length ? ` of ${inScope.length.toLocaleString()}` : ""} tracks`;
+  const empty = $("#lib-list").querySelector(".list-empty") ?? $("#lib-list").appendChild(Object.assign(document.createElement("div"), { className: "list-empty" }));
+  empty.textContent = !folders.length ? "No library folders yet. Menu → Import → Folder…" : filtered.length ? "" : "No tracks here";
 }
 
 $<HTMLInputElement>("#search").addEventListener("input", applySearch);
 
-$("#scan-btn").addEventListener("click", async () => {
-  const path = $<HTMLInputElement>("#folder").value.trim();
-  if (!path) return;
+const tree = new FolderTree(
+  $("#tree"),
+  () => applySearch(),
+  (path, isRoot, e) => {
+    const inside = tracks.filter((t) => t.path?.startsWith(`${path}/`));
+    const items: MenuItem[] = [
+      { label: `Analyse ${inside.filter((t) => !t.analysed).length} unanalysed tracks`, action: () => analyse(inside.filter((t) => !t.analysed).map((t) => t.id)) },
+      { label: `Analyse all ${inside.length} tracks again`, action: () => analyse(inside.map((t) => t.id)) },
+    ];
+    if (isRoot) items.push({ label: "Remove from library", action: () => void removeFolder(path) });
+    showMenu(e.clientX, e.clientY, items);
+  },
+);
+
+async function loadLibrary() {
   $("#lib-count").textContent = "scanning…";
   try {
     const t0 = performance.now();
-    const found = await invoke<ScannedTrack[]>("scan_folder", { path });
-    scanned = fromScanned(found, 1);
+    const found = await invoke<LibTrack[]>("scan_library");
+    tracks = found.map(fromLibrary);
     rebuildLibrary();
-    $("#lib-count").textContent += ` · scanned in ${((performance.now() - t0) / 1000).toFixed(1)} s`;
+    console.info(`library: ${tracks.length} tracks in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
   } catch (e) {
     $("#lib-count").textContent = `scan failed: ${e}`;
   }
+}
+
+async function refreshFolders(list?: string[]) {
+  folders = list ?? (await invoke<string[]>("library_folders"));
+  tree.setRoots(folders);
+}
+
+async function importFolder() {
+  let picked: string[] = [];
+  if (inTauri) {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const r = await open({ directory: true, multiple: true, title: "Add music folders to the library" });
+    picked = r == null ? [] : Array.isArray(r) ? r : [r];
+  } else {
+    const p = prompt("Folder path");
+    if (p) picked = [p];
+  }
+  if (!picked.length) return;
+  try {
+    let list = folders;
+    for (const p of picked) list = await invoke<string[]>("add_library_folder", { path: p });
+    await refreshFolders(list);
+    await loadLibrary();
+    tree.select(picked[0].replace(/\/+$/, ""));
+  } catch (e) {
+    alert(`Could not add folder: ${e}`);
+  }
+}
+
+async function removeFolder(path: string) {
+  await refreshFolders(await invoke<string[]>("remove_library_folder", { path }));
+  await loadLibrary();
+}
+
+function analyse(ids: number[]) {
+  if (ids.length) void invoke("analyse_tracks", { ids });
+}
+
+$("#menu-btn").addEventListener("click", (e) => {
+  const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  showMenu(r.left, r.bottom + 2, [
+    { label: "Import", submenu: [{ label: "Folder…", action: () => void importFolder() }] },
+    { label: "Rescan library", action: () => void loadLibrary() },
+  ]);
 });
+
+// ---- analysis progress ------------------------------------------------------------------
+
+const busy = new Set<number>();
+listen<AnalysisEvent>("analysis", (ev) => {
+  const t = byId.get(ev.track_id);
+  if (t) {
+    t.analysis = ev.state;
+    t.analysisProgress = ev.progress;
+    t.analysisStage = ev.stage;
+    if (ev.state === "done") {
+      t.analysed = true;
+      if (ev.bpm != null) t.bpm = ev.bpm;
+    }
+    t.analysisError = ev.error;
+  }
+  if (ev.state === "queued" || ev.state === "running") busy.add(ev.track_id);
+  else busy.delete(ev.track_id);
+  const pill = $("#analysis-status");
+  if (ev.state === "error") {
+    pill.hidden = false;
+    pill.className = "pill warn";
+    pill.textContent = `analysis failed${busy.size ? ` · ${busy.size} left` : ""}`;
+    pill.title = `${t?.title ?? ev.track_id}: ${ev.error}`;
+  } else if (ev.state === "running") {
+    pill.hidden = false;
+    pill.className = "pill progress";
+    pill.style.setProperty("--p", pct(ev.progress ?? 0));
+    pill.textContent = `analysing ${t?.title ?? ""} · ${pct(ev.progress ?? 0)}${busy.size > 1 ? ` · ${busy.size - 1} waiting` : ""}`;
+    pill.title = ev.stage ?? "";
+  } else if (busy.size) {
+    pill.hidden = false;
+    pill.className = "pill";
+    pill.textContent = `analysis · ${busy.size} waiting`;
+    pill.title = "";
+  } else if (!pill.classList.contains("warn")) pill.hidden = true;
+  for (const d of decks) if (d.track?.id === ev.track_id) d.showAnalysis(ev);
+  libList.draw();
+});
+$("#analysis-status").addEventListener("click", () => ($("#analysis-status").hidden = true));
+
+// A deck's track finished analysing: show its new grid.
+listen<DeckGridEvent>("deck-grid", (ev) => decks[ev.deck].setGrid(ev.grid));
+
+/** For double-click loading: a deck that isn't playing, preferring A. */
+function freeDeck() {
+  return decks.findIndex((d) => !d.state?.playing) === 1 ? 1 : 0;
+}
 
 function setSelected(id: number | null, from: "list" | "graph" | "other") {
   selectedId = id;
@@ -250,8 +392,8 @@ function makeGraph() {
   graph?.destroy();
   const container = $("#graph");
   const cb = {
-    onSelect: (i: number | null) => setSelected(i == null ? null : tracks[i]?.id ?? null, "graph"),
-    onDragStart: (i: number, ev: MouseEvent) => startGhostDrag(tracks[i], ev),
+    onSelect: (i: number | null) => setSelected(i == null ? null : graphNodes[i]?.id ?? null, "graph"),
+    onDragStart: (i: number, ev: MouseEvent) => startGhostDrag(graphNodes[i], ev),
   };
   try {
     graph = graphLib === "sigma" ? new SigmaView(container, cb) : new CosmosView(container, cb);
@@ -265,20 +407,22 @@ let lastBuild = { edgesMs: 0, setDataMs: 0, edges: 0 };
 function rebuildGraph() {
   if (!graph) makeGraph();
   if (!graph) return;
+  graphNodes = synthCount ? [...tracks, ...syntheticLibrary(synthCount, 1_000_000)] : tracks;
+  graphIndex = new Map(graphNodes.map((t, i) => [t.id, i]));
   const t0 = performance.now();
-  const edges = compatibilityEdges(tracks);
+  const edges = compatibilityEdges(graphNodes);
   const t1 = performance.now();
-  graph.setData(tracks, computeLayout(tracks, layoutMode), edges);
+  graph.setData(graphNodes, computeLayout(graphNodes, layoutMode), edges);
   const t2 = performance.now();
   lastBuild = { edgesMs: t1 - t0, setDataMs: t2 - t1, edges: edges.length };
-  $("#graph-info").textContent = `${tracks.length.toLocaleString()} nodes · ${edges.length.toLocaleString()} edges · edges ${lastBuild.edgesMs.toFixed(0)} ms · build ${lastBuild.setDataMs.toFixed(0)} ms`;
+  $("#graph-info").textContent = `${graphNodes.length.toLocaleString()} nodes · ${edges.length.toLocaleString()} edges · edges ${lastBuild.edgesMs.toFixed(0)} ms · build ${lastBuild.setDataMs.toFixed(0)} ms`;
   highlightGraph(currentReference()?.track.id ?? null);
 }
 
 function highlightGraph(id: number | null) {
   if (!graph) return;
-  const i = id == null ? null : indexOf.get(id) ?? null;
-  const related = suggestions.slice(0, 20).map((s) => indexOf.get(s.track.id)!).filter((x) => x != null);
+  const i = id == null ? null : graphIndex.get(id) ?? null;
+  const related = suggestions.slice(0, 20).map((s) => graphIndex.get(s.track.id)!).filter((x) => x != null);
   graph.setHighlight(i, i == null ? [] : related);
 }
 
@@ -294,10 +438,6 @@ segment("#graph-lib", "lib", (v) => {
   graphLib = v as typeof graphLib;
   makeGraph();
   rebuildGraph();
-});
-segment("#graph-size", "n", (v) => {
-  synthCount = +v;
-  rebuildLibrary();
 });
 segment("#graph-layout", "layout", (v) => {
   layoutMode = v as typeof layoutMode;
@@ -525,9 +665,9 @@ async function runBenchmark(log: (s: string) => void) {
   for (const lib of ["sigma", "cosmos"] as const) {
     for (const n of [2000, 10000]) {
       graphLib = lib;
-      synthCount = n;
+      synthCount = Math.max(0, n - tracks.length);
       makeGraph();
-      rebuildLibrary();
+      rebuildGraph();
       await sleep(1000);
       const startAudio = engine ? { ...engine.audio } : null;
       let worstCb = 0;
@@ -542,7 +682,7 @@ async function runBenchmark(log: (s: string) => void) {
           // Change the selection every 2 s, like browsing while playing.
           if (now - lastSel > 2000) {
             lastSel = now;
-            setSelected(tracks[Math.floor(Math.random() * tracks.length)].id, "other");
+            highlightGraph(graphNodes[Math.floor(Math.random() * graphNodes.length)].id);
           }
           if (t >= 1) {
             benchTick = null;
@@ -554,7 +694,7 @@ async function runBenchmark(log: (s: string) => void) {
       bench = null;
       const r = {
         graph: lib,
-        nodes: tracks.length,
+        nodes: graphNodes.length,
         edges: lastBuild.edges,
         edgesMs: Math.round(lastBuild.edgesMs),
         buildMs: Math.round(lastBuild.setDataMs),
@@ -576,7 +716,7 @@ async function runBenchmark(log: (s: string) => void) {
   graphLib = keepLib;
   synthCount = keepN;
   makeGraph();
-  rebuildLibrary();
+  rebuildGraph();
   graph?.resetCamera();
   const name = `bench-${env.when.replace(/[:.]/g, "-")}`;
   const path = await invoke<string>("save_report", { name, json: JSON.stringify({ env, results }, null, 2) });
@@ -601,12 +741,6 @@ $("#bench-run").addEventListener("click", async () => {
 
 // ---- start --------------------------------------------------------------------------------
 
-rebuildLibrary();
+void refreshFolders().then(loadLibrary);
 void showAudio();
 void connectMidi();
-// Something on the decks from the start, so there is a waveform to look at.
-for (const [d, src] of [[0, { bpm: 124, end_bpm: 127, key: "8A", seed: 1, title: "Demo A (live drummer, 124→127)" }], [1, { bpm: 126, key: "9A", seed: 2, title: "Demo B (126)" }]] as const) {
-  const t: Track = { ...syntheticLibrary(1, 800_000 + d)[0], title: src.title, bpm: src.bpm, key: src.key, source: { kind: "demo", ...src } };
-  byId.set(t.id, t);
-  void loadToDeck(d, t.id);
-}

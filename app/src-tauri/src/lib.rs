@@ -1,4 +1,7 @@
+mod analysis;
 mod controls;
+mod db;
+mod library;
 mod midi;
 mod state;
 
@@ -14,6 +17,7 @@ use earshot_engine::{Command, DECKS, Engine, OutputInfo, OutputOptions, demo, wa
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use library::Library;
 use state::{AppState, DeckSlot};
 
 // ---- audio output ----------------------------------------------------------------
@@ -99,20 +103,21 @@ enum TrackSource {
         seconds: Option<f64>,
         title: Option<String>,
     },
-    File {
-        path: String,
+    /// A library track, by its id in `earshot.db`.
+    Track {
+        id: i64,
     },
 }
 
-#[derive(Serialize)]
-struct GridDto {
+#[derive(Serialize, Clone)]
+pub(crate) struct GridDto {
     times: Vec<f64>,
     positions: Vec<u8>,
     source: String,
 }
 
 impl GridDto {
-    fn of(grid: &Option<Arc<Beatgrid>>, source: &str) -> Option<GridDto> {
+    pub(crate) fn of(grid: &Option<Arc<Beatgrid>>, source: &str) -> Option<GridDto> {
         grid.as_ref().map(|g| GridDto {
             times: g.times().to_vec(),
             positions: g.positions().to_vec(),
@@ -173,6 +178,7 @@ fn grid_for_file(
 #[tauri::command]
 async fn load_track(
     state: State<'_, AppState>,
+    lib: State<'_, Library>,
     deck: usize,
     source: TrackSource,
 ) -> Result<LoadedTrack, String> {
@@ -186,7 +192,8 @@ async fn load_track(
         .engine
         .as_ref()
         .map_or(44_100, |e| e.info().sample_rate);
-    let (audio, grid, grid_source, title, artist) =
+    let db = lib.db.clone();
+    let (audio, grid, grid_source, title, artist, track_id, cached_wave) =
         tauri::async_runtime::spawn_blocking(move || {
             Ok::<_, String>(match source {
                 TrackSource::Demo {
@@ -212,13 +219,22 @@ async fn load_track(
                         "demo (exact)".to_string(),
                         title,
                         "earshot".to_string(),
+                        None,
+                        None,
                     )
                 }
-                TrackSource::File { path } => {
-                    let path = PathBuf::from(path);
+                TrackSource::Track { id } => {
+                    let path = PathBuf::from(db::track_path(&db.lock().unwrap(), id)?);
                     let (audio, tags) = decode::decode_file(&path)?;
-                    let (grid, src) = grid_for_file(&path, &tags, audio.duration());
-                    let title = tags.title.clone().unwrap_or_else(|| {
+                    let (stored, wave) = {
+                        let conn = db.lock().unwrap();
+                        (db::grid(&conn, id)?, db::waveform(&conn, id, waveform::BINS_PER_SECOND)?)
+                    };
+                    let (grid, src) = match stored {
+                        Some((g, src)) => (Some(g), src),
+                        None => grid_for_file(&path, &tags, audio.duration()),
+                    };
+                    let title = tags.title.clone().filter(|t| !t.is_empty()).unwrap_or_else(|| {
                         path.file_stem()
                             .map(|s| s.to_string_lossy().into_owned())
                             .unwrap_or_default()
@@ -229,6 +245,8 @@ async fn load_track(
                         src,
                         title,
                         tags.artist.clone().unwrap_or_default(),
+                        Some(id),
+                        wave,
                     )
                 }
             })
@@ -237,7 +255,14 @@ async fn load_track(
         .map_err(|e| e.to_string())??;
 
     let audio: Arc<TrackAudio> = Arc::new(audio);
-    let wave = waveform::summarise(&audio);
+    let wave = cached_wave.unwrap_or_else(|| waveform::summarise(&audio));
+    // No analysed or hand-fixed grid yet: analyse in the background. The deck plays
+    // with the placeholder grid meanwhile and is updated when the result arrives.
+    if let Some(id) = track_id
+        && !matches!(grid_source.as_str(), "analysis" | "user" | "tempo-lock sidecar")
+    {
+        lib.analyser.queue(id, Some(audio.clone()), false);
+    }
     let grid = grid.map(Arc::new);
     let duration = audio.duration();
     let sample_rate = audio.sample_rate;
@@ -253,6 +278,7 @@ async fn load_track(
     })?;
     let dto = GridDto::of(&grid, &grid_source);
     inner.decks[deck] = DeckSlot {
+        track_id,
         audio: Some(audio),
         grid,
         grid_source,
@@ -292,7 +318,12 @@ enum GridOp {
 }
 
 #[tauri::command]
-fn edit_grid(state: State<'_, AppState>, deck: usize, op: GridOp) -> Result<GridDto, String> {
+fn edit_grid(
+    state: State<'_, AppState>,
+    lib: State<'_, Library>,
+    deck: usize,
+    op: GridOp,
+) -> Result<GridDto, String> {
     let mut inner = state.inner.lock().unwrap();
     let playhead = inner.shared().map_or(0.0, |s| s.decks[deck].position.get());
     let slot = inner.decks.get(deck).ok_or("no such deck")?;
@@ -323,89 +354,12 @@ fn edit_grid(state: State<'_, AppState>, deck: usize, op: GridOp) -> Result<Grid
         grid: edited.clone(),
     })?;
     inner.decks[deck].grid = edited.clone();
-    inner.decks[deck].grid_source = "edited".into();
-    Ok(GridDto::of(&edited, "edited").unwrap())
-}
-
-// ---- library -------------------------------------------------------------------------
-
-const AUDIO_EXTENSIONS: &[&str] = &[
-    "mp3", "flac", "wav", "aif", "aiff", "m4a", "mp4", "aac", "ogg",
-];
-
-#[derive(Serialize)]
-struct ScannedTrack {
-    path: String,
-    title: String,
-    artist: String,
-    bpm: Option<f64>,
-    key: Option<String>,
-    duration: Option<f64>,
-    has_beats_sidecar: bool,
-}
-
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in entries.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            walk(&p, out);
-        } else if p
-            .extension()
-            .and_then(|x| x.to_str())
-            .is_some_and(|x| AUDIO_EXTENSIONS.contains(&x.to_lowercase().as_str()))
-        {
-            out.push(p);
-        }
+    inner.decks[deck].grid_source = "user".into();
+    // Saved, so the fix survives a restart and re-analysis on load doesn't undo it.
+    if let (Some(id), Some(g)) = (inner.decks[deck].track_id, &edited) {
+        db::save_grid(&lib.db.lock().unwrap(), id, g, "user")?;
     }
-}
-
-#[tauri::command]
-async fn scan_folder(path: String) -> Result<Vec<ScannedTrack>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut files = Vec::new();
-        walk(Path::new(&path), &mut files);
-        files.sort();
-        let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-        let chunk = files.len().div_ceil(threads).max(1);
-        let mut out: Vec<ScannedTrack> = std::thread::scope(|s| {
-            let handles: Vec<_> = files
-                .chunks(chunk)
-                .map(|c| {
-                    s.spawn(move || {
-                        c.iter()
-                            .map(|p| {
-                                let tags = decode::read_tags(p).unwrap_or_default();
-                                ScannedTrack {
-                                    path: p.to_string_lossy().into_owned(),
-                                    title: tags.title.clone().unwrap_or_else(|| {
-                                        p.file_stem()
-                                            .map(|s| s.to_string_lossy().into_owned())
-                                            .unwrap_or_default()
-                                    }),
-                                    artist: tags.artist.clone().unwrap_or_default(),
-                                    bpm: tags.bpm,
-                                    key: tags.key.clone(),
-                                    duration: tags.duration,
-                                    has_beats_sidecar: sidecar_path(p).exists(),
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .flat_map(|h| h.join().unwrap())
-                .collect()
-        });
-        out.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(out)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    Ok(GridDto::of(&edited, "user").unwrap())
 }
 
 // ---- controls, MIDI, reports -------------------------------------------------------
@@ -564,9 +518,14 @@ fn spawn_publisher(app: AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .setup(|app| {
             let handle = app.handle().clone();
+            let db_path = handle.path().app_data_dir()?.join("earshot.db");
+            let db = db::open(&db_path)?;
+            let analyser = analysis::Analyser::start(handle.clone(), db.clone());
+            app.manage(Library { db, analyser });
             let state = handle.state::<AppState>();
             let opts = options_from_env();
             if let Err(e) = start_engine(&state, &opts) {
@@ -586,7 +545,12 @@ pub fn run() {
             load_track,
             get_waveform,
             edit_grid,
-            scan_folder,
+            library::library_folders,
+            library::add_library_folder,
+            library::remove_library_folder,
+            library::list_subdirs,
+            library::scan_library,
+            library::analyse_tracks,
             control,
             midi_connect,
             save_report,

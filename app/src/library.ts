@@ -1,6 +1,6 @@
-// Track library: Camelot keys, a synthetic library for the spike, scanned files, search.
+// Track library: Camelot keys, a synthetic library for the benchmark, library tracks, search.
 
-import type { ScannedTrack, Track } from "./types";
+import type { LibTrack, Track } from "./types";
 
 // ---- Camelot -----------------------------------------------------------------------
 
@@ -146,21 +146,26 @@ export function syntheticLibrary(n: number, firstId: number, seed = 7): Track[] 
   return tracks;
 }
 
-export function fromScanned(s: ScannedTrack[], firstId: number): Track[] {
-  return s.map((t, i) => {
-    const k = parseKey(t.key);
-    return {
-      id: firstId + i,
-      title: t.title,
-      artist: t.artist,
-      bpm: t.bpm,
-      key: k ? keyName(k) : null,
-      energy: 0.5,
-      vibe: null, // CLAP embeddings come from the worker (not built yet)
-      cluster: -1,
-      source: { kind: "file", path: t.path },
-    };
-  });
+const ANALYSED_SOURCES = new Set(["analysis", "user", "tempo-lock sidecar"]);
+
+export function fromLibrary(l: LibTrack): Track {
+  const k = parseKey(l.key);
+  return {
+    id: l.id,
+    title: l.title,
+    artist: l.artist,
+    bpm: l.bpm ?? l.tag_bpm,
+    key: k ? keyName(k) : null,
+    energy: 0.5,
+    vibe: null, // CLAP embeddings come from the worker (not built yet)
+    cluster: -1,
+    source: { kind: "track", id: l.id },
+    path: l.path,
+    duration: l.duration,
+    analysed: l.grid_source != null && ANALYSED_SOURCES.has(l.grid_source),
+    analysis: null,
+    analysisError: null,
+  };
 }
 
 // ---- search -------------------------------------------------------------------------
