@@ -12,12 +12,22 @@ that is in [`docs/design.md`](docs/design.md).
 
 ```
 engine/        Rust: beatgrids, decoding, real-time decks + mixer (cpal), tests
+gui/           egui app (native Rust UI)
 app/           Tauri app
   src/         UI (TypeScript, no framework): decks, folder tree, library, graph, suggestions
   src-tauri/   Rust: commands, control bus, MIDI, state publisher, earshot.db, analysis queue
 worker/        Python analysis worker (Beat This! beatgrids), its own uv venv
 docs/design.md decisions and roadmap
 ```
+
+## Two UIs
+
+- **`gui/`, egui (the way forward).** Native Rust UI; `cargo run --release -p earshot-gui`.
+  See [`gui/README.md`](gui/README.md). Not yet ported: Flow, Suggestions, graph.
+- **`app/`, Tauri (the Phase 0 spike).** Couldn't hold 60 fps on Linux (WebKitGTK) while
+  playing, which is what the spike was testing. Kept until the egui app has the rest.
+
+Both use the same engine, worker and library database.
 
 ## Run it (Linux)
 

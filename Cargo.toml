@@ -1,9 +1,13 @@
 [workspace]
-members = ["engine", "app/src-tauri"]
+members = ["engine", "app/src-tauri", "gui"]
 resolver = "2"
 
 [profile.dev.package."*"]
 opt-level = 2
 
 [profile.dev.package.earshot-engine]
+opt-level = 2
+
+# The egui app draws waveforms on the CPU every frame: keep it fast in dev builds too.
+[profile.dev.package.earshot-gui]
 opt-level = 2
