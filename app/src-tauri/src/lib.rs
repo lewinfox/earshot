@@ -359,6 +359,8 @@ enum GridOp {
     SetBpm { bpm: f64 },
     Nudge { ms: f64 },
     SetDownbeat,
+    /// Shift the grid so a beat lands exactly on the playhead, and make it the 1.
+    AnchorHere,
     Halve,
     Double,
 }
@@ -390,6 +392,13 @@ fn edit_grid(
         GridOp::SetBpm { .. } => return Err("BPM out of range".into()),
         GridOp::Nudge { ms } => grid.nudged(ms / 1000.0, duration),
         GridOp::SetDownbeat => Ok(grid.with_downbeat(nearest)),
+        GridOp::AnchorHere => grid
+            .nudged(playhead - grid.times()[nearest], duration)
+            // Re-fitting may add beats at the start, so find the beat again.
+            .map(|g| {
+                let i = g.beat_at(playhead).round().clamp(0.0, (g.len() - 1) as f64) as usize;
+                g.with_downbeat(i)
+            }),
         GridOp::Halve => grid.halved(duration),
         GridOp::Double => grid.doubled(duration),
     }

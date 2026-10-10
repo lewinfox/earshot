@@ -106,6 +106,7 @@ input:focus { outline: 1px solid var(--accent); }
 
 .wave { position: relative; height: var(--wave-h, 72px); background: #08090b; border-radius: 4px; overflow: hidden; cursor: grab; }
 .wave canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.wave.scrubbing { cursor: grabbing; }
 .bar-label { position: absolute; right: calc(50% + 6px); top: 3px; color: var(--deck); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; pointer-events: none; text-shadow: 0 0 3px #000; }
 .overview { position: relative; height: 34px; background: #08090b; border-radius: 3px; cursor: pointer; }
 .overview canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
@@ -117,6 +118,15 @@ input:focus { outline: 1px solid var(--accent); }
 /* Pads on the outside, jog display towards the middle; deck B is the mirror image. */
 .deck-body { display: flex; gap: 8px; align-items: stretch; min-width: 0; }
 .deck[data-deck="1"] .deck-body { flex-direction: row-reverse; }
+.pad-area { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.pad-mode { align-self: flex-start; }
+.pad-mode button { font-size: 10px; font-weight: 700; padding: 2px 8px; }
+.grid-edit { flex: 1; display: flex; flex-direction: column; gap: 4px; justify-content: center; }
+.ge-row { display: flex; gap: 3px; align-items: center; flex-wrap: wrap; }
+.ge-row button { padding: 3px 7px; font-size: 11px; }
+.ge-row .ge-big { font-weight: 700; border-color: var(--deck); }
+.ge-row input[type=number] { width: 72px; padding: 2px 5px; font-size: 12px; text-align: center; }
+.ge-label { font-size: 10px; color: var(--muted); width: 38px; text-transform: uppercase; }
 .pads { flex: 1; min-width: 0; display: grid; grid-template-columns: 1fr 1fr; grid-auto-flow: column; grid-template-rows: repeat(4, 1fr); gap: 3px; }
 .pads button { display: flex; justify-content: space-between; align-items: center; padding: 3px 8px; font-size: 11px; background: #121317; border-radius: 3px; min-width: 0; }
 .pads button b { color: var(--muted); font-weight: 600; }

@@ -41,6 +41,8 @@ export class DeckView {
   private wave: WaveformView | null = null;
   private overview: OverviewView;
   private barLabel: HTMLElement;
+  /** While the waveform is being dragged, the drag sets the playhead, not the engine. */
+  private scrubbing = false;
   /** Bar number of each grid beat (counting downbeats), for the bar.beat readout. */
   private bars: number[] = [];
   private els: Record<string, HTMLElement> = {};
@@ -76,11 +78,40 @@ export class DeckView {
       <div class="wave" data-el="wave"><canvas data-el="gl"></canvas><canvas data-el="ov"></canvas></div>
       <div class="overview" data-el="overview"><canvas data-el="ovc"></canvas><i class="ov-prog" data-el="prog"></i></div>
       <div class="deck-body">
-        <div class="pads" data-el="pads">
-          ${"ABCDEFGH"
-            .split("")
-            .map((l, i) => `<button data-hotcue="${i + 1}" title="Click: set/jump · Shift-click: clear"><b>${l}</b><span></span></button>`)
-            .join("")}
+        <div class="pad-area">
+          <div class="pads" data-el="pads">
+            ${"ABCDEFGH"
+              .split("")
+              .map((l, i) => `<button data-hotcue="${i + 1}" title="Click: set/jump · Shift-click: clear"><b>${l}</b><span></span></button>`)
+              .join("")}
+          </div>
+          <div class="grid-edit" data-el="gridedit" hidden>
+            <div class="ge-row">
+              <button class="ge-big" data-grid="anchor" title="Move the grid so a beat lands exactly on the playhead, and make it the 1">Anchor 1 here</button>
+              <button data-grid="downbeat" title="Keep the grid where it is; make the beat nearest the playhead the 1">Nearest beat = 1</button>
+            </div>
+            <div class="ge-row" title="Tempo of the grid. The beat under the playhead stays put.">
+              <span class="ge-label">BPM</span>
+              <button data-grid="bpm" data-delta="-0.1">−0.1</button>
+              <button data-grid="bpm" data-delta="-0.01">−0.01</button>
+              <input type="number" step="0.01" min="40" max="300" data-el="setbpm" placeholder="BPM" />
+              <button data-grid="bpm" data-delta="0.01">+0.01</button>
+              <button data-grid="bpm" data-delta="0.1">+0.1</button>
+              <button data-grid="halve" title="Half the tempo">÷2</button>
+              <button data-grid="double" title="Double the tempo">×2</button>
+            </div>
+            <div class="ge-row" title="Shift the whole grid earlier or later">
+              <span class="ge-label">Nudge</span>
+              <button data-grid="nudge" data-ms="-10">◁◁ 10 ms</button>
+              <button data-grid="nudge" data-ms="-1">◁ 1 ms</button>
+              <button data-grid="nudge" data-ms="1">1 ms ▷</button>
+              <button data-grid="nudge" data-ms="10">10 ms ▷▷</button>
+            </div>
+          </div>
+          <div class="seg pad-mode" data-el="padmode">
+            <button data-mode="cue" class="on">HOT CUE</button>
+            <button data-mode="grid">GRID</button>
+          </div>
         </div>
         <div class="transport">
           <div class="tgrp" title="Beat jump">
@@ -121,14 +152,6 @@ export class DeckView {
           <button data-ctl="rate_temp_down" data-hold title="Nudge slower">−</button>
           <input type="range" min="-1" max="1" step="0.001" value="0" data-el="pitch" title="Pitch ±8% (double-click to reset)" />
           <button data-ctl="rate_temp_up" data-hold title="Nudge faster">+</button>
-        </span>
-        <span class="grp" title="Beatgrid: whole-grid edits">
-          <input type="number" step="0.01" min="40" max="300" data-el="setbpm" placeholder="BPM" />
-          <button data-grid="nudge-">◁</button>
-          <button data-grid="nudge+">▷</button>
-          <button data-grid="downbeat" title="Make the beat nearest the playhead a 1">1</button>
-          <button data-grid="halve">÷2</button>
-          <button data-grid="double">×2</button>
         </span>
       </div>`;
     root.querySelectorAll<HTMLElement>("[data-el]").forEach((e) => (this.els[e.dataset.el!] = e));
@@ -204,16 +227,60 @@ export class DeckView {
     this.root.querySelectorAll<HTMLButtonElement>("[data-grid]").forEach((b) => {
       b.addEventListener("click", () => {
         const g = b.dataset.grid!;
-        if (g === "nudge-") edit({ op: "nudge", ms: -10 });
-        else if (g === "nudge+") edit({ op: "nudge", ms: 10 });
+        if (g === "nudge") edit({ op: "nudge", ms: +b.dataset.ms! });
+        else if (g === "anchor") edit({ op: "anchor_here" });
         else if (g === "downbeat") edit({ op: "set_downbeat" });
-        else edit({ op: g });
+        else if (g === "bpm") {
+          const cur = this.gridBpm() ?? this.track?.bpm ?? 120;
+          edit({ op: "set_bpm", bpm: Math.round((cur + +b.dataset.delta!) * 100) / 100 });
+        } else edit({ op: g });
       });
     });
+    // HOT CUE / GRID: the grid editor takes the pads' place, like Rekordbox.
+    this.els.padmode.querySelectorAll<HTMLButtonElement>("button").forEach((b) =>
+      b.addEventListener("click", () => {
+        const grid = b.dataset.mode === "grid";
+        this.els.padmode.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+        this.els.pads.hidden = grid;
+        this.els.gridedit.hidden = !grid;
+      }),
+    );
     const setbpm = this.els.setbpm as HTMLInputElement;
     setbpm.addEventListener("change", () => {
       if (+setbpm.value > 0) edit({ op: "set_bpm", bpm: +setbpm.value });
       setbpm.blur();
+    });
+
+    // Drag the waveform to scrub: the track moves with the pointer, like pushing a
+    // record. A playing deck is held while you drag and carries on when you let go.
+    const wave = this.els.wave;
+    wave.addEventListener("pointerdown", (e) => {
+      const s = this.state;
+      if (e.button !== 0 || !s || !s.duration) return;
+      e.preventDefault();
+      wave.setPointerCapture(e.pointerId);
+      wave.classList.add("scrubbing");
+      const wasPlaying = s.playing;
+      if (wasPlaying) send("play", 0);
+      const x0 = e.clientX;
+      const t0 = this.shown;
+      // Track seconds per CSS pixel, as drawn (see WaveformView.draw).
+      const secPerPx = (2 * halfWindow * (s.speed || 1)) / wave.clientWidth;
+      this.scrubbing = true;
+      const move = (m: PointerEvent) => {
+        const t = Math.min(s.duration, Math.max(0, t0 - (m.clientX - x0) * secPerPx));
+        this.shown = t;
+        send("playposition", t / s.duration);
+      };
+      const up = () => {
+        wave.removeEventListener("pointermove", move);
+        wave.classList.remove("scrubbing");
+        this.scrubbing = false;
+        if (wasPlaying) send("play", 1);
+      };
+      wave.addEventListener("pointermove", move);
+      wave.addEventListener("pointerup", up, { once: true });
+      wave.addEventListener("pointercancel", up, { once: true });
     });
 
     // Scroll on the waveform to zoom; click the overview to seek.
@@ -271,8 +338,19 @@ export class DeckView {
     }
   }
 
+  /** The grid's tempo (its mean), as the BPM display shows it at 0% pitch. */
+  private gridBpm(): number | null {
+    const t = this.grid?.times;
+    return t && t.length > 1 ? (60 * (t.length - 1)) / (t[t.length - 1] - t[0]) : null;
+  }
+
   setGrid(g: GridDto | null) {
     this.grid = g;
+    const setbpm = this.els.setbpm as HTMLInputElement;
+    if (document.activeElement !== setbpm) {
+      const b = this.gridBpm();
+      setbpm.value = b != null ? String(Math.round(b * 100) / 100) : "";
+    }
     let bar = 0;
     this.bars = g ? g.positions.map((p) => (p === 1 ? ++bar : Math.max(bar, 1))) : [];
     this.els.gridsrc.textContent = g ? `grid: ${g.source}` : "no grid";
@@ -284,7 +362,7 @@ export class DeckView {
     this.state = s;
     this.received = at;
     this.generation = s.generation;
-    if (jumped) this.shown = s.position;
+    if (jumped && !this.scrubbing) this.shown = s.position;
 
     this.els.bpm.textContent = s.bpm != null ? s.bpm.toFixed(2) : "–";
     this.els.rate.textContent = `${s.speed >= 1 ? "+" : ""}${((s.speed - 1) * 100).toFixed(1)}%`;
@@ -324,7 +402,7 @@ export class DeckView {
       // so 60 Hz state updates with jitter still give a steady scroll.
       const target = this.expected(now);
       const next = s.playing ? this.shown + dt * s.speed : target;
-      this.shown = Math.abs(target - next) > 0.05 ? target : next + (target - next) * 0.15;
+      if (!this.scrubbing) this.shown = Math.abs(target - next) > 0.05 ? target : next + (target - next) * 0.15;
     }
     this.wave?.draw({
       position: this.shown,
