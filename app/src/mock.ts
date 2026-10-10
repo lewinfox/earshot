@@ -69,7 +69,7 @@ setInterval(() => {
         d.playing = false;
       }
     }
-    d.bpm = d.grid ? bpmOf(d) * d.speed : null;
+    d.bpm = d.grid ? bpmOf(d) * (1 + d.rate) : null;
   }
   const state: EngineState = {
     decks: decks.map(({ grid: _g, waveform: _w, detail: _d, ...rest }) => ({ ...rest })),

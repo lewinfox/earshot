@@ -1,11 +1,16 @@
-// Scrolling colour waveform. Its shape is always the real signal: for every pixel
-// column, the lowest and highest sample in that slice of time, from a 2000-per-second
-// min/max summary (with a 1/16 copy for when zoomed out). Zoomed in, that traces the
-// individual cycles. The colour comes from the band summary (150 per second): bass red,
-// mids green, highs blue, like Rekordbox's RGB waveform. Both are uploaded once as
-// textures and a fragment shader draws the visible window each frame, so per-frame cost
-// does not depend on track length. Beats, cues, loops and the playhead go on a 2D
-// canvas on top (only a few dozen lines per frame).
+// Scrolling colour waveform, always drawn as a thin line through the real signal.
+//
+// The data is a 2000-per-second min/max summary (with a 1/16 copy for zoomed-out
+// views). The line follows the middle of each bin, i.e. the signal with the very
+// highest frequencies smoothed out; the bins' full range is drawn faintly behind it, so
+// hi-hats still show. Zoomed in, the line traces individual cycles; zoomed out, it
+// fills in where the signal oscillates densely, exactly as a thin line would. One
+// method at every zoom, so the thickness never jumps.
+//
+// Colour comes from the band summary (150 per second): bass red, mids green, highs
+// blue, like Rekordbox's RGB waveform. Everything is uploaded once as textures and a
+// fragment shader draws the visible window each frame, so per-frame cost does not
+// depend on track length. Beats, cues, loops and the playhead go on a 2D canvas on top.
 
 import type { GridDto } from "./types";
 
@@ -14,8 +19,6 @@ const TEX_W = 4096;
 const MIP = 16;
 /** Most detail bins the shader reads per pixel before switching to the coarse copy. */
 const MAX_FINE = 24;
-/** Below this many detail bins per pixel the wave is drawn as a thin line. */
-const LINE_BELOW = "3.0";
 /** Half the line's width, in device pixels. */
 const LINE_HALF_WIDTH = "0.6";
 // Bass carries most of the energy in dance music; these lift mids and highs so they
@@ -31,7 +34,7 @@ const FS = `#version 300 es
 precision highp float;
 uniform sampler2D uBands;  // RGBA per 1/150 s: peak, low, mid, high
 uniform sampler2D uFine;   // RG per 1/2000 s: min, max (128 = 0)
-uniform sampler2D uMip;    // RG per ${MIP} fine bins: min, max
+uniform sampler2D uMip;    // RGBA per ${MIP} fine bins: line min, line max, full min, full max
 uniform float uT;          // playhead, seconds
 uniform float uSecPerPx;
 uniform vec2 uSize;        // canvas size in device pixels
@@ -52,66 +55,63 @@ vec3 bandRGB(vec3 b) {
   return 0.12 + 0.88 * c * c * c;
 }
 
+// The line's value at fine bin i: the middle of its range.
+float mid(float i) { vec2 v = minmax(uFine, clamp(i, 0.0, uFineBins - 1.0)); return 0.5 * (v.x + v.y); }
+
+// The line at time t, interpolated between bin centres.
+float lineAt(float t) {
+  float x = t * uFineRate - 0.5;
+  float i = floor(x);
+  return mix(mid(i), mid(i + 1.0), x - i);
+}
+
 void main() {
   vec2 frag = gl_FragCoord.xy;
   vec3 bg = vec3(0.03, 0.035, 0.045);
   float t0 = uT + (frag.x - 0.5 - uSize.x * 0.5) * uSecPerPx;
   float t1 = t0 + uSecPerPx;
-  float a = max(0.0, floor(t0 * uFineRate));
-  // The last bin that starts inside this pixel, so neighbouring columns don't overlap.
-  float b = min(uFineBins - 1.0, max(a, ceil(t1 * uFineRate) - 1.0));
-  if (b < a) { color = vec4(bg, 1.0); return; }
+  float end = uFineBins / uFineRate;
+  if (t1 <= 0.0 || t0 >= end) { color = vec4(bg, 1.0); return; }
+  t0 = max(t0, 0.0);
+  t1 = min(t1, end);
 
-  // Lowest and highest sample in this pixel's slice of time.
-  float lo = 1.0, hi = -1.0;
+  // Range of the line across this pixel column: its values at both edges plus every
+  // bin centre in between (what a thin polyline covers in this column), and the
+  // bins' full range for the shadow.
+  float e0 = lineAt(t0), e1 = lineAt(t1);
+  float lo = min(e0, e1), hi = max(e0, e1);
+  float slo = lo, shi = hi;
+  float a = ceil(t0 * uFineRate - 0.5), b = floor(t1 * uFineRate - 0.5);
   if (b - a < ${MAX_FINE}.0) {
     for (int k = 0; k < ${MAX_FINE}; k++) {
       float i = a + float(k);
       if (i > b) break;
       vec2 v = minmax(uFine, i);
-      lo = min(lo, v.x); hi = max(hi, v.y);
+      float m = 0.5 * (v.x + v.y);
+      lo = min(lo, m); hi = max(hi, m);
+      slo = min(slo, v.x); shi = max(shi, v.y);
     }
   } else {
     float ma = floor(a / ${MIP}.0), mb = floor(b / ${MIP}.0);
     for (int k = 0; k < 256; k++) {
       float i = ma + float(k);
       if (i > mb) break;
-      vec2 v = minmax(uMip, i);
+      vec4 v = (texelFetch(uMip, at(i), 0) * 255.0 - 128.0) / 127.0;
       lo = min(lo, v.x); hi = max(hi, v.y);
+      slo = min(slo, v.z); shi = max(shi, v.w);
     }
   }
 
-  float px = 2.0 / uSize.y;
-  float y = (frag.y - uSize.y * 0.5) / (uSize.y * 0.5);
-  if (hi - lo < px) { float m = 0.5 * (lo + hi); lo = m - 0.5 * px; hi = m + 0.5 * px; }
-  // The full range, with softened edges.
-  float cover = clamp((y - lo) / px + 0.5, 0.0, 1.0) * clamp((hi - y) / px + 0.5, 0.0, 1.0);
-
-  // Zoomed in far enough to see cycles: a thin line through the middle of each bin,
-  // with the full range kept as a faint shadow so high frequencies still show.
-  float binsPerPx = uSecPerPx * uFineRate;
-  if (binsPerPx < ${LINE_BELOW}) {
-    float halfH = uSize.y * 0.5;
-    float tf = uT + (frag.x - uSize.x * 0.5) * uSecPerPx;   // time at this pixel's centre
-    float first = floor((tf - 2.0 * uSecPerPx) * uFineRate - 0.5);
-    float dist = 1e9;
-    vec2 prev = vec2(0.0);
-    for (int k = 0; k < 16; k++) {
-      float i = first + float(k);
-      if (i < 0.0 || i >= uFineBins) continue;
-      vec2 v = minmax(uFine, i);
-      float tc = (i + 0.5) / uFineRate;
-      vec2 p = vec2(uSize.x * 0.5 + (tc - uT) / uSecPerPx, halfH + 0.5 * (v.x + v.y) * halfH);
-      if (k > 0 && i > 0.0) {
-        vec2 d = p - prev, q = frag - prev;
-        float h = clamp(dot(q, d) / max(dot(d, d), 1e-6), 0.0, 1.0);
-        dist = min(dist, length(q - d * h));
-      }
-      prev = p;
-      if (p.x > frag.x + 2.0) break;
-    }
-    cover = max(0.25 * cover, clamp(${LINE_HALF_WIDTH} + 0.5 - dist, 0.0, 1.0));
-  }
+  // In pixels from here on. The line is LINE_HALF_WIDTH either side of its range,
+  // with a soft edge; the shadow is faint.
+  float halfH = uSize.y * 0.5;
+  float y = frag.y;
+  float dist = max(max(halfH + lo * halfH - y, y - (halfH + hi * halfH)), 0.0);
+  float sdist = max(max(halfH + slo * halfH - y, y - (halfH + shi * halfH)), 0.0);
+  float cover = max(
+    clamp(${LINE_HALF_WIDTH} + 0.5 - dist, 0.0, 1.0),
+    0.25 * clamp(0.5 - sdist, 0.0, 1.0)
+  );
   if (cover <= 0.0) { color = vec4(bg, 1.0); return; }
 
   // Colour from the bands around the middle of the pixel.
@@ -201,20 +201,25 @@ export class WaveformView {
     this.fineRate = fineRate;
     this.upload(this.bandsTex, bands, 4);
     this.upload(this.fineTex, fine, 2);
-    // Coarse min/max copy: each bin covers MIP fine bins.
+    // Coarse copy: each bin covers MIP fine bins. Line (bin middle) min and max, then
+    // full min and max, in the same 128-centred bytes.
     const n = Math.ceil(this.fineBins / MIP);
-    const mip = new Uint8Array(n * 2);
+    const mip = new Uint8Array(n * 4);
     for (let j = 0; j < n; j++) {
+      let mlo = 255;
+      let mhi = 0;
       let lo = 255;
       let hi = 0;
       for (let i = j * MIP; i < Math.min((j + 1) * MIP, this.fineBins); i++) {
+        const m = (fine[i * 2] + fine[i * 2 + 1]) / 2;
+        mlo = Math.min(mlo, Math.floor(m));
+        mhi = Math.max(mhi, Math.ceil(m));
         lo = Math.min(lo, fine[i * 2]);
         hi = Math.max(hi, fine[i * 2 + 1]);
       }
-      mip[j * 2] = lo;
-      mip[j * 2 + 1] = hi;
+      mip.set([mlo, mhi, lo, hi], j * 4);
     }
-    this.upload(this.mipTex, mip, 2);
+    this.upload(this.mipTex, mip, 4);
   }
 
   private upload(tex: WebGLTexture, data: Uint8Array, channels: 2 | 4) {

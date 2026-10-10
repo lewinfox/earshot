@@ -44,7 +44,7 @@ pub struct DeckShared {
     pub speed: AtomicF64,
     /// Pitch fader position as a fraction, e.g. 0.02 = +2 %.
     pub rate: AtomicF64,
-    /// Local tempo of the track at the playhead × speed. NaN without a grid.
+    /// The track's tempo (its grid's mean) × the tempo fader. NaN without a grid.
     pub bpm: AtomicF64,
     pub sync: AtomicBool,
     pub loop_in: AtomicF64,
@@ -681,8 +681,14 @@ impl Renderer {
             sh.playing.store(dk.playing, Relaxed);
             sh.speed.set(dk.speed);
             sh.rate.set(dk.rate);
-            sh.bpm
-                .set(dk.local_bpm().map_or(f64::NAN, |b| b * dk.speed));
+            // The track's one tempo times the tempo fader: steady while playing, and
+            // unmoved by nudges and sync's small phase corrections. A synced deck's
+            // `rate` is set to match the leader, so it shows the leader's tempo.
+            sh.bpm.set(
+                dk.grid
+                    .as_ref()
+                    .map_or(f64::NAN, |g| g.mean_bpm() * (1.0 + dk.rate)),
+            );
             sh.sync.store(dk.sync, Relaxed);
             sh.loop_in.set(dk.loop_in.unwrap_or(f64::NAN));
             sh.loop_out.set(dk.loop_out.unwrap_or(f64::NAN));

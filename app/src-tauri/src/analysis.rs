@@ -1,14 +1,15 @@
-//! Analysis queue: one thread works through tracks, computing the waveform here and
-//! the beatgrid in the Python worker (`earshot/worker`, Beat This!).
+//! Analysis queue: up to [`JOBS`] threads work through tracks in parallel, each
+//! computing the waveform here and the beatgrid in its own Python worker process
+//! (`earshot/worker`, Beat This!).
 //!
 //! The worker never decodes files itself. We send it a mono WAV from our own decoder,
 //! so its beat times line up exactly with what the decks play.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex};
 
 use earshot_engine::Command;
 use earshot_engine::beatgrid::Beatgrid;
@@ -60,49 +61,97 @@ struct DeckGridEvent {
     grid: Option<GridDto>,
 }
 
+/// Parallel analysis jobs (override with `EARSHOT_ANALYSIS_JOBS`). Each runs its own
+/// worker process with its own copy of the model (a few hundred MB each).
+const JOBS: usize = 4;
+
+#[derive(Default)]
+struct Queue {
+    jobs: Mutex<VecDeque<Job>>,
+    ready: Condvar,
+}
+
+impl Queue {
+    fn pop(&self) -> Job {
+        let mut jobs = self.jobs.lock().unwrap();
+        loop {
+            if let Some(j) = jobs.pop_front() {
+                return j;
+            }
+            jobs = self.ready.wait(jobs).unwrap();
+        }
+    }
+}
+
 pub struct Analyser {
-    tx: mpsc::Sender<Job>,
+    queue: Arc<Queue>,
     pending: Arc<Mutex<HashSet<i64>>>,
     app: AppHandle,
 }
 
 impl Analyser {
     pub fn start(app: AppHandle, db: Db) -> Analyser {
-        let (tx, rx) = mpsc::channel::<Job>();
+        let jobs = std::env::var("EARSHOT_ANALYSIS_JOBS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(JOBS)
+            .max(1);
+        // Split the cores between the workers: torch would otherwise give each one
+        // every core, and the processes would fight over them.
+        let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let threads = (cores / jobs).max(1);
+        let queue = Arc::new(Queue::default());
         let pending = Arc::new(Mutex::new(HashSet::new()));
-        let p = pending.clone();
-        let a = app.clone();
-        std::thread::Builder::new()
-            .name("earshot-analysis".into())
-            .spawn(move || {
-                let mut worker: Option<Worker> = None;
-                for job in rx {
-                    let ev = match run(&a, &db, &mut worker, &job) {
-                        Ok(ev) => ev,
-                        Err(e) => {
-                            eprintln!("analysis of track {}: {e}", job.id);
-                            AnalysisEvent { error: Some(e), ..AnalysisEvent::new(job.id, "error") }
-                        }
-                    };
-                    p.lock().unwrap().remove(&job.id);
-                    let _ = a.emit("analysis", ev);
-                }
-            })
-            .expect("spawn analysis thread");
-        Analyser { tx, pending, app }
+        for n in 0..jobs {
+            let (q, p, a, db) = (queue.clone(), pending.clone(), app.clone(), db.clone());
+            std::thread::Builder::new()
+                .name(format!("earshot-analysis-{n}"))
+                .spawn(move || {
+                    let mut worker: Option<Worker> = None;
+                    loop {
+                        let job = q.pop();
+                        let ev = match run(&a, &db, &mut worker, threads, &job) {
+                            Ok(ev) => ev,
+                            Err(e) => {
+                                eprintln!("analysis of track {}: {e}", job.id);
+                                AnalysisEvent { error: Some(e), ..AnalysisEvent::new(job.id, "error") }
+                            }
+                        };
+                        p.lock().unwrap().remove(&job.id);
+                        let _ = a.emit("analysis", ev);
+                    }
+                })
+                .expect("spawn analysis thread");
+        }
+        Analyser { queue, pending, app }
     }
 
-    /// Queue a track unless it is already waiting.
+    /// Queue a track unless it is already waiting. A track just loaded onto a deck
+    /// (`audio` given) goes to the front, ahead of any folder being analysed.
     pub fn queue(&self, id: i64, audio: Option<Arc<TrackAudio>>, force: bool) {
         if !self.pending.lock().unwrap().insert(id) {
             return;
         }
         let _ = self.app.emit("analysis", AnalysisEvent::new(id, "queued"));
-        let _ = self.tx.send(Job { id, audio, force });
+        let urgent = audio.is_some();
+        let job = Job { id, audio, force };
+        let mut jobs = self.queue.jobs.lock().unwrap();
+        if urgent {
+            jobs.push_front(job);
+        } else {
+            jobs.push_back(job);
+        }
+        self.queue.ready.notify_one();
     }
 }
 
-fn run(app: &AppHandle, db: &Db, worker: &mut Option<Worker>, job: &Job) -> Result<AnalysisEvent, String> {
+fn run(
+    app: &AppHandle,
+    db: &Db,
+    worker: &mut Option<Worker>,
+    threads: usize,
+    job: &Job,
+) -> Result<AnalysisEvent, String> {
     let progress = |fraction: f64, stage: &'static str| {
         let _ = app.emit(
             "analysis",
@@ -137,7 +186,7 @@ fn run(app: &AppHandle, db: &Db, worker: &mut Option<Worker>, job: &Job) -> Resu
     write_mono_wav(&wav, &audio).map_err(|e| format!("writing {}: {e}", wav.display()))?;
     if worker.is_none() {
         progress(WORKER_START, "starting the analyser");
-        *worker = Some(Worker::spawn()?);
+        *worker = Some(Worker::spawn(threads)?);
     }
     progress(WORKER_START, "finding beats");
     let reply = worker.as_mut().unwrap().analyse(&wav, &mut |f| {
@@ -151,11 +200,10 @@ fn run(app: &AppHandle, db: &Db, worker: &mut Option<Worker>, job: &Job) -> Resu
             return Err(e);
         }
     };
-    let grid = Beatgrid::from_indexed(&reply.beats, &reply.beat_index, &reply.is_downbeat)
-        .and_then(|g| g.refit(audio.duration()))
+    // One tempo per track: a straight grid through the detected beats.
+    let (grid, bpm) = Beatgrid::from_indexed(&reply.beats, &reply.beat_index, &reply.is_downbeat)
+        .and_then(|g| g.straightened(audio.duration()))
         .map_err(|e| format!("worker returned an unusable grid: {e}"))?;
-
-    let bpm = fitted_bpm(grid.times()).unwrap_or(reply.median_bpm);
 
     // A grid fixed by hand while this job waited wins over an automatic analysis.
     let keep_user = !job.force && existing.as_ref().is_some_and(|(_, s)| s == "user");
@@ -170,7 +218,7 @@ fn run(app: &AppHandle, db: &Db, worker: &mut Option<Worker>, job: &Job) -> Resu
         update_decks(app, job.id, grid);
     }
     eprintln!(
-        "analysed track {}: {:.2} BPM (worker's median {:.2}), {} beats, {:.1} s in the worker",
+        "analysed track {}: {} BPM (worker's median {:.2}), {} beats, {:.1} s in the worker",
         job.id,
         bpm,
         reply.median_bpm,
@@ -182,26 +230,6 @@ fn run(app: &AppHandle, db: &Db, worker: &mut Option<Worker>, job: &Job) -> Resu
         grid_source: Some(if keep_user { "user" } else { "analysis" }.into()),
         ..AnalysisEvent::new(job.id, "done")
     })
-}
-
-/// Average tempo from a least-squares line through beat number against time. The
-/// worker's median beat gap is quantised by its onset frames (~6 ms), which can put it
-/// half a BPM out; a fit over every beat averages that away.
-fn fitted_bpm(times: &[f64]) -> Option<f64> {
-    let n = times.len() as f64;
-    if n < 8.0 {
-        return None;
-    }
-    let mean_i = (n - 1.0) / 2.0;
-    let mean_t = times.iter().sum::<f64>() / n;
-    let (mut num, mut den) = (0.0, 0.0);
-    for (i, t) in times.iter().enumerate() {
-        let di = i as f64 - mean_i;
-        num += di * (t - mean_t);
-        den += di * di;
-    }
-    let period = num / den;
-    (period > 0.0).then(|| 60.0 / period)
 }
 
 /// Give the new grid to any deck that has this track loaded.
@@ -285,7 +313,8 @@ struct Worker {
 }
 
 impl Worker {
-    fn spawn() -> Result<Worker, String> {
+    /// `threads`: CPU threads the worker's torch may use.
+    fn spawn(threads: usize) -> Result<Worker, String> {
         let dir = worker_dir();
         let python = dir.join(".venv/bin/python");
         if !python.exists() {
@@ -297,6 +326,9 @@ impl Worker {
         let mut child = std::process::Command::new(&python)
             .args(["-m", "earshot_worker"])
             .current_dir(&dir)
+            .env("OMP_NUM_THREADS", threads.to_string())
+            .env("MKL_NUM_THREADS", threads.to_string())
+            .env("OPENBLAS_NUM_THREADS", threads.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -374,18 +406,17 @@ mod tests {
     fn analyses_a_real_track() {
         let path = std::env::var("EARSHOT_TEST_TRACK").expect("set EARSHOT_TEST_TRACK");
         let (audio, tags) = decode::decode_file(Path::new(&path)).unwrap();
-        let wav = std::env::temp_dir().join("earshot-test.wav");
+        let wav = std::env::temp_dir().join(format!("earshot-test-{}.wav", std::process::id()));
         write_mono_wav(&wav, &audio).unwrap();
-        let mut w = Worker::spawn().unwrap();
+        let mut w = Worker::spawn(4).unwrap();
         let mut seen = Vec::new();
         let r = w.analyse(&wav, &mut |f| seen.push(f)).unwrap();
         assert!(!seen.is_empty() && seen.windows(2).all(|p| p[0] <= p[1]), "progress {seen:?}");
-        let grid = Beatgrid::from_indexed(&r.beats, &r.beat_index, &r.is_downbeat)
-            .and_then(|g| g.refit(audio.duration()))
+        let (grid, bpm) = Beatgrid::from_indexed(&r.beats, &r.beat_index, &r.is_downbeat)
+            .and_then(|g| g.straightened(audio.duration()))
             .unwrap();
-        let bpm = fitted_bpm(grid.times()).unwrap();
         eprintln!(
-            "tag {:?} · fitted {bpm:.2} · median {:.2} · {} beats · first downbeat at {:?} s · {:.1} s",
+            "tag {:?} · straightened {bpm} · median {:.2} · {} beats · first downbeat at {:?} s · {:.1} s",
             tags.bpm,
             r.median_bpm,
             grid.len(),
@@ -393,11 +424,5 @@ mod tests {
             r.seconds
         );
         assert!(bpm > 60.0 && bpm < 200.0);
-    }
-
-    #[test]
-    fn fit_recovers_a_steady_tempo() {
-        let times: Vec<f64> = (0..100).map(|i| 0.3 + i as f64 * 60.0 / 124.0).collect();
-        assert!((fitted_bpm(&times).unwrap() - 124.0).abs() < 1e-9);
     }
 }

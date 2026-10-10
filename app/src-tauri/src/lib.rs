@@ -145,6 +145,13 @@ struct TempoLockAnalysis {
     is_downbeat: Vec<bool>,
 }
 
+/// Every beat the same distance apart (to within a microsecond).
+fn is_straight(g: &Beatgrid) -> bool {
+    let t = g.times();
+    let p = (t[t.len() - 1] - t[0]) / (t.len() - 1) as f64;
+    t.windows(2).all(|w| ((w[1] - w[0]) - p).abs() < 1e-6)
+}
+
 fn sidecar_path(path: &Path) -> PathBuf {
     let mut p = path.as_os_str().to_owned();
     p.push(".beats.json");
@@ -232,6 +239,19 @@ async fn load_track(
                         (db::grid(&conn, id)?, db::waveform(&conn, id, waveform::BINS_PER_SECOND)?)
                     };
                     let (grid, src) = match stored {
+                        // Analysed before grids were straightened to one tempo:
+                        // straighten now and save, so it only happens once.
+                        Some((g, src)) if src == "analysis" && !is_straight(&g) => {
+                            match g.straightened(audio.duration()) {
+                                Ok((s, bpm)) => {
+                                    let conn = db.lock().unwrap();
+                                    db::save_grid(&conn, id, &s, "analysis")?;
+                                    db::set_bpm(&conn, id, bpm)?;
+                                    (Some(s), src)
+                                }
+                                Err(_) => (Some(g), src),
+                            }
+                        }
                         Some((g, src)) => (Some(g), src),
                         None => grid_for_file(&path, &tags, audio.duration()),
                     };

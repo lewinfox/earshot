@@ -279,7 +279,35 @@ $("#menu-btn").addEventListener("click", (e) => {
 
 // ---- analysis progress ------------------------------------------------------------------
 
+// Several tracks analyse at once (see analysis.rs), so the top bar sums them up.
 const busy = new Set<number>();
+const running = new Map<number, number>();
+let failed = 0;
+let lastError = "";
+
+function showAnalysisPill() {
+  const pill = $("#analysis-status");
+  const waiting = busy.size - running.size;
+  const fail = failed ? ` · ${failed} failed` : "";
+  if (running.size) {
+    const avg = [...running.values()].reduce((x, y) => x + y, 0) / running.size;
+    pill.className = "pill progress";
+    pill.style.setProperty("--p", pct(avg));
+    const one = running.size === 1 ? byId.get([...running.keys()][0])?.title : null;
+    pill.textContent = `analysing ${one ?? `${running.size} tracks`} · ${pct(avg)}${waiting ? ` · ${waiting} waiting` : ""}${fail}`;
+    pill.title = [...running].map(([id, p]) => `${byId.get(id)?.title ?? id}: ${pct(p)}`).join("\n") + (lastError ? `\n\nLast error: ${lastError}` : "");
+  } else if (waiting) {
+    pill.className = "pill";
+    pill.textContent = `analysis · ${waiting} waiting${fail}`;
+    pill.title = lastError;
+  } else if (failed) {
+    pill.className = "pill warn";
+    pill.textContent = `analysis: ${failed} failed`;
+    pill.title = `${lastError}\n\nClick to dismiss.`;
+  }
+  pill.hidden = !running.size && !waiting && !failed;
+}
+
 listen<AnalysisEvent>("analysis", (ev) => {
   const t = byId.get(ev.track_id);
   if (t) {
@@ -294,28 +322,21 @@ listen<AnalysisEvent>("analysis", (ev) => {
   }
   if (ev.state === "queued" || ev.state === "running") busy.add(ev.track_id);
   else busy.delete(ev.track_id);
-  const pill = $("#analysis-status");
+  if (ev.state === "running") running.set(ev.track_id, ev.progress ?? 0);
+  else running.delete(ev.track_id);
   if (ev.state === "error") {
-    pill.hidden = false;
-    pill.className = "pill warn";
-    pill.textContent = `analysis failed${busy.size ? ` · ${busy.size} left` : ""}`;
-    pill.title = `${t?.title ?? ev.track_id}: ${ev.error}`;
-  } else if (ev.state === "running") {
-    pill.hidden = false;
-    pill.className = "pill progress";
-    pill.style.setProperty("--p", pct(ev.progress ?? 0));
-    pill.textContent = `analysing ${t?.title ?? ""} · ${pct(ev.progress ?? 0)}${busy.size > 1 ? ` · ${busy.size - 1} waiting` : ""}`;
-    pill.title = ev.stage ?? "";
-  } else if (busy.size) {
-    pill.hidden = false;
-    pill.className = "pill";
-    pill.textContent = `analysis · ${busy.size} waiting`;
-    pill.title = "";
-  } else if (!pill.classList.contains("warn")) pill.hidden = true;
+    failed++;
+    lastError = `${t?.title ?? ev.track_id}: ${ev.error}`;
+  }
+  showAnalysisPill();
   for (const d of decks) if (d.track?.id === ev.track_id) d.showAnalysis(ev);
   libList.draw();
 });
-$("#analysis-status").addEventListener("click", () => ($("#analysis-status").hidden = true));
+$("#analysis-status").addEventListener("click", () => {
+  failed = 0;
+  lastError = "";
+  showAnalysisPill();
+});
 
 // A deck's track finished analysing: show its new grid.
 listen<DeckGridEvent>("deck-grid", (ev) => decks[ev.deck].setGrid(ev.grid));

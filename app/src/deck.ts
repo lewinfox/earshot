@@ -25,6 +25,8 @@ const fmt = (s: number) => {
  * beatmatched decks line up even when their tracks' own BPMs differ.
  */
 let halfWindow = 4;
+/** Zoom sensitivity: log change in `halfWindow` per pixel scrolled. */
+const ZOOM_PER_PX = 0.0007;
 
 export class DeckView {
   readonly group: string;
@@ -217,7 +219,11 @@ export class DeckView {
     // Scroll on the waveform to zoom; click the overview to seek.
     this.els.wave.addEventListener("wheel", (e) => {
       e.preventDefault();
-      halfWindow = Math.min(30, Math.max(0.5, halfWindow * (e.deltaY > 0 ? 1.15 : 1 / 1.15)));
+      // Proportional to the scroll distance, so a touchpad's many small events zoom
+      // as smoothly as a wheel: about 7% per wheel notch (~100 px).
+      const px = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
+      const step = Math.exp(Math.max(-150, Math.min(150, px)) * ZOOM_PER_PX);
+      halfWindow = Math.min(30, Math.max(0.5, halfWindow * step));
     });
     this.els.overview.addEventListener("pointerdown", (e) => {
       const r = this.els.overview.getBoundingClientRect();

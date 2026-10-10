@@ -205,6 +205,11 @@ pub fn save_analysis(conn: &Connection, id: i64, bpm: f64, min: f64, max: f64, d
     Ok(())
 }
 
+pub fn set_bpm(conn: &Connection, id: i64, bpm: f64) -> Result<(), String> {
+    conn.execute("UPDATE analysis SET bpm = ?2 WHERE track_id = ?1", params![id, bpm]).map_err(err)?;
+    Ok(())
+}
+
 pub fn waveform(conn: &Connection, id: i64, bins_per_s: f64) -> Result<Option<Vec<u8>>, String> {
     conn.query_row(
         "SELECT data FROM waveforms WHERE track_id = ?1 AND version = ?2 AND bins_per_s = ?3",

@@ -281,6 +281,56 @@ impl Beatgrid {
         Self::new(times, positions)?.refit(duration)
     }
 
+    /// One tempo for the whole track: a constant grid fitted to these (detected) beats,
+    /// at the simplest BPM the beats support, keeping the downbeat. Returns the grid
+    /// and its BPM.
+    ///
+    /// The BPM is the first of: a whole number, a half, a tenth, a hundredth, whose
+    /// best-placed grid still lands within [`STRAIGHTEN_TOLERANCE`] of 90% of the
+    /// beats, or no worse than the unrounded fit plus 5 ms. A track at 128.0 with a few
+    /// ms of detection jitter comes out at exactly 128; one at 127.97 doesn't round to
+    /// 128, because over five minutes that would drift 70 ms.
+    pub fn straightened(&self, duration: f64) -> Result<(Self, f64), GridError> {
+        let n = self.times.len();
+        if n < 8 {
+            return Err(GridError::TooFewBeats);
+        }
+        let idx: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        // Least-squares line through beat number vs time, then again without outliers.
+        let (mut period, _) = line_fit(&idx, &self.times);
+        let keep: Vec<usize> = {
+            let off = median((0..n).map(|i| self.times[i] - idx[i] * period).collect());
+            let r: Vec<f64> = (0..n).map(|i| (self.times[i] - idx[i] * period - off).abs()).collect();
+            let mad = median(r.clone()).max(0.002);
+            (0..n).filter(|&i| r[i] <= 4.0 * mad).collect()
+        };
+        let (ki, kt): (Vec<f64>, Vec<f64>) = keep.iter().map(|&i| (idx[i], self.times[i])).unzip();
+        if ki.len() >= 8 {
+            period = line_fit(&ki, &kt).0;
+        }
+        if !(period > 0.0) {
+            return Err(GridError::NotIncreasing(0));
+        }
+        let fitted = 60.0 / period;
+        // How well a constant grid at `bpm` fits: (90th-percentile miss, offset).
+        let score = |bpm: f64| {
+            let p = 60.0 / bpm;
+            let off = median(ki.iter().zip(&kt).map(|(i, t)| t - i * p).collect());
+            let mut r: Vec<f64> = ki.iter().zip(&kt).map(|(i, t)| (t - i * p - off).abs()).collect();
+            r.sort_by(f64::total_cmp);
+            (r[(r.len() * 9 / 10).min(r.len() - 1)], off)
+        };
+        let tolerance = STRAIGHTEN_TOLERANCE.max(score(fitted).0 + 0.005);
+        let candidates = [1.0, 2.0, 10.0, 100.0].map(|k| (fitted * k).round() / k);
+        let bpm = candidates
+            .into_iter()
+            .find(|&b| score(b).0 <= tolerance)
+            .unwrap_or(candidates[3]);
+        let (_, offset) = score(bpm);
+        let anchor = offset + self.first_downbeat().unwrap_or(0) as f64 * 60.0 / bpm;
+        Ok((Self::constant(bpm, anchor, duration)?, bpm))
+    }
+
     /// Drop beats outside `0..=duration` and extend at the edge tempo to cover it.
     pub fn refit(&self, duration: f64) -> Result<Self, GridError> {
         let keep: Vec<usize> = (0..self.len())
@@ -305,6 +355,29 @@ impl Beatgrid {
 }
 
 /// Position in a 4/4 bar of the beat `offset` beats after a 1-beat (negative = before).
+/// Most a straightened grid may miss the detected beats by (see
+/// [`Beatgrid::straightened`]).
+pub const STRAIGHTEN_TOLERANCE: f64 = 0.015;
+
+/// Least-squares `y = slope * x + intercept`.
+fn line_fit(x: &[f64], y: &[f64]) -> (f64, f64) {
+    let n = x.len() as f64;
+    let mx = x.iter().sum::<f64>() / n;
+    let my = y.iter().sum::<f64>() / n;
+    let (mut num, mut den) = (0.0, 0.0);
+    for (a, b) in x.iter().zip(y) {
+        num += (a - mx) * (b - my);
+        den += (a - mx) * (a - mx);
+    }
+    let slope = num / den;
+    (slope, my - slope * mx)
+}
+
+fn median(mut v: Vec<f64>) -> f64 {
+    v.sort_by(f64::total_cmp);
+    v[v.len() / 2]
+}
+
 fn bar_position(offset: i64) -> u8 {
     (offset.rem_euclid(BEATS_PER_BAR as i64) + 1) as u8
 }
@@ -330,6 +403,55 @@ fn positions_from_downbeats(is_down: &[bool]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Beats at `bpm` from `start`, with deterministic ±`jitter` s noise, downbeat on
+    /// beat `down`.
+    fn detected(bpm: f64, start: f64, jitter: f64, down: usize) -> Beatgrid {
+        let p = 60.0 / bpm;
+        let mut x = 12345u64;
+        let times: Vec<f64> = (0..600)
+            .map(|i| {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let u = (x >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
+                start + i as f64 * p + u * jitter
+            })
+            .collect();
+        let down: Vec<bool> = (0..600).map(|i| i % 4 == down).collect();
+        let idx: Vec<i64> = (0..600).collect();
+        Beatgrid::from_indexed(&times, &idx, &down).unwrap()
+    }
+
+    #[test]
+    fn straightens_a_jittery_128_to_exactly_128() {
+        let (g, bpm) = detected(128.0, 0.31, 0.006, 2).straightened(290.0).unwrap();
+        assert_eq!(bpm, 128.0);
+        assert!((g.mean_bpm() - 128.0).abs() < 1e-9);
+        // Phase and downbeat kept: the downbeat at 0.31 + 2 beats.
+        let t = 0.31 + 2.0 * 60.0 / 128.0;
+        let i = g.beat_at(t).round() as usize;
+        assert!((g.times()[i] - t).abs() < 0.004, "{} vs {t}", g.times()[i]);
+        assert_eq!(g.positions()[i], 1);
+    }
+
+    #[test]
+    fn keeps_halves_and_awkward_tempos() {
+        assert_eq!(detected(125.5, 0.1, 0.004, 0).straightened(290.0).unwrap().1, 125.5);
+        // 127.97 is 70 ms from 128 after five minutes: too far to round.
+        let bpm = detected(127.97, 0.1, 0.004, 0).straightened(290.0).unwrap().1;
+        assert!((bpm - 127.97).abs() < 0.006, "{bpm}");
+    }
+
+    #[test]
+    fn ignores_a_few_wild_beats() {
+        let mut g = detected(124.0, 0.2, 0.003, 0);
+        let mut times = g.times().to_vec();
+        for i in [50, 51, 300] {
+            times[i] += 0.11;
+        }
+        times.sort_by(f64::total_cmp);
+        g = Beatgrid::new(times, g.positions().to_vec()).unwrap();
+        assert_eq!(g.straightened(290.0).unwrap().1, 124.0);
+    }
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9

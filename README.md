@@ -54,6 +54,7 @@ Environment variables:
 | `EARSHOT_AUDIO_DEVICE` | system default | Case-insensitive part of the output device name, e.g. `DDJ` |
 | `EARSHOT_BUFFER` | `256` | Buffer size in frames (ignored if the device doesn't support it) |
 | `EARSHOT_NULL_AUDIO` | unset | `1` runs the engine on a timer with no sound card |
+| `EARSHOT_ANALYSIS_JOBS` | `4` | Tracks analysed in parallel (one worker process each) |
 | `EARSHOT_WORKER_DIR` | `earshot/worker` | Where the analysis worker and its `.venv` live |
 
 If no audio device can be opened, earshot falls back to the null output and shows a
@@ -109,8 +110,9 @@ If the window is blank or the graph is very slow, try `WEBKIT_DISABLE_DMABUF_REN
   *Analyse unanalysed tracks*, to do it ahead of time. The dot by each track shows the
   state (green = analysed, amber = queued or running, red = failed; hover for the
   error). While a track analyses, a bar fills under its row, the top bar shows its
-  percentage, and so does its deck if it's loaded. Analysis runs in `worker/` (Beat This!) one track at a time, roughly 10–30 s
-  per track on a CPU. Grid edits on a deck are saved and are never overwritten by
+  percentage, and so does its deck if it's loaded. Analysis runs in `worker/` (Beat This!), four tracks at a time
+  (`EARSHOT_ANALYSIS_JOBS` to change), each worker on a share of the CPU cores; a
+  track you load onto a deck jumps the queue. Grid edits on a deck are saved and are never overwritten by
   automatic analysis (an explicit *Analyse* does overwrite them).
 - **Search** with free text plus `bpm:120-126` and `key:8A` (or `key:Am`). It searches
   within the selected folder.
