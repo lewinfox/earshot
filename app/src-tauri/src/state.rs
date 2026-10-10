@@ -14,6 +14,8 @@ pub struct DeckSlot {
     pub grid: Option<Arc<Beatgrid>>,
     pub grid_source: String,
     pub waveform: Arc<Vec<u8>>,
+    /// Min/max per 1/2000 s (`waveform::detail`).
+    pub detail: Arc<Vec<u8>>,
 }
 
 pub struct Inner {

@@ -1,5 +1,9 @@
-//! Colour waveform summary: per bin, the peak level and the energy in three bands,
-//! like Rekordbox's RGB waveform. Computed once per track; the UI draws from it.
+//! Waveform data for the UI, computed once per track:
+//!
+//! - [`summarise`]: per 1/150 s, the peak level and the energy in three bands (low,
+//!   mid, high), which give the colour, like Rekordbox's RGB waveform.
+//! - [`detail`]: per 1/2000 s, the lowest and highest sample, so that zoomed in the UI
+//!   draws the actual wave, not just its outline.
 
 use crate::decode::TrackAudio;
 
@@ -66,10 +70,70 @@ pub fn summarise(audio: &TrackAudio) -> Vec<u8> {
     out
 }
 
+pub const DETAIL_PER_SECOND: f64 = 2000.0;
+
+/// 2 bytes per bin: `[min, max]` of the mono signal, as `128 + 127 * x`, where `x` is
+/// scaled so the track's loudest sample is ±1 (the same scaling as the summary's peak).
+pub fn detail(audio: &TrackAudio) -> Vec<u8> {
+    let frames_per_bin = (audio.sample_rate as f64 / DETAIL_PER_SECOND).max(1.0);
+    let bins = (audio.frames() as f64 / frames_per_bin).ceil() as usize;
+    let peak = audio
+        .samples
+        .chunks_exact(2)
+        .fold(1e-9f32, |m, f| m.max((0.5 * (f[0] + f[1])).abs()));
+    let mut out = Vec::with_capacity(bins * 2);
+    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    let mut next_edge = frames_per_bin;
+    for (i, f) in audio.samples.chunks_exact(2).enumerate() {
+        let x = 0.5 * (f[0] + f[1]) / peak;
+        lo = lo.min(x);
+        hi = hi.max(x);
+        if (i + 1) as f64 >= next_edge || i + 1 == audio.frames() {
+            out.push(signed_u8(lo));
+            out.push(signed_u8(hi));
+            next_edge += frames_per_bin;
+            (lo, hi) = (f32::MAX, f32::MIN);
+        }
+    }
+    out.truncate(bins * 2);
+    out
+}
+
+fn signed_u8(x: f32) -> u8 {
+    (128.0 + 127.0 * x.clamp(-1.0, 1.0)).round() as u8
+}
+
 fn one_pole(cutoff: f64, sr: f64) -> f32 {
     (1.0 - (-2.0 * std::f64::consts::PI * cutoff / sr).exp()) as f32
 }
 
 fn to_u8(x: f32) -> u8 {
     (x.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detail_follows_a_slow_sine() {
+        // 50 Hz at 44.1 kHz: each 1/2000 s bin is a short slice of the cycle, so its
+        // min and max are close together and trace the sine.
+        let sr = 44_100u32;
+        let samples: Vec<f32> = (0..sr as usize)
+            .flat_map(|i| {
+                let x = (2.0 * std::f32::consts::PI * 50.0 * i as f32 / sr as f32).sin() * 0.5;
+                [x, x]
+            })
+            .collect();
+        let d = detail(&TrackAudio { samples, sample_rate: sr });
+        assert_eq!(d.len(), 2 * 2000);
+        // Bin 10 is at 5 ms = a quarter cycle: the top of the wave, scaled to ±1.
+        assert!(d[20] > 250 && d[21] >= d[20], "{:?}", &d[18..24]);
+        // Bin 30 is at 15 ms = three quarters: the bottom.
+        assert!(d[61] < 6, "{:?}", &d[58..64]);
+        for b in d.chunks_exact(2) {
+            assert!(b[0] <= b[1] && b[1] - b[0] < 25);
+        }
+    }
 }

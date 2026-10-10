@@ -17,13 +17,14 @@ function emit(event: string, payload: unknown) {
 interface MockDeck extends DeckState {
   grid: GridDto | null;
   waveform: Uint8Array;
+  detail: Uint8Array;
 }
 
 function emptyDeck(): MockDeck {
   return {
     position: 0, duration: 0, playing: false, speed: 1, rate: 0, bpm: null, sync: false,
     loop_in: null, loop_out: null, loop_active: false, cue_point: 0, hotcues: Array(8).fill(null),
-    volume: 1, pfl: false, generation: 0, grid: null, waveform: new Uint8Array(),
+    volume: 1, pfl: false, generation: 0, grid: null, waveform: new Uint8Array(), detail: new Uint8Array(),
   };
 }
 
@@ -71,7 +72,7 @@ setInterval(() => {
     d.bpm = d.grid ? bpmOf(d) * d.speed : null;
   }
   const state: EngineState = {
-    decks: decks.map(({ grid: _g, waveform: _w, ...rest }) => ({ ...rest })),
+    decks: decks.map(({ grid: _g, waveform: _w, detail: _d, ...rest }) => ({ ...rest })),
     crossfader,
     quantize: true,
     audio: { callbacks_per_second: 172, slow_callbacks: 0, xruns: 0, max_callback_ms: 0.2, budget_ms: 5.8, block_frames: 256, sample_rate: 44100 },
@@ -101,6 +102,38 @@ function demoWave(bpm: number, seconds: number): Uint8Array {
     out[i * 4 + 1] = 255 * kick;
     out[i * 4 + 2] = 120;
     out[i * 4 + 3] = 255 * hat;
+  }
+  return out;
+}
+
+/** Min/max per 1/2000 s of a synthetic signal: a kick (a falling sine) on each beat,
+ * a hi-hat (noise) on the off-beat and a 55 Hz bassline. */
+function demoDetail(bpm: number, seconds: number): Uint8Array {
+  const sr = 22050;
+  const per = sr / 2000;
+  const bins = Math.ceil(seconds * 2000);
+  const out = new Uint8Array(bins * 2);
+  const beat = 60 / bpm;
+  let phase = 0;
+  let noise = 1;
+  for (let j = 0; j < bins; j++) {
+    let lo = 1;
+    let hi = -1;
+    for (let k = 0; k < per; k++) {
+      const t = (j * per + k) / sr;
+      const pb = t % beat;
+      phase += (2 * Math.PI * (45 + 120 * Math.exp(-pb * 25))) / sr;
+      const kick = Math.sin(phase) * Math.exp(-pb * 9) * 0.8;
+      const ph = (t + beat / 2) % beat;
+      noise = (noise * 16807) % 2147483647;
+      const hat = (noise / 2147483647 - 0.5) * Math.exp(-ph * 60) * 0.5;
+      const bass = Math.sin(2 * Math.PI * 55 * t) * 0.25 * (pb > beat * 0.3 ? 1 : 0.2);
+      const x = Math.max(-1, Math.min(1, kick + hat + bass));
+      lo = Math.min(lo, x);
+      hi = Math.max(hi, x);
+    }
+    out[j * 2] = Math.round(128 + 127 * lo);
+    out[j * 2 + 1] = Math.round(128 + 127 * hi);
   }
   return out;
 }
@@ -140,17 +173,19 @@ export async function mockInvoke<T>(cmd: string, a: Record<string, any>): Promis
       const seconds = src.kind === "demo" ? src.seconds ?? 240 : 240;
       const d = decks[a.deck];
       Object.assign(d, emptyDeck(), {
-        duration: seconds, grid: demoGrid(bpm, seconds), waveform: demoWave(bpm, seconds),
+        duration: seconds, grid: demoGrid(bpm, seconds), waveform: demoWave(bpm, seconds), detail: demoDetail(bpm, seconds),
         generation: ++generation, volume: d.volume, pfl: d.pfl, sync: d.sync, rate: d.rate,
       });
       const t: LoadedTrack = {
         title: src.kind === "demo" ? src.title ?? `Demo ${bpm}` : lib?.title ?? "?", artist: lib?.artist ?? "mock",
-        duration: seconds, sample_rate: 44100, grid: d.grid, waveform_bins_per_second: 150,
+        duration: seconds, sample_rate: 44100, grid: d.grid, waveform_bins_per_second: 150, waveform_detail_per_second: 2000,
       };
       return r(t);
     }
     case "get_waveform":
       return r(decks[a.deck].waveform.buffer);
+    case "get_waveform_detail":
+      return r(decks[a.deck].detail.buffer);
     case "edit_grid":
       return r(decks[a.deck].grid);
     case "control":

@@ -134,6 +134,7 @@ struct LoadedTrack {
     sample_rate: u32,
     grid: Option<GridDto>,
     waveform_bins_per_second: f64,
+    waveform_detail_per_second: f64,
 }
 
 /// tempo-lock's `analyse` JSON, saved next to the audio as `<file>.beats.json`.
@@ -256,6 +257,7 @@ async fn load_track(
 
     let audio: Arc<TrackAudio> = Arc::new(audio);
     let wave = cached_wave.unwrap_or_else(|| waveform::summarise(&audio));
+    let detail = waveform::detail(&audio);
     // No analysed or hand-fixed grid yet: analyse in the background. The deck plays
     // with the placeholder grid meanwhile and is updated when the result arrives.
     if let Some(id) = track_id
@@ -283,6 +285,7 @@ async fn load_track(
         grid,
         grid_source,
         waveform: Arc::new(wave),
+        detail: Arc::new(detail),
     };
     Ok(LoadedTrack {
         title,
@@ -291,7 +294,19 @@ async fn load_track(
         sample_rate,
         grid: dto,
         waveform_bins_per_second: waveform::BINS_PER_SECOND,
+        waveform_detail_per_second: waveform::DETAIL_PER_SECOND,
     })
+}
+
+#[tauri::command]
+fn get_waveform_detail(state: State<'_, AppState>, deck: usize) -> tauri::ipc::Response {
+    let inner = state.inner.lock().unwrap();
+    let bytes = inner
+        .decks
+        .get(deck)
+        .map(|d| d.detail.as_ref().clone())
+        .unwrap_or_default();
+    tauri::ipc::Response::new(bytes)
 }
 
 #[tauri::command]
@@ -544,6 +559,7 @@ pub fn run() {
             audio_info,
             load_track,
             get_waveform,
+            get_waveform_detail,
             edit_grid,
             library::library_folders,
             library::add_library_folder,

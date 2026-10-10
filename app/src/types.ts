@@ -11,6 +11,7 @@ export interface LoadedTrack {
   sample_rate: number;
   grid: GridDto | null;
   waveform_bins_per_second: number;
+  waveform_detail_per_second: number;
 }
 
 export interface DeckState {

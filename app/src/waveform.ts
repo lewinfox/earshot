@@ -1,11 +1,27 @@
-// Scrolling colour waveform. The summary (4 bytes per bin: peak, low, mid, high) is
-// uploaded once as a texture; a fragment shader draws the visible window each frame,
-// so per-frame cost does not depend on track length. Beats, cues, loops and the
-// playhead go on a 2D canvas on top (only a few dozen lines per frame).
+// Scrolling colour waveform. Its shape is always the real signal: for every pixel
+// column, the lowest and highest sample in that slice of time, from a 2000-per-second
+// min/max summary (with a 1/16 copy for when zoomed out). Zoomed in, that traces the
+// individual cycles. The colour comes from the band summary (150 per second): bass red,
+// mids green, highs blue, like Rekordbox's RGB waveform. Both are uploaded once as
+// textures and a fragment shader draws the visible window each frame, so per-frame cost
+// does not depend on track length. Beats, cues, loops and the playhead go on a 2D
+// canvas on top (only a few dozen lines per frame).
 
 import type { GridDto } from "./types";
 
 const TEX_W = 4096;
+/** Detail bins per bin of the coarse min/max copy. */
+const MIP = 16;
+/** Most detail bins the shader reads per pixel before switching to the coarse copy. */
+const MAX_FINE = 24;
+/** Below this many detail bins per pixel the wave is drawn as a thin line. */
+const LINE_BELOW = "3.0";
+/** Half the line's width, in device pixels. */
+const LINE_HALF_WIDTH = "0.6";
+// Bass carries most of the energy in dance music; these lift mids and highs so they
+// still show through.
+const MID_GAIN = "2.0";
+const HIGH_GAIN = "4.0";
 
 const VS = `#version 300 es
 in vec2 p;
@@ -13,31 +29,106 @@ void main() { gl_Position = vec4(p, 0.0, 1.0); }`;
 
 const FS = `#version 300 es
 precision highp float;
-uniform sampler2D uWave;
-uniform float uCentre;     // playhead, in bins
-uniform float uBinsPerPx;
+uniform sampler2D uBands;  // RGBA per 1/150 s: peak, low, mid, high
+uniform sampler2D uFine;   // RG per 1/2000 s: min, max (128 = 0)
+uniform sampler2D uMip;    // RG per ${MIP} fine bins: min, max
+uniform float uT;          // playhead, seconds
+uniform float uSecPerPx;
 uniform vec2 uSize;        // canvas size in device pixels
-uniform float uBins;
+uniform float uBandRate;
+uniform float uBandBins;
+uniform float uFineRate;
+uniform float uFineBins;
 out vec4 color;
+
+ivec2 at(float i) { return ivec2(int(mod(i, ${TEX_W}.0)), int(i / ${TEX_W}.0)); }
+vec2 minmax(sampler2D s, float i) { return (texelFetch(s, at(i), 0).rg * 255.0 - 128.0) / 127.0; }
+
+// Bands are stored square-rooted; squaring again and then cubing the ratios to the
+// strongest band keeps the colours saturated, so a kick reads red and a hat blue.
+vec3 bandRGB(vec3 b) {
+  b = b * b * vec3(1.0, ${MID_GAIN}, ${HIGH_GAIN});
+  vec3 c = b / max(max(b.r, b.g), max(b.b, 1e-4));
+  return 0.12 + 0.88 * c * c * c;
+}
+
 void main() {
   vec2 frag = gl_FragCoord.xy;
-  float bin = floor(uCentre + (frag.x - uSize.x * 0.5) * uBinsPerPx);
   vec3 bg = vec3(0.03, 0.035, 0.045);
-  if (bin < 0.0 || bin >= uBins) { color = vec4(bg, 1.0); return; }
-  vec4 w = texelFetch(uWave, ivec2(int(mod(bin, ${TEX_W}.0)), int(bin / ${TEX_W}.0)), 0);
-  float dy = abs(frag.y - uSize.y * 0.5) / (uSize.y * 0.5);
-  // Three bands, low in blue, mid in amber, high in white, stacked from the centre out.
-  vec3 low = vec3(0.12, 0.45, 1.0), mid = vec3(1.0, 0.62, 0.18), high = vec3(0.95, 0.95, 1.0);
-  float tot = w.y + w.z + w.w + 1e-4;
-  vec3 c = (low * w.y + mid * w.z + high * w.w) / tot;
-  float played = frag.x < uSize.x * 0.5 ? 0.55 : 1.0;
-  if (dy < w.x) {
-    float shade = 0.65 + 0.35 * (1.0 - dy / max(w.x, 1e-3));
-    color = vec4(c * shade * played, 1.0);
+  float t0 = uT + (frag.x - 0.5 - uSize.x * 0.5) * uSecPerPx;
+  float t1 = t0 + uSecPerPx;
+  float a = max(0.0, floor(t0 * uFineRate));
+  // The last bin that starts inside this pixel, so neighbouring columns don't overlap.
+  float b = min(uFineBins - 1.0, max(a, ceil(t1 * uFineRate) - 1.0));
+  if (b < a) { color = vec4(bg, 1.0); return; }
+
+  // Lowest and highest sample in this pixel's slice of time.
+  float lo = 1.0, hi = -1.0;
+  if (b - a < ${MAX_FINE}.0) {
+    for (int k = 0; k < ${MAX_FINE}; k++) {
+      float i = a + float(k);
+      if (i > b) break;
+      vec2 v = minmax(uFine, i);
+      lo = min(lo, v.x); hi = max(hi, v.y);
+    }
   } else {
-    color = vec4(bg, 1.0);
+    float ma = floor(a / ${MIP}.0), mb = floor(b / ${MIP}.0);
+    for (int k = 0; k < 256; k++) {
+      float i = ma + float(k);
+      if (i > mb) break;
+      vec2 v = minmax(uMip, i);
+      lo = min(lo, v.x); hi = max(hi, v.y);
+    }
   }
+
+  float px = 2.0 / uSize.y;
+  float y = (frag.y - uSize.y * 0.5) / (uSize.y * 0.5);
+  if (hi - lo < px) { float m = 0.5 * (lo + hi); lo = m - 0.5 * px; hi = m + 0.5 * px; }
+  // The full range, with softened edges.
+  float cover = clamp((y - lo) / px + 0.5, 0.0, 1.0) * clamp((hi - y) / px + 0.5, 0.0, 1.0);
+
+  // Zoomed in far enough to see cycles: a thin line through the middle of each bin,
+  // with the full range kept as a faint shadow so high frequencies still show.
+  float binsPerPx = uSecPerPx * uFineRate;
+  if (binsPerPx < ${LINE_BELOW}) {
+    float halfH = uSize.y * 0.5;
+    float tf = uT + (frag.x - uSize.x * 0.5) * uSecPerPx;   // time at this pixel's centre
+    float first = floor((tf - 2.0 * uSecPerPx) * uFineRate - 0.5);
+    float dist = 1e9;
+    vec2 prev = vec2(0.0);
+    for (int k = 0; k < 16; k++) {
+      float i = first + float(k);
+      if (i < 0.0 || i >= uFineBins) continue;
+      vec2 v = minmax(uFine, i);
+      float tc = (i + 0.5) / uFineRate;
+      vec2 p = vec2(uSize.x * 0.5 + (tc - uT) / uSecPerPx, halfH + 0.5 * (v.x + v.y) * halfH);
+      if (k > 0 && i > 0.0) {
+        vec2 d = p - prev, q = frag - prev;
+        float h = clamp(dot(q, d) / max(dot(d, d), 1e-6), 0.0, 1.0);
+        dist = min(dist, length(q - d * h));
+      }
+      prev = p;
+      if (p.x > frag.x + 2.0) break;
+    }
+    cover = max(0.25 * cover, clamp(${LINE_HALF_WIDTH} + 0.5 - dist, 0.0, 1.0));
+  }
+  if (cover <= 0.0) { color = vec4(bg, 1.0); return; }
+
+  // Colour from the bands around the middle of the pixel.
+  float f = clamp(0.5 * (t0 + t1) * uBandRate - 0.5, 0.0, uBandBins - 1.0);
+  vec4 w = mix(texelFetch(uBands, at(floor(f)), 0), texelFetch(uBands, at(min(floor(f) + 1.0, uBandBins - 1.0)), 0), fract(f));
+  vec3 c = bandRGB(w.yzw);
+  float played = frag.x < uSize.x * 0.5 ? 0.55 : 1.0;
+  color = vec4(mix(bg, c * played, cover), 1.0);
 }`;
+
+/** Same colours as the shader, for the overview: bass red, mids green, highs blue. */
+export function bandColour(low: number, mid: number, high: number): string {
+  const b = [low * low, mid * mid * +MID_GAIN, high * high * +HIGH_GAIN];
+  const m = Math.max(...b, 1e-4);
+  const ch = (x: number) => Math.round(255 * (0.12 + 0.88 * (x / m) ** 3));
+  return `rgb(${ch(b[0])},${ch(b[1])},${ch(b[2])})`;
+}
 
 function compile(gl: WebGL2RenderingContext, type: number, src: string) {
   const s = gl.createShader(type)!;
@@ -65,10 +156,14 @@ export class WaveformView {
   private gl: WebGL2RenderingContext;
   private overlay: CanvasRenderingContext2D;
   private prog: WebGLProgram;
-  private tex: WebGLTexture;
+  private bandsTex: WebGLTexture;
+  private fineTex: WebGLTexture;
+  private mipTex: WebGLTexture;
   private u: Record<string, WebGLUniformLocation | null> = {};
-  private bins = 0;
-  private binsPerSecond = 150;
+  private bandBins = 0;
+  private bandRate = 150;
+  private fineBins = 0;
+  private fineRate = 2000;
 
   constructor(
     private glCanvas: HTMLCanvasElement,
@@ -84,25 +179,54 @@ export class WaveformView {
     gl.linkProgram(prog);
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) ?? "link");
     this.prog = prog;
-    for (const n of ["uWave", "uCentre", "uBinsPerPx", "uSize", "uBins"]) this.u[n] = gl.getUniformLocation(prog, n);
+    for (const n of ["uBands", "uFine", "uMip", "uT", "uSecPerPx", "uSize", "uBandRate", "uBandBins", "uFineRate", "uFineBins"]) {
+      this.u[n] = gl.getUniformLocation(prog, n);
+    }
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
     const loc = gl.getAttribLocation(prog, "p");
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
-    this.tex = gl.createTexture()!;
+    this.bandsTex = gl.createTexture()!;
+    this.fineTex = gl.createTexture()!;
+    this.mipTex = gl.createTexture()!;
   }
 
-  setWaveform(data: Uint8Array, binsPerSecond: number) {
+  /** `bands`: 4 bytes per bin (peak, low, mid, high). `fine`: 2 bytes per bin (min, max). */
+  setWaveform(bands: Uint8Array, bandRate: number, fine: Uint8Array, fineRate: number) {
+    this.bandBins = bands.length / 4;
+    this.bandRate = bandRate;
+    this.fineBins = fine.length / 2;
+    this.fineRate = fineRate;
+    this.upload(this.bandsTex, bands, 4);
+    this.upload(this.fineTex, fine, 2);
+    // Coarse min/max copy: each bin covers MIP fine bins.
+    const n = Math.ceil(this.fineBins / MIP);
+    const mip = new Uint8Array(n * 2);
+    for (let j = 0; j < n; j++) {
+      let lo = 255;
+      let hi = 0;
+      for (let i = j * MIP; i < Math.min((j + 1) * MIP, this.fineBins); i++) {
+        lo = Math.min(lo, fine[i * 2]);
+        hi = Math.max(hi, fine[i * 2 + 1]);
+      }
+      mip[j * 2] = lo;
+      mip[j * 2 + 1] = hi;
+    }
+    this.upload(this.mipTex, mip, 2);
+  }
+
+  private upload(tex: WebGLTexture, data: Uint8Array, channels: 2 | 4) {
     const gl = this.gl;
-    this.bins = data.length / 4;
-    this.binsPerSecond = binsPerSecond;
-    const rows = Math.max(1, Math.ceil(this.bins / TEX_W));
-    const padded = new Uint8Array(TEX_W * rows * 4);
+    const bins = data.length / channels;
+    const rows = Math.max(1, Math.ceil(bins / TEX_W));
+    const padded = new Uint8Array(TEX_W * rows * channels);
     padded.set(data);
-    gl.bindTexture(gl.TEXTURE_2D, this.tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, TEX_W, rows, 0, gl.RGBA, gl.UNSIGNED_BYTE, padded);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    if (channels === 4) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, TEX_W, rows, 0, gl.RGBA, gl.UNSIGNED_BYTE, padded);
+    else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG8, TEX_W, rows, 0, gl.RG, gl.UNSIGNED_BYTE, padded);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
   }
@@ -123,13 +247,20 @@ export class WaveformView {
     const [w, h] = this.fit(this.glCanvas);
     gl.viewport(0, 0, w, h);
     gl.useProgram(this.prog);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.tex);
-    gl.uniform1i(this.u.uWave, 0);
-    gl.uniform1f(this.u.uCentre, f.position * this.binsPerSecond);
-    gl.uniform1f(this.u.uBinsPerPx, (2 * f.halfWindow * this.binsPerSecond) / w);
+    [this.bandsTex, this.fineTex, this.mipTex].forEach((t, i) => {
+      gl.activeTexture(gl.TEXTURE0 + i);
+      gl.bindTexture(gl.TEXTURE_2D, t);
+    });
+    gl.uniform1i(this.u.uBands, 0);
+    gl.uniform1i(this.u.uFine, 1);
+    gl.uniform1i(this.u.uMip, 2);
+    gl.uniform1f(this.u.uT, f.position);
+    gl.uniform1f(this.u.uSecPerPx, (2 * f.halfWindow) / w);
     gl.uniform2f(this.u.uSize, w, h);
-    gl.uniform1f(this.u.uBins, this.bins);
+    gl.uniform1f(this.u.uBandRate, this.bandRate);
+    gl.uniform1f(this.u.uBandBins, this.bandBins);
+    gl.uniform1f(this.u.uFineRate, this.fineRate);
+    gl.uniform1f(this.u.uFineBins, this.fineBins);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     this.drawOverlay(f);
   }
@@ -214,15 +345,16 @@ export class OverviewView {
       const b = Math.max(a + 1, Math.floor(((x + 1) / w) * bins));
       let peak = 0;
       let lo = 0;
+      let mid = 0;
       let hi = 0;
       for (let i = a; i < b; i++) {
         peak = Math.max(peak, data[i * 4]);
         lo += data[i * 4 + 1];
+        mid += data[i * 4 + 2];
         hi += data[i * 4 + 3];
       }
-      const n = b - a;
       const amp = (peak / 255) * (h / 2);
-      c.fillStyle = `rgb(${80 + (hi / n) * 0.6},${110 + (lo / n) * 0.2},${200})`;
+      c.fillStyle = bandColour(lo, mid, hi);
       c.fillRect(x, h / 2 - amp, 1, amp * 2);
     }
     this.base = base;

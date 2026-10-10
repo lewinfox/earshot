@@ -217,7 +217,7 @@ export class DeckView {
     // Scroll on the waveform to zoom; click the overview to seek.
     this.els.wave.addEventListener("wheel", (e) => {
       e.preventDefault();
-      halfWindow = Math.min(30, Math.max(1, halfWindow * (e.deltaY > 0 ? 1.15 : 1 / 1.15)));
+      halfWindow = Math.min(30, Math.max(0.5, halfWindow * (e.deltaY > 0 ? 1.15 : 1 / 1.15)));
     });
     this.els.overview.addEventListener("pointerdown", (e) => {
       const r = this.els.overview.getBoundingClientRect();
@@ -237,9 +237,12 @@ export class DeckView {
     this.els.artist.textContent = loaded.artist;
     this.els.tagbpm.textContent = track.bpm != null ? track.bpm.toFixed(2) : "";
     this.setGrid(loaded.grid);
-    const buf = await invoke<ArrayBuffer>("get_waveform", { deck: this.index });
+    const [buf, fine] = await Promise.all([
+      invoke<ArrayBuffer>("get_waveform", { deck: this.index }),
+      invoke<ArrayBuffer>("get_waveform_detail", { deck: this.index }),
+    ]);
     const data = new Uint8Array(buf);
-    this.wave?.setWaveform(data, loaded.waveform_bins_per_second);
+    this.wave?.setWaveform(data, loaded.waveform_bins_per_second, new Uint8Array(fine), loaded.waveform_detail_per_second);
     this.overview.setWaveform(data);
   }
 
