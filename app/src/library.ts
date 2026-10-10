@@ -157,6 +157,7 @@ export function fromLibrary(l: LibTrack): Track {
     bpm: l.bpm ?? l.tag_bpm,
     key: k ? keyName(k) : null,
     energy: 0.5,
+    energyRaw: l.energy,
     vibe: null, // CLAP embeddings come from the worker (not built yet)
     cluster: -1,
     source: { kind: "track", id: l.id },
@@ -166,6 +167,12 @@ export function fromLibrary(l: LibTrack): Track {
     analysis: null,
     analysisError: null,
   };
+}
+
+/** Set `energy` to each track's rank (0..1) by raw energy; tracks without one get 0.5. */
+export function rankEnergy(tracks: Track[]) {
+  const known = tracks.filter((t) => t.energyRaw != null).sort((a, b) => a.energyRaw! - b.energyRaw!);
+  known.forEach((t, i) => (t.energy = known.length > 1 ? i / (known.length - 1) : 0.5));
 }
 
 // ---- search -------------------------------------------------------------------------

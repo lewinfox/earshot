@@ -2,7 +2,10 @@ import { control, inTauri, invoke, listen } from "./api";
 import { DeckView } from "./deck";
 import { computeLayout, CosmosView, type GraphView, SigmaView } from "./graph";
 import { installKeyboard, keymapHelp, type KeyBinding } from "./keys";
-import { fromLibrary, search, syntheticLibrary } from "./library";
+import { FlowView, keyColour } from "./flow";
+import { installSplitters, installZoomKeys, setZoom, zoom, ZOOMS } from "./layout";
+import { bandColour } from "./waveform";
+import { fromLibrary, rankEnergy, search, syntheticLibrary } from "./library";
 import { FrameStats, gpuInfo } from "./perf";
 import { compatibilityEdges, effectiveKey, type Reference, type Scored, suggest } from "./suggest";
 import { FolderTree, type MenuItem, showMenu } from "./tree";
@@ -117,6 +120,54 @@ function rowClasses(row: HTMLElement, t: Track, sel: boolean, base: string) {
 const mmss = (s: number | null | undefined) =>
   s == null ? "" : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
+// ---- waveform thumbnails --------------------------------------------------------------
+
+const PREVIEW_BINS = 128;
+const previews = new Map<number, Uint8Array>();
+const previewUrls = new Map<number, string>();
+
+/** Drawn once per track (bass red, mids green, highs blue) and kept as an image URL. */
+function previewUrl(id: number): string | null {
+  const cached = previewUrls.get(id);
+  if (cached) return cached;
+  const p = previews.get(id);
+  if (!p) return null;
+  const c = document.createElement("canvas");
+  c.width = PREVIEW_BINS;
+  c.height = 32;
+  const g = c.getContext("2d")!;
+  for (let i = 0; i < PREVIEW_BINS; i++) {
+    const amp = (p[i * 4] / 255) * 15;
+    g.fillStyle = bandColour(p[i * 4 + 1], p[i * 4 + 2], p[i * 4 + 3]);
+    g.fillRect(i, 16 - amp, 1, Math.max(1, amp * 2));
+  }
+  const url = c.toDataURL();
+  previewUrls.set(id, url);
+  return url;
+}
+
+/** Fetch thumbnails (all, or for these tracks) and redraw the list. */
+async function loadPreviews(ids?: number[]) {
+  try {
+    const buf = new Uint8Array(await invoke<ArrayBuffer>("waveform_previews", { ids: ids ?? null }));
+    const stride = 8 + PREVIEW_BINS * 4;
+    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    for (let o = 0; o + stride <= buf.length; o += stride) {
+      const id = Number(view.getBigInt64(o, true));
+      previews.set(id, buf.slice(o + 8, o + stride));
+      previewUrls.delete(id);
+    }
+    libList.draw();
+  } catch (e) {
+    console.warn("waveform previews:", e);
+  }
+}
+
+/** The key as a chip coloured round the Camelot wheel, as on the flow cards. */
+function keyCell(key: string | null) {
+  return key ? `<span class="n"><span class="chip key" style="--c:${keyColour(key)}">${key}</span></span>` : `<span class="n">–</span>`;
+}
+
 function statusCell(t: Track) {
   if (t.analysis === "error") return `<span class="st error" title="${esc(t.analysisError ?? "analysis failed")}">✕</span>`;
   if (t.analysis === "running") return `<span class="st running" title="${esc(t.analysisStage ?? "Analysing")} · ${pct(t.analysisProgress ?? 0)}">●</span>`;
@@ -130,9 +181,10 @@ const libList = new VList<Track>(
   (t, row, sel) => {
     rowClasses(row, t, sel, "lib-item");
     row.title = t.path ?? "";
-    row.innerHTML = `${statusCell(t)}<span class="t">${esc(t.title)}</span><span class="a">${esc(t.artist)}</span>
+    const pv = previewUrl(t.id);
+    row.innerHTML = `${statusCell(t)}<span class="pv">${pv ? `<img src="${pv}" alt="">` : ""}</span><span class="t">${esc(t.title)}</span><span class="a">${esc(t.artist)}</span>
       <span class="n${t.analysed ? "" : " tag"}" title="${t.analysed ? "Analysed" : "From the file's tag (not analysed)"}">${t.bpm?.toFixed(2) ?? "–"}</span>
-      <span class="n">${t.key ?? "–"}</span><span class="n">${mmss(t.duration)}</span>${
+      ${keyCell(t.key)}<span class="n">${mmss(t.duration)}</span>${
         t.analysis === "running" ? `<i class="row-prog" style="width:${pct(t.analysisProgress ?? 0)}"></i>` : ""
       }`;
   },
@@ -146,6 +198,7 @@ const libList = new VList<Track>(
     showMenu(e.clientX, e.clientY, [
       { label: "Load to deck A", action: () => loadToDeck(0, t.id) },
       { label: "Load to deck B", action: () => loadToDeck(1, t.id) },
+      { label: "Add to flow", action: () => addToFlow(t.id) },
       { label: t.analysed ? "Analyse again" : "Analyse", action: () => analyse([t.id]) },
     ]),
 );
@@ -158,7 +211,7 @@ const sugList = new VList<Scored>(
     rowClasses(row, s.track, sel, "sug-item");
     const ch = s.tempoChange == null ? "" : `${s.tempoChange >= 0 ? "+" : ""}${(s.tempoChange * 100).toFixed(1)}%`;
     row.innerHTML = `<span class="t">${esc(s.track.title)}<small>${esc(s.track.artist)}</small></span>
-      <span class="n" title="Tempo change needed">${ch}</span><span class="n">${s.track.key ?? "–"}</span>
+      <span class="n" title="Tempo change needed">${ch}</span>${keyCell(s.track.key)}
       <span class="score">${Math.round(s.total * 100)}</span>
       <span class="why">${[
         ["key", s.key, "#c25bff"],
@@ -186,9 +239,11 @@ focusPane("library");
 // ---- library ---------------------------------------------------------------------------
 
 function rebuildLibrary() {
+  rankEnergy(tracks);
   byId = new Map(tracks.map((t) => [t.id, t]));
   applySearch();
   rebuildGraph();
+  flow.refresh();
 }
 
 /** Tracks in the selected folder (and its subfolders), filtered by the search box. */
@@ -227,6 +282,7 @@ async function loadLibrary() {
     const found = await invoke<LibTrack[]>("scan_library");
     tracks = found.map(fromLibrary);
     rebuildLibrary();
+    void loadPreviews();
     console.info(`library: ${tracks.length} tracks in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
   } catch (e) {
     $("#lib-count").textContent = `scan failed: ${e}`;
@@ -274,6 +330,18 @@ $("#menu-btn").addEventListener("click", (e) => {
   showMenu(r.left, r.bottom + 2, [
     { label: "Import", submenu: [{ label: "Folder…", action: () => void importFolder() }] },
     { label: "Rescan library", action: () => void loadLibrary() },
+    {
+      label: "View",
+      submenu: [
+        {
+          label: "Size",
+          submenu: ZOOMS.map((z) => ({
+            label: `${Math.abs(z - zoom()) < 0.001 ? "✓ " : "   "}${Math.round(z * 100)}%${z === 1 ? "  (Ctrl 0)" : ""}`,
+            action: () => void setZoom(z),
+          })),
+        },
+      ],
+    },
   ]);
 });
 
@@ -317,6 +385,8 @@ listen<AnalysisEvent>("analysis", (ev) => {
     if (ev.state === "done") {
       t.analysed = true;
       if (ev.bpm != null) t.bpm = ev.bpm;
+      flow.refresh();
+      void loadPreviews([ev.track_id]);
     }
     t.analysisError = ev.error;
   }
@@ -340,6 +410,28 @@ $("#analysis-status").addEventListener("click", () => {
 
 // A deck's track finished analysing: show its new grid.
 listen<DeckGridEvent>("deck-grid", (ev) => decks[ev.deck].setGrid(ev.grid));
+
+// ---- flow (set-building canvas) ------------------------------------------------------------
+
+const flow = new FlowView($("#flow"), {
+  tracks: () => tracks,
+  byId: (id) => byId.get(id),
+  load: (id) => loadToDeck(freeDeck(), id),
+});
+
+function showTab(tab: "tracks" | "flow") {
+  document.querySelectorAll<HTMLButtonElement>("#center-tab button").forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
+  document.querySelectorAll<HTMLElement>("#library .tracks-only").forEach((e) => (e.hidden = tab !== "tracks"));
+  $("#flow").hidden = tab !== "flow";
+}
+document.querySelectorAll<HTMLButtonElement>("#center-tab button").forEach((b) =>
+  b.addEventListener("click", () => showTab(b.dataset.tab as "tracks" | "flow")),
+);
+
+function addToFlow(id: number) {
+  showTab("flow");
+  flow.addRoot(id);
+}
 
 /** For double-click loading: a deck that isn't playing, preferring A. */
 function freeDeck() {
@@ -508,6 +600,7 @@ async function loadToDeck(deck: number, id: number) {
   try {
     const loaded = await invoke<LoadedTrack>("load_track", { deck, source: t.source });
     await view.setTrack(t, loaded);
+    if (!previews.has(id)) void loadPreviews([id]);
   } catch (e) {
     console.error(e);
     alert(`Could not load ${t.title}: ${e}`);
@@ -762,6 +855,8 @@ $("#bench-run").addEventListener("click", async () => {
 
 // ---- start --------------------------------------------------------------------------------
 
+installSplitters();
+installZoomKeys();
 void refreshFolders().then(loadLibrary);
 void showAudio();
 void connectMidi();

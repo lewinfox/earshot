@@ -114,6 +114,20 @@ If the window is blank or the graph is very slow, try `WEBKIT_DISABLE_DMABUF_REN
   (`EARSHOT_ANALYSIS_JOBS` to change), each worker on a share of the CPU cores; a
   track you load onto a deck jumps the queue. Grid edits on a deck are saved and are never overwritten by
   automatic analysis (an explicit *Analyse* does overwrite them).
+- **Flow** (tab beside *Tracks*): build a set as a chain of cards. *Add track* (or
+  right-click a track → *Add to flow*) places a starting card; the **+** on a card's
+  right opens nine suggested next tracks, with *Drop / Hold / Build* for the energy
+  direction, and picking one adds it joined to that card. A card can have several
+  next tracks. Drag cards by their title, drag the background to pan, wheel to zoom;
+  ▶ or double-click loads the track onto a free deck. *Full screen* hides the decks.
+  The flow is kept in the app's local storage.
+- **Energy** is a stand-in for now: loudness of the busy parts plus brightness,
+  ranked across your library. It's measured when a track is analysed or loaded;
+  tracks without it count as middling.
+- **Layout**: drag the gaps between panes (and the line under the decks, which sets
+  the waveform height) to resize; double-click one to reset it. *Menu → View → Size*
+  or Ctrl −/=/0 scales the whole UI. Both are remembered.
+- **Waveform thumbnails** show left of each track that has been analysed or loaded.
 - **Search** with free text plus `bpm:120-126` and `key:8A` (or `key:Am`). It searches
   within the selected folder.
 - **Suggestions** follow the most recently started playing deck at its actual pitch

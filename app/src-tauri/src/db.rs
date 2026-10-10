@@ -14,7 +14,11 @@ pub type Db = Arc<Mutex<Connection>>;
 /// Bump when `engine/src/waveform.rs` changes its output, so cached waveforms are redone.
 pub const WAVEFORM_VERSION: i64 = 1;
 
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/001_library.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/001_library.sql"),
+    include_str!("../migrations/002_energy.sql"),
+    include_str!("../migrations/003_waveform_preview.sql"),
+];
 
 pub fn open(path: &Path) -> Result<Db, String> {
     if let Some(dir) = path.parent() {
@@ -126,12 +130,14 @@ pub struct LibTrack {
     pub tag_bpm: Option<f64>,
     pub key: Option<String>,
     pub grid_source: Option<String>,
+    /// Stand-in energy (engine/src/energy.rs); only its order means anything.
+    pub energy: Option<f64>,
 }
 
 pub fn all_tracks(conn: &Connection) -> Result<Vec<LibTrack>, String> {
     let mut st = conn
         .prepare(
-            "SELECT t.id, t.path, t.title, t.artist, t.duration_s, a.bpm, t.tag_bpm, t.tag_key, g.source
+            "SELECT t.id, t.path, t.title, t.artist, t.duration_s, a.bpm, t.tag_bpm, t.tag_key, g.source, t.energy
              FROM tracks t
              LEFT JOIN analysis a ON a.track_id = t.id
              LEFT JOIN beatgrids g ON g.track_id = t.id
@@ -154,6 +160,7 @@ pub fn all_tracks(conn: &Connection) -> Result<Vec<LibTrack>, String> {
                 tag_bpm: r.get(6)?,
                 key: r.get(7)?,
                 grid_source: r.get(8)?,
+                energy: r.get(9)?,
                 path,
             })
         })
@@ -205,6 +212,13 @@ pub fn save_analysis(conn: &Connection, id: i64, bpm: f64, min: f64, max: f64, d
     Ok(())
 }
 
+pub fn set_energy(conn: &Connection, id: i64, energy: f64) -> Result<(), String> {
+    if energy.is_finite() {
+        conn.execute("UPDATE tracks SET energy = ?2 WHERE id = ?1", params![id, energy]).map_err(err)?;
+    }
+    Ok(())
+}
+
 pub fn set_bpm(conn: &Connection, id: i64, bpm: f64) -> Result<(), String> {
     conn.execute("UPDATE analysis SET bpm = ?2 WHERE track_id = ?1", params![id, bpm]).map_err(err)?;
     Ok(())
@@ -222,11 +236,43 @@ pub fn waveform(conn: &Connection, id: i64, bins_per_s: f64) -> Result<Option<Ve
 
 pub fn save_waveform(conn: &Connection, id: i64, data: &[u8], bins_per_s: f64) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO waveforms(track_id, data, bins_per_s, version) VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO waveforms(track_id, data, bins_per_s, version, preview) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(track_id) DO UPDATE SET data = excluded.data, bins_per_s = excluded.bins_per_s,
-           version = excluded.version",
-        params![id, data, bins_per_s, WAVEFORM_VERSION],
+           version = excluded.version, preview = excluded.preview",
+        params![id, data, bins_per_s, WAVEFORM_VERSION, earshot_engine::waveform::preview(data)],
     )
     .map_err(err)?;
     Ok(())
+}
+
+/// Waveform thumbnails for the track list, for the given tracks or all of them.
+/// Waveforms saved before thumbnails existed get one made (and saved) here, once.
+pub fn previews(conn: &Connection, ids: Option<&[i64]>) -> Result<Vec<(i64, Vec<u8>)>, String> {
+    let mut st = conn.prepare("SELECT track_id, preview FROM waveforms").map_err(err)?;
+    let rows: Vec<(i64, Option<Vec<u8>>)> = st
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(err)?
+        .collect::<Result<_, _>>()
+        .map_err(err)?;
+    let wanted: Option<std::collections::HashSet<i64>> = ids.map(|i| i.iter().copied().collect());
+    let mut out = Vec::new();
+    for (id, preview) in rows {
+        if wanted.as_ref().is_some_and(|w| !w.contains(&id)) {
+            continue;
+        }
+        let preview = match preview {
+            Some(p) => p,
+            None => {
+                let data: Vec<u8> = conn
+                    .query_row("SELECT data FROM waveforms WHERE track_id = ?1", [id], |r| r.get(0))
+                    .map_err(err)?;
+                let p = earshot_engine::waveform::preview(&data);
+                conn.execute("UPDATE waveforms SET preview = ?2 WHERE track_id = ?1", params![id, p])
+                    .map_err(err)?;
+                p
+            }
+        };
+        out.push((id, preview));
+    }
+    Ok(out)
 }

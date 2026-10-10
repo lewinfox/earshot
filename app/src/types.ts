@@ -70,6 +70,8 @@ export interface LibTrack {
   tag_bpm: number | null;
   key: string | null;
   grid_source: string | null;
+  /** Stand-in energy; only its order means anything. */
+  energy: number | null;
 }
 
 export interface Subdir {
@@ -116,6 +118,8 @@ export interface Track {
   source: TrackSource;
   /** Library tracks only. */
   path?: string;
+  /** Raw stand-in energy from the file, before ranking into `energy`. */
+  energyRaw?: number | null;
   duration?: number | null;
   /** A beatgrid from analysis, a hand fix or a tempo-lock sidecar exists. */
   analysed?: boolean;

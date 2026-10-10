@@ -236,6 +236,7 @@ async fn load_track(
                     let (audio, tags) = decode::decode_file(&path)?;
                     let (stored, wave) = {
                         let conn = db.lock().unwrap();
+                        db::set_energy(&conn, id, earshot_engine::energy::energy(&audio))?;
                         (db::grid(&conn, id)?, db::waveform(&conn, id, waveform::BINS_PER_SECOND)?)
                     };
                     let (grid, src) = match stored {
@@ -276,7 +277,17 @@ async fn load_track(
         .map_err(|e| e.to_string())??;
 
     let audio: Arc<TrackAudio> = Arc::new(audio);
-    let wave = cached_wave.unwrap_or_else(|| waveform::summarise(&audio));
+    let wave = match cached_wave {
+        Some(w) => w,
+        None => {
+            // Saved, so the track list can show its thumbnail from now on.
+            let w = waveform::summarise(&audio);
+            if let Some(id) = track_id {
+                db::save_waveform(&lib.db.lock().unwrap(), id, &w, waveform::BINS_PER_SECOND)?;
+            }
+            w
+        }
+    };
     let detail = waveform::detail(&audio);
     // No analysed or hand-fixed grid yet: analyse in the background. The deck plays
     // with the placeholder grid meanwhile and is updated when the result arrives.
@@ -587,6 +598,7 @@ pub fn run() {
             library::list_subdirs,
             library::scan_library,
             library::analyse_tracks,
+            library::waveform_previews,
             control,
             midi_connect,
             save_report,

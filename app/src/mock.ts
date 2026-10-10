@@ -160,6 +160,23 @@ export async function mockInvoke<T>(cmd: string, a: Record<string, any>): Promis
       return r(a.path === "/music" ? [{ name: "house", path: "/music/house", has_children: false }, { name: "disco", path: "/music/disco", has_children: false }] : []);
     case "scan_library":
       return r(mockFolders.includes("/music") ? MOCK_TRACKS : []);
+    case "waveform_previews": {
+      // Every other track has one: intro, build, drop, breakdown, drop, outro.
+      const ids = (a.ids as number[] | null) ?? MOCK_TRACKS.filter((t) => t.id % 2 === 0).map((t) => t.id);
+      const out = new Uint8Array(ids.length * (8 + 512));
+      const view = new DataView(out.buffer);
+      ids.forEach((id, j) => {
+        const o = j * 520;
+        view.setBigInt64(o, BigInt(id), true);
+        for (let i = 0; i < 128; i++) {
+          const x = i / 128;
+          const level = x < 0.1 ? 0.35 : x < 0.25 ? 0.6 : x < 0.5 ? 0.95 : x < 0.6 ? 0.3 : x < 0.9 ? 1 : 0.4;
+          const kick = x > 0.25 && x < 0.5 ? 1 : x > 0.6 && x < 0.9 ? 1 : 0.3;
+          out.set([255 * level * (0.85 + 0.15 * Math.sin(i * (id + 3))), 200 * kick, 120, 140 * (1 - kick) + 60], o + 8 + i * 4);
+        }
+      });
+      return r(out.buffer);
+    }
     case "analyse_tracks":
       for (const id of a.ids as number[]) mockAnalyse(id);
       return r(null);
@@ -196,16 +213,25 @@ export async function mockInvoke<T>(cmd: string, a: Record<string, any>): Promis
 }
 
 let mockFolders = ["/music"];
-const MOCK_TRACKS: LibTrack[] = [
-  ["house", "Night Drive", "Lumen Collective", 124, "8A"],
-  ["house", "Velvet Theory", "The Pressure Unit", 126, "9A"],
-  ["house", "Static River", "Mira Lane", 123, "7A"],
-  ["disco", "Golden Window", "Haze & Ada", 118, "1B"],
-  ["disco", "Echo Harbour", "Sefa K", 117, "12B"],
-].map(([dir, title, artist, bpm, key], i) => ({
-  id: i + 1, path: `/music/${dir}/${title}.mp3`, title: title as string, artist: artist as string,
-  duration: 300 + i * 17, bpm: null, tag_bpm: bpm as number, key: key as string, grid_source: null,
-}));
+const MOCK_WORDS = ["Night", "Velvet", "Static", "Golden", "Echo", "Neon", "Liquid", "Crimson", "Quiet", "Hollow"];
+const MOCK_WORDS2 = ["Drive", "Theory", "River", "Window", "Harbour", "Pulse", "Season", "Machine", "Garden", "Signal"];
+const MOCK_ARTISTS = ["Lumen Collective", "The Pressure Unit", "Mira Lane", "Haze & Ada", "Sefa K", "Orla Vance", "Dub Theory"];
+const MOCK_TRACKS: LibTrack[] = Array.from({ length: 40 }, (_, i) => {
+  const house = i % 3 !== 2;
+  const title = `${MOCK_WORDS[i % 10]} ${MOCK_WORDS2[(i * 7) % 10]}`;
+  return {
+    id: i + 1,
+    path: `/music/${house ? "house" : "disco"}/${title}.mp3`,
+    title,
+    artist: MOCK_ARTISTS[(i * 3) % MOCK_ARTISTS.length],
+    duration: 280 + ((i * 37) % 120),
+    bpm: null,
+    tag_bpm: house ? 122 + (i % 6) : 116 + (i % 4),
+    key: `${1 + ((i * 5) % 12)}${i % 4 === 0 ? "B" : "A"}`,
+    grid_source: null,
+    energy: -14 + ((i * 13) % 10),
+  };
+});
 
 function mockAnalyse(id: number) {
   const ev = (state: string, extra = {}) =>

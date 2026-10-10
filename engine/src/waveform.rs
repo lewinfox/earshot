@@ -70,6 +70,36 @@ pub fn summarise(audio: &TrackAudio) -> Vec<u8> {
     out
 }
 
+pub const PREVIEW_BINS: usize = 128;
+
+/// The [`summarise`] output squeezed to [`PREVIEW_BINS`] bins of the same 4 bytes
+/// (peak: the highest; bands: the average), for a thumbnail of the whole track.
+pub fn preview(summary: &[u8]) -> Vec<u8> {
+    let bins = summary.len() / 4;
+    let mut out = vec![0u8; PREVIEW_BINS * 4];
+    if bins == 0 {
+        return out;
+    }
+    for j in 0..PREVIEW_BINS {
+        let a = j * bins / PREVIEW_BINS;
+        let b = ((j + 1) * bins / PREVIEW_BINS).max(a + 1).min(bins);
+        let mut sums = [0u32; 3];
+        let mut peak = 0u8;
+        for i in a..b {
+            peak = peak.max(summary[i * 4]);
+            for k in 0..3 {
+                sums[k] += summary[i * 4 + 1 + k] as u32;
+            }
+        }
+        let n = (b - a) as u32;
+        out[j * 4] = peak;
+        for k in 0..3 {
+            out[j * 4 + 1 + k] = (sums[k] / n) as u8;
+        }
+    }
+    out
+}
+
 pub const DETAIL_PER_SECOND: f64 = 2000.0;
 
 /// 2 bytes per bin: `[min, max]` of the mono signal, as `128 + 127 * x`, where `x` is

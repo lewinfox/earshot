@@ -35,23 +35,31 @@
       <div class="mixer" id="mixer"></div>
       <div class="deck" data-deck="1"></div>
     </section>
+    <div class="split h" id="split-wave" data-split="wave" title="Drag to resize the waveforms (double-click to reset)"></div>
 
     <main id="browser">
       <section id="tree-pane" class="pane">
         <div class="tree" id="tree"></div>
       </section>
+      <div class="split v" data-split="tree" title="Drag to resize (double-click to reset)"></div>
 
       <section id="library" class="pane">
         <div class="pane-head">
-          <span id="lib-title" class="lib-title">All tracks</span>
-          <input id="search" type="search" placeholder="Search   bpm:120-126  key:8A   ( / )" />
-          <span id="lib-count" class="muted"></span>
+          <div class="seg" id="center-tab">
+            <button data-tab="tracks" class="on">Tracks</button>
+            <button data-tab="flow">Flow</button>
+          </div>
+          <span id="lib-title" class="lib-title tracks-only">All tracks</span>
+          <input id="search" class="tracks-only" type="search" placeholder="Search   bpm:120-126  key:8A   ( / )" />
+          <span id="lib-count" class="muted tracks-only"></span>
         </div>
-        <div class="list-head lib-item">
-          <span></span><span>Title</span><span>Artist</span><span class="n">BPM</span><span class="n">Key</span><span class="n">Time</span>
+        <div class="list-head lib-item tracks-only">
+          <span></span><span></span><span>Title</span><span>Artist</span><span class="n">BPM</span><span class="n">Key</span><span class="n">Time</span>
         </div>
-        <div class="list" id="lib-list" tabindex="-1"></div>
+        <div class="list tracks-only" id="lib-list" tabindex="-1"></div>
+        <div id="flow" class="flow" hidden></div>
       </section>
+      <div class="split v" data-split="side" title="Drag to resize (double-click to reset)"></div>
 
       <section id="side">
         <section id="suggest" class="pane">
@@ -68,6 +76,7 @@
           <div class="list" id="suggest-list" tabindex="-1"></div>
         </section>
 
+        <div class="split h" data-split="sugg" title="Drag to resize (double-click to reset)"></div>
         <section id="graph-pane" class="pane">
           <div class="pane-head small">
             <div class="seg" id="graph-lib">

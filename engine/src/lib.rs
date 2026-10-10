@@ -6,6 +6,7 @@
 pub mod beatgrid;
 pub mod decode;
 pub mod demo;
+pub mod energy;
 pub mod engine;
 pub mod output;
 pub mod waveform;

@@ -14,7 +14,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use earshot_engine::Command;
 use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::decode::{self, TrackAudio};
-use earshot_engine::waveform;
+use earshot_engine::{energy, waveform};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -174,6 +174,7 @@ fn run(
     };
 
     progress(DECODED, "waveform");
+    db::set_energy(&db.lock().unwrap(), job.id, energy::energy(&audio))?;
     // Waveform: cheap, done here, cached so later loads skip it.
     let cached = db::waveform(&db.lock().unwrap(), job.id, waveform::BINS_PER_SECOND)?.is_some();
     if job.force || !cached {

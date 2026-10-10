@@ -153,6 +153,7 @@ export class SigmaView implements GraphView {
     for (const [a, b] of edges) this.graph.addEdge(String(a), String(b), { size: 0.4, color: "#2c303d" });
     this.sigma = new Sigma(this.graph, this.el, {
       labelRenderedSizeThreshold: 9,
+      allowInvalidContainer: true, // hidden while the flow is full screen
       hideEdgesOnMove: false,
       zIndex: true,
       nodeReducer: (node, data) => {

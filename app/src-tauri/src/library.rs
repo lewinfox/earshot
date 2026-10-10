@@ -173,6 +173,25 @@ pub async fn scan_library(lib: State<'_, Library>) -> Result<Vec<LibTrack>, Stri
     .map_err(|e| e.to_string())?
 }
 
+/// Waveform thumbnails, packed for the UI: per track, its id (i64, little-endian) then
+/// `PREVIEW_BINS` × 4 bytes (peak, low, mid, high).
+#[tauri::command]
+pub async fn waveform_previews(
+    lib: State<'_, Library>,
+    ids: Option<Vec<i64>>,
+) -> Result<tauri::ipc::Response, String> {
+    let db = lib.db.clone();
+    let rows = tauri::async_runtime::spawn_blocking(move || db::previews(&db.lock().unwrap(), ids.as_deref()))
+        .await
+        .map_err(|e| e.to_string())??;
+    let mut out = Vec::with_capacity(rows.len() * (8 + earshot_engine::waveform::PREVIEW_BINS * 4));
+    for (id, p) in rows {
+        out.extend_from_slice(&id.to_le_bytes());
+        out.extend_from_slice(&p);
+    }
+    Ok(tauri::ipc::Response::new(out))
+}
+
 /// Queue tracks for analysis (right-click → Analyse). Re-analyses even if a grid exists.
 #[tauri::command]
 pub fn analyse_tracks(lib: State<'_, Library>, ids: Vec<i64>) {
