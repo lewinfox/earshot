@@ -123,6 +123,7 @@ impl Analyser {
             std::thread::Builder::new()
                 .name(format!("earshot-analysis-{n}"))
                 .spawn(move || {
+                    lowest_priority();
                     let mut worker: Option<Worker> = None;
                     loop {
                         let job = q.pop();
@@ -265,6 +266,20 @@ fn run(
         drifts: Some(drifts),
         ..AnalysisEvent::new(job.id, "done")
     })
+}
+
+/// Decoding, waveforms and energy run on these threads: put them in Linux's idle
+/// scheduling class so they only use CPU nothing else wants (the worker process does
+/// the same for itself).
+fn lowest_priority() {
+    #[cfg(target_os = "linux")]
+    // SAFETY: sched_setscheduler on the calling thread (pid 0) with a valid param.
+    unsafe {
+        let param = libc::sched_param { sched_priority: 0 };
+        if libc::sched_setscheduler(0, libc::SCHED_IDLE, &param) != 0 {
+            libc::setpriority(libc::PRIO_PROCESS, 0, 19);
+        }
+    }
 }
 
 /// Give the new grid to any deck that has this track loaded.

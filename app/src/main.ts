@@ -43,7 +43,11 @@ class VList<T> {
   private spacer = document.createElement("div");
   private pool: HTMLElement[] = [];
   items: T[] = [];
+  /** The focused row (keyboard and single clicks). */
   selected = -1;
+  /** Every selected row, by id: Ctrl-click toggles, Shift-click selects a range. */
+  private chosen = new Set<number>();
+  private anchor = -1;
 
   constructor(
     private el: HTMLElement,
@@ -52,9 +56,16 @@ class VList<T> {
     private idOf: (item: T) => number,
     private onPick: (item: T) => void,
     private onActivate?: (item: T) => void,
-    private onContext?: (item: T, e: MouseEvent) => void,
+    private onContext?: (item: T, e: MouseEvent, chosen: T[]) => void,
   ) {
     el.appendChild(this.spacer);
+    el.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "a") {
+        e.preventDefault();
+        this.chosen = new Set(this.items.map(this.idOf));
+        this.draw();
+      }
+    });
     el.addEventListener("scroll", () => this.draw());
     new ResizeObserver(() => this.draw()).observe(el);
   }
@@ -62,13 +73,23 @@ class VList<T> {
   set(items: T[], selected = -1) {
     this.items = items;
     this.selected = selected;
+    const ids = new Set(items.map(this.idOf));
+    this.chosen = new Set([...this.chosen].filter((id) => ids.has(id)));
+    if (selected >= 0) this.chosen.add(this.idOf(items[selected]));
     this.spacer.style.height = `${items.length * this.rowH}px`;
     this.draw();
+  }
+
+  /** The selected rows, in list order. */
+  chosenItems(): T[] {
+    return this.items.filter((t) => this.chosen.has(this.idOf(t)));
   }
 
   select(i: number) {
     if (!this.items.length) return;
     this.selected = Math.max(0, Math.min(this.items.length - 1, i));
+    this.chosen = new Set([this.idOf(this.items[this.selected])]);
+    this.anchor = this.selected;
     const top = this.selected * this.rowH;
     if (top < this.el.scrollTop) this.el.scrollTop = top;
     else if (top + this.rowH > this.el.scrollTop + this.el.clientHeight) this.el.scrollTop = top + this.rowH - this.el.clientHeight;
@@ -82,12 +103,14 @@ class VList<T> {
     while (this.pool.length < count) {
       const row = document.createElement("div");
       row.draggable = true;
-      row.addEventListener("click", () => this.select(+row.dataset.i!));
+      row.addEventListener("click", (e) => this.click(+row.dataset.i!, e));
       row.addEventListener("dblclick", () => this.onActivate?.(this.items[+row.dataset.i!]));
       row.addEventListener("contextmenu", (e) => {
         e.preventDefault();
-        this.select(+row.dataset.i!);
-        this.onContext?.(this.items[+row.dataset.i!], e);
+        const i = +row.dataset.i!;
+        // Right-click inside the selection acts on all of it; outside, just that row.
+        if (!this.chosen.has(this.idOf(this.items[i]))) this.select(i);
+        this.onContext?.(this.items[i], e, this.chosenItems());
       });
       row.addEventListener("dragstart", (e) => {
         e.dataTransfer!.setData("text/earshot-track", String(this.idOf(this.items[+row.dataset.i!])));
@@ -105,8 +128,24 @@ class VList<T> {
       row.style.display = "";
       row.style.top = `${i * this.rowH}px`;
       row.dataset.i = String(i);
-      this.render(this.items[i], row, i === this.selected);
+      this.render(this.items[i], row, i === this.selected || this.chosen.has(this.idOf(this.items[i])));
     });
+  }
+
+  private click(i: number, e: MouseEvent) {
+    if (e.shiftKey && this.anchor >= 0) {
+      const [a, b] = [Math.min(this.anchor, i), Math.max(this.anchor, i)];
+      this.chosen = new Set(this.items.slice(a, b + 1).map(this.idOf));
+      this.selected = i;
+      this.draw();
+    } else if (e.ctrlKey || e.metaKey) {
+      const id = this.idOf(this.items[i]);
+      if (this.chosen.has(id)) this.chosen.delete(id);
+      else this.chosen.add(id);
+      this.selected = i;
+      this.anchor = i;
+      this.draw();
+    } else this.select(i);
   }
 }
 
@@ -163,6 +202,17 @@ async function loadPreviews(ids?: number[]) {
   }
 }
 
+function manyTrackMenu(ts: Track[]): MenuItem[] {
+  const ids = ts.map((t) => t.id);
+  const unanalysed = ts.filter((t) => !t.analysed).map((t) => t.id);
+  return [
+    { label: `Analyse ${ids.length} tracks`, action: () => analyse(ids) },
+    { label: `Analyse ${unanalysed.length} unanalysed`, action: () => analyse(unanalysed), disabled: !unanalysed.length },
+    { label: `Analyse ${ids.length} tracks (dynamic)`, action: () => analyse(ids, "dynamic") },
+    { label: `Add ${ids.length} to flow`, action: () => ids.forEach(addToFlow) },
+  ];
+}
+
 /** The key as a chip coloured round the Camelot wheel, as on the flow cards. */
 function keyCell(key: string | null) {
   return key ? `<span class="n"><span class="chip key" style="--c:${keyColour(key)}">${key}</span></span>` : `<span class="n">–</span>`;
@@ -196,8 +246,8 @@ const libList = new VList<Track>(
     setSelected(t.id, "list");
   },
   (t) => loadToDeck(freeDeck(), t.id),
-  (t, e) =>
-    showMenu(e.clientX, e.clientY, [
+  (t, e, chosen) =>
+    showMenu(e.clientX, e.clientY, chosen.length > 1 ? manyTrackMenu(chosen) : [
       { label: "Load to deck A", action: () => loadToDeck(0, t.id) },
       { label: "Load to deck B", action: () => loadToDeck(1, t.id) },
       { label: "Add to flow", action: () => addToFlow(t.id) },
@@ -258,6 +308,7 @@ function applySearch() {
   $("#lib-title").textContent = dir == null ? "All tracks" : dir.split("/").pop() || dir;
   $("#lib-title").title = dir ?? "";
   $("#lib-count").textContent = `${filtered.length.toLocaleString()}${filtered.length !== inScope.length ? ` of ${inScope.length.toLocaleString()}` : ""} tracks`;
+  updateAnalyseAll();
   const empty = $("#lib-list").querySelector(".list-empty") ?? $("#lib-list").appendChild(Object.assign(document.createElement("div"), { className: "list-empty" }));
   empty.textContent = !folders.length ? "No library folders yet. Menu → Import → Folder…" : filtered.length ? "" : "No tracks here";
 }
@@ -330,6 +381,15 @@ async function removeFolder(path: string) {
 }
 
 /** Static (one steady tempo, a few seconds) unless asked for dynamic (follows drift). */
+/** "Analyse all": the unanalysed tracks in the list as shown (folder and search). */
+function updateAnalyseAll() {
+  const n = filtered.filter((t) => !t.analysed).length;
+  const b = $<HTMLButtonElement>("#analyse-all");
+  b.textContent = n ? `Analyse all (${n.toLocaleString()})` : "All analysed";
+  b.disabled = !n;
+}
+$("#analyse-all").addEventListener("click", () => analyse(filtered.filter((t) => !t.analysed).map((t) => t.id)));
+
 function analyse(ids: number[], mode: "static" | "dynamic" = "static") {
   if (ids.length) void invoke("analyse_tracks", { ids, mode });
 }
@@ -385,22 +445,41 @@ function showAnalysisPill() {
   pill.hidden = !running.size && !waiting && !failed;
 }
 
+// Analysis sends many small updates (several tracks at once, each reporting progress).
+// They only change the model here; the list, top bar, flow and thumbnails are redrawn
+// in one go at most a few times a second, so the waveforms stay smooth.
+let redrawQueued = false;
+let flowStale = false;
+const newPreviews = new Set<number>();
+function redrawAnalysis() {
+  if (redrawQueued) return;
+  redrawQueued = true;
+  setTimeout(() => {
+    redrawQueued = false;
+    showAnalysisPill();
+    updateAnalyseAll();
+    if (flowStale) flow.refresh();
+    flowStale = false;
+    if (newPreviews.size) void loadPreviews([...newPreviews]);
+    else libList.draw();
+    newPreviews.clear();
+  }, 300);
+}
+
 listen<AnalysisEvent>("analysis", (ev) => {
   const t = byId.get(ev.track_id);
   if (t) {
     t.analysis = ev.state;
     t.analysisProgress = ev.progress;
     t.analysisStage = ev.stage;
+    t.analysisError = ev.error;
     if (ev.state === "done") {
       t.analysed = true;
       if (ev.bpm != null) t.bpm = ev.bpm;
-      flow.refresh();
-      void loadPreviews([ev.track_id]);
-    }
-    t.analysisError = ev.error;
-    if (ev.state === "done") {
       t.drifts = !!ev.drifts;
       t.dynamic = ev.grid_source === "analysis (dynamic)";
+      flowStale = true;
+      newPreviews.add(ev.track_id);
     }
   }
   if (ev.state === "queued" || ev.state === "running") busy.add(ev.track_id);
@@ -411,9 +490,8 @@ listen<AnalysisEvent>("analysis", (ev) => {
     failed++;
     lastError = `${t?.title ?? ev.track_id}: ${ev.error}`;
   }
-  showAnalysisPill();
   for (const d of decks) if (d.track?.id === ev.track_id) d.showAnalysis(ev);
-  libList.draw();
+  redrawAnalysis();
 });
 $("#analysis-status").addEventListener("click", () => {
   failed = 0;

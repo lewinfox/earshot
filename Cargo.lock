@@ -861,6 +861,7 @@ name = "earshot"
 version = "0.1.0"
 dependencies = [
  "earshot-engine",
+ "libc",
  "midir",
  "rusqlite",
  "serde",

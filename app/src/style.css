@@ -210,6 +210,7 @@ input:focus { outline: 1px solid var(--accent); }
 @keyframes pulse { from { opacity: 1; } to { opacity: 0.3; } }
 
 #menu-btn { flex-shrink: 0; }
+#analyse-all { flex-shrink: 0; white-space: nowrap; }
 .menu-pop { position: fixed; z-index: 20; min-width: 170px; background: #23252d; border: 1px solid #3a3d4a; border-radius: 6px; padding: 4px 0; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5); }
 .menu-item { padding: 5px 14px; white-space: nowrap; cursor: default; }
 .menu-item:hover { background: #2b5fb8; color: #fff; }

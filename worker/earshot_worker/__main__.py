@@ -21,6 +21,22 @@ def _claim_stdout():
 
 _proto = _claim_stdout()
 
+
+def _lowest_priority():
+    """Analysis must never take CPU from playback or the UI. Linux's idle scheduling
+    class only runs us when nothing else wants the CPU; elsewhere, nice 19. Done
+    before torch starts its threads, so they inherit it."""
+    try:
+        os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))
+    except (AttributeError, OSError):
+        try:
+            os.nice(19)
+        except OSError:
+            pass
+
+
+_lowest_priority()
+
 import json  # noqa: E402
 import logging  # noqa: E402
 import math  # noqa: E402
