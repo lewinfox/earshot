@@ -229,6 +229,7 @@ const MOCK_TRACKS: LibTrack[] = Array.from({ length: 40 }, (_, i) => {
     tag_bpm: house ? 122 + (i % 6) : 116 + (i % 4),
     key: `${1 + ((i * 5) % 12)}${i % 4 === 0 ? "B" : "A"}`,
     grid_source: null,
+    drifts: i % 9 === 4,
     energy: -14 + ((i * 13) % 10),
   };
 });

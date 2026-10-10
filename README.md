@@ -107,13 +107,23 @@ If the window is blank or the graph is very slow, try `WEBKIT_DISABLE_DMABUF_REN
 - **Analysis**: loading a track with no beatgrid starts analysis in the background; it
   plays meanwhile on a placeholder grid from its BPM tag, and the deck switches to the
   analysed grid when it's done. Right-click a track → *Analyse*, or a folder →
-  *Analyse unanalysed tracks*, to do it ahead of time. The dot by each track shows the
-  state (green = analysed, amber = queued or running, red = failed; hover for the
-  error). While a track analyses, a bar fills under its row, the top bar shows its
-  percentage, and so does its deck if it's loaded. Analysis runs in `worker/` (Beat This!), four tracks at a time
-  (`EARSHOT_ANALYSIS_JOBS` to change), each worker on a share of the CPU cores; a
-  track you load onto a deck jumps the queue. Grid edits on a deck are saved and are never overwritten by
-  automatic analysis (an explicit *Analyse* does overwrite them).
+  *Analyse unanalysed tracks*, to do it ahead of time. Like Rekordbox there are two
+  modes:
+  - **Static** (the default): one steady tempo for the whole track, preferring whole
+    numbers, in about 3–5 s. A fast tempo pass over the whole track, then Beat This!'s
+    small model on three 15 s excerpts for the phase and the downbeat
+    (`worker/earshot_worker/static_tempo.py`).
+  - **Dynamic** (*Analyse (dynamic)*): Beat This! over the whole track, so the grid
+    follows a drifting tempo (live drummers); about 15–30 s.
+
+  Static analysis flags tracks whose tempo seems to drift with an amber ≈; right-click
+  → *Analyse (dynamic)* for those. The dot by each track shows the state (green =
+  analysed, amber = queued or running, red = failed; hover for the error). While a
+  track analyses, a bar fills under its row, the top bar shows its percentage, and so
+  does its deck if it's loaded. Four tracks analyse at a time
+  (`EARSHOT_ANALYSIS_JOBS` to change); a track you load onto a deck jumps the queue.
+  Grid edits on a deck are saved and are never overwritten by automatic analysis (an
+  explicit *Analyse* does overwrite them).
 - **Flow** (tab beside *Tracks*): build a set as a chain of cards. *Add track* (or
   right-click a track → *Add to flow*) places a starting card; the **+** on a card's
   right opens nine suggested next tracks, with *Drop / Hold / Build* for the energy

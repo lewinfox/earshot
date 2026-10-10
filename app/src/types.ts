@@ -70,6 +70,7 @@ export interface LibTrack {
   tag_bpm: number | null;
   key: string | null;
   grid_source: string | null;
+  drifts: boolean;
   /** Stand-in energy; only its order means anything. */
   energy: number | null;
 }
@@ -91,6 +92,8 @@ export interface AnalysisEvent {
   bpm: number | null;
   grid_source: string | null;
   error: string | null;
+  /** After a static analysis: the tempo seems to drift (try dynamic). */
+  drifts: boolean | null;
 }
 
 export interface DeckGridEvent {
@@ -127,6 +130,10 @@ export interface Track {
   analysisProgress?: number | null;
   analysisStage?: string | null;
   analysisError?: string | null;
+  /** A static analysis found the tempo seems to drift. */
+  drifts?: boolean;
+  /** The grid follows the track's drift (dynamic analysis). */
+  dynamic?: boolean;
 }
 
 export interface MidiEvent {

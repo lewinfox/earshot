@@ -24,8 +24,14 @@ class RawBeats:
     detector: str
 
 
-_beat_this_model = None
+# Loaded Beat This! models, by checkpoint. Whole-track (dynamic) analysis uses the full
+# "final0" (~20M parameters): the small one (~2M, ~1.6x faster) matched it on real
+# tracks but doubled the tempo of a kick + off-beat hat test track. Static analysis
+# uses the small one on short excerpts and checks its tempo against its own.
+_beat_this_models: dict = {}
 _beat_this_ok: bool | None = None
+CHECKPOINT = "final0"
+SMALL_CHECKPOINT = "small0"
 
 
 def beat_this_available() -> bool:
@@ -41,24 +47,24 @@ def beat_this_available() -> bool:
     return _beat_this_ok
 
 
-def _get_beat_this(checkpoint: str = "final0", dbn: bool = False):
-    """Load (once) and cache the Beat This! model. Loading takes several seconds; the
+def get_beat_this(checkpoint: str = CHECKPOINT, dbn: bool = False):
+    """Load (once) and cache a Beat This! model. Loading takes a second or two; the
     first ever load also downloads the checkpoint."""
-    global _beat_this_model
-    if _beat_this_model is None:
+    key = (checkpoint, dbn)
+    if key not in _beat_this_models:
         import torch
         from beat_this.inference import Audio2Beats
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         log.info("loading Beat This! checkpoint %s on %s", checkpoint, device)
-        _beat_this_model = Audio2Beats(checkpoint_path=checkpoint, device=device, dbn=dbn)
-    return _beat_this_model
+        _beat_this_models[key] = Audio2Beats(checkpoint_path=checkpoint, device=device, dbn=dbn)
+    return _beat_this_models[key]
 
 
 def detect_beat_this(mono: np.ndarray, sr: int, dbn: bool = False, progress=None) -> RawBeats:
     """`progress(fraction)` is called as each chunk of the model's input is done; on a
     CPU that is most of the analysis time."""
-    model = _get_beat_this(dbn=dbn)
+    model = get_beat_this(dbn=dbn)
     mono = mono.astype(np.float32)
     if progress is None:
         beats, downbeats = model(mono, sr)

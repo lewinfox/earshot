@@ -292,9 +292,12 @@ async fn load_track(
     // No analysed or hand-fixed grid yet: analyse in the background. The deck plays
     // with the placeholder grid meanwhile and is updated when the result arrives.
     if let Some(id) = track_id
-        && !matches!(grid_source.as_str(), "analysis" | "user" | "tempo-lock sidecar")
+        && !matches!(
+            grid_source.as_str(),
+            "analysis" | analysis::DYNAMIC_SOURCE | "user" | "tempo-lock sidecar"
+        )
     {
-        lib.analyser.queue(id, Some(audio.clone()), false);
+        lib.analyser.queue(id, Some(audio.clone()), false, analysis::Mode::Static);
     }
     let grid = grid.map(Arc::new);
     let duration = audio.duration();

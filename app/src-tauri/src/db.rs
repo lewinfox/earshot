@@ -18,6 +18,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_library.sql"),
     include_str!("../migrations/002_energy.sql"),
     include_str!("../migrations/003_waveform_preview.sql"),
+    include_str!("../migrations/004_analysis_mode.sql"),
 ];
 
 pub fn open(path: &Path) -> Result<Db, String> {
@@ -132,12 +133,14 @@ pub struct LibTrack {
     pub grid_source: Option<String>,
     /// Stand-in energy (engine/src/energy.rs); only its order means anything.
     pub energy: Option<f64>,
+    /// A static analysis found the tempo seems to drift.
+    pub drifts: bool,
 }
 
 pub fn all_tracks(conn: &Connection) -> Result<Vec<LibTrack>, String> {
     let mut st = conn
         .prepare(
-            "SELECT t.id, t.path, t.title, t.artist, t.duration_s, a.bpm, t.tag_bpm, t.tag_key, g.source, t.energy
+            "SELECT t.id, t.path, t.title, t.artist, t.duration_s, a.bpm, t.tag_bpm, t.tag_key, g.source, t.energy, a.drifts
              FROM tracks t
              LEFT JOIN analysis a ON a.track_id = t.id
              LEFT JOIN beatgrids g ON g.track_id = t.id
@@ -161,6 +164,7 @@ pub fn all_tracks(conn: &Connection) -> Result<Vec<LibTrack>, String> {
                 key: r.get(7)?,
                 grid_source: r.get(8)?,
                 energy: r.get(9)?,
+                drifts: r.get::<_, Option<bool>>(10)?.unwrap_or(false),
                 path,
             })
         })
@@ -207,6 +211,15 @@ pub fn save_analysis(conn: &Connection, id: i64, bpm: f64, min: f64, max: f64, d
          ON CONFLICT(track_id) DO UPDATE SET bpm = excluded.bpm, bpm_min = excluded.bpm_min,
            bpm_max = excluded.bpm_max, detector = excluded.detector, analysed_at = CURRENT_TIMESTAMP",
         params![id, bpm, min, max, detector],
+    )
+    .map_err(err)?;
+    Ok(())
+}
+
+pub fn set_mode(conn: &Connection, id: i64, dynamic: bool, drifts: bool) -> Result<(), String> {
+    conn.execute(
+        "UPDATE analysis SET mode = ?2, drifts = ?3 WHERE track_id = ?1",
+        params![id, if dynamic { "dynamic" } else { "static" }, drifts],
     )
     .map_err(err)?;
     Ok(())

@@ -7,7 +7,7 @@ use std::time::UNIX_EPOCH;
 use earshot_engine::decode;
 use tauri::State;
 
-use crate::analysis::Analyser;
+use crate::analysis::{Analyser, Mode};
 use crate::db::{self, Db, LibTrack, TrackRow};
 
 pub struct Library {
@@ -193,9 +193,10 @@ pub async fn waveform_previews(
 }
 
 /// Queue tracks for analysis (right-click → Analyse). Re-analyses even if a grid exists.
+/// `mode`: "static" (default) or "dynamic".
 #[tauri::command]
-pub fn analyse_tracks(lib: State<'_, Library>, ids: Vec<i64>) {
+pub fn analyse_tracks(lib: State<'_, Library>, ids: Vec<i64>, mode: Option<Mode>) {
     for id in ids {
-        lib.analyser.queue(id, None, true);
+        lib.analyser.queue(id, None, true, mode.unwrap_or(Mode::Static));
     }
 }

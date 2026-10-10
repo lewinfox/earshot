@@ -28,7 +28,21 @@ struct Job {
     audio: Option<Arc<TrackAudio>>,
     /// Re-analyse even if the track already has a grid.
     force: bool,
+    mode: Mode,
 }
+
+/// How to analyse a track, like Rekordbox's Normal / Dynamic.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// One steady tempo: a fast tempo pass plus the small model on three excerpts.
+    Static,
+    /// Beat This! over the whole track; the grid follows any drift.
+    Dynamic,
+}
+
+/// Grid source for a dynamic grid. Static grids are plain "analysis".
+pub const DYNAMIC_SOURCE: &str = "analysis (dynamic)";
 
 #[derive(Serialize, Clone)]
 struct AnalysisEvent {
@@ -42,11 +56,13 @@ struct AnalysisEvent {
     bpm: Option<f64>,
     grid_source: Option<String>,
     error: Option<String>,
+    /// After a static analysis: the tempo seems to drift, so dynamic might suit it.
+    drifts: Option<bool>,
 }
 
 impl AnalysisEvent {
     fn new(track_id: i64, state: &'static str) -> Self {
-        AnalysisEvent { track_id, state, progress: None, stage: None, bpm: None, grid_source: None, error: None }
+        AnalysisEvent { track_id, state, progress: None, stage: None, bpm: None, grid_source: None, error: None, drifts: None }
     }
 }
 
@@ -128,13 +144,13 @@ impl Analyser {
 
     /// Queue a track unless it is already waiting. A track just loaded onto a deck
     /// (`audio` given) goes to the front, ahead of any folder being analysed.
-    pub fn queue(&self, id: i64, audio: Option<Arc<TrackAudio>>, force: bool) {
+    pub fn queue(&self, id: i64, audio: Option<Arc<TrackAudio>>, force: bool, mode: Mode) {
         if !self.pending.lock().unwrap().insert(id) {
             return;
         }
         let _ = self.app.emit("analysis", AnalysisEvent::new(id, "queued"));
         let urgent = audio.is_some();
-        let job = Job { id, audio, force };
+        let job = Job { id, audio, force, mode };
         let mut jobs = self.queue.jobs.lock().unwrap();
         if urgent {
             jobs.push_front(job);
@@ -189,9 +205,15 @@ fn run(
         progress(WORKER_START, "starting the analyser");
         *worker = Some(Worker::spawn(threads)?);
     }
-    progress(WORKER_START, "finding beats");
-    let reply = worker.as_mut().unwrap().analyse(&wav, &mut |f| {
-        progress(WORKER_START + (1.0 - WORKER_START) * f, if f < 0.8 { "finding beats" } else { "refining beats" })
+    progress(WORKER_START, "finding the tempo");
+    let reply = worker.as_mut().unwrap().analyse(&wav, job.mode, &mut |f| {
+        let stage = match job.mode {
+            Mode::Static if f < 0.25 => "finding the tempo",
+            Mode::Static => "placing the grid",
+            Mode::Dynamic if f < 0.8 => "finding beats",
+            Mode::Dynamic => "refining beats",
+        };
+        progress(WORKER_START + (1.0 - WORKER_START) * f, stage)
     });
     let _ = std::fs::remove_file(&wav);
     let reply = match reply {
@@ -201,40 +223,52 @@ fn run(
             return Err(e);
         }
     };
-    // One tempo per track: a straight grid through the detected beats.
-    let (grid, bpm) = Beatgrid::from_indexed(&reply.beats, &reply.beat_index, &reply.is_downbeat)
-        .and_then(|g| g.straightened(audio.duration()))
-        .map_err(|e| format!("worker returned an unusable grid: {e}"))?;
+    let duration = audio.duration();
+    let (grid, bpm, source, min, max) = match job.mode {
+        // One tempo: a straight grid with a 1 at the worker's downbeat.
+        Mode::Static => {
+            let g = Beatgrid::constant(reply.bpm, reply.downbeat, duration)
+                .map_err(|e| format!("worker returned an unusable tempo: {e}"))?;
+            (g, reply.bpm, "analysis", reply.bpm, reply.bpm)
+        }
+        // Every detected beat, so the grid follows the drift. Its BPM is the average.
+        Mode::Dynamic => {
+            let g = Beatgrid::from_indexed(&reply.beats, &reply.beat_index, &reply.is_downbeat)
+                .and_then(|g| g.refit(duration))
+                .map_err(|e| format!("worker returned an unusable grid: {e}"))?;
+            let bpm = (g.mean_bpm() * 100.0).round() / 100.0;
+            (g, bpm, DYNAMIC_SOURCE, reply.min_bpm, reply.max_bpm)
+        }
+    };
+    let drifts = job.mode == Mode::Static && !reply.steady;
 
     // A grid fixed by hand while this job waited wins over an automatic analysis.
     let keep_user = !job.force && existing.as_ref().is_some_and(|(_, s)| s == "user");
     {
         let conn = db.lock().unwrap();
-        db::save_analysis(&conn, job.id, bpm, reply.min_bpm, reply.max_bpm, &reply.detector)?;
+        db::save_analysis(&conn, job.id, bpm, min, max, &reply.detector)?;
+        db::set_mode(&conn, job.id, job.mode == Mode::Dynamic, drifts)?;
         if !keep_user {
-            db::save_grid(&conn, job.id, &grid, "analysis")?;
+            db::save_grid(&conn, job.id, &grid, source)?;
         }
     }
     if !keep_user {
-        update_decks(app, job.id, grid);
+        update_decks(app, job.id, grid, source);
     }
     eprintln!(
-        "analysed track {}: {} BPM (worker's median {:.2}), {} beats, {:.1} s in the worker",
-        job.id,
-        bpm,
-        reply.median_bpm,
-        reply.beats.len(),
-        reply.seconds
+        "analysed track {} ({:?}): {bpm} BPM (dynamic median {:.2}), phase spread {:.0} ms, {:.1} s in the worker",
+        job.id, job.mode, reply.median_bpm, reply.spread_ms, reply.seconds
     );
     Ok(AnalysisEvent {
         bpm: Some(bpm),
-        grid_source: Some(if keep_user { "user" } else { "analysis" }.into()),
+        grid_source: Some(if keep_user { "user" } else { source }.into()),
+        drifts: Some(drifts),
         ..AnalysisEvent::new(job.id, "done")
     })
 }
 
 /// Give the new grid to any deck that has this track loaded.
-fn update_decks(app: &AppHandle, track_id: i64, grid: Beatgrid) {
+fn update_decks(app: &AppHandle, track_id: i64, grid: Beatgrid, source: &str) {
     let grid = Some(Arc::new(grid));
     let state = app.state::<AppState>();
     let mut inner = state.inner.lock().unwrap();
@@ -246,8 +280,8 @@ fn update_decks(app: &AppHandle, track_id: i64, grid: Beatgrid) {
             continue;
         }
         inner.decks[deck].grid = grid.clone();
-        inner.decks[deck].grid_source = "analysis".into();
-        let _ = app.emit("deck-grid", DeckGridEvent { deck, grid: GridDto::of(&grid, "analysis") });
+        inner.decks[deck].grid_source = source.into();
+        let _ = app.emit("deck-grid", DeckGridEvent { deck, grid: GridDto::of(&grid, source) });
     }
 }
 
@@ -303,6 +337,19 @@ struct Reply {
     max_bpm: f64,
     #[serde(default)]
     seconds: f64,
+    // Static analysis.
+    #[serde(default)]
+    bpm: f64,
+    #[serde(default)]
+    downbeat: f64,
+    #[serde(default)]
+    spread_ms: f64,
+    #[serde(default = "yes")]
+    steady: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// `python -m earshot_worker` speaking JSON lines on stdin/stdout.
@@ -352,10 +399,14 @@ impl Worker {
     }
 
     /// `on_progress` gets the worker's 0..1 progress as it arrives.
-    fn analyse(&mut self, wav: &Path, on_progress: &mut dyn FnMut(f64)) -> Result<Reply, String> {
+    fn analyse(&mut self, wav: &Path, mode: Mode, on_progress: &mut dyn FnMut(f64)) -> Result<Reply, String> {
         let id = self.next_id;
         self.next_id += 1;
-        let req = serde_json::json!({ "id": id, "type": "analyse", "wav": wav });
+        let kind = match mode {
+            Mode::Static => "analyse_static",
+            Mode::Dynamic => "analyse",
+        };
+        let req = serde_json::json!({ "id": id, "type": kind, "wav": wav });
         writeln!(self.stdin, "{req}")
             .and_then(|_| self.stdin.flush())
             .map_err(|e| format!("the analysis worker has stopped: {e}"))?;
@@ -401,29 +452,25 @@ impl Drop for Worker {
 mod tests {
     use super::*;
 
-    /// End to end against the real worker: `EARSHOT_TEST_TRACK=/path/song.mp3 cargo test -- --ignored`.
+    /// End to end against the real worker, both modes:
+    /// `EARSHOT_TEST_TRACK=/path/song.mp3 cargo test --lib -- --include-ignored`.
     #[test]
     #[ignore]
     fn analyses_a_real_track() {
         let path = std::env::var("EARSHOT_TEST_TRACK").expect("set EARSHOT_TEST_TRACK");
-        let (audio, tags) = decode::decode_file(Path::new(&path)).unwrap();
+        let (audio, _) = decode::decode_file(Path::new(&path)).unwrap();
         let wav = std::env::temp_dir().join(format!("earshot-test-{}.wav", std::process::id()));
         write_mono_wav(&wav, &audio).unwrap();
         let mut w = Worker::spawn(4).unwrap();
-        let mut seen = Vec::new();
-        let r = w.analyse(&wav, &mut |f| seen.push(f)).unwrap();
-        assert!(!seen.is_empty() && seen.windows(2).all(|p| p[0] <= p[1]), "progress {seen:?}");
-        let (grid, bpm) = Beatgrid::from_indexed(&r.beats, &r.beat_index, &r.is_downbeat)
-            .and_then(|g| g.straightened(audio.duration()))
-            .unwrap();
-        eprintln!(
-            "tag {:?} · straightened {bpm} · median {:.2} · {} beats · first downbeat at {:?} s · {:.1} s",
-            tags.bpm,
-            r.median_bpm,
-            grid.len(),
-            grid.first_downbeat().map(|i| grid.times()[i]),
-            r.seconds
-        );
-        assert!(bpm > 60.0 && bpm < 200.0);
+        for mode in [Mode::Static, Mode::Dynamic] {
+            let mut seen = Vec::new();
+            let r = w.analyse(&wav, mode, &mut |f| seen.push(f)).unwrap();
+            assert!(!seen.is_empty() && seen.windows(2).all(|p| p[0] <= p[1]), "progress {seen:?}");
+            eprintln!(
+                "{mode:?}: bpm {} (dynamic median {:.2}), downbeat {:.3} s, spread {:.1} ms, steady {}, {} beats, {:.1} s",
+                r.bpm, r.median_bpm, r.downbeat, r.spread_ms, r.steady, r.beats.len(), r.seconds
+            );
+        }
+        let _ = std::fs::remove_file(&wav);
     }
 }

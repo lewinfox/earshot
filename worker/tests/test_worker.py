@@ -107,3 +107,17 @@ def test_bad_requests_keep_loop_alive(worker):
     r = worker.read()
     assert r["id"] is None and r["ok"] is False
     assert worker.ask({"id": 5, "type": "ping"})["ok"] is True
+
+
+def test_analyse_static_click_track(worker, tmp_path):
+    wav = tmp_path / "click.wav"
+    sf.write(wav, click_track(seconds=60.0), SR, subtype="FLOAT")
+    r = worker.ask({"id": 5, "type": "analyse_static", "wav": str(wav)})
+    assert r["ok"], r
+    assert r["bpm"] == BPM
+    assert r["steady"] is True
+    # The click track's beats start at 0.5 s, so a beat sits there (phase is modulo a beat).
+    period = 60 / BPM
+    off = (r["beat"] - 0.5) % period
+    assert min(off, period - off) < 0.02, r
+    assert worker.progress and worker.progress == sorted(worker.progress)

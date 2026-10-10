@@ -172,7 +172,9 @@ function statusCell(t: Track) {
   if (t.analysis === "error") return `<span class="st error" title="${esc(t.analysisError ?? "analysis failed")}">✕</span>`;
   if (t.analysis === "running") return `<span class="st running" title="${esc(t.analysisStage ?? "Analysing")} · ${pct(t.analysisProgress ?? 0)}">●</span>`;
   if (t.analysis === "queued") return `<span class="st queued" title="Waiting to be analysed">○</span>`;
-  return t.analysed ? `<span class="st done" title="Beatgrid analysed">●</span>` : `<span class="st" title="Not analysed"></span>`;
+  if (t.dynamic) return `<span class="st done" title="Analysed (dynamic): the grid follows the tempo">≈</span>`;
+  if (t.drifts) return `<span class="st drift" title="The tempo seems to drift: right-click → Analyse (dynamic)">≈</span>`;
+  return t.analysed ? `<span class="st done" title="Beatgrid analysed (static: one steady tempo)">●</span>` : `<span class="st" title="Not analysed"></span>`;
 }
 
 const libList = new VList<Track>(
@@ -200,6 +202,7 @@ const libList = new VList<Track>(
       { label: "Load to deck B", action: () => loadToDeck(1, t.id) },
       { label: "Add to flow", action: () => addToFlow(t.id) },
       { label: t.analysed ? "Analyse again" : "Analyse", action: () => analyse([t.id]) },
+      { label: `Analyse (dynamic)${t.drifts ? "  ← suggested" : ""}`, action: () => analyse([t.id], "dynamic") },
     ]),
 );
 
@@ -269,6 +272,11 @@ const tree = new FolderTree(
     const items: MenuItem[] = [
       { label: `Analyse ${inside.filter((t) => !t.analysed).length} unanalysed tracks`, action: () => analyse(inside.filter((t) => !t.analysed).map((t) => t.id)) },
       { label: `Analyse all ${inside.length} tracks again`, action: () => analyse(inside.map((t) => t.id)) },
+      {
+        label: `Analyse ${inside.filter((t) => t.drifts).length} drifting tracks (dynamic)`,
+        action: () => analyse(inside.filter((t) => t.drifts).map((t) => t.id), "dynamic"),
+        disabled: !inside.some((t) => t.drifts),
+      },
     ];
     if (isRoot) items.push({ label: "Remove from library", action: () => void removeFolder(path) });
     showMenu(e.clientX, e.clientY, items);
@@ -321,8 +329,9 @@ async function removeFolder(path: string) {
   await loadLibrary();
 }
 
-function analyse(ids: number[]) {
-  if (ids.length) void invoke("analyse_tracks", { ids });
+/** Static (one steady tempo, a few seconds) unless asked for dynamic (follows drift). */
+function analyse(ids: number[], mode: "static" | "dynamic" = "static") {
+  if (ids.length) void invoke("analyse_tracks", { ids, mode });
 }
 
 $("#menu-btn").addEventListener("click", (e) => {
@@ -389,6 +398,10 @@ listen<AnalysisEvent>("analysis", (ev) => {
       void loadPreviews([ev.track_id]);
     }
     t.analysisError = ev.error;
+    if (ev.state === "done") {
+      t.drifts = !!ev.drifts;
+      t.dynamic = ev.grid_source === "analysis (dynamic)";
+    }
   }
   if (ev.state === "queued" || ev.state === "running") busy.add(ev.track_id);
   else busy.delete(ev.track_id);

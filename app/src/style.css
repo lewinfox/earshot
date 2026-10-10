@@ -205,6 +205,7 @@ input:focus { outline: 1px solid var(--accent); }
 .row-item .st.running { color: var(--warn); animation: pulse 1s infinite alternate; }
 .row-item .st.queued { color: var(--warn); opacity: 0.6; }
 .row-item .st.error { color: var(--bad); }
+.row-item .st.drift { color: var(--warn); font-weight: 700; }
 .row-item .n.tag { font-style: italic; opacity: 0.7; }
 @keyframes pulse { from { opacity: 1; } to { opacity: 0.3; } }
 

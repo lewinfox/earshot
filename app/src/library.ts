@@ -146,7 +146,8 @@ export function syntheticLibrary(n: number, firstId: number, seed = 7): Track[] 
   return tracks;
 }
 
-const ANALYSED_SOURCES = new Set(["analysis", "user", "tempo-lock sidecar"]);
+const DYNAMIC_SOURCE = "analysis (dynamic)";
+const ANALYSED_SOURCES = new Set(["analysis", DYNAMIC_SOURCE, "user", "tempo-lock sidecar"]);
 
 export function fromLibrary(l: LibTrack): Track {
   const k = parseKey(l.key);
@@ -166,6 +167,8 @@ export function fromLibrary(l: LibTrack): Track {
     analysed: l.grid_source != null && ANALYSED_SOURCES.has(l.grid_source),
     analysis: null,
     analysisError: null,
+    drifts: l.drifts,
+    dynamic: l.grid_source === DYNAMIC_SOURCE,
   };
 }
 

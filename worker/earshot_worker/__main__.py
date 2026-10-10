@@ -32,6 +32,7 @@ import soundfile as sf  # noqa: E402
 
 from .analysis import analyse  # noqa: E402
 from .detectors import detector_name  # noqa: E402
+from .static_tempo import analyse_static  # noqa: E402
 
 log = logging.getLogger("earshot_worker")
 
@@ -75,12 +76,28 @@ def handle_analyse(req: dict) -> dict:
     }
 
 
+def handle_analyse_static(req: dict) -> dict:
+    path = req.get("wav")
+    if not isinstance(path, str) or not path:
+        raise ValueError("analyse_static needs a 'wav' path")
+    t0 = time.perf_counter()
+    y, sr = sf.read(path, dtype="float32", always_2d=False)
+    if y.size == 0:
+        raise ValueError(f"{path}: no audio")
+    req_id = req.get("id")
+    r = analyse_static(y, int(sr), progress=lambda f: send({"id": req_id, "type": "progress", "fraction": round(float(f), 3)}))
+    _finite("result", [r["bpm"], r["beat"], r["downbeat"], r["spread_ms"], r["drift_pct"]])
+    return {"ok": True, "detector": "static", **r, "seconds": float(time.perf_counter() - t0)}
+
+
 def handle(req: dict) -> dict:
     kind = req.get("type")
     if kind == "ping":
         return {"ok": True, "detector": detector_name()}
     if kind == "analyse":
         return handle_analyse(req)
+    if kind == "analyse_static":
+        return handle_analyse_static(req)
     raise ValueError(f"unknown request type {kind!r}")
 
 
