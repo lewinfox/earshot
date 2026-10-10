@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>earshot</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <header id="topbar">
+      <span class="brand">earshot</span>
+      <div class="seg" id="mode">
+        <button data-mode="export">Export</button>
+        <button data-mode="performance" class="on">Performance</button>
+      </div>
+      <span id="audio-status" class="pill" title="Audio output">audio …</span>
+      <span id="midi-status" class="pill" title="MIDI inputs (click to rescan)">MIDI …</span>
+      <span id="key-layer" class="pill" title="Keyboard layer: deck shortcuts are live unless a text field has focus. Esc returns to deck keys.">DECK KEYS</span>
+      <span class="spacer"></span>
+      <span id="fps" class="mono" title="UI frame rate over the last 2 s: average / 1% low / worst frame">– fps</span>
+      <span id="audio-load" class="mono" title="Audio callback: worst time in the last tick / budget, slow callbacks, xruns">–</span>
+      <button id="bench-btn" title="Run the scripted benchmark and save a report">Benchmark</button>
+      <button id="help-btn" title="Keyboard shortcuts">Keys</button>
+    </header>
+
+    <section id="decks">
+      <div class="deck" data-deck="0"></div>
+      <div class="mixer" id="mixer"></div>
+      <div class="deck" data-deck="1"></div>
+    </section>
+
+    <main id="browser">
+      <section id="library" class="pane">
+        <div class="pane-head">
+          <input id="search" type="search" placeholder="Search   bpm:120-126  key:8A   ( / )" />
+        </div>
+        <div class="pane-head small">
+          <input id="folder" type="text" placeholder="/path/to/music" />
+          <button id="scan-btn">Scan</button>
+          <span id="lib-count" class="muted"></span>
+        </div>
+        <div class="list" id="lib-list" tabindex="-1"></div>
+      </section>
+
+      <section id="graph-pane" class="pane">
+        <div class="pane-head small">
+          <div class="seg" id="graph-lib">
+            <button data-lib="sigma" class="on">Sigma.js</button>
+            <button data-lib="cosmos">cosmos.gl</button>
+          </div>
+          <div class="seg" id="graph-size">
+            <button data-n="2000" class="on">2k</button>
+            <button data-n="5000">5k</button>
+            <button data-n="10000">10k</button>
+          </div>
+          <div class="seg" id="graph-layout">
+            <button data-layout="wheel" class="on" title="Angle = Camelot key, radius = BPM">Key wheel</button>
+            <button data-layout="vibe" title="Clustered by vibe embedding">Vibe</button>
+          </div>
+          <span id="graph-info" class="muted"></span>
+        </div>
+        <div id="graph"></div>
+      </section>
+
+      <section id="suggest" class="pane">
+        <div class="pane-head small">
+          <span id="suggest-ref" class="muted">Select or play a track</span>
+        </div>
+        <div class="pane-head small">
+          <div class="seg" id="energy-mode" title="Energy direction">
+            <button data-e="-0.15">Drop</button>
+            <button data-e="0" class="on">Hold</button>
+            <button data-e="0.15">Build</button>
+          </div>
+        </div>
+        <div class="list" id="suggest-list" tabindex="-1"></div>
+      </section>
+    </main>
+
+    <footer id="midi-log" class="mono"></footer>
+
+    <dialog id="help"></dialog>
+    <dialog id="bench-dialog">
+      <h3>Benchmark</h3>
+      <p class="muted">Loads demo tracks on both decks, plays them, and pans/zooms the graph for each library and size. About a minute. Keep the window in front.</p>
+      <pre id="bench-out" class="mono"></pre>
+      <div class="row"><button id="bench-run">Run</button><button id="bench-close">Close</button></div>
+    </dialog>
+    <div id="drag-ghost"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,612 @@
+import { control, inTauri, invoke, listen } from "./api";
+import { DeckView } from "./deck";
+import { computeLayout, CosmosView, type GraphView, SigmaView } from "./graph";
+import { installKeyboard, keymapHelp, type KeyBinding } from "./keys";
+import { fromScanned, search, syntheticLibrary } from "./library";
+import { FrameStats, gpuInfo } from "./perf";
+import { compatibilityEdges, effectiveKey, type Reference, type Scored, suggest } from "./suggest";
+import type { EngineState, LoadedTrack, MidiEvent, OutputInfo, ScannedTrack, Track, UiControl } from "./types";
+
+const $ = <T extends HTMLElement = HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
+
+// ---- state ---------------------------------------------------------------------------
+
+let scanned: Track[] = [];
+let tracks: Track[] = [];
+let byId = new Map<number, Track>();
+let indexOf = new Map<number, number>();
+let filtered: Track[] = [];
+let suggestions: Scored[] = [];
+let selectedId: number | null = null;
+let focusedPane: "library" | "suggest" = "library";
+let synthCount = 2000;
+let layoutMode: "wheel" | "vibe" = "wheel";
+let graphLib: "sigma" | "cosmos" = "sigma";
+let energyDelta = 0;
+let engine: EngineState | null = null;
+const played = new Set<number>();
+const playStarted: (number | null)[] = [null, null];
+let lastStarted: number | null = null;
+let refKey = "";
+
+const decks = [0, 1].map((i) => new DeckView(i, $(`.deck[data-deck="${i}"]`), (d, id) => loadToDeck(d, id)));
+
+// ---- virtual lists ---------------------------------------------------------------------
+
+class VList<T> {
+  private spacer = document.createElement("div");
+  private pool: HTMLElement[] = [];
+  items: T[] = [];
+  selected = -1;
+
+  constructor(
+    private el: HTMLElement,
+    private rowH: number,
+    private render: (item: T, row: HTMLElement, selected: boolean) => void,
+    private idOf: (item: T) => number,
+    private onPick: (item: T) => void,
+  ) {
+    el.appendChild(this.spacer);
+    el.addEventListener("scroll", () => this.draw());
+    new ResizeObserver(() => this.draw()).observe(el);
+  }
+
+  set(items: T[], selected = -1) {
+    this.items = items;
+    this.selected = selected;
+    this.spacer.style.height = `${items.length * this.rowH}px`;
+    this.draw();
+  }
+
+  select(i: number) {
+    if (!this.items.length) return;
+    this.selected = Math.max(0, Math.min(this.items.length - 1, i));
+    const top = this.selected * this.rowH;
+    if (top < this.el.scrollTop) this.el.scrollTop = top;
+    else if (top + this.rowH > this.el.scrollTop + this.el.clientHeight) this.el.scrollTop = top + this.rowH - this.el.clientHeight;
+    this.draw();
+    this.onPick(this.items[this.selected]);
+  }
+
+  draw() {
+    const first = Math.floor(this.el.scrollTop / this.rowH);
+    const count = Math.ceil(this.el.clientHeight / this.rowH) + 2;
+    while (this.pool.length < count) {
+      const row = document.createElement("div");
+      row.draggable = true;
+      row.addEventListener("click", () => this.select(+row.dataset.i!));
+      row.addEventListener("dragstart", (e) => {
+        e.dataTransfer!.setData("text/earshot-track", String(this.idOf(this.items[+row.dataset.i!])));
+        e.dataTransfer!.effectAllowed = "copy";
+      });
+      this.el.appendChild(row);
+      this.pool.push(row);
+    }
+    this.pool.forEach((row, k) => {
+      const i = first + k;
+      if (k >= count || i >= this.items.length) {
+        row.style.display = "none";
+        return;
+      }
+      row.style.display = "";
+      row.style.top = `${i * this.rowH}px`;
+      row.dataset.i = String(i);
+      this.render(this.items[i], row, i === this.selected);
+    });
+  }
+}
+
+const esc = (s: string) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+
+function rowClasses(row: HTMLElement, t: Track, sel: boolean, base: string) {
+  const onDeck = decks.some((d) => d.track?.id === t.id && d.state?.playing);
+  row.className = `row-item ${base}${sel ? " sel" : ""}${onDeck ? " playing" : ""}${played.has(t.id) ? " played" : ""}`;
+}
+
+const libList = new VList<Track>(
+  $("#lib-list"),
+  28,
+  (t, row, sel) => {
+    rowClasses(row, t, sel, "");
+    row.innerHTML = `<span class="t">${esc(t.title)}<small>${esc(t.artist)}</small></span><span class="n">${t.bpm?.toFixed(1) ?? "–"}</span><span class="n">${t.key ?? "–"}</span>`;
+  },
+  (t) => t.id,
+  (t) => {
+    focusPane("library");
+    setSelected(t.id, "list");
+  },
+);
+
+const pct = (x: number) => `${Math.round(x * 100)}%`;
+const sugList = new VList<Scored>(
+  $("#suggest-list"),
+  40,
+  (s, row, sel) => {
+    rowClasses(row, s.track, sel, "sug-item");
+    const ch = s.tempoChange == null ? "" : `${s.tempoChange >= 0 ? "+" : ""}${(s.tempoChange * 100).toFixed(1)}%`;
+    row.innerHTML = `<span class="t">${esc(s.track.title)}<small>${esc(s.track.artist)}</small></span>
+      <span class="n" title="Tempo change needed">${ch}</span><span class="n">${s.track.key ?? "–"}</span>
+      <span class="score">${Math.round(s.total * 100)}</span>
+      <span class="why">${[
+        ["key", s.key, "#c25bff"],
+        ["tempo", s.tempo, "#3fa7ff"],
+        ["vibe", s.vibe, "#45d483"],
+        ["energy", s.energy, "#ffcc4d"],
+      ]
+        .map(([n, v, c]) => `<span class="bar" title="${n} ${pct(v as number)}" style="--c:${c}"><i style="width:${pct(v as number)}"></i></span>`)
+        .join("")}</span>`;
+  },
+  (s) => s.track.id,
+  (s) => {
+    focusPane("suggest");
+    highlightGraph(s.track.id);
+  },
+);
+
+function focusPane(p: "library" | "suggest") {
+  focusedPane = p;
+  $("#library").classList.toggle("focused", p === "library");
+  $("#suggest").classList.toggle("focused", p === "suggest");
+}
+focusPane("library");
+
+// ---- library ---------------------------------------------------------------------------
+
+function rebuildLibrary() {
+  tracks = [...scanned, ...syntheticLibrary(synthCount, 1_000_000)];
+  byId = new Map(tracks.map((t) => [t.id, t]));
+  indexOf = new Map(tracks.map((t, i) => [t.id, i]));
+  $("#lib-count").textContent = `${tracks.length.toLocaleString()} tracks${scanned.length ? ` (${scanned.length} from disk)` : ""}`;
+  applySearch();
+  rebuildGraph();
+}
+
+function applySearch() {
+  filtered = search(tracks, $<HTMLInputElement>("#search").value);
+  libList.set(filtered, filtered.findIndex((t) => t.id === selectedId));
+}
+
+$<HTMLInputElement>("#search").addEventListener("input", applySearch);
+
+$("#scan-btn").addEventListener("click", async () => {
+  const path = $<HTMLInputElement>("#folder").value.trim();
+  if (!path) return;
+  $("#lib-count").textContent = "scanning…";
+  try {
+    const t0 = performance.now();
+    const found = await invoke<ScannedTrack[]>("scan_folder", { path });
+    scanned = fromScanned(found, 1);
+    rebuildLibrary();
+    $("#lib-count").textContent += ` · scanned in ${((performance.now() - t0) / 1000).toFixed(1)} s`;
+  } catch (e) {
+    $("#lib-count").textContent = `scan failed: ${e}`;
+  }
+});
+
+function setSelected(id: number | null, from: "list" | "graph" | "other") {
+  selectedId = id;
+  if (from !== "list") {
+    const i = filtered.findIndex((t) => t.id === id);
+    if (i >= 0) libList.select(i);
+  }
+  refreshSuggestions(true);
+}
+
+// ---- suggestions -----------------------------------------------------------------------
+
+function currentReference(): Reference | null {
+  // Live: the most recently started playing deck. Otherwise the selected track.
+  const live = [lastStarted, 0, 1].find((d) => d != null && decks[d].state?.playing && decks[d].track) as number | undefined;
+  if (live != null) {
+    const d = decks[live];
+    const s = d.state!;
+    return {
+      track: d.track!,
+      bpm: s.bpm ?? d.track!.bpm,
+      key: effectiveKey(d.track!.key, s.speed),
+      energyDelta,
+      played,
+    };
+  }
+  const t = selectedId != null ? byId.get(selectedId) : undefined;
+  if (!t) return null;
+  return { track: t, bpm: t.bpm, key: effectiveKey(t.key, 1), energyDelta, played };
+}
+
+function refreshSuggestions(force = false) {
+  const ref = currentReference();
+  const live = ref && decks.some((d) => d.track?.id === ref.track.id && d.state?.playing);
+  const key = ref ? `${ref.track.id}|${ref.bpm?.toFixed(1)}|${ref.key?.n}${ref.key?.minor}|${energyDelta}|${played.size}` : "";
+  if (!force && key === refKey) return;
+  refKey = key;
+  if (!ref) {
+    suggestions = [];
+    $("#suggest-ref").textContent = "Select or play a track";
+  } else {
+    const t0 = performance.now();
+    suggestions = suggest(ref, tracks, 80);
+    const ms = performance.now() - t0;
+    const deck = decks.find((d) => d.track?.id === ref.track.id && d.state?.playing);
+    $("#suggest-ref").innerHTML = `${live ? `<b style="color:var(--accent)">LIVE · deck ${"AB"[deck!.index]}</b> ` : "After "}${esc(ref.track.title)} · ${ref.bpm?.toFixed(1) ?? "?"} BPM · ${ref.key ? `${ref.key.n}${ref.key.minor ? "A" : "B"}` : "?"} <span class="muted">(${ms.toFixed(1)} ms over ${tracks.length})</span>`;
+  }
+  sugList.set(suggestions, focusedPane === "suggest" ? Math.min(sugList.selected, suggestions.length - 1) : -1);
+  highlightGraph(ref?.track.id ?? null);
+}
+setInterval(() => refreshSuggestions(), 500);
+
+document.querySelectorAll<HTMLButtonElement>("#energy-mode button").forEach((b) =>
+  b.addEventListener("click", () => {
+    energyDelta = +b.dataset.e!;
+    document.querySelectorAll("#energy-mode button").forEach((x) => x.classList.toggle("on", x === b));
+    refreshSuggestions(true);
+  }),
+);
+
+// ---- graph -------------------------------------------------------------------------------
+
+let graph: GraphView | null = null;
+
+function makeGraph() {
+  graph?.destroy();
+  const container = $("#graph");
+  const cb = {
+    onSelect: (i: number | null) => setSelected(i == null ? null : tracks[i]?.id ?? null, "graph"),
+    onDragStart: (i: number, ev: MouseEvent) => startGhostDrag(tracks[i], ev),
+  };
+  try {
+    graph = graphLib === "sigma" ? new SigmaView(container, cb) : new CosmosView(container, cb);
+  } catch (e) {
+    graph = null;
+    $("#graph-info").textContent = `${graphLib} failed: ${e}`;
+  }
+}
+
+let lastBuild = { edgesMs: 0, setDataMs: 0, edges: 0 };
+function rebuildGraph() {
+  if (!graph) makeGraph();
+  if (!graph) return;
+  const t0 = performance.now();
+  const edges = compatibilityEdges(tracks);
+  const t1 = performance.now();
+  graph.setData(tracks, computeLayout(tracks, layoutMode), edges);
+  const t2 = performance.now();
+  lastBuild = { edgesMs: t1 - t0, setDataMs: t2 - t1, edges: edges.length };
+  $("#graph-info").textContent = `${tracks.length.toLocaleString()} nodes · ${edges.length.toLocaleString()} edges · edges ${lastBuild.edgesMs.toFixed(0)} ms · build ${lastBuild.setDataMs.toFixed(0)} ms`;
+  highlightGraph(currentReference()?.track.id ?? null);
+}
+
+function highlightGraph(id: number | null) {
+  if (!graph) return;
+  const i = id == null ? null : indexOf.get(id) ?? null;
+  const related = suggestions.slice(0, 20).map((s) => indexOf.get(s.track.id)!).filter((x) => x != null);
+  graph.setHighlight(i, i == null ? [] : related);
+}
+
+function segment(sel: string, attr: string, onPick: (v: string) => void) {
+  document.querySelectorAll<HTMLButtonElement>(`${sel} button`).forEach((b) =>
+    b.addEventListener("click", () => {
+      document.querySelectorAll(`${sel} button`).forEach((x) => x.classList.toggle("on", x === b));
+      onPick(b.dataset[attr]!);
+    }),
+  );
+}
+segment("#graph-lib", "lib", (v) => {
+  graphLib = v as typeof graphLib;
+  makeGraph();
+  rebuildGraph();
+});
+segment("#graph-size", "n", (v) => {
+  synthCount = +v;
+  rebuildLibrary();
+});
+segment("#graph-layout", "layout", (v) => {
+  layoutMode = v as typeof layoutMode;
+  rebuildGraph();
+});
+segment("#mode", "mode", (v) => {
+  document.body.classList.toggle("export", v === "export");
+  window.dispatchEvent(new Event("resize"));
+});
+
+// ---- drag from the graph -----------------------------------------------------------------
+
+function startGhostDrag(t: Track | undefined, ev: MouseEvent) {
+  if (!t) return;
+  const ghost = $("#drag-ghost");
+  ghost.textContent = t.title;
+  const move = (e: MouseEvent) => {
+    ghost.style.display = "block";
+    ghost.style.left = `${e.clientX + 12}px`;
+    ghost.style.top = `${e.clientY + 8}px`;
+    document.querySelectorAll(".deck").forEach((d) => d.classList.toggle("drop", d.contains(document.elementFromPoint(e.clientX, e.clientY))));
+  };
+  const up = (e: MouseEvent) => {
+    window.removeEventListener("mousemove", move, true);
+    window.removeEventListener("mouseup", up, true);
+    ghost.style.display = "none";
+    document.querySelectorAll(".deck").forEach((d) => d.classList.remove("drop"));
+    const deckEl = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>(".deck");
+    if (deckEl && ghost.dataset.moved) loadToDeck(+deckEl.dataset.deck!, t.id);
+    else setSelected(t.id, "graph");
+    delete ghost.dataset.moved;
+  };
+  const start = { x: ev.clientX, y: ev.clientY };
+  window.addEventListener("mousemove", (e) => {
+    if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > 4) ghost.dataset.moved = "1";
+  }, { once: true });
+  window.addEventListener("mousemove", move, true);
+  window.addEventListener("mouseup", up, true);
+}
+
+// ---- decks -------------------------------------------------------------------------------
+
+async function loadToDeck(deck: number, id: number) {
+  const t = byId.get(id);
+  if (!t) return;
+  const view = decks[deck];
+  try {
+    const loaded = await invoke<LoadedTrack>("load_track", { deck, source: t.source });
+    await view.setTrack(t, loaded);
+  } catch (e) {
+    console.error(e);
+    alert(`Could not load ${t.title}: ${e}`);
+  }
+}
+
+function libraryControl(c: UiControl) {
+  if (c.key === "MoveVertical") {
+    const list = focusedPane === "library" ? libList : sugList;
+    list.select((list.selected < 0 ? -1 : list.selected) + Math.round(c.value));
+  } else if (c.key === "TogglePane") {
+    if (c.value > 0) focusPane(focusedPane === "library" ? "suggest" : "library");
+  } else if (c.key === "LoadSelectedTrack" && c.value > 0) {
+    const deck = c.group === "[Channel2]" ? 1 : 0;
+    const t = focusedPane === "library" ? libList.items[libList.selected] : sugList.items[sugList.selected]?.track;
+    if (t) loadToDeck(deck, t.id);
+  }
+}
+listen<UiControl>("ui-control", libraryControl);
+
+// ---- mixer --------------------------------------------------------------------------------
+
+$("#mixer").innerHTML = `
+  <label>Volume A<input type="range" min="0" max="1" step="0.01" value="1" data-mix="[Channel1] volume" /></label>
+  <label>Volume B<input type="range" min="0" max="1" step="0.01" value="1" data-mix="[Channel2] volume" /></label>
+  <label>Crossfader<input type="range" min="-1" max="1" step="0.01" value="0" data-mix="[Master] crossfader" /></label>
+  <label style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" checked data-q /> Quantise</label>
+  <span class="muted" style="font-size:11px">Master → out 1/2<br>Headphones → out 3/4</span>`;
+document.querySelectorAll<HTMLInputElement>("[data-mix]").forEach((el) => {
+  const [g, k] = el.dataset.mix!.split(" ");
+  el.addEventListener("input", () => control(g, k, +el.value));
+  el.addEventListener("dblclick", () => {
+    el.value = k === "crossfader" ? "0" : "1";
+    control(g, k, +el.value);
+  });
+});
+$<HTMLInputElement>("[data-q]").addEventListener("change", (e) => control("[Master]", "quantize", (e.target as HTMLInputElement).checked ? 1 : 0));
+
+// ---- keyboard ------------------------------------------------------------------------------
+
+function sendBinding(b: KeyBinding, value: number) {
+  if (b.group === "[Library]" || b.key === "LoadSelectedTrack") libraryControl({ group: b.group, key: b.key, value });
+  else control(b.group, b.key, value);
+}
+
+installKeyboard({
+  send: sendBinding,
+  isOn: (group, key) => decks[group === "[Channel2]" ? 1 : 0].isOn(key),
+  onLayer: (typing) => {
+    const el = $("#key-layer");
+    el.textContent = typing ? "TYPING" : "DECK KEYS";
+    el.classList.toggle("typing", typing);
+  },
+  focusSearch: () => $<HTMLInputElement>("#search").focus(),
+});
+$("#help").innerHTML = keymapHelp();
+$("#help-btn").addEventListener("click", () => $<HTMLDialogElement>("#help").showModal());
+
+// ---- engine state, audio and MIDI status ---------------------------------------------------
+
+let worstCallback = 0;
+listen<EngineState>("engine-state", (s) => {
+  const now = performance.now();
+  engine = s;
+  worstCallback = Math.max(worstCallback, s.audio.max_callback_ms);
+  s.decks.forEach((d, i) => {
+    const was = decks[i].state?.playing;
+    decks[i].update(d, now);
+    if (d.playing && !was) {
+      lastStarted = i;
+      playStarted[i] = now;
+    }
+    if (!d.playing) playStarted[i] = null;
+    const t = decks[i].track;
+    if (t && playStarted[i] != null && now - playStarted[i]! > 30_000) played.add(t.id);
+  });
+});
+
+async function showAudio() {
+  const info = await invoke<OutputInfo | null>("audio_info");
+  const el = $("#audio-status");
+  if (!info) {
+    el.textContent = "no audio";
+    return;
+  }
+  el.textContent = `${info.null ? "⚠ " : ""}${info.device} · ${info.sample_rate / 1000} kHz · ${info.buffer_frames ?? "default"} frames · ${info.channels} ch`;
+  el.className = `pill ${info.null ? "warn" : "ok"}`;
+  el.title = info.null
+    ? "No audio device: the engine is running on a timer so the UI can be tested. Set EARSHOT_AUDIO_DEVICE or check your sound card."
+    : `${info.sample_format}. Master on outputs 1/2${info.channels >= 4 ? ", headphones on 3/4" : " (no headphone outputs on this device)"}.`;
+}
+
+async function connectMidi() {
+  const el = $("#midi-status");
+  try {
+    const ports = await invoke<string[]>("midi_connect");
+    el.textContent = ports.length ? `MIDI: ${ports.join(", ")}` : "MIDI: none";
+    el.className = `pill ${ports.length ? "ok" : ""}`;
+  } catch (e) {
+    el.textContent = `MIDI: ${e}`;
+  }
+}
+$("#midi-status").addEventListener("click", connectMidi);
+
+const midiLines: string[] = [];
+listen<MidiEvent>("midi", (m) => {
+  const hex = m.bytes.map((b) => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
+  midiLines.unshift(`${hex} → ${m.mapped ?? "unmapped"}`);
+  midiLines.length = Math.min(midiLines.length, 6);
+  $("#midi-log").textContent = `MIDI  ${midiLines.join("   |   ")}`;
+});
+
+// ---- frame loop and HUD ---------------------------------------------------------------------
+
+const hud = new FrameStats();
+let bench: FrameStats | null = null;
+let benchTick: ((now: number) => void) | null = null;
+let lastFrame = performance.now();
+function frame(now: number) {
+  const dt = now - lastFrame;
+  lastFrame = now;
+  hud.add(dt);
+  bench?.add(dt);
+  benchTick?.(now);
+  for (const d of decks) d.frame(now);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+setInterval(() => {
+  hud.trim(2000);
+  const s = hud.summary();
+  $("#fps").textContent = `${s.avgFps.toFixed(0)} fps · 1% ${s.low1Fps.toFixed(0)} · worst ${s.worstMs.toFixed(0)} ms`;
+  if (engine) {
+    const a = engine.audio;
+    const el = $("#audio-load");
+    el.textContent = `cb ${worstCallback.toFixed(2)}/${a.budget_ms.toFixed(1)} ms · slow ${a.slow_callbacks} · xrun ${a.xruns}`;
+    el.style.color = a.xruns || worstCallback > a.budget_ms * 0.8 ? "var(--bad)" : "";
+    worstCallback = 0;
+  }
+}, 500);
+
+// ---- benchmark ------------------------------------------------------------------------------
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const nextFrame = () => new Promise((r) => requestAnimationFrame(r));
+
+async function runBenchmark(log: (s: string) => void) {
+  const DURATION = 12_000;
+  const env = {
+    when: new Date().toISOString(),
+    userAgent: navigator.userAgent,
+    tauri: inTauri,
+    window: `${innerWidth}x${innerHeight} @${devicePixelRatio}x`,
+    gpu: gpuInfo(),
+    audio: await invoke<OutputInfo | null>("audio_info"),
+  };
+  log(`${env.window} · ${env.gpu}\n${env.userAgent}\n`);
+  document.body.classList.remove("export");
+  window.dispatchEvent(new Event("resize"));
+
+  // Two demo tracks: a drifting "live" one on A and a steady one on B, synced.
+  const demoA: Track = { ...syntheticLibrary(1, 900_001)[0], title: "Bench A (124→127 live)", source: { kind: "demo", bpm: 124, end_bpm: 127, key: "8A", seed: 11, title: "Bench A (124→127 live)" } };
+  const demoB: Track = { ...syntheticLibrary(1, 900_002, 9)[0], title: "Bench B (125)", source: { kind: "demo", bpm: 125, key: "9A", seed: 12, title: "Bench B (125)" } };
+  for (const [d, t] of [[0, demoA], [1, demoB]] as const) {
+    byId.set(t.id, t);
+    await loadToDeck(d, t.id);
+  }
+  control("[Channel1]", "play", 1);
+  control("[Channel2]", "sync_enabled", 1);
+  control("[Channel2]", "play", 1);
+
+  const results: Record<string, unknown>[] = [];
+  const keepLib = graphLib;
+  const keepN = synthCount;
+  for (const lib of ["sigma", "cosmos"] as const) {
+    for (const n of [2000, 10000]) {
+      graphLib = lib;
+      synthCount = n;
+      makeGraph();
+      rebuildLibrary();
+      await sleep(1000);
+      const startAudio = engine ? { ...engine.audio } : null;
+      let worstCb = 0;
+      bench = new FrameStats();
+      const t0 = performance.now();
+      let lastSel = 0;
+      await new Promise<void>((done) => {
+        benchTick = (now) => {
+          const t = (now - t0) / DURATION;
+          graph?.benchFrame(Math.min(1, t));
+          if (engine) worstCb = Math.max(worstCb, engine.audio.max_callback_ms);
+          // Change the selection every 2 s, like browsing while playing.
+          if (now - lastSel > 2000) {
+            lastSel = now;
+            setSelected(tracks[Math.floor(Math.random() * tracks.length)].id, "other");
+          }
+          if (t >= 1) {
+            benchTick = null;
+            done();
+          }
+        };
+      });
+      const s = bench.summary();
+      bench = null;
+      const r = {
+        graph: lib,
+        nodes: tracks.length,
+        edges: lastBuild.edges,
+        edgesMs: Math.round(lastBuild.edgesMs),
+        buildMs: Math.round(lastBuild.setDataMs),
+        ...Object.fromEntries(Object.entries(s).map(([k, v]) => [k, Math.round(v * 10) / 10])),
+        audioSlowCallbacks: engine && startAudio ? engine.audio.slow_callbacks - startAudio.slow_callbacks : null,
+        audioXruns: engine && startAudio ? engine.audio.xruns - startAudio.xruns : null,
+        audioWorstCallbackMs: Math.round(worstCb * 100) / 100,
+        audioBudgetMs: engine?.audio.budget_ms ?? null,
+      };
+      results.push(r);
+      log(
+        `${lib.padEnd(6)} ${String(r.nodes).padStart(6)} nodes  ${s.avgFps.toFixed(1).padStart(5)} fps avg  ${s.low1Fps.toFixed(1).padStart(5)} 1%-low  worst ${s.worstMs.toFixed(0).padStart(4)} ms  >33ms ${String(s.over33ms).padStart(3)}  | audio worst ${r.audioWorstCallbackMs} ms, slow ${r.audioSlowCallbacks}, xruns ${r.audioXruns}`,
+      );
+      await nextFrame();
+    }
+  }
+  control("[Channel1]", "play", 0);
+  control("[Channel2]", "play", 0);
+  graphLib = keepLib;
+  synthCount = keepN;
+  makeGraph();
+  rebuildLibrary();
+  graph?.resetCamera();
+  const name = `bench-${env.when.replace(/[:.]/g, "-")}`;
+  const path = await invoke<string>("save_report", { name, json: JSON.stringify({ env, results }, null, 2) });
+  log(`\nSaved ${path}`);
+}
+
+$("#bench-btn").addEventListener("click", () => $<HTMLDialogElement>("#bench-dialog").showModal());
+$("#bench-close").addEventListener("click", () => $<HTMLDialogElement>("#bench-dialog").close());
+$("#bench-run").addEventListener("click", async () => {
+  const out = $("#bench-out");
+  const btn = $<HTMLButtonElement>("#bench-run");
+  out.textContent = "";
+  btn.disabled = true;
+  try {
+    await runBenchmark((s) => (out.textContent += `${s}\n`));
+  } catch (e) {
+    out.textContent += `\nFailed: ${e}`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ---- start --------------------------------------------------------------------------------
+
+rebuildLibrary();
+void showAudio();
+void connectMidi();
+// Something on the decks from the start, so there is a waveform to look at.
+for (const [d, src] of [[0, { bpm: 124, end_bpm: 127, key: "8A", seed: 1, title: "Demo A (live drummer, 124→127)" }], [1, { bpm: 126, key: "9A", seed: 2, title: "Demo B (126)" }]] as const) {
+  const t: Track = { ...syntheticLibrary(1, 800_000 + d)[0], title: src.title, bpm: src.bpm, key: src.key, source: { kind: "demo", ...src } };
+  byId.set(t.id, t);
+  void loadToDeck(d, t.id);
+}

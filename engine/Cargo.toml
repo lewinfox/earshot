@@ -1,0 +1,15 @@
+[package]
+name = "earshot-engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cpal = "0.18.2"
+rtrb = "0.4.0"
+serde = { version = "1.0.229", features = ["derive"] }
+symphonia = { version = "0.6.1", features = ["mp3", "aac", "isomp4", "alac"] }
+
+# Ask rtkit for real-time priority on the audio thread (cpal's `realtime` alone is a
+# no-op on Linux). Needs libdbus-1-dev to build.
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { version = "0.18.2", features = ["realtime-dbus"] }
