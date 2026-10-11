@@ -1154,7 +1154,7 @@ impl eframe::App for EarshotApp {
                     ui.allocate_ui(vec2(mixer_w, 0.0), |ui| {
                         egui::Frame::new()
                             .fill(util::PANEL)
-                            .stroke(Stroke::new(1.0, util::LINE))
+                            .stroke(Stroke::new(1.0_f32, util::LINE))
                             .corner_radius(8)
                             .inner_margin(egui::Margin::symmetric(8, 6))
                             .show(ui, |ui| {
@@ -1286,7 +1286,7 @@ fn bar_frame() -> egui::Frame {
 fn pill(ui: &mut Ui, text: &str, border: egui::Color32) -> egui::Response {
     egui::Frame::new()
         .fill(util::PANEL_2)
-        .stroke(Stroke::new(1.0, border))
+        .stroke(Stroke::new(1.0_f32, border))
         .corner_radius(10)
         .inner_margin(egui::Margin::symmetric(8, 2))
         .show(ui, |ui| ui.label(RichText::new(text).size(11.0)))

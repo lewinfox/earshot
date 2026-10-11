@@ -311,7 +311,7 @@ fn drop_target(ui: &Ui, r: &egui::Response, folder: Option<i64>, actions: &mut V
     ui.painter().rect_stroke(
         r.rect,
         3,
-        Stroke::new(1.0, util::ACCENT),
+        Stroke::new(1.0_f32, util::ACCENT),
         egui::StrokeKind::Inside,
     );
     if ui.input(|i| i.pointer.any_released())
@@ -326,7 +326,7 @@ fn drop_target(ui: &Ui, r: &egui::Response, folder: Option<i64>, actions: &mut V
 fn flow_icon(ui: &mut Ui, linear: bool) {
     let (rect, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
     let p = ui.painter();
-    let s = Stroke::new(1.3, Color32::from_gray(140));
+    let s = Stroke::new(1.3_f32, Color32::from_gray(140));
     let (l, r, c) = (rect.left() + 1.0, rect.right() - 1.0, rect.center());
     if linear {
         for dy in [-3.5, 0.0, 3.5] {

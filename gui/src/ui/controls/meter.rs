@@ -81,7 +81,7 @@ impl Widget for Meter {
         let y = rect.bottom() - zero as f32 * rect.height();
         p.line_segment(
             [pos2(rect.left(), y), pos2(rect.right(), y)],
-            egui::Stroke::new(1.0, util::TEXT),
+            egui::Stroke::new(1.0_f32, util::TEXT),
         );
         resp
     }

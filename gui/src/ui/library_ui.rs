@@ -740,7 +740,7 @@ fn status(ui: &mut Ui, t: &Track) {
         }
         Mark::Ring(col) => {
             ui.painter()
-                .circle_stroke(c, 3.5, egui::Stroke::new(1.2, col));
+                .circle_stroke(c, 3.5, egui::Stroke::new(1.2_f32, col));
         }
         Mark::Text(s, col) => {
             ui.painter().text(

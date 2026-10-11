@@ -333,6 +333,6 @@ pub fn show(ui: &mut Ui, shared: Option<&Shared>, actions: &mut Vec<Action>) {
             egui::pos2(x, area.top()),
             egui::pos2(x, area.top() + FADER_BOTTOM),
         ],
-        egui::Stroke::new(1.0, util::LINE),
+        egui::Stroke::new(1.0_f32, util::LINE),
     );
 }

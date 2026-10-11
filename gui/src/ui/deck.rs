@@ -480,7 +480,7 @@ impl DeckUi {
         let info = loading.as_ref().unwrap_or(info);
         let frame = egui::Frame::new()
             .fill(util::PANEL)
-            .stroke(Stroke::new(1.0, util::LINE))
+            .stroke(Stroke::new(1.0_f32, util::LINE))
             .corner_radius(8)
             .inner_margin(egui::Margin::symmetric(8, 6));
         let resp = frame
@@ -520,7 +520,7 @@ impl DeckUi {
             ui.painter().rect_stroke(
                 resp.rect,
                 8.0,
-                Stroke::new(2.0, util::ACCENT),
+                Stroke::new(2.0_f32, util::ACCENT),
                 StrokeKind::Inside,
             );
         }
@@ -623,7 +623,7 @@ impl DeckUi {
             c,
             r,
             Color32::from_rgb(0x0c, 0x0d, 0x10),
-            Stroke::new(3.0, self.colour()),
+            Stroke::new(3.0_f32, self.colour()),
         );
         if self.pending.is_none() {
             let a = ((self.shown / 1.8).fract() as f32) * TAU - TAU / 4.0;
@@ -983,7 +983,7 @@ impl DeckUi {
             if ui
                 .add(
                     Button::new(RichText::new("Anchor 1 here").strong())
-                        .stroke(Stroke::new(1.0, self.colour())),
+                        .stroke(Stroke::new(1.0_f32, self.colour())),
                 )
                 .on_hover_text(
                     "Move the grid so a beat lands exactly on the playhead, and make it the 1",

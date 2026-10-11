@@ -455,7 +455,7 @@ impl FlowUi {
                             Port::Out => (pos2(n.pos.x + NODE_W, n.pos.y + NODE_H / 2.0), at),
                             Port::In => (at, pos2(n.pos.x, n.pos.y + NODE_H / 2.0)),
                         };
-                        edge(ui, a, b, Stroke::new(2.0, util::ACCENT));
+                        edge(ui, a, b, Stroke::new(2.0_f32, util::ACCENT));
                     }
                 }
                 for n in &self.nodes {
@@ -628,14 +628,14 @@ impl FlowUi {
                     map,
                     4,
                     Color32::from_black_alpha(200),
-                    Stroke::new(1.0, CARD_LINE),
+                    Stroke::new(1.0_f32, CARD_LINE),
                     egui::StrokeKind::Outside,
                 );
                 for n in &self.nodes {
                     if let Some(parent) = self.nodes.iter().find(|m| Some(m.id) == n.parent) {
                         let a = to_map(pos2(parent.pos.x + NODE_W, parent.pos.y + NODE_H / 2.0));
                         let b = to_map(pos2(n.pos.x, n.pos.y + NODE_H / 2.0));
-                        p.line_segment([a, b], Stroke::new(1.0, util::MUTED));
+                        p.line_segment([a, b], Stroke::new(1.0_f32, util::MUTED));
                     }
                 }
                 for n in &self.nodes {
@@ -657,7 +657,7 @@ impl FlowUi {
                 p.rect_stroke(
                     view,
                     2,
-                    Stroke::new(1.5, Color32::WHITE),
+                    Stroke::new(1.5_f32, Color32::WHITE),
                     egui::StrokeKind::Inside,
                 );
                 if (resp.clicked() || resp.dragged())
@@ -740,7 +740,7 @@ impl FlowUi {
     }
 
     fn edges(&self, ui: &Ui) {
-        let stroke = Stroke::new(2.0, Color32::from_rgb(0x5a, 0x5f, 0x73));
+        let stroke = Stroke::new(2.0_f32, Color32::from_rgb(0x5a, 0x5f, 0x73));
         for n in &self.nodes {
             let Some(p) = n.parent.and_then(|p| self.nodes.iter().find(|m| m.id == p)) else {
                 continue;
@@ -888,7 +888,7 @@ impl FlowUi {
                                     ui.painter().rect_stroke(
                                         row.rect.expand(1.0),
                                         3,
-                                        Stroke::new(1.0, util::ACCENT),
+                                        Stroke::new(1.0_f32, util::ACCENT),
                                         egui::StrokeKind::Outside,
                                     );
                                 }
@@ -1005,7 +1005,7 @@ fn card(
         rect,
         8,
         CARD,
-        Stroke::new(if state.selected { 2.0 } else { 1.0 }, border),
+        Stroke::new(if state.selected { 2.0 } else { 1.0_f32 }, border),
         egui::StrokeKind::Inside,
     );
     seek_bar(ui, n, t, &state, actions);
@@ -1067,10 +1067,10 @@ fn card(
             )
             .on_hover_text("Remove from the Flow (Delete)");
         let col = if x.hovered() { util::WARN } else { util::MUTED };
-        ui.painter().circle(c, 9.0, util::BG, Stroke::new(1.5, col));
+        ui.painter().circle(c, 9.0, util::BG, Stroke::new(1.5_f32, col));
         for d in [vec2(3.5, 3.5), vec2(3.5, -3.5)] {
             ui.painter()
-                .line_segment([c - d, c + d], Stroke::new(1.5, col));
+                .line_segment([c - d, c + d], Stroke::new(1.5_f32, col));
         }
         if x.clicked() {
             out.push(CardAction::Remove(n.id));
@@ -1095,7 +1095,7 @@ fn card(
         util::MUTED
     };
     ui.painter()
-        .circle(c_in, 5.0, util::BG, Stroke::new(2.0, col));
+        .circle(c_in, 5.0, util::BG, Stroke::new(2.0_f32, col));
 
     // "+" on the right edge: click for suggestions, drag to link to the next card.
     let c = pos2(rect.right(), rect.center().y);
@@ -1115,7 +1115,7 @@ fn card(
         util::MUTED
     };
     ui.painter()
-        .circle(c, 13.0, util::BG, Stroke::new(2.0, col));
+        .circle(c, 13.0, util::BG, Stroke::new(2.0_f32, col));
     ui.painter().text(
         c,
         Align2::CENTER_CENTER,
@@ -1182,7 +1182,7 @@ fn seek_bar(ui: &mut Ui, n: &Node, t: &Track, state: &CardState, actions: &mut V
         );
         p.line_segment(
             [pos2(x, bar.top() - 2.0), pos2(x, bar.bottom() + 2.0)],
-            Stroke::new(2.0, util::ACCENT),
+            Stroke::new(2.0_f32, util::ACCENT),
         );
     }
 }
@@ -1326,7 +1326,7 @@ fn pick_tile(ui: &mut Ui, w: f32, t: &Track, lib: &LibraryUi, score: f64) -> egu
         7,
         CARD,
         Stroke::new(
-            1.0,
+            1.0_f32,
             if resp.hovered() {
                 util::ACCENT
             } else {

@@ -129,7 +129,7 @@ impl Widget for Fader<'_> {
             };
             p.line_segment(
                 [c - across * half, c + across * half],
-                Stroke::new(1.0, util::LINE),
+                Stroke::new(1.0_f32, util::LINE),
             );
         }
         for (t, text) in self.marks {
@@ -149,19 +149,19 @@ impl Widget for Fader<'_> {
             );
         }
         // Groove, with the travel from the origin lit faintly.
-        let groove_w = 4.0;
+        let groove_w = 4.0_f32;
         let ends = [at(0.0), at(1.0)];
         p.line_segment(ends, Stroke::new(groove_w, GROOVE));
         let pos = self.range.to_pos(*self.value);
         p.line_segment(
             [at(self.range.origin()), at(pos)],
-            Stroke::new(2.0, util::dim(self.colour, 0.6)),
+            Stroke::new(2.0_f32, util::dim(self.colour, 0.6)),
         );
         if let Some(v) = self.target {
             // A bar across the groove, with a notch beyond it, in the control's colour.
             let c = at(self.range.to_pos(v));
             let w = thick / 2.0;
-            p.line_segment([c - across * w, c + across * w], Stroke::new(2.0, self.colour));
+            p.line_segment([c - across * w, c + across * w], Stroke::new(2.0_f32, self.colour));
             let tip = c + across * (w + 1.0);
             let back = across * 5.0;
             let side = if vertical { vec2(0.0, 3.5) } else { vec2(3.5, 0.0) };
@@ -188,13 +188,13 @@ impl Widget for Fader<'_> {
             cap,
             2.0,
             face,
-            Stroke::new(1.0, util::LINE),
+            Stroke::new(1.0_f32, util::LINE),
             StrokeKind::Inside,
         );
         let half = (if vertical { cap_size.x } else { cap_size.y }) / 2.0 - 2.0;
         p.line_segment(
             [c - across * half, c + across * half],
-            Stroke::new(2.0, self.colour),
+            Stroke::new(2.0_f32, self.colour),
         );
         resp
     }

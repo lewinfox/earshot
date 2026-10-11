@@ -86,13 +86,13 @@ impl Widget for Knob<'_> {
         // Groove, then the lit arc from the origin (the centre for detented knobs).
         p.add(Shape::line(
             arc(c, r, 0.0, 1.0),
-            Stroke::new(3.0, ARC_TRACK),
+            Stroke::new(3.0_f32, ARC_TRACK),
         ));
         let origin = self.range.origin();
         if (pos - origin).abs() > 1e-3 {
             p.add(Shape::line(
                 arc(c, r, origin, pos),
-                Stroke::new(3.0, self.colour),
+                Stroke::new(3.0_f32, self.colour),
             ));
         }
         let face = if resp.hovered() || resp.dragged() {
@@ -100,12 +100,12 @@ impl Widget for Knob<'_> {
         } else {
             FACE
         };
-        p.circle(c, r - 4.0, face, Stroke::new(1.0, util::LINE));
+        p.circle(c, r - 4.0, face, Stroke::new(1.0_f32, util::LINE));
         let a = angle(pos);
         let dir = vec2(a.cos(), a.sin());
         p.line_segment(
             [c + dir * (r - 12.0).max(1.0), c + dir * (r - 4.5)],
-            Stroke::new(2.0, util::TEXT),
+            Stroke::new(2.0_f32, util::TEXT),
         );
         if let Some(label) = self.label {
             p.text(

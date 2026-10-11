@@ -218,10 +218,10 @@ pub fn scrolling(
             if g.position_of(i) == 1 {
                 painter.line_segment(
                     [pos2(x, rect.top()), pos2(x, rect.bottom())],
-                    Stroke::new(1.5, Color32::from_rgba_unmultiplied(255, 70, 70, 230)),
+                    Stroke::new(1.5_f32, Color32::from_rgba_unmultiplied(255, 70, 70, 230)),
                 );
             } else {
-                let s = Stroke::new(1.0, Color32::from_white_alpha(90));
+                let s = Stroke::new(1.0_f32, Color32::from_white_alpha(90));
                 let tick = rect.height() * 0.18;
                 painter.line_segment([pos2(x, rect.top()), pos2(x, rect.top() + tick)], s);
                 painter.line_segment([pos2(x, rect.bottom() - tick), pos2(x, rect.bottom())], s);
@@ -235,7 +235,7 @@ pub fn scrolling(
         let x = x_of(t);
         painter.line_segment(
             [pos2(x, rect.top()), pos2(x, rect.bottom())],
-            Stroke::new(2.0, c),
+            Stroke::new(2.0_f32, c),
         );
         painter.add(Shape::convex_polygon(
             vec![
@@ -264,7 +264,7 @@ pub fn scrolling(
     }
     painter.line_segment(
         [pos2(cx, rect.top()), pos2(cx, rect.bottom())],
-        Stroke::new(2.0, Color32::WHITE),
+        Stroke::new(2.0_f32, Color32::WHITE),
     );
 }
 
@@ -346,7 +346,7 @@ pub fn overview(
     }
     painter.line_segment(
         [pos2(x_of(pos), rect.top()), pos2(x_of(pos), rect.bottom())],
-        Stroke::new(2.0, Color32::WHITE),
+        Stroke::new(2.0_f32, Color32::WHITE),
     );
     if let Some(p) = analysing {
         let r = Rect::from_min_size(

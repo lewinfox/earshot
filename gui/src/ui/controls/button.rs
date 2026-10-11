@@ -101,7 +101,7 @@ impl Widget for HwButton<'_> {
         };
         let p = ui.painter();
         let stroke = Stroke::new(
-            if self.round { 1.5 } else { 1.0 },
+            if self.round { 1.5 } else { 1.0_f32 },
             if resp.hovered() {
                 util::dim(border, 1.3)
             } else {
