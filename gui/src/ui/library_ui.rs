@@ -13,6 +13,7 @@ use super::wave;
 use crate::core::analysis::DYNAMIC_SOURCE;
 use crate::core::db::LibTrack;
 use crate::core::library::{self, Subdir};
+use crate::core::suggest::Candidate;
 
 const ANALYSED_SOURCES: [&str; 4] = ["analysis", DYNAMIC_SOURCE, "user", "tempo-lock sidecar"];
 
@@ -52,8 +53,17 @@ impl Track {
 }
 
 pub enum LibAction {
-    Load { deck: Option<usize>, track_id: i64 },
-    Analyse { ids: Vec<i64>, dynamic: bool },
+    Load {
+        deck: Option<usize>,
+        track_id: i64,
+    },
+    Analyse {
+        ids: Vec<i64>,
+        dynamic: bool,
+    },
+    AddToFlow(Vec<i64>),
+    /// Start (or stop) playing a track in the headphones.
+    Preview(i64),
     RemoveFolder(String),
 }
 
@@ -121,6 +131,19 @@ impl LibraryUi {
         }
         self.dirty = true;
         self.version += 1;
+    }
+
+    /// Every track, as the suggestion scorer sees it.
+    pub fn candidates(&self) -> Vec<Candidate> {
+        self.tracks
+            .iter()
+            .map(|t| Candidate {
+                id: t.lib.id,
+                bpm: t.bpm(),
+                key: t.key,
+                energy: t.energy,
+            })
+            .collect()
     }
 
     pub fn track_mut(&mut self, id: i64) -> Option<&mut Track> {
@@ -543,6 +566,11 @@ impl LibraryUi {
             .filter(|i| self.chosen.contains(i))
             .collect();
         if chosen.len() > 1 {
+            if ui.button(format!("Add {} to Flow", chosen.len())).clicked() {
+                actions.push(LibAction::AddToFlow(chosen.clone()));
+                ui.close();
+            }
+            ui.separator();
             let fresh: Vec<i64> = chosen
                 .iter()
                 .copied()
@@ -592,6 +620,14 @@ impl LibraryUi {
                 });
                 ui.close();
             }
+        }
+        if ui.button("Preview in headphones").clicked() {
+            actions.push(LibAction::Preview(id));
+            ui.close();
+        }
+        if ui.button("Add to Flow").clicked() {
+            actions.push(LibAction::AddToFlow(vec![id]));
+            ui.close();
         }
         ui.separator();
         if ui

@@ -200,6 +200,10 @@ impl SuggestUi {
                 }
                 resp.dnd_set_drag_payload(s.id);
                 resp.context_menu(|ui| {
+                    if ui.button("Preview in headphones").clicked() {
+                        actions.push(LibAction::Preview(s.id));
+                        ui.close();
+                    }
                     for (deck, label) in [(0, "Load to deck A"), (1, "Load to deck B")] {
                         if ui.button(label).clicked() {
                             actions.push(LibAction::Load {

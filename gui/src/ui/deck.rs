@@ -58,6 +58,7 @@ struct State {
     duration: f64,
     playing: bool,
     speed: f64,
+    tempo: f64,
     rate: f64,
     bpm: Option<f64>,
     sync: bool,
@@ -84,6 +85,7 @@ fn read(sh: &DeckShared) -> State {
         duration: sh.duration.get(),
         playing: sh.playing.load(Relaxed),
         speed: sh.speed.get(),
+        tempo: sh.tempo.get(),
         rate: sh.rate.get(),
         bpm: finite(sh.bpm.get()),
         sync: sh.sync.load(Relaxed),
@@ -194,8 +196,9 @@ impl DeckUi {
     // ---- the scrolling waveform (drawn in the stacked row above the decks) -----------
 
     /// `half_window`: real seconds visible either side of the playhead, shared by both
-    /// decks. Each shows `half_window × speed` of its track, so both scroll at the same
-    /// speed and beat markers are spaced by the tempo you hear.
+    /// decks. Each shows `half_window × tempo` of its track, so both scroll at the same
+    /// speed and beat markers are spaced by the tempo you hear. (Tempo, not speed: sync's
+    /// phase corrections and nudges would make the zoom wobble.)
     pub fn show_wave(
         &mut self,
         ui: &mut Ui,
@@ -207,8 +210,8 @@ impl DeckUi {
         let (rect, resp) =
             ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click_and_drag());
         let half = *half_window
-            * if self.state.speed > 0.0 {
-                self.state.speed
+            * if self.state.tempo > 0.0 {
+                self.state.tempo
             } else {
                 1.0
             };

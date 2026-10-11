@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -11,15 +11,17 @@ use std::time::Instant;
 use earshot_engine::{OutputInfo, OutputOptions, Shared};
 use egui::{Key, RichText, Stroke, Ui, vec2};
 
+use super::audio_ui::{AudioAction, AudioUi};
 use super::deck::{Action, DeckInfo, DeckUi};
+use super::flow::FlowUi;
 use super::library_ui::{LibAction, LibraryUi};
 use super::suggest_ui::{RefInfo, SuggestUi};
 use super::util;
 use crate::core::analysis::{Analyser, Mode};
 use crate::core::library::{self, Library};
 use crate::core::midi::{self, Midi};
-use crate::core::player::{self, Player};
-use crate::core::suggest::{self, Candidate, Reference};
+use crate::core::player::{self, AudioSettings, Player};
+use crate::core::suggest::{self, Reference};
 use crate::core::{Event, Sink, controls, db};
 
 pub struct EarshotApp {
@@ -37,6 +39,7 @@ pub struct EarshotApp {
     half_window: f64,
     library: LibraryUi,
     suggest: SuggestUi,
+    flow: FlowUi,
     /// Which list the keyboard and the controller's browse knob move through.
     pane: Pane,
     /// The deck that most recently started playing (the live reference).
@@ -47,6 +50,10 @@ pub struct EarshotApp {
     mixer: Mixer,
     hud: Hud,
     show_keys: bool,
+    audio_settings: AudioSettings,
+    audio_ui: AudioUi,
+    /// The track asked to play in the headphones, and whether it's still decoding.
+    preview: Option<(i64, Arc<AtomicBool>)>,
     /// Keys held down for deck buttons, so release sends 0.
     held_keys: HashSet<Key>,
     /// Folders picked in the import dialog (on its own thread).
@@ -57,6 +64,34 @@ pub struct EarshotApp {
 enum Pane {
     Library,
     Suggest,
+}
+
+/// Where the Flow and audio settings are kept in eframe's storage.
+const FLOW_KEY: &str = "earshot.flow";
+const AUDIO_KEY: &str = "earshot.audio";
+
+/// Start audio on the chosen device; failing that the default one, then the null
+/// output (so the app still runs without a sound card).
+fn start_audio(player: &Player, settings: &AudioSettings) -> Result<OutputInfo, String> {
+    let opts = player::output_options(settings);
+    player::start_engine(player, &opts)
+        .or_else(|e| {
+            if opts.device.is_none() {
+                return Err(e);
+            }
+            eprintln!("audio: {e}; trying the default device");
+            player::start_engine(
+                player,
+                &OutputOptions {
+                    device: None,
+                    ..opts.clone()
+                },
+            )
+        })
+        .or_else(|e| {
+            eprintln!("audio: {e}; falling back to the null output");
+            player::start_engine(player, &OutputOptions { null: true, ..opts })
+        })
 }
 
 /// A track counts as played once it has been playing this long.
@@ -107,11 +142,12 @@ impl EarshotApp {
         });
 
         let player = player::new_player();
-        let opts = player::options_from_env();
-        let audio = player::start_engine(&player, &opts).or_else(|e| {
-            eprintln!("audio: {e}; falling back to the null output");
-            player::start_engine(&player, &OutputOptions { null: true, ..opts })
-        });
+        let audio_settings: AudioSettings = cc
+            .storage
+            .and_then(|s| eframe::get_value(s, AUDIO_KEY))
+            .unwrap_or_default();
+        player.lock().unwrap().routing = audio_settings.routing;
+        let audio = start_audio(&player, &audio_settings);
         let shared = player.lock().unwrap().shared();
 
         let db = db::open(&data_dir().join("earshot.db"))?;
@@ -136,6 +172,11 @@ impl EarshotApp {
             half_window: 4.0,
             library: LibraryUi::default(),
             suggest: SuggestUi::default(),
+            flow: FlowUi::from_saved(
+                cc.storage
+                    .and_then(|s| eframe::get_value(s, FLOW_KEY))
+                    .unwrap_or_default(),
+            ),
             pane: Pane::Library,
             last_started: None,
             play_started: [None; 2],
@@ -147,6 +188,9 @@ impl EarshotApp {
             },
             hud: Hud::default(),
             show_keys: false,
+            audio_settings,
+            audio_ui: AudioUi::default(),
+            preview: None,
             held_keys: HashSet::new(),
             picked: Arc::new(Mutex::new(None)),
         };
@@ -250,7 +294,7 @@ impl EarshotApp {
                 .find(|&d| sh.decks[d].playing.load(Relaxed) && inner.decks[d].track_id.is_some())
                 .map(|d| {
                     let bpm = sh.decks[d].bpm.get();
-                    let speed = sh.decks[d].speed.get();
+                    let speed = sh.decks[d].tempo.get();
                     (
                         d,
                         inner.decks[d].track_id.unwrap(),
@@ -286,17 +330,7 @@ impl EarshotApp {
         if stamp == self.suggest.computed_for {
             return;
         }
-        let candidates: Vec<Candidate> = self
-            .library
-            .tracks
-            .iter()
-            .map(|t| Candidate {
-                id: t.lib.id,
-                bpm: t.bpm(),
-                key: t.key,
-                energy: t.energy,
-            })
-            .collect();
+        let candidates = self.library.candidates();
         let reference = Reference {
             id,
             bpm,
@@ -314,6 +348,62 @@ impl EarshotApp {
         });
         self.suggest.set(list);
         self.suggest.computed_for = stamp;
+    }
+
+    /// Play a track in the headphones, or stop it if it's the one already playing.
+    fn toggle_preview(&mut self, id: i64) {
+        if self.preview_state().is_some_and(|(p, _)| p == id) {
+            self.preview = None;
+            if let Err(e) = player::stop_preview(&self.player) {
+                eprintln!("preview: {e}");
+            }
+            return;
+        }
+        let decoding = Arc::new(AtomicBool::new(true));
+        self.preview = Some((id, decoding.clone()));
+        let (player, db) = (self.player.clone(), self.lib.db.clone());
+        std::thread::spawn(move || {
+            if let Err(e) = player::preview(&player, &db, id) {
+                eprintln!("preview: {e}");
+            }
+            decoding.store(false, Relaxed);
+        });
+    }
+
+    /// The track previewing (or about to) and how far through it is, 0..1.
+    fn preview_state(&self) -> Option<(i64, f32)> {
+        let (id, decoding) = self.preview.as_ref()?;
+        if decoding.load(Relaxed) {
+            return Some((*id, 0.0));
+        }
+        let sh = self.shared.as_ref()?;
+        if !sh.preview_playing.load(Relaxed) {
+            return None;
+        }
+        let d = sh.preview_duration.get();
+        let f = if d > 0.0 {
+            sh.preview_position.get() / d
+        } else {
+            0.0
+        };
+        Some((*id, f as f32))
+    }
+
+    fn apply_audio(&mut self, a: AudioAction) {
+        match a {
+            AudioAction::Route(r) => {
+                self.audio_settings.routing = Some(r);
+                if let Err(e) = player::set_routing(&self.player, r) {
+                    eprintln!("routing: {e}");
+                }
+            }
+            AudioAction::Restart(settings) => {
+                self.audio_settings = settings;
+                self.preview = None;
+                self.audio = start_audio(&self.player, &self.audio_settings);
+                self.shared = self.player.lock().unwrap().shared();
+            }
+        }
     }
 
     fn analyse(&self, ids: Vec<i64>, dynamic: bool) {
@@ -530,6 +620,10 @@ impl EarshotApp {
                         ui.close();
                     }
                 });
+                if ui.button("Audio…").clicked() {
+                    self.audio_ui.toggle();
+                    ui.close();
+                }
                 if ui.button("Rescan library").clicked() {
                     self.rescan();
                     ui.close();
@@ -563,7 +657,12 @@ impl EarshotApp {
                 ),
                 Err(e) => (format!("no audio: {e}"), false),
             };
-            pill(ui, &audio, if ok { util::OK } else { util::WARN });
+            if pill(ui, &audio, if ok { util::OK } else { util::WARN })
+                .on_hover_text("Audio settings")
+                .clicked()
+            {
+                self.audio_ui.toggle();
+            }
             let midi = if self.midi_ports.is_empty() {
                 "MIDI: none".to_string()
             } else {
@@ -758,6 +857,11 @@ impl EarshotApp {
 }
 
 impl eframe::App for EarshotApp {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, AUDIO_KEY, &self.audio_settings);
+        eframe::set_value(storage, FLOW_KEY, &self.flow.saved());
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
         self.keyboard(ctx);
@@ -786,12 +890,14 @@ impl eframe::App for EarshotApp {
                         .color(util::MUTED),
                 );
             });
+        // Full-screen Flow hides the decks and side panes while planning.
+        let planning = self.flow.open && self.flow.full;
         egui::TopBottomPanel::top("waves")
             .resizable(true)
             .default_height(150.0)
             .height_range(60.0..=520.0)
             .frame(egui::Frame::new().fill(util::BG).inner_margin(6))
-            .show(ctx, |ui| {
+            .show_animated(ctx, !planning, |ui| {
                 let h = (ui.available_height() - 3.0) / 2.0;
                 ui.spacing_mut().item_spacing.y = 3.0;
                 for d in 0..2 {
@@ -804,7 +910,7 @@ impl eframe::App for EarshotApp {
                     .fill(util::BG)
                     .inner_margin(egui::Margin::symmetric(6, 4)),
             )
-            .show(ctx, |ui| {
+            .show_animated(ctx, !planning, |ui| {
                 let mixer_w = 130.0;
                 let w = (ui.available_width() - mixer_w - 12.0) / 2.0;
                 ui.horizontal_top(|ui| {
@@ -827,14 +933,14 @@ impl eframe::App for EarshotApp {
             .resizable(true)
             .default_width(250.0)
             .width_range(140.0..=600.0)
-            .show(ctx, |ui| {
+            .show_animated(ctx, !planning, |ui| {
                 self.library.tree(ui, &mut lib_actions);
             });
         egui::SidePanel::right("suggest")
             .resizable(true)
             .default_width(380.0)
             .width_range(240.0..=700.0)
-            .show(ctx, |ui| {
+            .show_animated(ctx, !planning, |ui| {
                 let focus = self.pane == Pane::Suggest;
                 if self
                     .suggest
@@ -844,10 +950,34 @@ impl eframe::App for EarshotApp {
                 }
             });
         egui::CentralPanel::default().show(ctx, |ui| {
-            if self.library.list(ui, &mut lib_actions) {
+            ui.horizontal(|ui| {
+                if ui.selectable_label(!self.flow.open, "Tracks").clicked() {
+                    self.flow.open = false;
+                }
+                if ui
+                    .selectable_label(self.flow.open, "Flow")
+                    .on_hover_text("Plan a set: add tracks, then grow it from suggestions")
+                    .clicked()
+                {
+                    self.flow.open = true;
+                }
+            });
+            ui.separator();
+            if self.flow.open {
+                let preview = self.preview_state();
+                self.flow.show(ui, &self.library, preview, &mut lib_actions);
+            } else if self.library.list(ui, &mut lib_actions) {
                 self.pane = Pane::Library;
             }
         });
+
+        let routing = player::routing(&self.player, self.audio.as_ref().map_or(2, |i| i.channels));
+        if let Some(a) = self
+            .audio_ui
+            .show(ctx, &self.audio_settings, &self.audio, routing)
+        {
+            self.apply_audio(a);
+        }
 
         if self.show_keys {
             egui::Window::new("Keyboard")
@@ -871,6 +1001,13 @@ impl eframe::App for EarshotApp {
             match a {
                 LibAction::Load { deck, track_id } => self.load(deck, track_id),
                 LibAction::Analyse { ids, dynamic } => self.analyse(ids, dynamic),
+                LibAction::Preview(id) => self.toggle_preview(id),
+                LibAction::AddToFlow(ids) => {
+                    self.flow.open = true;
+                    for id in ids {
+                        self.flow.add_root(id);
+                    }
+                }
                 LibAction::RemoveFolder(path) => {
                     if let Ok(list) = library::remove_folder(&self.lib.db, &path) {
                         self.library.folders = list;
@@ -1065,6 +1202,45 @@ mod tests {
             t.elapsed().as_secs_f64() * 1000.0 / n as f64,
             worst * 1000.0
         );
+        h.render().expect("render").save(&path).expect("save");
+    }
+
+    /// The Flow tab with two cards and the "+" suggestions open. Same setup as
+    /// `screenshot`; writes to `EARSHOT_SHOT`.
+    #[test]
+    #[ignore]
+    fn flow_screenshot() {
+        let path = std::env::var("EARSHOT_SHOT").expect("set EARSHOT_SHOT");
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(vec2(1700.0, 1000.0))
+            .wgpu()
+            .build_eframe(|cc| EarshotApp::new(cc).expect("app"));
+        for _ in 0..500 {
+            h.step();
+            std::thread::sleep(Duration::from_millis(16));
+            if !h.state().library.scanning {
+                break;
+            }
+        }
+        let ids: Vec<i64> = h
+            .state()
+            .library
+            .tracks
+            .iter()
+            .filter(|t| t.analysed && t.key.is_some())
+            .take(2)
+            .map(|t| t.lib.id)
+            .collect();
+        let app = h.state_mut();
+        app.flow = FlowUi::from_saved(Default::default());
+        app.flow.open = true;
+        for id in ids {
+            app.flow.add_root(id);
+        }
+        app.flow.fit();
+        h.run_steps(5);
+        h.state_mut().flow.open_first_suggestions();
+        h.run_steps(5);
         h.render().expect("render").save(&path).expect("save");
     }
 }

@@ -40,8 +40,13 @@ pub struct DeckShared {
     pub position: AtomicF64,
     pub duration: AtomicF64,
     pub playing: AtomicBool,
-    /// Current playback speed ratio (1.0 = original tempo), including sync and nudge.
+    /// How fast the audio is advancing right now (1.0 = original tempo), including
+    /// nudges and sync's brief phase corrections. For moving the playhead.
     pub speed: AtomicF64,
+    /// The deck's tempo as a ratio to the track's own: the pitch fader, or the followed
+    /// tempo when synced. Steady: leaves out nudges and phase corrections. For anything
+    /// that shows tempo (waveform zoom, effective key).
+    pub tempo: AtomicF64,
     /// Pitch fader position as a fraction, e.g. 0.02 = +2 %.
     pub rate: AtomicF64,
     /// The track's tempo (its grid's mean) × the tempo fader. NaN without a grid.
@@ -72,11 +77,80 @@ pub struct Shared {
     pub max_callback_ns: AtomicU64,
     pub last_block_frames: AtomicU32,
     pub sample_rate: AtomicU32,
+    /// The preview player (headphones only).
+    pub preview_playing: AtomicBool,
+    pub preview_position: AtomicF64,
+    pub preview_duration: AtomicF64,
 }
 
 impl Shared {
     pub fn take_max_callback_ns(&self) -> u64 {
         self.max_callback_ns.swap(0, Relaxed)
+    }
+}
+
+// ---- output routing ----------------------------------------------------------------
+
+/// Where a stereo bus goes on the device. Channels are 0-based.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Out {
+    Off,
+    /// Left on this channel, right on the next.
+    Stereo(u16),
+    /// Left and right summed onto one channel (e.g. split cueing on a laptop).
+    Mono(u16),
+}
+
+/// Master and headphone buses to device channels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Routing {
+    pub master: Out,
+    pub phones: Out,
+}
+
+impl Routing {
+    /// Master on 1/2, headphones on 3/4 when the device has them (DDJ-400 layout).
+    pub fn default_for(channels: u16) -> Routing {
+        Routing {
+            master: Out::Stereo(0),
+            phones: if channels >= 4 {
+                Out::Stereo(2)
+            } else {
+                Out::Off
+            },
+        }
+    }
+}
+
+impl Default for Routing {
+    fn default() -> Routing {
+        Routing::default_for(4)
+    }
+}
+
+/// Add a stereo frame to `frame` as `out` says. Channels the device lacks are skipped.
+#[inline]
+fn route(frame: &mut [f32], out: Out, l: f32, r: f32) {
+    let ch = frame.len();
+    match out {
+        Out::Off => {}
+        Out::Stereo(c) if ch == 1 => {
+            if c == 0 {
+                frame[0] += 0.5 * (l + r);
+            }
+        }
+        Out::Stereo(c) => {
+            let c = c as usize;
+            if c + 1 < ch {
+                frame[c] += l;
+                frame[c + 1] += r;
+            }
+        }
+        Out::Mono(c) => {
+            if (c as usize) < ch {
+                frame[c as usize] += 0.5 * (l + r);
+            }
+        }
     }
 }
 
@@ -171,6 +245,13 @@ pub enum Command {
     Quantize {
         on: bool,
     },
+    SetRouting(Routing),
+    /// Play a track on the headphone bus only, from `start` seconds.
+    Preview {
+        audio: Arc<TrackAudio>,
+        start: f64,
+    },
+    PreviewStop,
 }
 
 /// Things the audio thread must not free itself.
@@ -207,7 +288,22 @@ struct Deck {
     volume: f32,
     pfl: bool,
     generation: u64,
+    /// While synced: the smoothed tempo ratio to the leader, and the smoothed phase
+    /// correction on top of it. 0 = not following yet.
+    sync_ratio: f64,
+    sync_correction: f64,
+    /// See [`DeckShared::tempo`].
+    tempo: f64,
 }
+
+/// Sync follows the leader's tempo averaged over this many beats either side, so
+/// beat-to-beat wobble in an analysed grid doesn't shake the follower.
+const SYNC_TEMPO_BEATS: usize = 16;
+/// Seconds for the followed tempo and the phase correction to settle.
+const SYNC_TEMPO_SECS: f64 = 0.5;
+const SYNC_PHASE_SECS: f64 = 0.25;
+/// Phase errors smaller than this (beats; ~4 ms at 120 BPM) are left alone.
+const SYNC_DEADBAND: f64 = 0.008;
 
 /// Without a grid, beat maths falls back to 120 BPM from zero.
 const FALLBACK_BEAT: f64 = 0.5;
@@ -232,6 +328,9 @@ impl Deck {
             volume: 1.0,
             pfl: false,
             generation: 0,
+            sync_ratio: 0.0,
+            sync_correction: 0.0,
+            tempo: 1.0,
         }
     }
 
@@ -253,8 +352,12 @@ impl Deck {
         }
     }
 
-    fn local_bpm(&self) -> Option<f64> {
-        self.grid.as_ref().map(|g| g.bpm_at(self.pos, 4))
+    /// Tempo for sync: the grid's tempo around the playhead, averaged widely (the
+    /// grid's one tempo when it is straight).
+    fn sync_bpm(&self) -> Option<f64> {
+        self.grid
+            .as_ref()
+            .map(|g| g.bpm_at(self.pos, SYNC_TEMPO_BEATS))
     }
 
     fn snap(&self, t: f64, quantize: bool) -> f64 {
@@ -292,6 +395,10 @@ pub struct Renderer {
     deck_buf: [Vec<f32>; DECKS],
     master: Vec<f32>,
     phones: Vec<f32>,
+    routing: Routing,
+    preview: Option<Arc<TrackAudio>>,
+    preview_pos: f64,
+    preview_playing: bool,
 }
 
 impl Renderer {
@@ -314,11 +421,15 @@ impl Renderer {
             deck_buf: [vec![0.0; MAX_BLOCK * 2], vec![0.0; MAX_BLOCK * 2]],
             master: vec![0.0; MAX_BLOCK * 2],
             phones: vec![0.0; MAX_BLOCK * 2],
+            routing: Routing::default(),
+            preview: None,
+            preview_pos: 0.0,
+            preview_playing: false,
         }
     }
 
-    /// Render into an interleaved device buffer with `channels` channels. Master goes to
-    /// channels 1–2 and headphones to 3–4 when the device has them (DDJ-400 layout).
+    /// Render into an interleaved device buffer with `channels` channels, routing the
+    /// master and headphone buses as set by [`Command::SetRouting`].
     pub fn process(&mut self, out: &mut [f32], channels: usize) {
         let started = Instant::now();
         let channels = channels.max(1);
@@ -328,26 +439,16 @@ impl Renderer {
             let n = (total - done).min(MAX_BLOCK);
             self.render_block(n);
             let chunk = &mut out[done * channels..(done + n) * channels];
+            let Routing { master, phones } = self.routing;
             for (f, frame) in chunk.chunks_exact_mut(channels).enumerate() {
-                let (ml, mr) = (self.master[2 * f], self.master[2 * f + 1]);
-                match channels {
-                    1 => frame[0] = 0.5 * (ml + mr),
-                    2 | 3 => {
-                        frame[0] = ml;
-                        frame[1] = mr;
+                frame.fill(0.0);
+                route(frame, master, self.master[2 * f], self.master[2 * f + 1]);
+                route(frame, phones, self.phones[2 * f], self.phones[2 * f + 1]);
+                if master != Out::Off && phones != Out::Off {
+                    // Both buses may share channels (a laptop's only pair).
+                    for s in frame.iter_mut() {
+                        *s = s.clamp(-1.0, 1.0);
                     }
-                    _ => {
-                        frame[0] = ml;
-                        frame[1] = mr;
-                        frame[2] = self.phones[2 * f];
-                        frame[3] = self.phones[2 * f + 1];
-                    }
-                }
-                for s in frame.iter_mut().skip(4) {
-                    *s = 0.0;
-                }
-                if channels == 3 {
-                    frame[2] = 0.0;
                 }
             }
             done += n;
@@ -368,7 +469,7 @@ impl Renderer {
         while let Ok(cmd) = self.commands.pop() {
             self.apply(cmd);
         }
-        self.update_speeds();
+        self.update_speeds(n);
 
         let sr = self.sample_rate;
         for d in 0..DECKS {
@@ -429,28 +530,86 @@ impl Renderer {
                 m
             };
         }
+
+        // The preview player plays at its own pace on the headphone bus only.
+        if self.preview_playing
+            && let Some(audio) = self.preview.as_deref()
+        {
+            let src_rate = audio.sample_rate as f64;
+            let duration = audio.duration();
+            for f in 0..n {
+                if self.preview_pos >= duration {
+                    self.preview_playing = false;
+                    break;
+                }
+                let (l, r) = sample_at(audio, self.preview_pos * src_rate);
+                self.phones[2 * f] = (self.phones[2 * f] + 0.8 * l).clamp(-1.0, 1.0);
+                self.phones[2 * f + 1] = (self.phones[2 * f + 1] + 0.8 * r).clamp(-1.0, 1.0);
+                self.preview_pos += 1.0 / sr;
+            }
+        }
     }
 
     /// Synced decks follow the other playing deck's tempo and beat phase, block by block,
-    /// so they keep up when the leader's tempo drifts.
-    fn update_speeds(&mut self) {
-        for d in 0..DECKS {
-            self.decks[d].speed = self.decks[d].base_speed();
+    /// so they keep up when the leader's tempo drifts. Both are smoothed: the tempo is
+    /// averaged over many beats and eased in, and small phase errors are ignored, so
+    /// the follower (and its BPM readout) stays steady when the grids wobble a little.
+    ///
+    /// A paused follower matches the leader's tempo (so its readout and waveform zoom
+    /// are right when it starts) but doesn't correct phase: it isn't moving, so the
+    /// error would just sweep round with every one of the leader's beats.
+    fn update_speeds(&mut self, n: usize) {
+        for dk in &mut self.decks {
+            dk.speed = dk.base_speed();
+            dk.tempo = 1.0 + dk.rate;
         }
+        let secs = n as f64 / self.sample_rate;
+        let ease = |tau: f64| 1.0 - (-secs / tau).exp();
         for d in 0..DECKS {
             let o = 1 - d;
             let (me, other) = (&self.decks[d], &self.decks[o]);
             if !me.sync || other.audio.is_none() || !other.playing {
+                self.decks[d].sync_ratio = 0.0;
+                self.decks[d].sync_correction = 0.0;
                 continue;
             }
-            let (Some(my_bpm), Some(leader_bpm)) = (me.local_bpm(), other.local_bpm()) else {
+            let (Some(my_bpm), Some(leader_bpm)) = (me.sync_bpm(), other.sync_bpm()) else {
                 continue;
             };
-            let target = leader_bpm * other.speed / my_bpm;
-            let err = phase_error(other.beat_at(other.pos), me.beat_at(me.pos));
-            let correction = (err * 0.1).clamp(-0.02, 0.02);
-            self.decks[d].speed = target * (1.0 + correction) * (1.0 + me.nudge);
-            self.decks[d].rate = target - 1.0;
+            // The leader's own sync correction is left out, so two synced decks don't
+            // chase each other's corrections.
+            let leader_speed = other.speed / (1.0 + other.sync_correction);
+            let target = leader_bpm * leader_speed / my_bpm;
+            // The readout shows the leader's readout: both tracks' one tempo, not the
+            // local tempo the speed follows (they are the same for straight grids).
+            let shown = match (&me.grid, &other.grid) {
+                (Some(m), Some(l)) => l.mean_bpm() * (1.0 + other.rate) / m.mean_bpm(),
+                _ => target,
+            };
+            let wanted = if me.playing {
+                let err = phase_error(other.beat_at(other.pos), me.beat_at(me.pos));
+                if err.abs() < SYNC_DEADBAND {
+                    0.0
+                } else {
+                    (err * 0.1).clamp(-0.02, 0.02)
+                }
+            } else {
+                0.0
+            };
+            let me = &mut self.decks[d];
+            me.sync_ratio = if me.sync_ratio == 0.0 || !me.playing {
+                target
+            } else {
+                me.sync_ratio + (target - me.sync_ratio) * ease(SYNC_TEMPO_SECS)
+            };
+            me.sync_correction = if me.playing {
+                me.sync_correction + (wanted - me.sync_correction) * ease(SYNC_PHASE_SECS)
+            } else {
+                0.0
+            };
+            me.speed = me.sync_ratio * (1.0 + me.sync_correction) * (1.0 + me.nudge);
+            me.tempo = me.sync_ratio;
+            me.rate = shown - 1.0;
         }
     }
 
@@ -668,6 +827,20 @@ impl Renderer {
             Command::Pfl { deck, on } => self.decks[deck].pfl = on,
             Command::Crossfader { value } => self.crossfader = value,
             Command::Quantize { on } => self.quantize = on,
+            Command::SetRouting(r) => self.routing = r,
+            Command::Preview { audio, start } => {
+                self.preview_pos = start.clamp(0.0, audio.duration());
+                self.preview_playing = true;
+                if let Some(old) = self.preview.replace(audio) {
+                    self.trash(Garbage::Audio(old));
+                }
+            }
+            Command::PreviewStop => {
+                self.preview_playing = false;
+                if let Some(old) = self.preview.take() {
+                    self.trash(Garbage::Audio(old));
+                }
+            }
         }
     }
 
@@ -675,11 +848,16 @@ impl Renderer {
         let s = &self.shared;
         s.crossfader.set(self.crossfader);
         s.quantize.store(self.quantize, Relaxed);
+        s.preview_playing.store(self.preview_playing, Relaxed);
+        s.preview_position.set(self.preview_pos);
+        s.preview_duration
+            .set(self.preview.as_ref().map_or(0.0, |a| a.duration()));
         for (dk, sh) in self.decks.iter().zip(&s.decks) {
             sh.position.set(dk.pos);
             sh.duration.set(dk.duration());
             sh.playing.store(dk.playing, Relaxed);
             sh.speed.set(dk.speed);
+            sh.tempo.set(dk.tempo);
             sh.rate.set(dk.rate);
             // The track's one tempo times the tempo fader: steady while playing, and
             // unmoved by nudges and sync's small phase corrections. A synced deck's
@@ -861,9 +1039,13 @@ mod tests {
         rig.send(Command::Sync { deck: 1, on: true });
         rig.send(Command::Play { deck: 1, on: true });
         rig.run(40.0);
+        // Playing at the leader's local tempo…
         let lb = leader.bpm_at(rig.pos(0), 4) * rig.shared.decks[0].speed.get();
-        let fb = rig.shared.decks[1].bpm.get();
-        assert!((lb - fb).abs() < 0.2, "tempo {lb} vs {fb}");
+        let fb = follower.bpm_at(rig.pos(1), 4) * rig.shared.decks[1].speed.get();
+        assert!((lb - fb).abs() < 0.3, "tempo {lb} vs {fb}");
+        // …while showing the leader's one steady tempo.
+        let (lr, fr) = (rig.shared.decks[0].bpm.get(), rig.shared.decks[1].bpm.get());
+        assert!((lr - fr).abs() < 1e-9, "readout {lr} vs {fr}");
         let err = phase_error(leader.beat_at(rig.pos(0)), follower.beat_at(rig.pos(1)));
         assert!(err.abs() < 0.02, "phase error {err} beats");
     }
@@ -928,5 +1110,159 @@ mod tests {
         let phones_peak = rig.out.chunks(4).map(|f| f[2].abs()).fold(0.0, f32::max);
         let master_peak = rig.out.chunks(4).map(|f| f[0].abs()).fold(0.0, f32::max);
         assert!(master_peak > 0.01 && phones_peak == 0.0);
+    }
+
+    #[test]
+    fn sync_ignores_wobble_in_the_leaders_grid() {
+        let mut rig = Rig::new();
+        let follower = rig.load(1, 125.0, 125.0);
+        // A 124 BPM leader whose analysed beats are each up to 8 ms off.
+        let (audio, _) = generate(
+            &DemoSpec {
+                start_bpm: 124.0,
+                end_bpm: 124.0,
+                key: "8A".into(),
+                seconds: 60.0,
+                seed: 9,
+            },
+            SR,
+        );
+        let mut seed = 12345u64;
+        let times: Vec<f64> = (0..120)
+            .map(|i| {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let jitter = ((seed >> 33) as f64 / (1u64 << 31) as f64 - 0.5) * 0.016;
+                i as f64 * 60.0 / 124.0 + 0.1 + jitter
+            })
+            .collect();
+        let positions = (0..120).map(|i| (i % 4 + 1) as u8).collect();
+        let leader = Arc::new(Beatgrid::new(times, positions).unwrap());
+        rig.send(Command::Load {
+            deck: 0,
+            audio: Arc::new(audio),
+            grid: Some(leader.clone()),
+            generation: 2,
+        });
+        rig.send(Command::Play { deck: 0, on: true });
+        rig.run(2.0);
+        rig.send(Command::Sync { deck: 1, on: true });
+        rig.send(Command::Play { deck: 1, on: true });
+        rig.run(5.0); // settle
+        let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+        let (mut slo, mut shi) = (f64::MAX, f64::MIN);
+        for _ in 0..400 {
+            rig.run(0.05);
+            let bpm = rig.shared.decks[1].bpm.get();
+            let speed = rig.shared.decks[1].speed.get();
+            (lo, hi) = (lo.min(bpm), hi.max(bpm));
+            (slo, shi) = (slo.min(speed), shi.max(speed));
+        }
+        assert!(hi - lo < 0.05, "BPM readout wanders {lo:.3}..{hi:.3}");
+        assert!(shi / slo - 1.0 < 0.004, "speed wanders {slo:.4}..{shi:.4}");
+        let err = phase_error(leader.beat_at(rig.pos(0)), follower.beat_at(rig.pos(1)));
+        assert!(err.abs() < 0.03, "phase error {err} beats");
+    }
+
+    /// A paused synced deck must hold still while the leader plays (it used to swing
+    /// its speed with every leader beat, and its waveform pulsed), and a playing one
+    /// must show a steady tempo while it corrects phase.
+    #[test]
+    fn synced_follower_tempo_is_steady() {
+        let mut rig = Rig::new();
+        rig.load(0, 124.0, 124.0);
+        rig.load(1, 126.0, 126.0);
+        rig.send(Command::Seek {
+            deck: 1,
+            seconds: 10.3, // off the leader's phase, so playing needs correcting
+        });
+        rig.send(Command::Play { deck: 0, on: true });
+        rig.send(Command::Sync { deck: 1, on: true });
+        let range = |rig: &mut Rig, f: fn(&DeckShared) -> f64| {
+            let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+            for _ in 0..100 {
+                rig.run(0.01);
+                let v = f(&rig.shared.decks[1]);
+                (lo, hi) = (lo.min(v), hi.max(v));
+            }
+            hi - lo
+        };
+        rig.run(0.5);
+        let r = range(&mut rig, |d| d.speed.get());
+        // (It used to swing by up to 4 %; what's left is beat times rounded to samples.)
+        assert!(r < 1e-5, "paused speed moves by {r}");
+        assert!(range(&mut rig, |d| d.tempo.get()) < 1e-5, "paused tempo moves");
+        assert!((rig.shared.decks[1].tempo.get() - 124.0 / 126.0).abs() < 1e-5);
+        rig.send(Command::Play { deck: 1, on: true });
+        rig.send(Command::Nudge {
+            deck: 1,
+            amount: 0.01,
+        });
+        rig.run(0.2);
+        assert!(range(&mut rig, |d| d.tempo.get()) < 1e-5, "playing tempo moves");
+    }
+
+    fn peaks(out: &[f32], channels: usize) -> Vec<f32> {
+        (0..channels)
+            .map(|c| out.chunks(channels).map(|f| f[c].abs()).fold(0.0, f32::max))
+            .collect()
+    }
+
+    #[test]
+    fn preview_plays_on_headphones_only() {
+        let mut rig = Rig::new();
+        let (audio, _) = generate(
+            &DemoSpec {
+                start_bpm: 124.0,
+                end_bpm: 124.0,
+                key: "8A".into(),
+                seconds: 10.0,
+                seed: 5,
+            },
+            SR,
+        );
+        rig.send(Command::Preview {
+            audio: Arc::new(audio),
+            start: 1.0,
+        });
+        rig.run(0.5);
+        let p = peaks(&rig.out, 4);
+        assert!(p[0] == 0.0 && p[1] == 0.0, "master silent: {p:?}");
+        assert!(p[2] > 0.01 && p[3] > 0.01, "phones play: {p:?}");
+        assert!(rig.shared.preview_playing.load(Relaxed));
+        assert!((rig.shared.preview_position.get() - 1.5).abs() < 0.02);
+        rig.send(Command::PreviewStop);
+        rig.run(0.1);
+        assert_eq!(peaks(&rig.out, 4)[2], 0.0);
+        assert!(!rig.shared.preview_playing.load(Relaxed));
+    }
+
+    #[test]
+    fn routing_moves_and_splits_buses() {
+        let mut rig = Rig::new();
+        rig.load(0, 120.0, 120.0);
+        rig.send(Command::Play { deck: 0, on: true });
+        rig.send(Command::Pfl { deck: 1, on: true }); // headphones hear nothing
+        // A laptop's one stereo pair, split: master on the right, headphones on the left.
+        rig.send(Command::SetRouting(Routing {
+            master: Out::Mono(1),
+            phones: Out::Mono(0),
+        }));
+        let mut out = vec![0.0; 256 * 2];
+        for _ in 0..80 {
+            rig.r.process(&mut out, 2);
+        }
+        let p = peaks(&out, 2);
+        assert!(p[0] == 0.0 && p[1] > 0.01, "{p:?}");
+        // Off means silent; a pair the device lacks is skipped.
+        rig.send(Command::SetRouting(Routing {
+            master: Out::Stereo(2),
+            phones: Out::Off,
+        }));
+        for _ in 0..4 {
+            rig.r.process(&mut out, 2);
+        }
+        assert_eq!(peaks(&out, 2), vec![0.0, 0.0]);
     }
 }

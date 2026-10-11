@@ -1,7 +1,9 @@
 //! Drawing: the window and its panels. See app.rs for the layout.
 
 pub mod app;
+pub mod audio_ui;
 pub mod deck;
+pub mod flow;
 pub mod library_ui;
 pub mod suggest_ui;
 pub mod util;

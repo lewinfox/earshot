@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::thread;
 use std::time::Duration;
 
-pub use engine::{Command, DECKS, HOTCUES, Press, RATE_RANGE, Shared};
+pub use engine::{Command, DECKS, HOTCUES, Out, Press, RATE_RANGE, Routing, Shared};
 pub use output::{OutputInfo, OutputOptions};
 
 use engine::{Garbage, Renderer};

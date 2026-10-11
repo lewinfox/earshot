@@ -8,8 +8,10 @@ use std::sync::{Arc, Mutex};
 
 use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::decode::{self, TrackAudio};
-use earshot_engine::{Command, DECKS, Engine, OutputInfo, OutputOptions, Shared, energy, waveform};
-use serde::Deserialize;
+use earshot_engine::{
+    Command, DECKS, Engine, OutputInfo, OutputOptions, Routing, Shared, energy, waveform,
+};
+use serde::{Deserialize, Serialize};
 
 use super::analysis::{self, Mode};
 use super::db;
@@ -37,6 +39,10 @@ pub struct Inner {
     pub generation: u64,
     pub jump_size: [f64; DECKS],
     pub loop_size: [f64; DECKS],
+    /// Output routing; `None` means the default for the device's channel count.
+    pub routing: Option<Routing>,
+    /// Bumped on every preview request, so a slow decode can't start a stale one.
+    pub preview_seq: u64,
 }
 
 impl Inner {
@@ -61,22 +67,85 @@ pub fn new_player() -> Player {
         generation: 0,
         jump_size: [4.0; DECKS],
         loop_size: [4.0; DECKS],
+        routing: None,
+        preview_seq: 0,
     }))
 }
 
-pub fn options_from_env() -> OutputOptions {
+/// Audio settings kept between runs. Environment variables override them.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct AudioSettings {
+    /// Device id (or a substring of its name); `None` = the system default.
+    pub device: Option<String>,
+    pub buffer_frames: Option<u32>,
+    pub routing: Option<Routing>,
+}
+
+/// Output options from saved settings, with environment variables taking precedence.
+pub fn output_options(saved: &AudioSettings) -> OutputOptions {
     OutputOptions {
         device: std::env::var("EARSHOT_AUDIO_DEVICE")
             .ok()
-            .filter(|s| !s.is_empty()),
+            .filter(|s| !s.is_empty())
+            .or_else(|| saved.device.clone()),
         buffer_frames: Some(
             std::env::var("EARSHOT_BUFFER")
                 .ok()
                 .and_then(|s| s.parse().ok())
+                .or(saved.buffer_frames)
                 .unwrap_or(256),
         ),
         null: std::env::var("EARSHOT_NULL_AUDIO").is_ok_and(|v| v == "1"),
     }
+}
+
+/// Change where master and headphones go, without restarting audio.
+pub fn set_routing(player: &Player, routing: Routing) -> Result<(), String> {
+    let mut inner = player.lock().unwrap();
+    inner.routing = Some(routing);
+    inner.send(Command::SetRouting(routing))
+}
+
+/// The routing in use: the chosen one, or the default for this device.
+pub fn routing(player: &Player, channels: u16) -> Routing {
+    player
+        .lock()
+        .unwrap()
+        .routing
+        .unwrap_or(Routing::default_for(channels))
+}
+
+/// Play a library track on the headphones only. Blocking (decoding takes about a
+/// second, unless the track is on a deck): call it from a background thread.
+pub fn preview(player: &Player, db: &db::Db, id: i64) -> Result<(), String> {
+    let (seq, on_deck) = {
+        let mut inner = player.lock().unwrap();
+        inner.preview_seq += 1;
+        let on_deck = inner
+            .decks
+            .iter()
+            .find(|d| d.track_id == Some(id))
+            .and_then(|d| d.audio.clone());
+        (inner.preview_seq, on_deck)
+    };
+    let audio = match on_deck {
+        Some(a) => a,
+        None => {
+            let path = PathBuf::from(db::track_path(&db.lock().unwrap(), id)?);
+            Arc::new(decode::decode_file(&path)?.0)
+        }
+    };
+    let mut inner = player.lock().unwrap();
+    if inner.preview_seq != seq {
+        return Ok(()); // another preview was asked for meanwhile
+    }
+    inner.send(Command::Preview { audio, start: 0.0 })
+}
+
+pub fn stop_preview(player: &Player) -> Result<(), String> {
+    let mut inner = player.lock().unwrap();
+    inner.preview_seq += 1;
+    inner.send(Command::PreviewStop)
 }
 
 /// Start (or restart) audio and reload whatever was on the decks.
@@ -95,6 +164,9 @@ pub fn start_engine(player: &Player, opts: &OutputOptions) -> Result<OutputInfo,
         }
     }
     let info = engine.info().clone();
+    engine.send(Command::SetRouting(
+        inner.routing.unwrap_or(Routing::default_for(info.channels)),
+    ))?;
     inner.engine = Some(engine);
     Ok(info)
 }

@@ -31,14 +31,23 @@ The first pass was only checked off-screen (kittest renders and frame timing).
 
 ## 3. Flow canvas (`app/src/flow.ts`)
 
-- [ ] Add a Tracks | Flow tab switch in the library area.
-- [ ] Flow canvas: pan and zoom, track nodes (art, title, key and BPM chips), and edges
-      between nodes. Add tracks with "Add to Flow" or by dragging.
-- [ ] A "+" button on each node's right-hand side opens a 3×3 grid of nine suggestions,
-      with Drop / Hold / Build. Picking one adds it as a connected node.
-- [ ] Load a node to a deck by dragging it or double-clicking.
-- [ ] Keep the Flow across restarts. The Tauri app saves it in localStorage
-      (`earshot.flow`); use eframe storage here.
+- [x] Tracks | Flow tabs above the library list.
+- [x] Canvas on egui's `Scene`: drag the background to pan, wheel to zoom, drag cards
+      to move them. Cards show art, title, artist, BPM, key,
+      energy and time, with curved edges between them.
+- [x] Add tracks with *Add track* (search), by dragging from the list, or with
+      right-click > *Add to Flow* (works on a multi-selection).
+- [x] "+" on each card opens nine suggestions with Drop / Hold / Build; picking one
+      adds a connected card. Tracks already in the Flow are left out.
+- [x] Play button previews the track in the headphones (stop square while playing,
+      progress along the card's bottom). Double-click or right-click loads to a deck.
+- [x] Link cards by dragging from a "+" to another card's left port (or the other
+      way); loops are refused. Right-click > *Unlink from previous card*.
+- [x] Fit, Reset, Full screen (hides the decks and side panes).
+- [x] Kept across restarts in eframe's storage. The Tauri app's saved Flow (in
+      WebKit's localStorage) isn't carried over.
+- [ ] Drag a card onto a deck to load it (dragging moves the card today).
+- [ ] Try it on a real screen: zoom feel, popups, linking.
 
 ## 4. Library graph (`app/src/graph.ts`)
 
@@ -48,9 +57,14 @@ The first pass was only checked off-screen (kittest renders and frame timing).
 
 ## 5. Smaller gaps
 
-- [ ] Audio output: show the device, rate and buffer in the audio pill with the same
-      tooltip text. Add a way to restart audio or pick a device (`start_audio`,
-      `list_audio_devices`).
+- [x] Audio window (*Menu > Audio…* or click the audio pill): pick any output device and
+      buffer size (restarts audio, decks stay loaded), and route master and headphones
+      to any channel pair or single channel, live. Presets: Controller, Speakers only,
+      Split cue. Saved between runs.
+- [x] Preview player in the engine: headphone bus only. In the Flow, and right-click >
+      *Preview in headphones* in the library and Suggestions.
+- [ ] Try routing and preview on real hardware (laptop, then the DDJ-400).
+- [ ] Separate devices for master and headphones (two streams) isn't supported.
 - [ ] Reconnect MIDI by clicking the MIDI pill.
 - [ ] Benchmark (`perf.ts`, `runBenchmark`, `save_report`): a scripted run that writes
       a frame-time report. The kittest `screenshot` test covers some of this; decide
