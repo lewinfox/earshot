@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use earshot_engine::{OutputInfo, OutputOptions, Shared};
+use earshot_engine::{Command, OutputInfo, OutputOptions, Shared, TempoRange};
 use egui::{Key, RichText, Stroke, Ui, vec2};
 
 use super::audio_ui::{AudioAction, AudioUi};
@@ -75,6 +75,8 @@ const FLOW_KEY: &str = "earshot.flow";
 const AUDIO_KEY: &str = "earshot.audio";
 /// Waveform zoom: seconds either side of the playhead.
 const WAVE_ZOOM_KEY: &str = "earshot.wave_zoom";
+/// Each deck's tempo fader range.
+const TEMPO_RANGE_KEY: &str = "earshot.tempo_ranges";
 /// The name a new Flow gets until it's renamed.
 const UNTITLED: &str = "Untitled Flow";
 
@@ -202,6 +204,13 @@ impl EarshotApp {
             picked: Arc::new(Mutex::new(None)),
         };
         app.library.folders = db::folders(&app.lib.db.lock().unwrap())?;
+        let ranges: [TempoRange; 2] = cc
+            .storage
+            .and_then(|s| eframe::get_value(s, TEMPO_RANGE_KEY))
+            .unwrap_or_default();
+        for (deck, range) in ranges.into_iter().enumerate() {
+            app.set_tempo_range(deck, range);
+        }
         app.restore_flow();
         app.rescan();
         app.connect_midi();
@@ -217,6 +226,20 @@ impl EarshotApp {
                 eprintln!("MIDI: {e}");
                 (Midi::default(), vec![])
             });
+    }
+
+    fn set_tempo_range(&mut self, deck: usize, range: TempoRange) {
+        if let Err(e) = self.player.lock().unwrap().send(Command::TempoRange { deck, range }) {
+            eprintln!("tempo range: {e}");
+        }
+    }
+
+    /// Each deck's tempo range, as the engine has it.
+    fn tempo_ranges(&self) -> [TempoRange; 2] {
+        let Some(sh) = &self.shared else {
+            return Default::default();
+        };
+        [0, 1].map(|d| TempoRange::from_index(sh.decks[d].rate_range.load(Relaxed)))
     }
 
     // ---- saved Flows ------------------------------------------------------------------
@@ -601,10 +624,14 @@ impl EarshotApp {
                 }
             }
             AudioAction::Restart(settings) => {
+                let ranges = self.tempo_ranges();
                 self.audio_settings = settings;
                 self.preview = None;
                 self.audio = start_audio(&self.player, &self.audio_settings);
                 self.shared = self.player.lock().unwrap().shared();
+                for (deck, range) in ranges.into_iter().enumerate() {
+                    self.set_tempo_range(deck, range);
+                }
             }
         }
     }
@@ -1035,6 +1062,7 @@ impl eframe::App for EarshotApp {
         eframe::set_value(storage, AUDIO_KEY, &self.audio_settings);
         eframe::set_value(storage, FLOW_KEY, &self.flow.saved());
         eframe::set_value(storage, WAVE_ZOOM_KEY, &self.half_window);
+        eframe::set_value(storage, TEMPO_RANGE_KEY, &self.tempo_ranges());
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -1179,6 +1207,7 @@ impl eframe::App for EarshotApp {
                     }
                 }
                 Action::Load { deck, track_id } => self.load(Some(deck), track_id),
+                Action::TempoRange { deck, range } => self.set_tempo_range(deck, range),
             }
         }
         for a in lib_actions {

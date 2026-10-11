@@ -57,8 +57,9 @@ fn ddj400() -> Vec<Mapping> {
         v.push(m(note, 0x10, g, "loop_in", Kind::Button));
         v.push(m(note, 0x11, g, "loop_out", Kind::Button));
         v.push(m(note, 0x4D, g, "reloop_toggle", Kind::Button));
-        // Tempo slider: top of the fader is minus on Pioneer gear.
-        v.push(m(cc, 0x00, g, "rate", Kind::Absolute(1.0, -1.0)));
+        // Tempo slider: as Mixxx's mapping reads it, a raw 0 is the slowest end (the
+        // top of the fader is minus on Pioneer gear).
+        v.push(m(cc, 0x00, g, "rate", Kind::Absolute(-1.0, 1.0)));
         v.push(m(cc, 0x13, g, "volume", Kind::Absolute(0.0, 1.0)));
         // Performance pads in hot cue mode, unshifted / shifted.
         const HOTCUE_ACTIVATE: [&str; 8] = [

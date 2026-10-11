@@ -20,6 +20,9 @@ pub struct Fader<'a> {
     /// Text at points along the travel (0..1), drawn beside the groove.
     marks: &'a [(f64, &'a str)],
     colour: Color32,
+    /// A value to show apart from the cap: where the control really is, when the
+    /// cap has to be moved past it to take over again ("pickup").
+    target: Option<f64>,
 }
 
 impl<'a> Fader<'a> {
@@ -33,6 +36,7 @@ impl<'a> Fader<'a> {
             ticks: 11,
             marks: &[],
             colour: ARC,
+            target: None,
         }
     }
 
@@ -55,6 +59,12 @@ impl<'a> Fader<'a> {
 
     pub fn marks(mut self, marks: &'a [(f64, &'a str)]) -> Self {
         self.marks = marks;
+        self
+    }
+
+    /// Mark `value` on the groove: the cap takes over only once moved past it.
+    pub fn target(mut self, value: Option<f64>) -> Self {
+        self.target = value;
         self
     }
 
@@ -147,6 +157,20 @@ impl Widget for Fader<'_> {
             [at(self.range.origin()), at(pos)],
             Stroke::new(2.0, util::dim(self.colour, 0.6)),
         );
+        if let Some(v) = self.target {
+            // A bar across the groove, with a notch beyond it, in the control's colour.
+            let c = at(self.range.to_pos(v));
+            let w = thick / 2.0;
+            p.line_segment([c - across * w, c + across * w], Stroke::new(2.0, self.colour));
+            let tip = c + across * (w + 1.0);
+            let back = across * 5.0;
+            let side = if vertical { vec2(0.0, 3.5) } else { vec2(3.5, 0.0) };
+            p.add(egui::Shape::convex_polygon(
+                vec![tip, tip + back - side, tip + back + side],
+                self.colour,
+                Stroke::NONE,
+            ));
+        }
         // The cap.
         let c = at(pos);
         let cap_size = if vertical {

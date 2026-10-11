@@ -4,7 +4,9 @@
 //! Buttons send 1 on press and 0 on release. Controls that the UI owns (library
 //! navigation, loading the selected track) are handed back to the caller to forward.
 
-use earshot_engine::{Command, EQ_HIGH, EQ_LOW, EQ_MID, Press, RATE_RANGE, Shared};
+use std::sync::atomic::Ordering::Relaxed;
+
+use earshot_engine::{Command, EQ_HIGH, EQ_LOW, EQ_MID, Press, Shared, TempoRange};
 
 use crate::core::player::Inner;
 
@@ -113,11 +115,18 @@ pub fn apply(inner: &mut Inner, group: &str, key: &str, value: f64) -> Result<Ou
         "pfl" => Command::Pfl { deck, on: pressed },
         "volume" => Command::Volume { deck, value },
         "pregain" => Command::Pregain { deck, value },
-        // Mixxx's `rate` is -1..1 across the fader range.
-        "rate" => Command::Rate {
+        // Mixxx's `rate` is the fader, -1..1 across its range. The engine decides
+        // whether it moves the tempo (see `Command::TempoFader`).
+        "rate" => Command::TempoFader {
             deck,
-            value: value * RATE_RANGE,
+            position: value,
         },
+        // Step to the next range (±6, ±10, ±16, WIDE), like a CDJ's tempo range button.
+        "rateRange" if pressed => Command::TempoRange {
+            deck,
+            range: range_of(inner, deck).next(),
+        },
+        "rateRange" => return Ok(Outcome::Done),
         "rate_temp_up" => Command::Nudge {
             deck,
             amount: if pressed { 0.04 } else { 0.0 },
@@ -167,9 +176,16 @@ pub fn apply(inner: &mut Inner, group: &str, key: &str, value: f64) -> Result<Ou
     Ok(Outcome::Done)
 }
 
+/// The deck's tempo fader range, as the engine last published it.
+fn range_of(inner: &Inner, deck: usize) -> TempoRange {
+    inner
+        .shared()
+        .map(|s| TempoRange::from_index(s.decks[deck].rate_range.load(Relaxed)))
+        .unwrap_or_default()
+}
+
 /// Current value of a toggle-style control, so button presses can flip it.
 pub fn current(inner: &Inner, group: &str, key: &str) -> Option<bool> {
-    use std::sync::atomic::Ordering::Relaxed;
     let shared = inner.shared()?;
     let d = &shared.decks[deck_of(group)?];
     match key {
@@ -205,7 +221,7 @@ pub fn value(shared: &Shared, group: &str, key: &str) -> Option<f64> {
     Some(match key {
         "volume" => d.volume.get(),
         "pregain" => d.pregain.get(),
-        "rate" => d.rate.get() / RATE_RANGE,
+        "rate" => d.fader.get(),
         _ => return None,
     })
 }

@@ -11,6 +11,7 @@ pub mod energy;
 pub mod engine;
 pub mod keylock;
 pub mod output;
+pub mod tempo;
 pub mod waveform;
 
 use std::sync::Arc;
@@ -18,9 +19,8 @@ use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::thread;
 use std::time::Duration;
 
-pub use engine::{
-    Command, DECKS, EQ_HIGH, EQ_LOW, EQ_MID, HOTCUES, Out, Press, RATE_RANGE, Routing, Shared,
-};
+pub use engine::{Command, DECKS, EQ_HIGH, EQ_LOW, EQ_MID, HOTCUES, Out, Press, Routing, Shared};
+pub use tempo::TempoRange;
 pub use output::{OutputInfo, OutputOptions};
 
 use engine::{Garbage, Renderer};

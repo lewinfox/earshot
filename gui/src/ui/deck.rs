@@ -10,7 +10,7 @@ use std::f32::consts::TAU;
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
-use earshot_engine::RATE_RANGE;
+use earshot_engine::TempoRange;
 use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::engine::DeckShared;
 use egui::{
@@ -37,6 +37,10 @@ pub enum Action {
     Load {
         deck: usize,
         track_id: i64,
+    },
+    TempoRange {
+        deck: usize,
+        range: TempoRange,
     },
 }
 
@@ -109,6 +113,11 @@ struct State {
     speed: f64,
     tempo: f64,
     rate: f64,
+    range: TempoRange,
+    /// The tempo fader's position, and whether it's in control (see
+    /// `DeckShared::fader`).
+    fader: f64,
+    fader_live: bool,
     bpm: Option<f64>,
     sync: bool,
     quantize: bool,
@@ -137,6 +146,9 @@ fn read(sh: &DeckShared) -> State {
         speed: sh.speed.get(),
         tempo: sh.tempo.get(),
         rate: sh.rate.get(),
+        range: TempoRange::from_index(sh.rate_range.load(Relaxed)),
+        fader: sh.fader.get(),
+        fader_live: sh.fader_live.load(Relaxed),
         bpm: finite(sh.bpm.get()),
         sync: sh.sync.load(Relaxed),
         quantize: sh.quantize.load(Relaxed),
@@ -150,17 +162,33 @@ fn read(sh: &DeckShared) -> State {
     }
 }
 
-/// The tempo fader, in the control bus's units (-1..1 across the ±8 % range).
-pub const TEMPO: Range = Range {
-    name: "Tempo",
-    min: -1.0,
-    max: 1.0,
-    default: 0.0,
-    centre: Some(0.0),
-    format: |v| format!("{:+.2} %", v * RATE_RANGE * 100.0),
-};
-/// Range markings beside the tempo fader; it runs minus at the top, like Mixxx's.
-const TEMPO_MARKS: [(f64, &str); 3] = [(0.0, "-8"), (0.5, "0"), (1.0, "+8")];
+/// The tempo fader, in the control bus's units (-1..1 across the deck's range), and
+/// the range markings beside it (it runs minus at the top, like Mixxx's).
+fn tempo_fader(range: TempoRange) -> (&'static Range, &'static [(f64, &'static str)]) {
+    const fn fader(format: fn(f64) -> String) -> Range {
+        Range {
+            name: "Tempo",
+            min: -1.0,
+            max: 1.0,
+            default: 0.0,
+            centre: Some(0.0),
+            format,
+        }
+    }
+    fn pct(rate: f64) -> String {
+        format!("{:+.2} %", rate * 100.0)
+    }
+    const SIX: Range = fader(|v| pct(TempoRange::Six.rate(v)));
+    const TEN: Range = fader(|v| pct(TempoRange::Ten.rate(v)));
+    const SIXTEEN: Range = fader(|v| pct(TempoRange::Sixteen.rate(v)));
+    const WIDE: Range = fader(|v| pct(TempoRange::Wide.rate(v)));
+    match range {
+        TempoRange::Six => (&SIX, &[(0.0, "-6"), (0.5, "0"), (1.0, "+6")]),
+        TempoRange::Ten => (&TEN, &[(0.0, "-10"), (0.5, "0"), (1.0, "+10")]),
+        TempoRange::Sixteen => (&SIXTEEN, &[(0.0, "-16"), (0.5, "0"), (1.0, "+16")]),
+        TempoRange::Wide => (&WIDE, &[(0.0, "0"), (0.5, "1x"), (1.0, "2.5")]),
+    }
+}
 
 // Layout.
 const TEMPO_W: f32 = 76.0;
@@ -627,7 +655,7 @@ impl DeckUi {
             util::MUTED,
         );
         let range = p.layout_no_wrap(
-            format!(" ±{:.0}", RATE_RANGE * 100.0),
+            format!(" {}", s.range.label()),
             FontId::monospace(9.5),
             self.colour(),
         );
@@ -1083,12 +1111,17 @@ impl DeckUi {
             let h = height - ui.min_rect().height() - ui.spacing().item_spacing.y;
             ui.horizontal_top(|ui| {
                 ui.add_space(16.0); // the fader's range markings
-                let mut v = s.rate / RATE_RANGE;
+                let (fader, marks) = tempo_fader(s.range);
+                // The cap is where the fader was left; until it's moved past the
+                // tempo (marked), it doesn't change it.
+                let mut v = s.fader;
+                let target = (!s.fader_live).then(|| s.range.fader(s.rate));
                 let r = ui.add(
-                    Fader::vertical(&TEMPO, &mut v, vec2(26.0, h))
+                    Fader::vertical(fader, &mut v, vec2(26.0, h))
                         .inverted(true)
                         .ticks(17)
-                        .marks(&TEMPO_MARKS)
+                        .marks(marks)
+                        .target(target)
                         .colour(self.colour()),
                 );
                 if r.changed() {
@@ -1107,6 +1140,24 @@ impl DeckUi {
                             self.control(actions, key, d as u8 as f64);
                         }
                     }
+                    // The fader's range: click for the next, right-click to pick one.
+                    let r = ui
+                        .add(HwButton::new(s.range.label(), util::TEXT, vec2(24.0, 18.0)).font(8.0))
+                        .on_hover_text("Tempo range: ±6, ±10, ±16 % or WIDE (0 to 256 % speed)");
+                    if r.clicked() {
+                        self.control(actions, "rateRange", 1.0);
+                    }
+                    r.context_menu(|ui| {
+                        for range in TempoRange::ALL {
+                            if ui.radio(s.range == range, range.label()).clicked() {
+                                actions.push(Action::TempoRange {
+                                    deck: self.index,
+                                    range,
+                                });
+                                ui.close();
+                            }
+                        }
+                    });
                 });
             });
         });

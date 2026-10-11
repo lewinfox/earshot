@@ -12,13 +12,12 @@ use crate::beatgrid::Beatgrid;
 use crate::decode::TrackAudio;
 use crate::dsp::{self, DjFilter, Eq3, Smoothed};
 use crate::keylock::{self, Keylock};
+use crate::tempo::TempoRange;
 
 pub const DECKS: usize = 2;
 pub const HOTCUES: usize = 8;
 /// Largest block rendered in one go; bigger device buffers are rendered in chunks.
 pub const MAX_BLOCK: usize = 4096;
-/// Pitch fader range, as a fraction (±8 %, the CDJ default).
-pub const RATE_RANGE: f64 = 0.08;
 /// EQ band indices for [`Command::Eq`] and [`DeckShared::eq`].
 pub const EQ_LOW: usize = 0;
 pub const EQ_MID: usize = 1;
@@ -59,6 +58,13 @@ pub struct DeckShared {
     pub tempo: AtomicF64,
     /// Pitch fader position as a fraction, e.g. 0.02 = +2 %.
     pub rate: AtomicF64,
+    /// The tempo fader's range ([`TempoRange::index`]).
+    pub rate_range: AtomicU32,
+    /// Where the tempo fader is (-1..1), which differs from `rate` until it's picked
+    /// up again after sync or a range change moved the tempo.
+    pub fader: AtomicF64,
+    /// The fader is in control (it has been moved past the tempo since then).
+    pub fader_live: AtomicBool,
     /// The track's tempo (its grid's mean) × the tempo fader. NaN without a grid.
     pub bpm: AtomicF64,
     pub sync: AtomicBool,
@@ -248,7 +254,7 @@ pub enum Command {
         deck: usize,
         slot: usize,
     },
-    /// Pitch fader, as a fraction (-RATE_RANGE..=RATE_RANGE).
+    /// Tempo change, as a fraction (within the deck's [`TempoRange`]).
     Rate {
         deck: usize,
         value: f64,
@@ -309,6 +315,18 @@ pub enum Command {
         deck: usize,
         on: bool,
     },
+    /// The tempo fader moved to `position` (-1..1 across its range). It sets the
+    /// tempo only once it has been moved past the current tempo ("pickup"), and never
+    /// while sync is on.
+    TempoFader {
+        deck: usize,
+        position: f64,
+    },
+    /// The tempo fader's range. The tempo stays put (clamped into the new range).
+    TempoRange {
+        deck: usize,
+        range: TempoRange,
+    },
     SetRouting(Routing),
     /// Play a track on the headphone bus only, from `start` seconds.
     Preview {
@@ -344,6 +362,11 @@ struct Deck {
     pos: f64,
     playing: bool,
     rate: f64,
+    range: TempoRange,
+    /// The tempo fader's position and whether it's in control: see
+    /// [`DeckShared::fader`].
+    fader: f64,
+    fader_live: bool,
     nudge: f64,
     sync: bool,
     quantize: bool,
@@ -375,6 +398,10 @@ const SYNC_PHASE_SECS: f64 = 0.25;
 /// Phase errors smaller than this (beats; ~4 ms at 120 BPM) are left alone.
 const SYNC_DEADBAND: f64 = 0.008;
 
+/// The tempo fader picks the tempo up when it comes this close (in fader travel,
+/// -1..1) or moves past it.
+const PICKUP: f64 = 0.01;
+
 /// Without a grid, beat maths falls back to 120 BPM from zero.
 const FALLBACK_BEAT: f64 = 0.5;
 
@@ -386,6 +413,9 @@ impl Deck {
             pos: 0.0,
             playing: false,
             rate: 0.0,
+            range: TempoRange::default(),
+            fader: 0.0,
+            fader_live: true,
             nudge: 0.0,
             sync: false,
             quantize: true,
@@ -447,6 +477,12 @@ impl Deck {
 
     fn seek(&mut self, t: f64) {
         self.pos = t.clamp(0.0, self.duration());
+    }
+
+    /// After the tempo moved without the fader: the fader is in control again only
+    /// if it's where the tempo now is.
+    fn check_pickup(&mut self) {
+        self.fader_live = (self.range.fader(self.rate) - self.fader).abs() < PICKUP;
     }
 
     fn base_speed(&self) -> f64 {
@@ -763,7 +799,7 @@ impl Renderer {
         for d in 0..DECKS {
             let o = 1 - d;
             let (me, other) = (&self.decks[d], &self.decks[o]);
-            if !me.sync || other.audio.is_none() || !other.playing {
+            if !me.sync || other.audio.is_none() {
                 self.decks[d].sync_ratio = 0.0;
                 self.decks[d].sync_correction = 0.0;
                 continue;
@@ -781,7 +817,7 @@ impl Renderer {
                 (Some(m), Some(l)) => l.mean_bpm() * (1.0 + other.rate) / m.mean_bpm(),
                 _ => target,
             };
-            let wanted = if me.playing {
+            let wanted = if me.playing && other.playing {
                 let err = phase_error(other.beat_at(other.pos), me.beat_at(me.pos));
                 if err.abs() < SYNC_DEADBAND {
                     0.0
@@ -805,6 +841,7 @@ impl Renderer {
             me.speed = me.sync_ratio * (1.0 + me.sync_correction) * (1.0 + me.nudge);
             me.tempo = me.sync_ratio;
             me.rate = shown - 1.0;
+            me.check_pickup();
         }
     }
 
@@ -854,6 +891,9 @@ impl Renderer {
                     pos: first_beat,
                     cue_point: first_beat,
                     rate: dk.rate,
+                    range: dk.range,
+                    fader: dk.fader,
+                    fader_live: dk.fader_live,
                     sync: dk.sync,
                     quantize: dk.quantize,
                     keylock: dk.keylock,
@@ -1008,12 +1048,33 @@ impl Renderer {
             }
             Command::Rate { deck, value } => {
                 let dk = &mut self.decks[deck];
-                dk.rate = value.clamp(-1.0, 1.0);
+                let (lo, hi) = dk.range.bounds();
+                dk.rate = value.clamp(lo, hi);
+                dk.check_pickup();
+            }
+            Command::TempoFader { deck, position } => {
+                let dk = &mut self.decks[deck];
+                let target = dk.range.fader(dk.rate);
+                let was = dk.fader;
+                dk.fader = position.clamp(-1.0, 1.0);
+                if dk.sync {
+                    dk.check_pickup();
+                } else {
+                    let crossed = (was - target) * (dk.fader - target) <= 0.0;
+                    if crossed || (dk.fader - target).abs() < PICKUP {
+                        dk.fader_live = true;
+                    }
+                    if dk.fader_live {
+                        dk.rate = dk.range.rate(dk.fader);
+                    }
+                }
             }
             Command::Nudge { deck, amount } => self.decks[deck].nudge = amount,
             Command::Sync { deck, on } => {
                 self.decks[deck].sync = on;
-                if on && self.decks[deck].playing {
+                // Line the beats up now if both are playing; the tempo follows below
+                // (only a loaded track is needed for that).
+                if on && self.decks[deck].playing && self.decks[1 - deck].playing {
                     self.snap_phase(deck);
                 }
             }
@@ -1040,6 +1101,14 @@ impl Renderer {
             Command::Quantize { deck, on } => {
                 if let Some(dk) = self.decks.get_mut(deck) {
                     dk.quantize = on;
+                }
+            }
+            Command::TempoRange { deck, range } => {
+                if let Some(dk) = self.decks.get_mut(deck) {
+                    let (lo, hi) = range.bounds();
+                    dk.range = range;
+                    dk.rate = dk.rate.clamp(lo, hi);
+                    dk.check_pickup();
                 }
             }
             Command::Keylock { deck, on } => {
@@ -1107,6 +1176,9 @@ impl Renderer {
             sh.speed.set(dk.speed);
             sh.tempo.set(dk.tempo);
             sh.rate.set(dk.rate);
+            sh.rate_range.store(dk.range.index(), Relaxed);
+            sh.fader.set(dk.fader);
+            sh.fader_live.store(dk.fader_live, Relaxed);
             // The track's one tempo times the tempo fader: steady while playing, and
             // unmoved by nudges and sync's small phase corrections. A synced deck's
             // `rate` is set to match the leader, so it shows the leader's tempo.
@@ -1322,6 +1394,41 @@ mod tests {
         let heard = clicks(&record(&mut rig, 0.5));
         let first = heard.first().copied().unwrap_or(f64::NAN);
         assert!((first - 0.1 / 1.08).abs() < 0.008, "first click after the jump at {first:.3}s");
+    }
+
+    #[test]
+    fn sync_matches_a_stopped_deck_and_the_fader_picks_up_after() {
+        let mut rig = Rig::new();
+        rig.load(0, 120.0, 120.0);
+        rig.load(1, 126.0, 126.0);
+        rig.run(0.05);
+        // Neither deck is playing: sync still matches deck 1's tempo to deck 0's.
+        rig.send(Command::Sync { deck: 1, on: true });
+        rig.run(0.05);
+        let rate = rig.shared.decks[1].rate.get();
+        assert!((126.0 * (1.0 + rate) - 120.0).abs() < 0.01, "rate {rate}");
+        // Off again: the tempo stays matched, the fader (still at 0) isn't in control.
+        rig.send(Command::Sync { deck: 1, on: false });
+        rig.run(0.05);
+        assert!((rig.shared.decks[1].rate.get() - rate).abs() < 1e-9);
+        assert!(!rig.shared.decks[1].fader_live.load(Relaxed));
+
+        // The tempo (-4.8 %) is below the fader (0); moving the fader up but not past
+        // it does nothing.
+        let at = TempoRange::Ten.fader(rate);
+        rig.send(Command::TempoFader { deck: 1, position: 0.2 });
+        rig.send(Command::TempoFader { deck: 1, position: at + 0.05 });
+        rig.run(0.05);
+        assert!((rig.shared.decks[1].rate.get() - rate).abs() < 1e-9, "not picked up yet");
+        // Past it: picked up, and the fader moves the tempo from then on.
+        rig.send(Command::TempoFader { deck: 1, position: at - 0.05 });
+        rig.run(0.05);
+        assert!(rig.shared.decks[1].fader_live.load(Relaxed));
+        let want = TempoRange::Ten.rate(at - 0.05);
+        assert!((rig.shared.decks[1].rate.get() - want).abs() < 1e-9);
+        rig.send(Command::TempoFader { deck: 1, position: 0.3 });
+        rig.run(0.05);
+        assert!((rig.shared.decks[1].rate.get() - 0.03).abs() < 1e-9);
     }
 
     #[test]
