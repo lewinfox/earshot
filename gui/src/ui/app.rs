@@ -966,16 +966,7 @@ impl EarshotApp {
         };
         let n = a.busy.len();
         let text = if n > 0 {
-            let progress = if a.running.is_empty() {
-                String::new()
-            } else {
-                let avg = a.running.values().sum::<f64>() / a.running.len() as f64;
-                format!(" · {:.0}%", avg * 100.0)
-            };
-            format!(
-                "analysing {n} track{}{progress}{fail}",
-                if n == 1 { "" } else { "s" }
-            )
+            format!("analysing {n} track{}{fail}", if n == 1 { "" } else { "s" })
         } else if a.failed > 0 {
             format!("analysis: {} failed", a.failed)
         } else {
