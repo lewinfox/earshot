@@ -38,10 +38,10 @@ One native desktop app with two modes, like Rekordbox:
 - **Performance mode** — the same library panes, with decks above them.
 
 ```
-┌──────────────────────────── earshot (Tauri) ─────────────────────────────┐
-│  UI (TypeScript in the system webview)                                   │
+┌──────────────────────────── earshot ─────────────────────────────────────┐
+│  UI (Rust, egui)                                                         │
 │   library · graph · search · suggestions · decks · waveforms             │
-│        │ invoke / events                                                 │
+│        │ events                                                          │
 │        ▼                                                                 │
 │  Rust core ───────────────────────────────────────────┐                  │
 │   control bus ◄── keyboard map / on-screen controls   │                  │
@@ -61,7 +61,7 @@ One native desktop app with two modes, like Rekordbox:
 | Part | Language | Reason |
 |---|---|---|
 | Audio engine, MIDI, control bus | Rust | Real-time audio needs no GC and no GIL. cpal (audio), midir (MIDI), symphonia (decoding) cover Linux and macOS. |
-| UI | TypeScript in a Tauri webview | Fastest route to a polished library UI. WebKitGTK performance on Linux is the main risk, hence the spike. Fallback: egui. |
+| UI | Rust (egui) | A webview UI was tried first (Phase 0) and couldn't hold 60 fps on Linux while playing. egui draws the waveforms and library natively, in the same process as the engine. |
 | Search, suggestions, DB | Rust | Live suggestions must not depend on the worker being alive. Brute-force cosine over 10k × 512 floats is ~1 ms. |
 | Analysis, CLAP, tempo-lock, cratelib | Python worker | The best tools (Beat This!, Essentia, CLAP, cratelib itself) are Python. Can be ported to Rust (ONNX via `ort`) piece by piece later. |
 
@@ -255,11 +255,11 @@ neighbourhood.
 
 ### Phase 0 — performance spike
 
-Throwaway code to answer one question: can Tauri on WebKitGTK draw our worst-case
-screen while real audio plays? (`app/` + `engine/`; see the README for how to run it.)
+Done. Throwaway code to answer one question: can a webview UI on Linux (WebKitGTK)
+draw our worst-case screen while real audio plays?
 
-- Graph view with 2k–10k synthetic tracks and ~5 edges each, Sigma.js vs
-  cosmos.gl, measured in fps while panning/zooming.
+- Graph view with 2k–10k synthetic tracks and ~5 edges each, measured in fps while
+  panning/zooming.
 - Two decks with colour waveforms scrolling against a playhead fed from the audio
   clock, beat markers with 1-beats highlighted.
 - Real audio through cpal with master and headphones routed separately; callback
@@ -270,11 +270,11 @@ screen while real audio plays? (`app/` + `engine/`; see the README for how to ru
 - A built-in benchmark that runs a scripted 20 s scenario and saves a report.
 
 **Pass**: steady 60 fps for graph + waveforms together, no audio dropouts at a
-256-frame buffer, playhead visibly in time with the audio. If only the graph fails,
-consider making it a mode rather than always on screen before abandoning Tauri.
+256-frame buffer, playhead visibly in time with the audio.
 
-The spike's beatgrid module, control names and engine structure are meant to
-survive; its UI code is not (the real UI will likely use a component framework).
+**Result**: fail. The webview couldn't hold 60 fps while playing, so the UI was
+rebuilt natively in egui (`gui/`). The spike's beatgrid module, control names and
+engine structure survived; its UI code was deleted.
 
 ### Phase 1 — library
 

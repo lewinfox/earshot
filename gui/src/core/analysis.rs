@@ -530,7 +530,7 @@ mod tests {
     use super::*;
 
     /// End to end against the real worker, both modes:
-    /// `EARSHOT_TEST_TRACK=/path/song.mp3 cargo test --lib -- --include-ignored`.
+    /// `EARSHOT_TEST_TRACK=/path/song.mp3 cargo test -p earshot-gui -- --include-ignored analyses_a_real_track`.
     #[test]
     #[ignore]
     fn analyses_a_real_track() {

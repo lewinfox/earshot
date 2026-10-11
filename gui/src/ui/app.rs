@@ -119,7 +119,7 @@ struct Hud {
     last: Option<Instant>,
 }
 
-/// Where the Tauri app kept its data, so both apps share one library.
+/// Where earshot keeps its data (the name is the app id it was first released under).
 /// `EARSHOT_DATA_DIR` overrides it (e.g. to try things on a copy).
 fn data_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("EARSHOT_DATA_DIR") {
@@ -153,11 +153,6 @@ impl EarshotApp {
         let db = db::open(&data_dir().join("earshot.db"))?;
         let analyser = Analyser::start(sink.clone(), player.clone(), db.clone());
         let lib = Arc::new(Library { db, analyser });
-        let (midi, midi_ports) = midi::connect_all(&sink, &player).unwrap_or_else(|e| {
-            eprintln!("MIDI: {e}");
-            (Midi::default(), vec![])
-        });
-
         let mut app = EarshotApp {
             player,
             lib,
@@ -165,8 +160,8 @@ impl EarshotApp {
             rx,
             shared,
             audio,
-            _midi: midi,
-            midi_ports,
+            _midi: Midi::default(),
+            midi_ports: vec![],
             midi_log: VecDeque::new(),
             decks: [DeckUi::new(0), DeckUi::new(1)],
             half_window: 4.0,
@@ -196,7 +191,19 @@ impl EarshotApp {
         };
         app.library.folders = db::folders(&app.lib.db.lock().unwrap())?;
         app.rescan();
+        app.connect_midi();
         Ok(app)
+    }
+
+    /// (Re)open every MIDI input, e.g. after plugging the controller in.
+    fn connect_midi(&mut self) {
+        // Close the old ports first so they can be reopened.
+        self._midi = Midi::default();
+        (self._midi, self.midi_ports) =
+            midi::connect_all(&self.sink, &self.player).unwrap_or_else(|e| {
+                eprintln!("MIDI: {e}");
+                (Midi::default(), vec![])
+            });
     }
 
     fn rescan(&mut self) {
@@ -668,7 +675,7 @@ impl EarshotApp {
             } else {
                 format!("MIDI: {}", self.midi_ports.join(", "))
             };
-            pill(
+            if pill(
                 ui,
                 &midi,
                 if self.midi_ports.is_empty() {
@@ -676,7 +683,12 @@ impl EarshotApp {
                 } else {
                     util::OK
                 },
-            );
+            )
+            .on_hover_text("Click to reconnect MIDI")
+            .clicked()
+            {
+                self.connect_midi();
+            }
             self.analysis_pill(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Keys").clicked() {

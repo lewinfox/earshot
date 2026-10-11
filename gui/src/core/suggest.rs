@@ -6,8 +6,8 @@ use std::collections::HashSet;
 use super::keys::{Camelot, transpose, wheel_distance};
 
 /// Weights of the parts of a score. Vibe (sound-alike embeddings) isn't built yet, so
-/// every pair scores a neutral 0.5 there; it keeps its weight so scores stay
-/// comparable with the Tauri app's.
+/// every pair scores a neutral 0.5 there; it keeps its weight so scores won't shift
+/// scale once it is.
 const W_KEY: f64 = 0.35;
 const W_TEMPO: f64 = 0.3;
 const W_VIBE: f64 = 0.25;

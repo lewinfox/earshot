@@ -81,6 +81,9 @@ pub struct FlowUi {
     picks_for: String,
     /// A link being dragged: from this card, starting at its out ("+") or in port.
     linking: Option<(u64, Port)>,
+    /// A card being dragged, and where it started. Dropped outside the canvas (e.g. on
+    /// a deck, which loads it) it goes back there.
+    moving: Option<(u64, Pos2)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -93,6 +96,7 @@ enum CardAction {
     Remove(u64),
     Plus(u64),
     Move(u64, egui::Vec2),
+    MoveEnd,
     StartLink(u64, Port),
     Unlink(u64),
 }
@@ -126,6 +130,7 @@ impl FlowUi {
             picks: vec![],
             picks_for: String::new(),
             linking: None,
+            moving: None,
         }
     }
 
@@ -353,7 +358,9 @@ impl FlowUi {
                 util::MUTED,
             );
         }
+        // A card carries its track too (so it can be dropped on a deck); don't add it again.
         if let Some(id) = resp.dnd_release_payload::<i64>()
+            && self.moving.is_none()
             && let Some(p) = ui.input(|i| i.pointer.interact_pos())
         {
             let at = to_global.inverse() * p;
@@ -378,7 +385,21 @@ impl FlowUi {
                 }
                 CardAction::Move(id, d) => {
                     if let Some(n) = self.nodes.iter_mut().find(|n| n.id == id) {
+                        if self.moving.is_none() {
+                            self.moving = Some((id, n.pos));
+                        }
                         n.pos += d;
+                    }
+                }
+                CardAction::MoveEnd => {
+                    let outside = ui
+                        .input(|i| i.pointer.latest_pos())
+                        .is_some_and(|p| !canvas.contains(p));
+                    if let Some((moved, start)) = self.moving.take()
+                        && outside
+                        && let Some(n) = self.nodes.iter_mut().find(|n| n.id == moved)
+                    {
+                        n.pos = start;
                     }
                 }
                 CardAction::StartLink(id, port) => {
@@ -683,6 +704,10 @@ fn card(
     if resp.dragged() {
         out.push(CardAction::Move(n.id, resp.drag_delta()));
     }
+    if resp.drag_stopped() {
+        out.push(CardAction::MoveEnd);
+    }
+    resp.dnd_set_drag_payload(t.lib.id);
     if resp.double_clicked() {
         actions.push(LibAction::Load {
             deck: None,
@@ -915,7 +940,7 @@ fn art(ui: &mut Ui, size: f32, t: &Track) {
     .collect::<String>()
     .to_uppercase();
     let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
-    // A diagonal two-colour gradient, like the Tauri app's.
+    // A diagonal two-colour gradient.
     let (a, b) = (util::hsl(h, 0.55, 0.42), util::hsl(h + 60.0, 0.6, 0.28));
     let mut mesh = egui::Mesh::default();
     let mid = util::hsl(h + 30.0, 0.57, 0.35);

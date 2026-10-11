@@ -1,5 +1,5 @@
 [workspace]
-members = ["engine", "app/src-tauri", "gui"]
+members = ["engine", "gui"]
 resolver = "2"
 
 [profile.dev.package."*"]

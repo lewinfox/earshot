@@ -1,8 +1,4 @@
-# egui rewrite: what's left
-
-The egui app (`gui/`) replaces the Tauri app (`app/`). These are the steps to reach
-parity, then retire the Tauri app. The TS files named below are the reference for each
-feature.
+# What's left
 
 ## 1. Check it on a real screen
 
@@ -15,7 +11,7 @@ The first pass was only checked off-screen (kittest renders and frame timing).
 - [x] Keyboard shortcuts, including held buttons (cue, nudge) and Shift + hot cue to clear.
 - [ ] Panel sizes, zoom and UI size survive a restart.
 
-## 2. Suggestions (`app/src/suggest.ts`)
+## 2. Suggestions
 
 - [x] Scorer in `core/suggest.rs` (key 0.35, tempo 0.3, vibe 0.25, energy 0.1), half and
       double tempo, per-part breakdown, unit tests. Vibe is a neutral 0.5 until there
@@ -29,7 +25,7 @@ The first pass was only checked off-screen (kittest renders and frame timing).
       controller's browse button) switches the keyboard between library and suggestions.
 - [ ] Try it in a real set: are the rankings sensible?
 
-## 3. Flow canvas (`app/src/flow.ts`)
+## 3. Flow canvas
 
 - [x] Tracks | Flow tabs above the library list.
 - [x] Canvas on egui's `Scene`: drag the background to pan, wheel to zoom, drag cards
@@ -44,14 +40,13 @@ The first pass was only checked off-screen (kittest renders and frame timing).
 - [x] Link cards by dragging from a "+" to another card's left port (or the other
       way); loops are refused. Right-click > *Unlink from previous card*.
 - [x] Fit, Reset, Full screen (hides the decks and side panes).
-- [x] Kept across restarts in eframe's storage. The Tauri app's saved Flow (in
-      WebKit's localStorage) isn't carried over.
-- [ ] Drag a card onto a deck to load it (dragging moves the card today).
+- [x] Kept across restarts in eframe's storage.
+- [x] Drag a card onto a deck to load it (the card goes back to where it was).
 - [ ] Try it on a real screen: zoom feel, popups, linking.
 
-## 4. Library graph (`app/src/graph.ts`)
+## 4. Library graph
 
-- [ ] Decide whether it is still wanted. If it is, port it as an egui painter: wheel
+- [ ] Decide whether it is still wanted. If it is, build it as an egui painter: wheel
       layout (Camelot) and vibe layout (PCA), key colours, hover and select synced with
       the list. Plain egui shapes should cope with ~2,000 points; check that.
 
@@ -65,17 +60,12 @@ The first pass was only checked off-screen (kittest renders and frame timing).
       *Preview in headphones* in the library and Suggestions.
 - [ ] Try routing and preview on real hardware (laptop, then the DDJ-400).
 - [ ] Separate devices for master and headphones (two streams) isn't supported.
-- [ ] Reconnect MIDI by clicking the MIDI pill.
-- [ ] Benchmark (`perf.ts`, `runBenchmark`, `save_report`): a scripted run that writes
+- [x] Reconnect MIDI by clicking the MIDI pill.
+- [ ] Benchmark: a scripted run (two decks playing, panning and selecting) that writes
       a frame-time report. The kittest `screenshot` test covers some of this; decide
       whether a live in-app benchmark is still needed.
-- [ ] Library control from MIDI only handles browse and load. Check `libraryControl`
-      in `main.ts` for anything else, such as switching to the Suggestions pane.
+- [x] Library control from MIDI: browse, switch between library and Suggestions, load.
 
-## 6. Retire the Tauri app
+## 6. Housekeeping
 
-- [ ] Once 1–5 are done, delete `app/`. Remove it from the workspace `members` and
-      update both READMEs.
-- [ ] Move `migrations/` ownership fully to `gui/`. It is a copy today; after `app/` is
-      gone there is only one.
 - [ ] Drop the `ordered-float` 5.0.0 pin in `Cargo.lock` when Rust is updated past 1.89.

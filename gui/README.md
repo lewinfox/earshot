@@ -1,17 +1,15 @@
 # earshot (egui)
 
-earshot's native UI, rebuilt in Rust with egui because the Tauri/WebKitGTK UI couldn't
-hold 60 fps on Linux while playing. It shares the engine (`../engine`), the analysis
-worker (`../worker`) and the library database (`earshot.db`) with the Tauri app.
+earshot's UI, in Rust with egui. It uses the engine (`../engine`) and the analysis
+worker (`../worker`); the library lives in `earshot.db`. How to install and use it is in
+the [top-level README](../README.md).
 
 ```bash
 cd earshot/worker && ./setup.sh     # once: the analysis worker
 cd earshot && cargo run --release -p earshot-gui
 ```
 
-Same environment variables as the Tauri app (`EARSHOT_AUDIO_DEVICE`, `EARSHOT_BUFFER`,
-`EARSHOT_NULL_AUDIO`, `EARSHOT_ANALYSIS_JOBS`, `EARSHOT_WORKER_DIR`), plus
-`EARSHOT_DATA_DIR` to use a different library database.
+Environment variables are listed in the top-level README.
 
 ```
 src/core/   no drawing: database, library scan, analysis queue, decks (player),
@@ -22,14 +20,7 @@ src/ui/     egui: app.rs (window and panels), deck.rs, wave.rs (waveforms),
             util.rs (colours, search)
 ```
 
-Done so far: decks (waveforms, overview, hot cues, grid editor, transport, jog, pitch),
-mixer, library folders and track list (thumbnails, multi-select, drag to deck,
-right-click analysis), Suggestions (Drop / Hold / Build), the Flow canvas,
-static/dynamic analysis with progress, keyboard and MIDI, UI size (Ctrl −/=/0; panel
-sizes and zoom are remembered).
-
-Not yet ported from the Tauri app: the library graph and the benchmark. See `TODO.md`
-for the remaining steps.
+What's left to do is in `TODO.md`.
 
 Tests: `cargo test -p earshot-gui`. An off-screen screenshot of the whole window (and
 frame-build timing), on a copy of the library:
