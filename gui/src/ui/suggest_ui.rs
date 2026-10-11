@@ -1,6 +1,6 @@
-//! The Suggestions pane: what to play after the reference track (the playing deck,
-//! or the track selected in the library), ranked, with each part of the score shown
-//! as a small bar. Drop / Hold / Build picks the energy direction.
+//! The Suggestions pane: what to play after the reference track, ranked, with each
+//! part of the score shown as a small bar. Master / A / B / Selected picks the
+//! reference; Drop / Hold / Build picks the energy direction.
 
 use egui::{Align, Color32, CornerRadius, RichText, Sense, Ui, vec2};
 use egui_extras::{Column, TableBuilder};
@@ -17,17 +17,31 @@ const BARS: [(&str, Color32); 3] = [
     ("energy", Color32::from_rgb(0xff, 0xcc, 0x4d)),
 ];
 
+/// Where the reference track comes from.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Source {
+    /// Whichever deck is playing (the one started most recently, if both are).
+    #[default]
+    Master,
+    /// What's loaded on deck A (0) or B (1), playing or not.
+    Deck(usize),
+    /// The track highlighted in the library.
+    Selected,
+}
+
 /// What the suggestions are measured from, for the pane's header.
 pub struct RefInfo {
     pub title: String,
     pub bpm: Option<f64>,
     pub key: Option<Camelot>,
-    /// The deck it's playing on, when live.
+    /// The deck it's on, if it's from a deck, and whether that deck is playing.
     pub deck: Option<usize>,
+    pub playing: bool,
 }
 
 #[derive(Default)]
 pub struct SuggestUi {
+    pub source: Source,
     pub direction: Direction,
     pub list: Vec<Scored>,
     pub reference: Option<RefInfo>,
@@ -95,18 +109,44 @@ impl SuggestUi {
                 }
             });
         });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("After").color(util::MUTED));
+            for (src, name, tip) in [
+                (Source::Master, "Master", "Whichever deck is playing"),
+                (Source::Deck(0), "A", "The track on deck A, playing or not"),
+                (Source::Deck(1), "B", "The track on deck B, playing or not"),
+                (Source::Selected, "Selected", "The track highlighted in the library"),
+            ] {
+                if ui
+                    .selectable_label(self.source == src, name)
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    self.source = src;
+                }
+            }
+        });
         ui.horizontal(|ui| match &self.reference {
             None => {
-                ui.label(RichText::new("Select or play a track").color(util::MUTED));
+                let hint = match self.source {
+                    Source::Master => "No deck is playing".to_string(),
+                    Source::Deck(d) => format!("Nothing on deck {}", ["A", "B"][d]),
+                    Source::Selected => "Select a track in the library".to_string(),
+                };
+                ui.label(RichText::new(hint).color(util::MUTED));
             }
             Some(r) => {
                 match r.deck {
-                    Some(d) => ui.label(
-                        RichText::new(format!("LIVE deck {}", ["A", "B"][d]))
-                            .strong()
-                            .color(util::DECK[d]),
-                    ),
-                    None => ui.label(RichText::new("After").color(util::MUTED)),
+                    Some(d) => {
+                        let text = RichText::new(format!(
+                            "{}deck {}",
+                            if r.playing { "LIVE " } else { "" },
+                            ["A", "B"][d]
+                        ))
+                        .color(util::DECK[d]);
+                        ui.label(if r.playing { text.strong() } else { text })
+                    }
+                    None => ui.label(RichText::new("Selected").color(util::MUTED)),
                 };
                 let detail = format!(
                     "{} BPM  {}",

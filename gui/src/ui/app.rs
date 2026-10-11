@@ -17,7 +17,7 @@ use super::flow::FlowUi;
 use super::flows_ui::{FlowsAction, FlowsUi, Item};
 use super::library_ui::{LibAction, LibraryUi, PreviewState, take_wanted_art};
 use super::mixer;
-use super::suggest_ui::{RefInfo, SuggestUi};
+use super::suggest_ui::{RefInfo, Source, SuggestUi};
 use super::util;
 use crate::core::analysis::{Analyser, Mode};
 use crate::core::library::{self, Library};
@@ -452,42 +452,41 @@ impl EarshotApp {
         }
     }
 
-    /// The live deck (most recently started, still playing) at its actual tempo and
-    /// key; otherwise the track selected in the library.
+    /// The reference track the Suggestions pane's source asks for: a deck's track at
+    /// its actual tempo and key, or the track selected in the library.
     fn refresh_suggestions(&mut self) {
-        let live = self.shared.as_ref().and_then(|sh| {
-            let inner = self.player.lock().unwrap();
-            [self.last_started, Some(0), Some(1)]
+        // (deck, track, BPM as playing, how far the key has moved, playing)
+        let on_deck = |d: usize| {
+            let sh = self.shared.as_ref()?;
+            let id = self.player.lock().unwrap().decks[d].track_id?;
+            let bpm = sh.decks[d].bpm.get();
+            // How far the key has moved: not at all with keylock.
+            let speed = if sh.decks[d].keylock.load(Relaxed) {
+                1.0
+            } else {
+                sh.decks[d].tempo.get()
+            };
+            let playing = sh.decks[d].playing.load(Relaxed);
+            Some((d, id, bpm.is_finite().then_some(bpm), speed, playing))
+        };
+        let source = match self.suggest.source {
+            Source::Master => [self.last_started, Some(0), Some(1)]
                 .into_iter()
                 .flatten()
-                .find(|&d| sh.decks[d].playing.load(Relaxed) && inner.decks[d].track_id.is_some())
-                .map(|d| {
-                    let bpm = sh.decks[d].bpm.get();
-                    // How far the key has moved: not at all with keylock.
-                    let speed = if sh.decks[d].keylock.load(Relaxed) {
-                        1.0
-                    } else {
-                        sh.decks[d].tempo.get()
-                    };
-                    (
-                        d,
-                        inner.decks[d].track_id.unwrap(),
-                        bpm.is_finite().then_some(bpm),
-                        speed,
-                    )
-                })
-        });
-        let (id, deck, bpm, speed) = match live {
-            Some((d, id, bpm, speed)) => (id, Some(d), bpm, speed),
-            None => match self.library.focused() {
-                Some(id) => (id, None, None, 1.0),
-                None => {
-                    self.suggest.reference = None;
-                    self.suggest.set(vec![]);
-                    self.suggest.computed_for.clear();
-                    return;
-                }
-            },
+                .filter_map(on_deck)
+                .find(|r| r.4),
+            Source::Deck(d) => on_deck(d),
+            Source::Selected => self.library.focused().map(|id| (0, id, None, 1.0, false)),
+        };
+        let deck = match self.suggest.source {
+            Source::Selected => None,
+            _ => source.map(|r| r.0),
+        };
+        let Some((_, id, bpm, speed, playing)) = source else {
+            self.suggest.reference = None;
+            self.suggest.set(vec![]);
+            self.suggest.computed_for.clear();
+            return;
         };
         let Some(t) = self.library.track(id) else {
             return;
@@ -495,7 +494,7 @@ impl EarshotApp {
         let bpm = bpm.or(t.bpm());
         let key = suggest::effective_key(t.key, speed);
         let stamp = format!(
-            "{id}|{deck:?}|{:.1}|{key:?}|{:?}|{}|{}",
+            "{id}|{deck:?}|{playing}|{:.1}|{key:?}|{:?}|{}|{}",
             bpm.unwrap_or(0.0),
             self.suggest.direction,
             self.library.played.len(),
@@ -519,6 +518,7 @@ impl EarshotApp {
             bpm,
             key,
             deck,
+            playing,
         });
         self.suggest.set(list);
         self.suggest.computed_for = stamp;

@@ -16,8 +16,9 @@ The first pass was only checked off-screen (kittest renders and frame timing).
 - [x] Scorer in `core/suggest.rs` (key 0.35, tempo 0.3, vibe 0.25, energy 0.1), half and
       double tempo, per-part breakdown, unit tests. Vibe is a neutral 0.5 until there
       are sound-alike embeddings.
-- [x] Reference track: the deck that started playing most recently, at its actual
-      tempo and pitch; otherwise the track selected in the library.
+- [x] Reference track, picked with *Master / A / B / Selected*: the playing deck (the
+      one started most recently), either deck's track, or the library's selection.
+      Deck tracks count at their actual tempo and key.
 - [x] "Played this session": counts after 30 s of play; dimmed in both lists and
       scored lower.
 - [x] Suggestions pane on the right: Drop / Hold / Build, ranked rows with score bars
