@@ -76,6 +76,12 @@ def run(method: str, tid: int) -> dict:
         r.pop("id")
     elif method == "fast":
         r = fastgrid.analyse(y, sr)
+    elif method == "worker":
+        # The hybrid as implemented in the worker (worker/earshot_worker/static_tempo.py)
+        from earshot_worker.static_tempo import analyse_static
+
+        s = analyse_static(y, sr)
+        r = {"bpm": s["bpm"], "phase": s["beat"], "downbeat": s["downbeat"], "spread_ms": s["spread_ms"], "drift_pct": s["drift_pct"], "steady": s["steady"]}
     elif method == "hybrid":
         import hybrid
 

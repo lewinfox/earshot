@@ -56,11 +56,11 @@ def excerpt_starts(t: np.ndarray, env: np.ndarray, low: np.ndarray, sr: int) -> 
     w = int(st.EXCERPT_S * fps)
     kick = kick_regions(t, low)
     if kick.mean() < KICK_MIN_SHARE:
-        return st.excerpt_starts(t, env, sr)
+        return st.excerpt_starts(t, env, low, sr)
     idx = np.flatnonzero(kick)
     first, last = int(idx[0]), int(idx[-1]) + 1
     if last - first < w * st.EXCERPTS:
-        return st.excerpt_starts(t, env, sr)
+        return st.excerpt_starts(t, env, low, sr)
     frames = [first, last - w]
     # windows wholly (90%) inside kick sections, scored by kick strength
     inside = np.convolve(kick.astype(float), np.ones(w), mode="valid") >= 0.9 * w

@@ -58,7 +58,7 @@ def flagged(method: str, r: dict) -> bool:
         return True  # gave up: the app would offer dynamic analysis
     if method in ("fast", "fast_rs"):
         return r["win_resid_p90_ms"] > FAST_WIN_MS or r["good_frac"] < FAST_GOOD
-    if method in ("static", "static_snap"):
+    if method in ("static", "static_snap", "worker"):
         return not r["steady"]
     if method in ("small_line", "full_line"):
         return r["resid_p90_ms"] > LINE_P90
@@ -150,4 +150,4 @@ def main(methods):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:] or ["fast_rs", "static", "static_snap", "hybrid", "small_line", "full_line"])
+    main(sys.argv[1:] or ["fast_rs", "static", "static_snap", "hybrid", "worker", "small_line", "full_line"])

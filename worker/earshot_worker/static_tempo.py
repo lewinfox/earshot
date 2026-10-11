@@ -1,35 +1,43 @@
 """Static analysis: one tempo for the whole track, its phase and its downbeat.
 
-For the ~99.9% of tracks with a perfectly regular beat. Much faster than running Beat
-This! over the whole track (about 4 s instead of 20 s on a laptop CPU):
+For the great majority of tracks, with a perfectly regular beat. Much faster than
+running Beat This! over the whole track (about 3 s instead of 11 s on 4 laptop cores):
 
 1. Tempo from cheap signal processing over the whole track: an onset envelope
    (spectral flux at 11 kHz, 5.8 ms hop), a rough tempo by autocorrelation with a soft
    preference around 125 BPM, then a fine scan of +-3% in 0.01 BPM steps. This is
    usually right to a few hundredths, but can pick a side peak; step 3 checks it.
-2. Phase and downbeat from the small Beat This! model on five 15 s excerpts: the
-   very start and very end of the music (DJ-friendly intros and outros usually carry
-   the cleanest beat), plus the strongest-beat 15 s of each third of what's between
-   (so not a breakdown). Each excerpt's beats are lined up with the tempo from step
-   1; excerpts whose beats don't line up cleanly (coherence below MIN_COHERENCE) are
-   ignored. The downbeat is a majority vote.
+2. Phase and downbeat from the small Beat This! model on five 15 s excerpts, all
+   from stretches with a steady kick (kick_sections; Beat This! is unreliable without
+   one): the first and last of them, plus the strongest-kick 15 s of each third of
+   what's between. Intros without percussion, bass-less breakdowns and fade-outs are
+   skipped. Each excerpt's beats are lined up with the tempo from step 1; excerpts
+   whose beats don't line up cleanly (coherence below MIN_COHERENCE) are ignored. The
+   downbeat is a majority vote.
 3. The excerpts also check and correct the tempo. Each has its own (from ~30 beats);
-   if they agree with each other but not with step 1, theirs wins. Then, if it's a
-   little off, their phases creep steadily from start to end. A line through them
-   gives the tempo, then the roundest BPM (to 0.1 at the finest) whose grid still lands on every excerpt's
-   beats (choose_tempo).
-4. If the excerpts still disagree with that grid by more than STEADY_MS, or one's own
-   tempo is more than STEADY_TEMPO_PCT from the track's, the tempo probably drifts,
-   and the track is flagged so the app can suggest dynamic analysis.
+   if they agree with each other but not with step 1, theirs wins. If most don't line
+   up with step 1 at all (it can lock to 2/3 of a drum & bass tempo), their own tempo,
+   refined by the whole-track scan, is tried instead (and half and double it). Then,
+   if it's a little off, their phases creep steadily from start to end. A line
+   through them gives the tempo, then the roundest BPM (to 0.1 at the finest) whose
+   grid still lands on every excerpt's beats (choose_tempo).
+4. Beat This! puts beats 20-40 ms after the start of the kick, so the grid is then
+   moved to where the kicks start (snap.snap_to_kicks).
+5. The track is flagged as not steady, so the app can suggest dynamic analysis, if
+   the excerpts still disagree with the grid by more than STEADY_MS, two or more of
+   them don't line up with its tempo at all, or one's own tempo is more than
+   STEADY_TEMPO_PCT from the track's (is_steady).
 
-Worked out in the beat-detection research for earshot; on four test tracks it matched
-Beat This! final0 over the whole track on BPM and downbeat, with phase within ~15 ms.
+Worked out in research/beatgrid (see its README). On 75 library tracks: grids within
+10 ms of the kick start on 57 of 63 regular tracks; 11 of 12 irregular tracks flagged,
+3 regular ones wrongly.
 """
 from __future__ import annotations
 
 import numpy as np
 
 from .detectors import SMALL_CHECKPOINT, get_beat_this
+from .snap import snap_to_kicks
 
 SR = 11025
 NFFT = 1024
@@ -41,10 +49,19 @@ EXCERPTS = MIDDLE_EXCERPTS + 2
 # How well an excerpt's beats must line up with the tempo (1 = perfectly) to count.
 MIN_COHERENCE = 0.6
 # Excerpt phases further apart than this suggest a drifting tempo...
-STEADY_MS = 35.0
-# ...as does an excerpt whose own tempo is this far (%) from the track's. (A drift
-# of more than half a beat wraps the phase round, so the phase check alone misses it.)
-STEADY_TEMPO_PCT = 0.4
+STEADY_MS = 60.0
+# ...as does an excerpt whose own tempo is this far (%) from the track's (half and
+# double allowed; 15 s excerpts are noisy to about 3%), or two or more excerpts not
+# lining up with the track's tempo at all. (A drift of more than half a beat wraps
+# the phase round, so the phase check alone misses it.)
+STEADY_TEMPO_PCT = 5.0
+# Kick sections for choosing excerpts: kick-band onsets summed over KICK_WIN_S, above
+# KICK_LEVEL of their 90th percentile, for at least KICK_MIN_S. Tracks with less than
+# KICK_MIN_SHARE of them (breakbeats, drum & bass) choose excerpts as before.
+KICK_WIN_S = 2.0
+KICK_LEVEL = 0.35
+KICK_MIN_S = 8.0
+KICK_MIN_SHARE = 0.3
 
 
 def onset_envelope(y: np.ndarray, sr: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -130,21 +147,44 @@ def bass_on_grid(t: np.ndarray, low: np.ndarray, phase: float, period: float, a:
     return float(np.mean([low[max(0, j - w) : j + w + 1].max() for j in i]))
 
 
-def excerpt_starts(t: np.ndarray, env: np.ndarray, sr: int) -> list[int]:
-    """Start sample of each EXCERPT_S excerpt: the first and last of the music
-    (leading and trailing quiet skipped), then the window with the strongest onsets
-    in each of MIDDLE_EXCERPTS equal parts of what's between."""
+def kick_sections(low: np.ndarray) -> np.ndarray:
+    """Per envelope frame: inside a stretch of steady kicks (the kick-band onset
+    strength over KICK_WIN_S is above KICK_LEVEL of its 90th percentile, for at least
+    KICK_MIN_S)."""
+    fps = SR / HOP
+    level = np.convolve(low, np.ones(int(KICK_WIN_S * fps)), mode="same")
+    on = level > KICK_LEVEL * np.percentile(level, 90)
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], on.astype(int), [0]])))
+    for a, b in zip(edges[::2], edges[1::2]):
+        if b - a < KICK_MIN_S * fps:
+            on[a:b] = False
+    return on
+
+
+def excerpt_starts(t: np.ndarray, env: np.ndarray, low: np.ndarray, sr: int) -> list[int]:
+    """Start sample of each EXCERPT_S excerpt: the first and last 15 s with a steady
+    kick, then the window with the strongest kick in each of MIDDLE_EXCERPTS equal
+    parts of what's between (wholly inside kick sections). Tracks with too little
+    steady kick (breakbeats, drum & bass) use the music's first and last 15 s and the
+    strongest onsets between."""
     fps = SR / HOP
     w = int(EXCERPT_S * fps)
-    # Where the music starts and stops: one-second onset strength above a fifth of
-    # its typical level.
-    level = np.convolve(env, np.ones(int(fps)), mode="same")
-    on = np.flatnonzero(level > 0.2 * np.median(level[level > 0]))
-    first, last = (int(on[0]), int(on[-1]) + 1) if len(on) else (0, len(env))
-    if last - first < w * EXCERPTS:
-        first, last = 0, len(env)
+    kick = kick_sections(low)
+    on = np.flatnonzero(kick)
+    if kick.mean() >= KICK_MIN_SHARE and on[-1] + 1 - on[0] >= w * EXCERPTS:
+        first, last = int(on[0]), int(on[-1]) + 1
+        inside = np.convolve(kick.astype(float), np.ones(w), mode="valid") >= 0.9 * w
+        strength = np.convolve(low, np.ones(w), mode="valid") * inside  # strength[i]: window from frame i
+    else:
+        # Where the music starts and stops: one-second onset strength above a fifth
+        # of its typical level.
+        level = np.convolve(env, np.ones(int(fps)), mode="same")
+        on = np.flatnonzero(level > 0.2 * np.median(level[level > 0]))
+        first, last = (int(on[0]), int(on[-1]) + 1) if len(on) else (0, len(env))
+        if last - first < w * EXCERPTS:
+            first, last = 0, len(env)
+        strength = np.convolve(env, np.ones(w), mode="valid")
     frames = [first, last - w]
-    strength = np.convolve(env, np.ones(w), mode="valid")  # strength[i]: window from frame i
     lo0, hi0 = first + w, last - 2 * w  # middle windows mustn't overlap the ends
     for k in range(MIDDLE_EXCERPTS):
         lo = lo0 + int(k * (hi0 - lo0) / MIDDLE_EXCERPTS)
@@ -224,13 +264,13 @@ def analyse_static(y: np.ndarray, sr: int, progress=None) -> dict:
     model = get_beat_this(SMALL_CHECKPOINT)
     n = len(mono)
     span = int(EXCERPT_S * sr)
-    starts = [0] if n <= span * EXCERPTS else excerpt_starts(t, env, sr)
+    starts = [0] if n <= span * EXCERPTS else excerpt_starts(t, env, low, sr)
     found = []  # (start, beats, downbeats) per excerpt
     for i, s in enumerate(starts):
         seg = mono[s : s + span] if len(starts) > 1 else mono
         beats, downbeats = model(seg, sr)
         found.append((s, np.asarray(beats, float) + s / sr, np.asarray(downbeats, float) + s / sr))
-        report(0.25 + 0.75 * (i + 1) / len(starts))
+        report(0.25 + 0.65 * (i + 1) / len(starts))
 
     def gather(period):
         """Per excerpt that lines up: a beat time near its middle, how cleanly it
@@ -262,6 +302,18 @@ def analyse_static(y: np.ndarray, sr: int, progress=None) -> dict:
     if len(local) >= 3 and np.ptp(local) < 0.002 * raw and abs(np.median(local) / raw - 1) > 0.001:
         start = float(np.median(local))
         anchors, weights, downs, local = gather(60 / start)
+    # Most excerpts don't line up at all: the whole-track pass probably locked to a
+    # wrong multiple (2/3 of a drum & bass tempo, say). Try the excerpts' own tempo,
+    # and half and double it, each refined by the whole-track scan (the small model's
+    # own tempo is only rough on fast breakbeats: 176 for 174).
+    if len(anchors) < max(2, len(found) // 2):
+        own = own_tempo(found)
+        for guess in (own, own / 2, own * 2) if own else ():
+            if 60 <= guess <= 200:
+                trial_bpm = fine_tempo(t, env, guess)
+                trial = gather(60 / trial_bpm)
+                if len(trial[0]) > len(anchors):
+                    start, (anchors, weights, downs, local) = trial_bpm, trial
     if not anchors:
         raise ValueError("no clear beats found: try dynamic analysis")
 
@@ -272,19 +324,49 @@ def analyse_static(y: np.ndarray, sr: int, progress=None) -> dict:
     # excerpts still disagree with it, which a straight grid can't fix (drift).
     phase, miss = grid_fit(anchors, weights, period)
     spread_ms = float(np.ptp(miss) * 1000) if len(anchors) > 1 else 0.0
-    drift_pct = float(max((abs(b / bpm - 1) * 100 for b in local), default=0.0))
+    lined = len(gather(period)[0])
+    # Each excerpt's own tempo against the track's, half and double allowed.
+    drift_pct = max((min(abs(b * f / bpm - 1) for f in (0.5, 1, 2)) * 100 for b in excerpt_tempos(found)), default=0.0)
     votes = [v for d in downs for v in np.round((d - phase) / period).astype(int) % 4]
     if votes:
         k, counts = np.unique(votes, return_counts=True)
         down = int(k[np.argmax(counts)])
     else:
         down = 0
+    # Beat This! is late: move the grid to where the kicks start. Beat and downbeat
+    # by the same amount, so the downbeat stays on the same beat.
+    shift = snap_to_kicks(mono, sr, bpm, phase)
+    report(1.0)
     return {
         "bpm": float(bpm),
         "raw_bpm": float(raw),
-        "beat": float(phase),
-        "downbeat": float(phase + down * period),
+        "beat": float((phase + shift) % period),
+        "downbeat": float((phase + shift + down * period) % (4 * period)),
         "spread_ms": spread_ms,
-        "drift_pct": drift_pct,
-        "steady": spread_ms <= STEADY_MS and drift_pct <= STEADY_TEMPO_PCT,
+        "drift_pct": float(drift_pct),
+        "steady": is_steady(spread_ms, lined, len(found), drift_pct),
     }
+
+
+def excerpt_tempos(found) -> list[float]:
+    """Each excerpt's own tempo: a straight line through its beats, numbered by their
+    median spacing (the spacing alone is quantised to the model's 20 ms frames)."""
+    out = []
+    for _, beats, _ in found:
+        if len(beats) >= 8:
+            k = np.round((beats - beats[0]) / np.median(np.diff(beats)))
+            out.append(60 / np.polyfit(k, beats, 1)[0])
+    return out
+
+
+def own_tempo(found) -> float | None:
+    """The excerpts' tempo: the median of their own, if at least two have one."""
+    tempos = excerpt_tempos(found)
+    return float(np.median(tempos)) if len(tempos) >= 2 else None
+
+
+def is_steady(spread_ms: float, lined: int, excerpts: int, drift_pct: float) -> bool:
+    """One straight grid fits: the excerpts agree on the phase (within STEADY_MS), at
+    most one fails to line up with the track's tempo, and none has its own tempo more
+    than STEADY_TEMPO_PCT from the track's."""
+    return bool(spread_ms <= STEADY_MS and lined > excerpts - 2 and drift_pct <= STEADY_TEMPO_PCT)

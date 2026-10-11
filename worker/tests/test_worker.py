@@ -116,8 +116,10 @@ def test_analyse_static_click_track(worker, tmp_path):
     assert r["ok"], r
     assert r["bpm"] == BPM
     assert r["steady"] is True
-    # The click track's beats start at 0.5 s, so a beat sits there (phase is modulo a beat).
+    # The click track's kicks start at 0.5 s, so a beat sits there (phase is modulo a
+    # beat), on the kick's start, not where Beat This! puts it.
     period = 60 / BPM
     off = (r["beat"] - 0.5) % period
-    assert min(off, period - off) < 0.02, r
+    assert min(off, period - off) < 0.005, r
+    assert (r["downbeat"] - r["beat"]) % period < 1e-9 or period - (r["downbeat"] - r["beat"]) % period < 1e-9
     assert worker.progress and worker.progress == sorted(worker.progress)

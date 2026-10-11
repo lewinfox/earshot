@@ -61,6 +61,28 @@ Where the hybrid misses 10 ms on a regular track:
 
    The thresholds were tuned on this sample, so expect a few more misses on new tracks. The missed irregular track is 937 (spread 50 ms). The false flags are 1132 (live), 1527 (drum & bass) and 439.
 
+## In the worker
+
+The hybrid is now in `worker/earshot_worker/static_tempo.py`, with the snap in `worker/earshot_worker/snap.py`. The reply shape is unchanged:
+- `beat` and `downbeat` are moved by the same snap offset.
+- `steady` follows the new flag.
+- `drift_pct` is now the largest excerpt-tempo deviation.
+
+`candidates.py worker` runs it over the sample. The results match `hybrid.py` exactly:
+- tempo right on 62 of 63 regular tracks;
+- 57 of 63 within 10 ms;
+- 11 of 12 irregular tracks flagged, with 3 false flags.
+
+Its time per track is the same as `hybrid.py`'s.
+
+## Dynamic grids (measured, not changed)
+
+Dynamic analysis (Beat This! full, then the strongest librosa onset within 35 ms) sits a median 16–18 ms after the kick start. On regular tracks:
+- **As they are:** no track has its median error within 10 ms, and 12% of beats are within 10 ms.
+- **With the snap applied per beat** (each beat moved by the median hit-start offset of the 16 beats around it): the bias goes to about 0. 57 of 63 regular and 10 of 12 irregular tracks are within 10 ms, with 71% and 64% of beats within 10 ms.
+
+This is partly by construction: the reference uses the same hit-start rule (`dyn_snap.py`).
+
 ## Things that didn't work
 
 - **A per-beat hit-start flag.** For each grid line, check whether the hit starts within 25 ms. Too noisy: the wide search catches other hits.
