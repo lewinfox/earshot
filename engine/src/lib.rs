@@ -6,6 +6,7 @@
 pub mod beatgrid;
 pub mod decode;
 pub mod demo;
+pub mod dsp;
 pub mod energy;
 pub mod engine;
 pub mod output;
@@ -16,7 +17,9 @@ use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::thread;
 use std::time::Duration;
 
-pub use engine::{Command, DECKS, HOTCUES, Out, Press, RATE_RANGE, Routing, Shared};
+pub use engine::{
+    Command, DECKS, EQ_HIGH, EQ_LOW, EQ_MID, HOTCUES, Out, Press, RATE_RANGE, Routing, Shared,
+};
 pub use output::{OutputInfo, OutputOptions};
 
 use engine::{Garbage, Renderer};

@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use crate::beatgrid::Beatgrid;
 use crate::decode::TrackAudio;
+use crate::dsp::{self, DjFilter, Eq3, Smoothed};
 
 pub const DECKS: usize = 2;
 pub const HOTCUES: usize = 8;
@@ -17,6 +18,14 @@ pub const HOTCUES: usize = 8;
 pub const MAX_BLOCK: usize = 4096;
 /// Pitch fader range, as a fraction (±8 %, the CDJ default).
 pub const RATE_RANGE: f64 = 0.08;
+/// EQ band indices for [`Command::Eq`] and [`DeckShared::eq`].
+pub const EQ_LOW: usize = 0;
+pub const EQ_MID: usize = 1;
+pub const EQ_HIGH: usize = 2;
+/// Seconds for channel strip knobs (gain, EQ) to settle, so moves don't click.
+const KNOB_SECS: f64 = 0.01;
+/// Seconds for a level meter to fall back by a factor of e.
+const VU_FALL_SECS: f64 = 0.25;
 
 // ---- shared state (written by the audio thread, read anywhere) --------------------
 
@@ -59,6 +68,14 @@ pub struct DeckShared {
     pub hotcues: [AtomicF64; HOTCUES],
     pub volume: AtomicF64,
     pub pfl: AtomicBool,
+    /// Channel gain (trim) before the EQ, linear: 1 = unchanged.
+    pub pregain: AtomicF64,
+    /// EQ band gains, linear, indexed by [`EQ_LOW`] etc.: 0 = killed, 1 = flat.
+    pub eq: [AtomicF64; 3],
+    /// Filter knob: -1 low-pass .. 0 off .. 1 high-pass.
+    pub filter: AtomicF64,
+    /// Channel level meter (peak, after gain, EQ and filter, before the fader).
+    pub vu: AtomicF64,
     /// Bumped on every load so readers can tell tracks apart.
     pub generation: AtomicU64,
 }
@@ -68,6 +85,16 @@ pub struct Shared {
     pub decks: [DeckShared; DECKS],
     pub crossfader: AtomicF64,
     pub quantize: AtomicBool,
+    /// Main output level, linear.
+    pub main_gain: AtomicF64,
+    /// Main output balance, -1 (left) .. 1 (right).
+    pub balance: AtomicF64,
+    /// Headphone level, linear.
+    pub head_gain: AtomicF64,
+    /// What the headphones hear: -1 the cue bus only .. 1 the main mix only.
+    pub head_mix: AtomicF64,
+    /// Main output meters, left and right (peak).
+    pub vu_main: [AtomicF64; 2],
     pub callbacks: AtomicU64,
     /// Callbacks that took more than 80 % of their time budget.
     pub slow_callbacks: AtomicU64,
@@ -239,6 +266,34 @@ pub enum Command {
         deck: usize,
         on: bool,
     },
+    /// Channel gain (trim), linear (0..4).
+    Pregain {
+        deck: usize,
+        value: f64,
+    },
+    /// One EQ band's gain, linear (0 kills it, 1 is flat).
+    Eq {
+        deck: usize,
+        band: usize,
+        value: f64,
+    },
+    /// Filter knob, -1 (low-pass) .. 0 (off) .. 1 (high-pass).
+    Filter {
+        deck: usize,
+        value: f64,
+    },
+    MainGain {
+        value: f64,
+    },
+    Balance {
+        value: f64,
+    },
+    HeadGain {
+        value: f64,
+    },
+    HeadMix {
+        value: f64,
+    },
     Crossfader {
         value: f64,
     },
@@ -399,6 +454,68 @@ pub struct Renderer {
     preview: Option<Arc<TrackAudio>>,
     preview_pos: f64,
     preview_playing: bool,
+    strips: [Strip; DECKS],
+    main_gain: f64,
+    balance: f64,
+    head_gain: f64,
+    head_mix: f64,
+    vu_main: [f32; 2],
+    /// Per-sample easing for knobs; see [`KNOB_SECS`].
+    knob_ease: f64,
+}
+
+/// A mixer channel's gain, EQ and filter. Kept apart from [`Deck`] so loading a
+/// track leaves the mixer as it is.
+struct Strip {
+    pregain: Smoothed,
+    eq_gain: [Smoothed; 3],
+    eq: Eq3,
+    filter_value: f64,
+    filter: DjFilter,
+    vu: f32,
+}
+
+impl Strip {
+    fn new(sr: f64) -> Strip {
+        Strip {
+            pregain: Smoothed::new(1.0),
+            eq_gain: [Smoothed::new(1.0); 3],
+            eq: Eq3::new(sr),
+            filter_value: 0.0,
+            filter: DjFilter::new(sr),
+            vu: 0.0,
+        }
+    }
+
+    /// Gain, EQ and filter on one block of interleaved stereo, in place. Returns the
+    /// block's peak.
+    fn process(&mut self, buf: &mut [f32], k: f64) -> f32 {
+        self.filter.set(self.filter_value);
+        let filtering = self.filter.active();
+        let mut peak = 0f32;
+        for frame in buf.chunks_exact_mut(2) {
+            let pre = self.pregain.next(k);
+            let g = [
+                self.eq_gain[0].next(k),
+                self.eq_gain[1].next(k),
+                self.eq_gain[2].next(k),
+            ];
+            for (ch, s) in frame.iter_mut().enumerate() {
+                let mut y = self.eq.run(ch, *s as f64 * pre, g);
+                if filtering {
+                    y = self.filter.run(ch, y);
+                }
+                *s = y as f32;
+                peak = peak.max(s.abs());
+            }
+        }
+        peak
+    }
+}
+
+/// A meter that jumps up to a block's peak and falls back slowly.
+fn meter(level: f32, peak: f32, secs: f64) -> f32 {
+    peak.max(level * (-secs / VU_FALL_SECS).exp() as f32)
 }
 
 impl Renderer {
@@ -425,6 +542,16 @@ impl Renderer {
             preview: None,
             preview_pos: 0.0,
             preview_playing: false,
+            strips: [
+                Strip::new(sample_rate as f64),
+                Strip::new(sample_rate as f64),
+            ],
+            main_gain: 1.0,
+            balance: 0.0,
+            head_gain: 1.0,
+            head_mix: -1.0,
+            vu_main: [0.0; 2],
+            knob_ease: dsp::ease_per_sample(KNOB_SECS, sample_rate as f64),
         }
     }
 
@@ -507,10 +634,25 @@ impl Renderer {
             }
         }
 
+        // Channel strips: gain, EQ, filter. Meters read here, before the faders.
+        let secs = n as f64 / sr;
+        for d in 0..DECKS {
+            let strip = &mut self.strips[d];
+            let peak = strip.process(&mut self.deck_buf[d][..n * 2], self.knob_ease);
+            strip.vu = meter(strip.vu, peak, secs);
+        }
+
         // Constant-power crossfader.
         let x = (self.crossfader.clamp(-1.0, 1.0) + 1.0) * std::f64::consts::FRAC_PI_4;
         let xf = [x.cos() as f32, x.sin() as f32];
         let any_pfl = self.decks.iter().any(|d| d.pfl);
+        let main = self.main_gain as f32;
+        let bal = self.balance.clamp(-1.0, 1.0) as f32;
+        let side = [(1.0 - bal).min(1.0), (1.0 + bal).min(1.0)];
+        // Head mix: how much of the main mix the headphones hear, against the cue bus.
+        let mix = ((self.head_mix.clamp(-1.0, 1.0) + 1.0) / 2.0) as f32;
+        let head = self.head_gain as f32;
+        let mut peaks = [0f32; 2];
         for f in 0..n * 2 {
             let mut m = 0.0;
             let mut p = 0.0;
@@ -522,13 +664,16 @@ impl Renderer {
                     p += s;
                 }
             }
-            let m = (0.8 * m).clamp(-1.0, 1.0);
-            self.master[f] = m;
-            self.phones[f] = if any_pfl {
-                (0.8 * p).clamp(-1.0, 1.0)
-            } else {
-                m
-            };
+            let m = 0.8 * m;
+            let out = (m * main * side[f % 2]).clamp(-1.0, 1.0);
+            peaks[f % 2] = peaks[f % 2].max(out.abs());
+            self.master[f] = out;
+            // With nothing cued the cue bus carries the main mix.
+            let cue = if any_pfl { 0.8 * p } else { m };
+            self.phones[f] = (head * ((1.0 - mix) * cue + mix * m)).clamp(-1.0, 1.0);
+        }
+        for (v, p) in self.vu_main.iter_mut().zip(peaks) {
+            *v = meter(*v, p, secs);
         }
 
         // The preview player plays at its own pace on the headphone bus only.
@@ -543,8 +688,9 @@ impl Renderer {
                     break;
                 }
                 let (l, r) = sample_at(audio, self.preview_pos * src_rate);
-                self.phones[2 * f] = (self.phones[2 * f] + 0.8 * l).clamp(-1.0, 1.0);
-                self.phones[2 * f + 1] = (self.phones[2 * f + 1] + 0.8 * r).clamp(-1.0, 1.0);
+                let g = 0.8 * self.head_gain as f32;
+                self.phones[2 * f] = (self.phones[2 * f] + g * l).clamp(-1.0, 1.0);
+                self.phones[2 * f + 1] = (self.phones[2 * f + 1] + g * r).clamp(-1.0, 1.0);
                 self.preview_pos += 1.0 / sr;
             }
         }
@@ -825,6 +971,21 @@ impl Renderer {
                 self.decks[deck].volume = value.clamp(0.0, 1.0) as f32
             }
             Command::Pfl { deck, on } => self.decks[deck].pfl = on,
+            Command::Pregain { deck, value } => {
+                self.strips[deck].pregain.target = value.clamp(0.0, 4.0)
+            }
+            Command::Eq { deck, band, value } => {
+                if band < 3 {
+                    self.strips[deck].eq_gain[band].target = value.clamp(0.0, 4.0);
+                }
+            }
+            Command::Filter { deck, value } => {
+                self.strips[deck].filter_value = value.clamp(-1.0, 1.0)
+            }
+            Command::MainGain { value } => self.main_gain = value.clamp(0.0, 5.0),
+            Command::Balance { value } => self.balance = value.clamp(-1.0, 1.0),
+            Command::HeadGain { value } => self.head_gain = value.clamp(0.0, 5.0),
+            Command::HeadMix { value } => self.head_mix = value.clamp(-1.0, 1.0),
             Command::Crossfader { value } => self.crossfader = value,
             Command::Quantize { on } => self.quantize = on,
             Command::SetRouting(r) => self.routing = r,
@@ -852,6 +1013,21 @@ impl Renderer {
         s.preview_position.set(self.preview_pos);
         s.preview_duration
             .set(self.preview.as_ref().map_or(0.0, |a| a.duration()));
+        s.main_gain.set(self.main_gain);
+        s.balance.set(self.balance);
+        s.head_gain.set(self.head_gain);
+        s.head_mix.set(self.head_mix);
+        for (v, m) in s.vu_main.iter().zip(self.vu_main) {
+            v.set(m as f64);
+        }
+        for (st, sh) in self.strips.iter().zip(&s.decks) {
+            sh.pregain.set(st.pregain.target);
+            for (e, g) in sh.eq.iter().zip(&st.eq_gain) {
+                e.set(g.target);
+            }
+            sh.filter.set(st.filter_value);
+            sh.vu.set(st.vu as f64);
+        }
         for (dk, sh) in self.decks.iter().zip(&s.decks) {
             sh.position.set(dk.pos);
             sh.duration.set(dk.duration());
@@ -1192,7 +1368,10 @@ mod tests {
         let r = range(&mut rig, |d| d.speed.get());
         // (It used to swing by up to 4 %; what's left is beat times rounded to samples.)
         assert!(r < 1e-5, "paused speed moves by {r}");
-        assert!(range(&mut rig, |d| d.tempo.get()) < 1e-5, "paused tempo moves");
+        assert!(
+            range(&mut rig, |d| d.tempo.get()) < 1e-5,
+            "paused tempo moves"
+        );
         assert!((rig.shared.decks[1].tempo.get() - 124.0 / 126.0).abs() < 1e-5);
         rig.send(Command::Play { deck: 1, on: true });
         rig.send(Command::Nudge {
@@ -1200,7 +1379,10 @@ mod tests {
             amount: 0.01,
         });
         rig.run(0.2);
-        assert!(range(&mut rig, |d| d.tempo.get()) < 1e-5, "playing tempo moves");
+        assert!(
+            range(&mut rig, |d| d.tempo.get()) < 1e-5,
+            "playing tempo moves"
+        );
     }
 
     fn peaks(out: &[f32], channels: usize) -> Vec<f32> {
@@ -1236,6 +1418,52 @@ mod tests {
         rig.run(0.1);
         assert_eq!(peaks(&rig.out, 4)[2], 0.0);
         assert!(!rig.shared.preview_playing.load(Relaxed));
+    }
+
+    #[test]
+    fn meters_follow_gain_and_eq() {
+        let mut rig = Rig::new();
+        rig.load(0, 120.0, 120.0);
+        rig.send(Command::Play { deck: 0, on: true });
+        rig.run(0.5);
+        let flat = rig.shared.decks[0].vu.get();
+        assert!(flat > 0.01, "meter moves: {flat}");
+        assert!(rig.shared.vu_main[0].get() > 0.01);
+        // Killing all three bands silences the channel; its meter falls away.
+        for band in [EQ_LOW, EQ_MID, EQ_HIGH] {
+            rig.send(Command::Eq {
+                deck: 0,
+                band,
+                value: 0.0,
+            });
+        }
+        rig.run(3.0);
+        assert!(rig.shared.decks[0].vu.get() < flat * 0.01);
+        assert!(peaks(&rig.out, 4)[0] < 0.001);
+        assert_eq!(rig.shared.decks[0].eq[EQ_MID].get(), 0.0);
+    }
+
+    #[test]
+    fn main_gain_balance_and_head_mix() {
+        let mut rig = Rig::new();
+        rig.load(0, 120.0, 120.0);
+        rig.send(Command::Play { deck: 0, on: true });
+        rig.send(Command::Pfl { deck: 1, on: true }); // cue bus silent
+        rig.send(Command::Balance { value: 1.0 }); // right only
+        rig.run(0.5);
+        let p = peaks(&rig.out, 4);
+        assert!(p[0] == 0.0 && p[1] > 0.01, "balance: {p:?}");
+        assert_eq!(p[2], 0.0, "headphones hear only the (silent) cue bus");
+        // Head mix fully to main: the headphones hear the main mix.
+        rig.send(Command::HeadMix { value: 1.0 });
+        rig.run(0.2);
+        assert!(peaks(&rig.out, 4)[2] > 0.01);
+        // Main gain 0 silences the main output but not the headphones.
+        rig.send(Command::MainGain { value: 0.0 });
+        rig.run(0.2);
+        let p = peaks(&rig.out, 4);
+        assert!(p[0] == 0.0 && p[1] == 0.0 && p[2] > 0.01, "{p:?}");
+        assert_eq!(rig.shared.main_gain.get(), 0.0);
     }
 
     #[test]

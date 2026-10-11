@@ -12,9 +12,10 @@ use earshot_engine::{OutputInfo, OutputOptions, Shared};
 use egui::{Key, RichText, Stroke, Ui, vec2};
 
 use super::audio_ui::{AudioAction, AudioUi};
-use super::deck::{Action, DeckInfo, DeckUi};
+use super::deck::{Action, DeckInfo, DeckUi, PendingLoad};
 use super::flow::FlowUi;
 use super::library_ui::{LibAction, LibraryUi};
+use super::mixer;
 use super::suggest_ui::{RefInfo, SuggestUi};
 use super::util;
 use crate::core::analysis::{Analyser, Mode};
@@ -47,7 +48,6 @@ pub struct EarshotApp {
     /// When each deck started playing, to count a track as played after 30 s.
     play_started: [Option<Instant>; 2],
     analysis: AnalysisSummary,
-    mixer: Mixer,
     hud: Hud,
     show_keys: bool,
     audio_settings: AudioSettings,
@@ -103,12 +103,6 @@ struct AnalysisSummary {
     running: HashMap<i64, f64>,
     failed: u32,
     last_error: String,
-}
-
-struct Mixer {
-    volume: [f64; 2],
-    crossfader: f64,
-    quantize: bool,
 }
 
 #[derive(Default)]
@@ -181,11 +175,6 @@ impl EarshotApp {
             last_started: None,
             play_started: [None; 2],
             analysis: AnalysisSummary::default(),
-            mixer: Mixer {
-                volume: [1.0, 1.0],
-                crossfader: 0.0,
-                quantize: true,
-            },
             hud: Hud::default(),
             show_keys: false,
             audio_settings,
@@ -212,6 +201,8 @@ impl EarshotApp {
         } else {
             0
         });
+        // Show the track's details at once; the audio follows when it has decoded.
+        self.decks[deck].start_load(PendingLoad::new(track_id, self.library.track(track_id)));
         let (player, lib, sink) = (self.player.clone(), self.lib.clone(), self.sink.clone());
         std::thread::spawn(move || {
             let result = player::load_track(&player, &lib, deck, track_id);
@@ -444,14 +435,19 @@ impl EarshotApp {
                     deck,
                     track_id,
                     result,
-                } => match result {
-                    Ok(()) => {
-                        if !self.library.previews.contains_key(&track_id) {
-                            self.refresh_previews(Some(&[track_id]));
+                } => {
+                    // Stop showing the pending track (on failure the deck shows what
+                    // it had). A stale result, for an older request, changes nothing.
+                    self.decks[deck].finish_load(track_id);
+                    match result {
+                        Ok(()) => {
+                            if !self.library.previews.contains_key(&track_id) {
+                                self.refresh_previews(Some(&[track_id]));
+                            }
                         }
+                        Err(e) => eprintln!("load to deck {}: {e}", deck + 1),
                     }
-                    Err(e) => eprintln!("load to deck {}: {e}", deck + 1),
-                },
+                }
                 Event::Analysis(ev) => {
                     let a = &mut self.analysis;
                     match ev.state {
@@ -765,48 +761,6 @@ impl EarshotApp {
         }
     }
 
-    fn mixer_ui(&mut self, ui: &mut Ui) {
-        let mut sends: Vec<(&'static str, &'static str, f64)> = vec![];
-        ui.vertical(|ui| {
-            ui.spacing_mut().slider_width = 100.0;
-            for (d, name) in [(0, "Volume A"), (1, "Volume B")] {
-                ui.label(RichText::new(name).size(11.0).color(util::MUTED));
-                let r = ui
-                    .add(egui::Slider::new(&mut self.mixer.volume[d], 0.0..=1.0).show_value(false));
-                if r.double_clicked() {
-                    self.mixer.volume[d] = 1.0;
-                }
-                if r.changed() || r.double_clicked() {
-                    sends.push((
-                        ["[Channel1]", "[Channel2]"][d],
-                        "volume",
-                        self.mixer.volume[d],
-                    ));
-                }
-            }
-            ui.label(RichText::new("Crossfader").size(11.0).color(util::MUTED));
-            let r =
-                ui.add(egui::Slider::new(&mut self.mixer.crossfader, -1.0..=1.0).show_value(false));
-            if r.double_clicked() {
-                self.mixer.crossfader = 0.0;
-            }
-            if r.changed() || r.double_clicked() {
-                sends.push(("[Master]", "crossfader", self.mixer.crossfader));
-            }
-            if ui.checkbox(&mut self.mixer.quantize, "Quantise").changed() {
-                sends.push(("[Master]", "quantize", self.mixer.quantize as u8 as f64));
-            }
-            ui.label(
-                RichText::new("Master: out 1/2\nHeadphones: out 3/4")
-                    .size(10.0)
-                    .color(util::MUTED),
-            );
-        });
-        for (g, k, v) in sends {
-            self.control(g, k, v);
-        }
-    }
-
     fn tick_hud(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
         let dt = ctx.input(|i| i.unstable_dt);
@@ -911,10 +865,11 @@ impl eframe::App for EarshotApp {
                     .inner_margin(egui::Margin::symmetric(6, 4)),
             )
             .show_animated(ctx, !planning, |ui| {
-                let mixer_w = 130.0;
+                let mixer_w = mixer::WIDTH + 16.0;
+                let height = mixer::HEIGHT + 12.0;
                 let w = (ui.available_width() - mixer_w - 12.0) / 2.0;
                 ui.horizontal_top(|ui| {
-                    self.decks[0].show(ui, w, &infos[0], &mut actions);
+                    self.decks[0].show(ui, w, height, &infos[0], &mut actions);
                     ui.allocate_ui(vec2(mixer_w, 0.0), |ui| {
                         egui::Frame::new()
                             .fill(util::PANEL)
@@ -923,10 +878,10 @@ impl eframe::App for EarshotApp {
                             .inner_margin(8)
                             .show(ui, |ui| {
                                 ui.set_width(mixer_w - 16.0);
-                                self.mixer_ui(ui);
+                                mixer::show(ui, self.shared.as_deref(), &mut actions);
                             });
                     });
-                    self.decks[1].show(ui, w, &infos[1], &mut actions);
+                    self.decks[1].show(ui, w, height, &infos[1], &mut actions);
                 });
             });
         egui::SidePanel::left("tree")
@@ -1102,10 +1057,10 @@ fn keys_help(ui: &mut Ui) {
                 "reloop / exit",
                 "nudge slower",
                 "nudge faster",
-                "hot cue A",
-                "hot cue B",
-                "hot cue C",
-                "hot cue D",
+                "hot cue 1",
+                "hot cue 2",
+                "hot cue 3",
+                "hot cue 4",
             ];
             k.into_iter().zip(what).collect()
         };

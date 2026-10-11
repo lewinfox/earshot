@@ -4,7 +4,7 @@
 //! Buttons send 1 on press and 0 on release. Controls that the UI owns (library
 //! navigation, loading the selected track) are handed back to the caller to forward.
 
-use earshot_engine::{Command, Press, RATE_RANGE};
+use earshot_engine::{Command, EQ_HIGH, EQ_LOW, EQ_MID, Press, RATE_RANGE, Shared};
 
 use crate::core::player::Inner;
 
@@ -14,10 +14,28 @@ pub enum Outcome {
     Ui,
 }
 
+pub const CHANNELS: [&str; 2] = ["[Channel1]", "[Channel2]"];
+/// Mixxx's groups for each channel's EQ (`parameter1..3` = low, mid, high) and its
+/// quick effect, the filter knob (`super1`).
+pub const EQ_GROUPS: [&str; 2] = [
+    "[EqualizerRack1_[Channel1]_Effect1]",
+    "[EqualizerRack1_[Channel2]_Effect1]",
+];
+pub const FILTER_GROUPS: [&str; 2] = [
+    "[QuickEffectRack1_[Channel1]]",
+    "[QuickEffectRack1_[Channel2]]",
+];
+
 fn deck_of(group: &str) -> Option<usize> {
-    match group {
-        "[Channel1]" => Some(0),
-        "[Channel2]" => Some(1),
+    CHANNELS.iter().position(|g| *g == group)
+}
+
+/// EQ band (0 low, 1 mid, 2 high) for Mixxx's `parameter1..3`.
+fn eq_band(key: &str) -> Option<usize> {
+    match key {
+        "parameter1" => Some(EQ_LOW),
+        "parameter2" => Some(EQ_MID),
+        "parameter3" => Some(EQ_HIGH),
         _ => None,
     }
 }
@@ -30,9 +48,29 @@ pub fn apply(inner: &mut Inner, group: &str, key: &str, value: f64) -> Result<Ou
         let cmd = match key {
             "crossfader" => Command::Crossfader { value },
             "quantize" => Command::Quantize { on: value > 0.0 },
+            "gain" => Command::MainGain { value },
+            "balance" => Command::Balance { value },
+            "headGain" => Command::HeadGain { value },
+            "headMix" => Command::HeadMix { value },
             _ => return Err(format!("unknown control {group} {key}")),
         };
         inner.send(cmd)?;
+        return Ok(Outcome::Done);
+    }
+    if let Some(deck) = EQ_GROUPS.iter().position(|g| *g == group) {
+        let band = eq_band(key).ok_or_else(|| format!("unknown control {group} {key}"))?;
+        inner.send(Command::Eq { deck, band, value })?;
+        return Ok(Outcome::Done);
+    }
+    if let Some(deck) = FILTER_GROUPS.iter().position(|g| *g == group) {
+        if key != "super1" {
+            return Err(format!("unknown control {group} {key}"));
+        }
+        // Mixxx's super1 is 0..1 with the filter off at 0.5.
+        inner.send(Command::Filter {
+            deck,
+            value: value * 2.0 - 1.0,
+        })?;
         return Ok(Outcome::Done);
     }
     let deck = deck_of(group).ok_or_else(|| format!("unknown group {group}"))?;
@@ -73,6 +111,7 @@ pub fn apply(inner: &mut Inner, group: &str, key: &str, value: f64) -> Result<Ou
         "sync_enabled" => Command::Sync { deck, on: pressed },
         "pfl" => Command::Pfl { deck, on: pressed },
         "volume" => Command::Volume { deck, value },
+        "pregain" => Command::Pregain { deck, value },
         // Mixxx's `rate` is -1..1 across the fader range.
         "rate" => Command::Rate {
             deck,
@@ -138,4 +177,32 @@ pub fn current(inner: &Inner, group: &str, key: &str) -> Option<bool> {
         "pfl" => Some(d.pfl.load(Relaxed)),
         _ => None,
     }
+}
+
+/// Current value of a continuous control, in the units [`apply`] takes, so on-screen
+/// knobs and faders show what the keyboard and MIDI last set.
+pub fn value(shared: &Shared, group: &str, key: &str) -> Option<f64> {
+    if group == "[Master]" {
+        return Some(match key {
+            "crossfader" => shared.crossfader.get(),
+            "gain" => shared.main_gain.get(),
+            "balance" => shared.balance.get(),
+            "headGain" => shared.head_gain.get(),
+            "headMix" => shared.head_mix.get(),
+            _ => return None,
+        });
+    }
+    if let Some(d) = EQ_GROUPS.iter().position(|g| *g == group) {
+        return Some(shared.decks[d].eq[eq_band(key)?].get());
+    }
+    if let Some(d) = FILTER_GROUPS.iter().position(|g| *g == group) {
+        return (key == "super1").then(|| (shared.decks[d].filter.get() + 1.0) / 2.0);
+    }
+    let d = &shared.decks[deck_of(group)?];
+    Some(match key {
+        "volume" => d.volume.get(),
+        "pregain" => d.pregain.get(),
+        "rate" => d.rate.get() / RATE_RANGE,
+        _ => return None,
+    })
 }
