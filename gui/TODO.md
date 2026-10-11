@@ -61,9 +61,6 @@ The first pass was only checked off-screen (kittest renders and frame timing).
 - [ ] Try routing and preview on real hardware (laptop, then the DDJ-400).
 - [ ] Separate devices for master and headphones (two streams) isn't supported.
 - [x] Reconnect MIDI by clicking the MIDI pill.
-- [ ] Benchmark: a scripted run (two decks playing, panning and selecting) that writes
-      a frame-time report. The kittest `screenshot` test covers some of this; decide
-      whether a live in-app benchmark is still needed.
 - [x] Library control from MIDI: browse, switch between library and Suggestions, load.
 
 ## 6. Housekeeping
