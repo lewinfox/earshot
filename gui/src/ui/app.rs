@@ -1080,7 +1080,11 @@ impl eframe::App for EarshotApp {
                     self.decks[d].show_wave(ui, h, &infos[d], &mut self.half_window, &mut actions);
                 }
             });
+        // A fixed height (the mixer's), so the decks can't be stretched by a height
+        // egui remembered from an older layout.
+        let decks_h = mixer::HEIGHT + 12.0;
         egui::TopBottomPanel::top("decks")
+            .exact_height(decks_h + 8.0)
             .frame(
                 egui::Frame::new()
                     .fill(util::BG)
@@ -1088,7 +1092,7 @@ impl eframe::App for EarshotApp {
             )
             .show_animated(ctx, !planning, |ui| {
                 let mixer_w = mixer::WIDTH + 16.0;
-                let height = mixer::HEIGHT + 12.0;
+                let height = decks_h;
                 let w = (ui.available_width() - mixer_w - 12.0) / 2.0;
                 ui.horizontal_top(|ui| {
                     self.decks[0].show(ui, w, height, &infos[0], &mut actions);
@@ -1097,7 +1101,7 @@ impl eframe::App for EarshotApp {
                             .fill(util::PANEL)
                             .stroke(Stroke::new(1.0, util::LINE))
                             .corner_radius(8)
-                            .inner_margin(8)
+                            .inner_margin(egui::Margin::symmetric(8, 6))
                             .show(ui, |ui| {
                                 ui.set_width(mixer_w - 16.0);
                                 mixer::show(ui, self.shared.as_deref(), &mut actions);

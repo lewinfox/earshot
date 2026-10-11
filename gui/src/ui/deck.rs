@@ -164,12 +164,14 @@ const TEMPO_MARKS: [(f64, &str); 3] = [(0.0, "-8"), (0.5, "0"), (1.0, "+8")];
 
 // Layout.
 const TEMPO_W: f32 = 76.0;
-const OVERVIEW_H: f32 = 52.0;
-const BTN_H: f32 = 34.0;
+const BTN_H: f32 = 40.0;
 const BTN_W: f32 = 34.0;
-const TRANSPORT_W: f32 = 52.0;
+/// CUE and play: circles this wide, one above the other.
+const TRANSPORT: f32 = BTN_H;
 /// Two rows of buttons.
 const CONTROLS_H: f32 = 2.0 * BTN_H + 4.0;
+/// The jog ring (with the BPM in it) fills the height of the controls.
+const JOG: f32 = CONTROLS_H;
 const SIZES: [f64; 9] = [0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
 
 const CUE_COLOUR: Color32 = Color32::from_rgb(0xf0, 0xa0, 0x30);
@@ -203,6 +205,8 @@ pub struct DeckUi {
     scrub: Option<(f32, f64, bool)>,
     pub wave: Option<DeckWave>,
     grid_mode: bool,
+    /// Width of the controls row last frame, to right-align deck 1's.
+    controls_w: f32,
     bpm_text: String,
     jump_size: f64,
     loop_size: f64,
@@ -221,6 +225,7 @@ impl DeckUi {
             scrub: None,
             wave: None,
             grid_mode: false,
+            controls_w: 0.0,
             bpm_text: String::new(),
             jump_size: 4.0,
             loop_size: 4.0,
@@ -456,18 +461,29 @@ impl DeckUi {
                 ui.set_min_height(height - 12.0);
                 ui.spacing_mut().item_spacing = vec2(4.0, 5.0);
                 let left = inner - TEMPO_W - 8.0;
+                let inner_h = height - 12.0;
+                // The tempo fader on the outside edge: deck 1's left, deck 2's right.
                 ui.horizontal_top(|ui| {
+                    if self.index == 0 {
+                        self.tempo(ui, actions, inner_h);
+                        ui.add_space(4.0);
+                    }
                     ui.vertical(|ui| {
                         ui.set_width(left);
+                        let top = ui.cursor().min.y;
                         self.header(ui, info);
-                        ui.horizontal(|ui| {
-                            self.platter(ui);
-                            self.overview(ui, info, actions);
-                        });
+                        // The overview takes what the header and controls leave, so the
+                        // controls sit on the bottom edge.
+                        let used = ui.cursor().min.y - top;
+                        let overview_h = (inner_h - used - CONTROLS_H - ui.spacing().item_spacing.y)
+                            .max(24.0);
+                        self.overview(ui, info, actions, overview_h);
                         self.controls(ui, info, actions);
                     });
-                    ui.add_space(4.0);
-                    self.tempo(ui, actions);
+                    if self.index == 1 {
+                        ui.add_space(4.0);
+                        self.tempo(ui, actions, inner_h);
+                    }
                 });
             })
             .response;
@@ -564,34 +580,66 @@ impl DeckUi {
         });
     }
 
-    /// A small platter that turns like a record at 33⅓ rpm (1.8 s a turn).
-    fn platter(&self, ui: &mut Ui) {
-        let (rect, _) = ui.allocate_exact_size(vec2(OVERVIEW_H, OVERVIEW_H), Sense::hover());
+    /// A jog-wheel ring, like Rekordbox's: the BPM at the current tempo in the middle,
+    /// the tempo change and fader range under it, and a dot on the rim that turns like
+    /// a record at 33⅓ rpm (1.8 s a turn).
+    fn jog(&self, ui: &mut Ui) {
+        let s = self.state;
+        let (rect, resp) = ui.allocate_exact_size(vec2(JOG, JOG), Sense::hover());
+        resp.on_hover_text("BPM at the current tempo; the tempo change and the fader's range");
         let p = ui.painter();
         let c = rect.center();
-        let r = rect.width() / 2.0 - 1.5;
+        let r = JOG / 2.0 - 2.0;
         p.circle(
             c,
             r,
             Color32::from_rgb(0x0c, 0x0d, 0x10),
-            Stroke::new(2.0, self.colour()),
+            Stroke::new(3.0, self.colour()),
         );
-        p.circle_filled(c, r * 0.35, Color32::from_rgb(0x1b, 0x1d, 0x24));
         if self.pending.is_none() {
             let a = ((self.shown / 1.8).fract() as f32) * TAU - TAU / 4.0;
-            p.line_segment(
-                [
-                    c + vec2(a.cos(), a.sin()) * r * 0.4,
-                    c + vec2(a.cos(), a.sin()) * (r - 2.0),
-                ],
-                Stroke::new(2.0, util::TEXT),
-            );
+            p.circle_filled(c + vec2(a.cos(), a.sin()) * r, 3.5, Color32::from_rgb(0xe8, 0x3a, 0x3a));
         }
+        let bpm = match &self.pending {
+            Some(pl) => pl.bpm.map(|b| b * (1.0 + s.rate)),
+            None => s.bpm,
+        };
+        // "124" large, ".00" small, sitting on one baseline.
+        let (whole, frac) = match bpm {
+            Some(b) => {
+                let t = format!("{b:.2}");
+                let (w, f) = t.split_at(t.len() - 3);
+                (w.to_string(), f.to_string())
+            }
+            None => ("-".into(), String::new()),
+        };
+        let big = p.layout_no_wrap(whole, FontId::monospace(20.0), util::TEXT);
+        let small = p.layout_no_wrap(frac, FontId::monospace(12.0), util::TEXT);
+        let w = big.size().x + small.size().x;
+        let top = c.y - big.size().y + 4.0;
+        let left = c.x - w / 2.0;
+        let small_top = top + big.size().y - small.size().y - 2.0;
+        p.galley(pos2(left, top), big.clone(), util::TEXT);
+        p.galley(pos2(left + big.size().x, small_top), small, util::TEXT);
+        let pct = p.layout_no_wrap(
+            format!("{:+.1}%", s.rate * 100.0),
+            FontId::monospace(9.5),
+            util::MUTED,
+        );
+        let range = p.layout_no_wrap(
+            format!(" ±{:.0}", RATE_RANGE * 100.0),
+            FontId::monospace(9.5),
+            self.colour(),
+        );
+        let w = pct.size().x + range.size().x;
+        let y = c.y + 7.0;
+        p.galley(pos2(c.x - w / 2.0, y), pct.clone(), util::MUTED);
+        p.galley(pos2(c.x - w / 2.0 + pct.size().x, y), range, self.colour());
     }
 
-    fn overview(&mut self, ui: &mut Ui, info: &DeckInfo, actions: &mut Vec<Action>) {
+    fn overview(&mut self, ui: &mut Ui, info: &DeckInfo, actions: &mut Vec<Action>, height: f32) {
         let (rect, resp) = ui.allocate_exact_size(
-            vec2(ui.available_width(), OVERVIEW_H),
+            vec2(ui.available_width(), height),
             Sense::click_and_drag(),
         );
         if self.pending.is_some() {
@@ -620,41 +668,86 @@ impl DeckUi {
         }
     }
 
-    /// CUE and play, then hot cue pads (or the grid editor), loops and beat jumps.
+    /// CUE / play and the BPM ring nearest the mixer (like Rekordbox), then the hot cue
+    /// pads (or the grid editor), loops and beat jumps towards the outside. Deck 1's
+    /// row is right-aligned, with those groups in the opposite order.
     fn controls(&mut self, ui: &mut Ui, info: &DeckInfo, actions: &mut Vec<Action>) {
+        #[derive(Clone, Copy)]
+        enum Part {
+            Transport,
+            Pads,
+            Loops,
+            Jumps,
+            GridEditor,
+            GridButton,
+            Gap(f32),
+        }
+        use Part::*;
+        // CUE / play with the ring on the mixer side; the rest runs outwards from there.
+        let centre = [Transport];
+        let mut outer = vec![Gap(6.0)];
+        if self.grid_mode {
+            outer.push(GridEditor);
+        } else {
+            outer.extend([Pads, Gap(6.0), Loops, Gap(6.0), Jumps]);
+        }
+        outer.extend([Gap(6.0), GridButton]);
+        let mirrored = self.index == 0;
+        let parts: Vec<Part> = if mirrored {
+            outer.into_iter().rev().chain(centre).collect()
+        } else {
+            centre.into_iter().chain(outer).collect()
+        };
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing = vec2(3.0, 4.0);
-            self.transport(ui, actions);
-            ui.add_space(6.0);
-            if self.grid_mode {
-                ui.vertical(|ui| {
-                    ui.set_height(CONTROLS_H);
-                    self.grid_editor(ui, info, actions);
-                });
-            } else {
-                self.pads(ui, actions);
-                ui.add_space(6.0);
-                self.loops(ui, actions);
-                ui.add_space(6.0);
-                self.jumps(ui, actions);
+            if mirrored {
+                // Push the row against the mixer side (its width is from last frame).
+                ui.add_space((ui.available_width() - self.controls_w).max(0.0));
             }
-            ui.add_space(6.0);
-            let r = ui
-                .add(
-                    HwButton::new("GRID", util::ACCENT, vec2(BTN_W + 4.0, BTN_H))
-                        .font(10.0)
-                        .lit(self.grid_mode),
-                )
-                .on_hover_text("Edit the beat grid (in place of the hot cue pads)");
-            if r.clicked() {
-                self.grid_mode = !self.grid_mode;
+            let start = ui.cursor().min.x;
+            for part in parts {
+                match part {
+                    Transport => self.transport(ui, actions),
+                    Pads => self.pads(ui, actions),
+                    Loops => self.loops(ui, actions),
+                    Jumps => self.jumps(ui, actions),
+                    GridEditor => {
+                        ui.vertical(|ui| {
+                            ui.set_height(CONTROLS_H);
+                            self.grid_editor(ui, info, actions);
+                        });
+                    }
+                    GridButton => {
+                        let r = ui
+                            .add(
+                                HwButton::new("GRID", util::ACCENT, vec2(BTN_W + 4.0, BTN_H))
+                                    .font(10.0)
+                                    .lit(self.grid_mode),
+                            )
+                            .on_hover_text("Edit the beat grid (in place of the hot cue pads)");
+                        if r.clicked() {
+                            self.grid_mode = !self.grid_mode;
+                        }
+                    }
+                    Gap(w) => ui.add_space(w),
+                }
             }
+            self.controls_w = ui.cursor().min.x - start - ui.spacing().item_spacing.x;
         });
     }
 
+    /// One unit, like Rekordbox's: CUE above play, and the BPM ring to their right.
     fn transport(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            self.cue_play(ui, actions);
+            self.jog(ui);
+        });
+    }
+
+    fn cue_play(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         ui.vertical(|ui| {
-            let size = vec2(TRANSPORT_W, BTN_H);
+            let size = vec2(TRANSPORT, TRANSPORT);
             // CUE lights while the deck sits at its cue point, ready to go.
             let at_cue = !self.state.playing
                 && self.state.duration > 0.0
@@ -662,7 +755,8 @@ impl DeckUi {
             let r = ui
                 .add(
                     HwButton::new("CUE", CUE_COLOUR, size)
-                        .font(12.0)
+                        .round(true)
+                        .font(11.0)
                         .tinted(true)
                         .lit(at_cue && self.pending.is_none()),
                 )
@@ -674,8 +768,9 @@ impl DeckUi {
             let r = ui
                 .add(
                     HwButton::new("Play", PLAY_COLOUR, size)
+                        .round(true)
                         .icon(Icon::PlayPause)
-                        .font(14.0)
+                        .font(12.0)
                         .tinted(true)
                         .lit(playing),
                 )
@@ -945,30 +1040,12 @@ impl DeckUi {
     }
 
     /// BPM and tempo readouts, SYNC, and the tempo fader with nudge buttons.
-    fn tempo(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+    /// SYNC, Q and KEY over the tempo fader, `height` tall in all.
+    fn tempo(&mut self, ui: &mut Ui, actions: &mut Vec<Action>, height: f32) {
         let s = self.state;
         ui.vertical(|ui| {
             ui.set_width(TEMPO_W);
             ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
-            let bpm = match &self.pending {
-                Some(p) => p.bpm.map(|b| b * (1.0 + s.rate)),
-                None => s.bpm,
-            };
-            ui.with_layout(Layout::top_down(Align::Max), |ui| {
-                ui.label(
-                    RichText::new(bpm.map_or("-".into(), |b| format!("{b:.2}")))
-                        .size(19.0)
-                        .monospace()
-                        .color(util::TEXT),
-                )
-                .on_hover_text("BPM at the current tempo");
-                ui.label(
-                    RichText::new(format!("{:+.2} %", s.rate * 100.0))
-                        .size(10.0)
-                        .monospace()
-                        .color(util::MUTED),
-                );
-            });
             let r = ui
                 .add(
                     HwButton::new("SYNC", self.colour(), vec2(TEMPO_W, 20.0))
@@ -1002,7 +1079,8 @@ impl DeckUi {
                     self.control(actions, "keylock", if s.keylock { 0.0 } else { 1.0 });
                 }
             });
-            let h = (ui.available_height()).max(70.0);
+            // The fader gets exactly what's left, so it never stretches the deck.
+            let h = height - ui.min_rect().height() - ui.spacing().item_spacing.y;
             ui.horizontal_top(|ui| {
                 ui.add_space(16.0); // the fader's range markings
                 let mut v = s.rate / RATE_RANGE;

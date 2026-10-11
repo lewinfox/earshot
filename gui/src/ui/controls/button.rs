@@ -26,6 +26,8 @@ pub struct HwButton<'a> {
     font: f32,
     /// Show the colour on the border and label even when off (a set-but-idle hot cue).
     tinted: bool,
+    /// A circle (like a CDJ's play and cue buttons) as wide as the button is tall.
+    round: bool,
 }
 
 impl<'a> HwButton<'a> {
@@ -38,6 +40,7 @@ impl<'a> HwButton<'a> {
             size,
             font: 11.0,
             tinted: false,
+            round: false,
         }
     }
 
@@ -54,6 +57,11 @@ impl<'a> HwButton<'a> {
 
     pub fn tinted(mut self, on: bool) -> Self {
         self.tinted = on;
+        self
+    }
+
+    pub fn round(mut self, on: bool) -> Self {
+        self.round = on;
         self
     }
 
@@ -92,20 +100,26 @@ impl Widget for HwButton<'_> {
             fill
         };
         let p = ui.painter();
-        p.rect(
-            rect.shrink(0.5),
-            CornerRadius::same(3),
-            fill,
-            Stroke::new(
-                1.0,
-                if resp.hovered() {
-                    util::dim(border, 1.3)
-                } else {
-                    border
-                },
-            ),
-            StrokeKind::Inside,
+        let stroke = Stroke::new(
+            if self.round { 1.5 } else { 1.0 },
+            if resp.hovered() {
+                util::dim(border, 1.3)
+            } else {
+                border
+            },
         );
+        if self.round {
+            let r = rect.width().min(rect.height()) / 2.0 - 1.0;
+            p.circle(rect.center(), r, fill, stroke);
+        } else {
+            p.rect(
+                rect.shrink(0.5),
+                CornerRadius::same(3),
+                fill,
+                stroke,
+                StrokeKind::Inside,
+            );
+        }
         match self.icon {
             Some(Icon::PlayPause) => play_pause(p, rect, self.font, text),
             None => {
