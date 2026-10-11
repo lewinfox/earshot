@@ -2,9 +2,11 @@
 
 pub mod app;
 pub mod audio_ui;
+pub mod controls;
 pub mod deck;
 pub mod flow;
 pub mod library_ui;
+pub mod mixer;
 pub mod suggest_ui;
 pub mod util;
 pub mod wave;

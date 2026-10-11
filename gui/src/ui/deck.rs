@@ -1,6 +1,7 @@
-//! One deck, laid out like Rekordbox's performance view: header, overview, hot cue pads
-//! (or the beat grid editor), transport and a jog display. Its scrolling waveform is
-//! drawn separately, in the stacked row above the decks.
+//! One deck, laid out like Mixxx's: header and overview with a spinning platter, then
+//! CUE and play, hot cue pads (or the beat grid editor), loop and beat jump buttons,
+//! and on the right the BPM, SYNC and a tempo fader with nudge buttons. Its scrolling
+//! waveform is drawn separately, in the stacked row above the decks.
 //!
 //! Drawing reads the engine's atomics directly; every button becomes an [`Action`] the
 //! app applies after the frame, through the same control bus as keyboard and MIDI.
@@ -9,6 +10,7 @@ use std::f32::consts::TAU;
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
+use earshot_engine::RATE_RANGE;
 use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::engine::DeckShared;
 use egui::{
@@ -16,6 +18,8 @@ use egui::{
     StrokeKind, Ui, pos2, vec2,
 };
 
+use super::controls::{Fader, HwButton, Icon, Range, held};
+use super::library_ui::Track;
 use super::util::{self, Camelot};
 use super::wave::{self, DeckWave, Marks};
 use crate::core::player::GridOp;
@@ -51,6 +55,51 @@ pub struct DeckInfo {
     pub analysing: Option<(f64, String)>,
 }
 
+/// A track asked for but still decoding. The deck shows its details from the library
+/// straight away, and a placeholder where the waveforms go.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingLoad {
+    pub track_id: i64,
+    pub title: String,
+    pub artist: String,
+    pub bpm: Option<f64>,
+    pub key: Option<Camelot>,
+    pub duration: Option<f64>,
+}
+
+impl PendingLoad {
+    /// From the library's row for the track, if it has one.
+    pub fn new(track_id: i64, t: Option<&Track>) -> PendingLoad {
+        PendingLoad {
+            track_id,
+            title: t.map(|t| t.lib.title.clone()).unwrap_or_default(),
+            artist: t.map(|t| t.lib.artist.clone()).unwrap_or_default(),
+            bpm: t.and_then(|t| t.lib.bpm.or(t.lib.tag_bpm)),
+            key: t.and_then(|t| t.key),
+            duration: t.and_then(|t| t.lib.duration),
+        }
+    }
+
+    fn info(&self) -> DeckInfo {
+        DeckInfo {
+            title: if self.title.is_empty() {
+                "Loading…".into()
+            } else {
+                self.title.clone()
+            },
+            artist: self.artist.clone(),
+            grid: None,
+            grid_source: String::new(),
+            generation: 0,
+            waveform: Arc::default(),
+            detail: Arc::default(),
+            tag_bpm: self.bpm,
+            key: self.key,
+            analysing: None,
+        }
+    }
+}
+
 /// One snapshot of the engine's deck state.
 #[derive(Default, Clone, Copy)]
 struct State {
@@ -67,7 +116,6 @@ struct State {
     loop_active: bool,
     cue: f64,
     hotcues: [Option<f64>; 8],
-    pfl: bool,
     generation: u64,
 }
 
@@ -94,9 +142,51 @@ fn read(sh: &DeckShared) -> State {
         loop_active: sh.loop_active.load(Relaxed),
         cue: sh.cue_point.get(),
         hotcues,
-        pfl: sh.pfl.load(Relaxed),
         generation: sh.generation.load(Relaxed),
     }
+}
+
+/// The tempo fader, in the control bus's units (-1..1 across the ±8 % range).
+pub const TEMPO: Range = Range {
+    name: "Tempo",
+    min: -1.0,
+    max: 1.0,
+    default: 0.0,
+    centre: Some(0.0),
+    format: |v| format!("{:+.2} %", v * RATE_RANGE * 100.0),
+};
+/// Range markings beside the tempo fader; it runs minus at the top, like Mixxx's.
+const TEMPO_MARKS: [(f64, &str); 3] = [(0.0, "-8"), (0.5, "0"), (1.0, "+8")];
+
+// Layout.
+const TEMPO_W: f32 = 76.0;
+const OVERVIEW_H: f32 = 52.0;
+const BTN_H: f32 = 34.0;
+const BTN_W: f32 = 34.0;
+const TRANSPORT_W: f32 = 52.0;
+/// Two rows of buttons.
+const CONTROLS_H: f32 = 2.0 * BTN_H + 4.0;
+const SIZES: [f64; 9] = [0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+
+const CUE_COLOUR: Color32 = Color32::from_rgb(0xf0, 0xa0, 0x30);
+const PLAY_COLOUR: Color32 = Color32::from_rgb(0x4f, 0xd4, 0x7a);
+const LOOP_COLOUR: Color32 = Color32::from_rgb(0x3c, 0xd3, 0x6b);
+
+fn size_label(s: f64) -> String {
+    if s < 1.0 {
+        format!("1/{}", (1.0 / s).round())
+    } else {
+        format!("{s}")
+    }
+}
+
+/// The next size up (`dir` 1) or down (-1) in [`SIZES`].
+fn step_size(s: f64, dir: i32) -> f64 {
+    let i = SIZES
+        .iter()
+        .position(|&x| x >= s)
+        .unwrap_or(SIZES.len() - 1) as i32;
+    SIZES[(i + dir).clamp(0, SIZES.len() as i32 - 1) as usize]
 }
 
 pub struct DeckUi {
@@ -112,8 +202,9 @@ pub struct DeckUi {
     bpm_text: String,
     jump_size: f64,
     loop_size: f64,
-    pitch: f64,
     state: State,
+    /// A load in progress; see [`PendingLoad`].
+    pending: Option<PendingLoad>,
 }
 
 impl DeckUi {
@@ -129,13 +220,36 @@ impl DeckUi {
             bpm_text: String::new(),
             jump_size: 4.0,
             loop_size: 4.0,
-            pitch: 0.0,
             state: State::default(),
+            pending: None,
         }
     }
 
     pub fn playing(&self) -> bool {
         self.state.playing
+    }
+
+    /// A load was asked for: show the track's details until it arrives. A newer load
+    /// replaces an older one.
+    pub fn start_load(&mut self, p: PendingLoad) {
+        self.pending = Some(p);
+    }
+
+    /// A load finished (or failed). Returns false, and keeps waiting, if it is for an
+    /// older request than the one shown.
+    pub fn finish_load(&mut self, track_id: i64) -> bool {
+        match &self.pending {
+            Some(p) if p.track_id != track_id => false,
+            _ => {
+                self.pending = None;
+                true
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn pending(&self) -> Option<&PendingLoad> {
+        self.pending.as_ref()
     }
 
     fn colour(&self) -> Color32 {
@@ -193,6 +307,19 @@ impl DeckUi {
         }
     }
 
+    /// The quiet stand-in for a waveform while a track decodes.
+    fn loading(&self, ui: &Ui, rect: Rect) {
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, 4.0, util::WAVE_BG);
+        p.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Loading…",
+            FontId::proportional(12.0),
+            util::MUTED,
+        );
+    }
+
     // ---- the scrolling waveform (drawn in the stacked row above the decks) -----------
 
     /// `half_window`: real seconds visible either side of the playhead, shared by both
@@ -209,6 +336,16 @@ impl DeckUi {
     ) {
         let (rect, resp) =
             ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click_and_drag());
+        if self.pending.is_some() {
+            self.loading(ui, rect);
+            if let Some(id) = resp.dnd_release_payload::<i64>() {
+                actions.push(Action::Load {
+                    deck: self.index,
+                    track_id: *id,
+                });
+            }
+            return;
+        }
         let half = *half_window
             * if self.state.tempo > 0.0 {
                 self.state.tempo
@@ -292,8 +429,17 @@ impl DeckUi {
 
     // ---- the deck panel -----------------------------------------------------------------
 
-    /// Draw the deck `width` points wide.
-    pub fn show(&mut self, ui: &mut Ui, width: f32, info: &DeckInfo, actions: &mut Vec<Action>) {
+    /// Draw the deck `width` points wide and at least `height` tall.
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        width: f32,
+        height: f32,
+        info: &DeckInfo,
+        actions: &mut Vec<Action>,
+    ) {
+        let loading = self.pending.as_ref().map(PendingLoad::info);
+        let info = loading.as_ref().unwrap_or(info);
         let frame = egui::Frame::new()
             .fill(util::PANEL)
             .stroke(Stroke::new(1.0, util::LINE))
@@ -301,30 +447,23 @@ impl DeckUi {
             .inner_margin(egui::Margin::symmetric(8, 6));
         let resp = frame
             .show(ui, |ui| {
-                // The frame inherits its parent's left-to-right layout; stack instead.
-                ui.vertical(|ui| {
-                    let inner = width - 18.0;
-                    ui.set_width(inner);
-                    ui.set_max_width(inner);
-                    ui.spacing_mut().item_spacing = vec2(4.0, 5.0);
-                    self.header(ui, info, actions);
-                    self.overview(ui, info, actions);
-                    // Transport (150) + jog (112) + gaps; the pads get the rest.
-                    let pad_w = (inner - 150.0 - 112.0 - 3.0 * ui.spacing().item_spacing.x - 4.0)
-                        .max(160.0);
-                    ui.horizontal(|ui| {
-                        let mirrored = self.index == 1;
-                        if mirrored {
-                            self.jog(ui);
-                            self.transport(ui, actions);
-                            self.pad_area(ui, pad_w, info, actions);
-                        } else {
-                            self.pad_area(ui, pad_w, info, actions);
-                            self.transport(ui, actions);
-                            self.jog(ui);
-                        }
+                let inner = width - 18.0;
+                ui.set_width(inner);
+                ui.set_min_height(height - 12.0);
+                ui.spacing_mut().item_spacing = vec2(4.0, 5.0);
+                let left = inner - TEMPO_W - 8.0;
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(left);
+                        self.header(ui, info);
+                        ui.horizontal(|ui| {
+                            self.platter(ui);
+                            self.overview(ui, info, actions);
+                        });
+                        self.controls(ui, info, actions);
                     });
-                    self.tools(ui, actions);
+                    ui.add_space(4.0);
+                    self.tempo(ui, actions);
                 });
             })
             .response;
@@ -344,8 +483,13 @@ impl DeckUi {
         }
     }
 
-    fn header(&mut self, ui: &mut Ui, info: &DeckInfo, actions: &mut Vec<Action>) {
+    fn header(&mut self, ui: &mut Ui, info: &DeckInfo) {
         let s = self.state;
+        // While loading: the new track's length, from the top.
+        let (position, duration) = match &self.pending {
+            Some(p) => (0.0, p.duration.unwrap_or(0.0)),
+            None => (s.position, s.duration),
+        };
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new((self.index + 1).to_string())
@@ -353,8 +497,8 @@ impl DeckUi {
                     .size(16.0)
                     .color(self.colour()),
             );
-            // Title and details on the left, as wide as the times and buttons allow.
-            let right = 230.0;
+            // Title and details on the left, as wide as the times allow.
+            let right = 90.0;
             let left = (ui.available_width() - right).max(60.0);
             ui.allocate_ui_with_layout(vec2(left, 36.0), Layout::top_down(Align::Min), |ui| {
                 ui.set_width(left);
@@ -393,48 +537,63 @@ impl DeckUi {
                     );
                 });
             });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if toggle(ui, "PFL", s.pfl, "Headphone cue") {
-                    self.control(actions, "pfl", if s.pfl { 0.0 } else { 1.0 });
-                }
-                if toggle(
-                    ui,
-                    "BEAT SYNC",
-                    s.sync,
-                    "Match the other deck's tempo and beat",
-                ) {
-                    self.control(actions, "sync_enabled", if s.sync { 0.0 } else { 1.0 });
-                }
-                ui.add_space(6.0);
-                ui.vertical(|ui| {
-                    ui.with_layout(Layout::top_down(Align::Max), |ui| {
-                        let ending = s.playing && s.duration - s.position < 30.0;
-                        let remain = if s.duration > 0.0 {
-                            util::fmt_tenths(s.position - s.duration)
-                        } else {
-                            "--:--.-".into()
-                        };
-                        ui.label(
-                            RichText::new(remain)
-                                .size(17.0)
-                                .monospace()
-                                .color(if ending { util::BAD } else { util::TEXT }),
-                        );
-                        ui.label(
-                            RichText::new(util::fmt_tenths(s.position))
-                                .size(11.0)
-                                .monospace()
-                                .color(util::MUTED),
-                        );
-                    });
-                });
+            ui.with_layout(Layout::top_down(Align::Max), |ui| {
+                let ending = s.playing && self.pending.is_none() && duration - position < 30.0;
+                let remain = if duration > 0.0 {
+                    util::fmt_tenths(position - duration)
+                } else {
+                    "--:--.-".into()
+                };
+                ui.label(
+                    RichText::new(remain)
+                        .size(17.0)
+                        .monospace()
+                        .color(if ending { util::BAD } else { util::TEXT }),
+                );
+                ui.label(
+                    RichText::new(util::fmt_tenths(position))
+                        .size(11.0)
+                        .monospace()
+                        .color(util::MUTED),
+                );
             });
         });
     }
 
+    /// A small platter that turns like a record at 33⅓ rpm (1.8 s a turn).
+    fn platter(&self, ui: &mut Ui) {
+        let (rect, _) = ui.allocate_exact_size(vec2(OVERVIEW_H, OVERVIEW_H), Sense::hover());
+        let p = ui.painter();
+        let c = rect.center();
+        let r = rect.width() / 2.0 - 1.5;
+        p.circle(
+            c,
+            r,
+            Color32::from_rgb(0x0c, 0x0d, 0x10),
+            Stroke::new(2.0, self.colour()),
+        );
+        p.circle_filled(c, r * 0.35, Color32::from_rgb(0x1b, 0x1d, 0x24));
+        if self.pending.is_none() {
+            let a = ((self.shown / 1.8).fract() as f32) * TAU - TAU / 4.0;
+            p.line_segment(
+                [
+                    c + vec2(a.cos(), a.sin()) * r * 0.4,
+                    c + vec2(a.cos(), a.sin()) * (r - 2.0),
+                ],
+                Stroke::new(2.0, util::TEXT),
+            );
+        }
+    }
+
     fn overview(&mut self, ui: &mut Ui, info: &DeckInfo, actions: &mut Vec<Action>) {
-        let (rect, resp) =
-            ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click_and_drag());
+        let (rect, resp) = ui.allocate_exact_size(
+            vec2(ui.available_width(), OVERVIEW_H),
+            Sense::click_and_drag(),
+        );
+        if self.pending.is_some() {
+            self.loading(ui, rect);
+            return;
+        }
         let hotcues = self.state.hotcues;
         let marks = self.marks(info, &hotcues);
         wave::overview(
@@ -457,68 +616,97 @@ impl DeckUi {
         }
     }
 
-    fn pad_area(&mut self, ui: &mut Ui, w: f32, info: &DeckInfo, actions: &mut Vec<Action>) {
-        ui.allocate_ui_with_layout(vec2(w, 132.0), Layout::top_down(Align::Min), |ui| {
-            ui.set_width(w);
+    /// CUE and play, then hot cue pads (or the grid editor), loops and beat jumps.
+    fn controls(&mut self, ui: &mut Ui, info: &DeckInfo, actions: &mut Vec<Action>) {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing = vec2(3.0, 4.0);
+            self.transport(ui, actions);
+            ui.add_space(6.0);
             if self.grid_mode {
-                self.grid_editor(ui, info, actions);
+                ui.vertical(|ui| {
+                    ui.set_height(CONTROLS_H);
+                    self.grid_editor(ui, info, actions);
+                });
             } else {
-                self.pads(ui, w, actions);
+                self.pads(ui, actions);
+                ui.add_space(6.0);
+                self.loops(ui, actions);
+                ui.add_space(6.0);
+                self.jumps(ui, actions);
             }
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                if ui
-                    .selectable_label(
-                        !self.grid_mode,
-                        RichText::new("HOT CUE").size(10.0).strong(),
-                    )
-                    .clicked()
-                {
-                    self.grid_mode = false;
-                }
-                if ui
-                    .selectable_label(self.grid_mode, RichText::new("GRID").size(10.0).strong())
-                    .clicked()
-                {
-                    self.grid_mode = true;
-                }
-            });
+            ui.add_space(6.0);
+            let r = ui
+                .add(
+                    HwButton::new("GRID", util::ACCENT, vec2(BTN_W + 4.0, BTN_H))
+                        .font(10.0)
+                        .lit(self.grid_mode),
+                )
+                .on_hover_text("Edit the beat grid (in place of the hot cue pads)");
+            if r.clicked() {
+                self.grid_mode = !self.grid_mode;
+            }
         });
     }
 
-    fn pads(&mut self, ui: &mut Ui, w: f32, actions: &mut Vec<Action>) {
-        let pad = vec2((w - 4.0) / 2.0, 23.0);
+    fn transport(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        ui.vertical(|ui| {
+            let size = vec2(TRANSPORT_W, BTN_H);
+            // CUE lights while the deck sits at its cue point, ready to go.
+            let at_cue = !self.state.playing
+                && self.state.duration > 0.0
+                && (self.state.position - self.state.cue).abs() < 0.01;
+            let r = ui
+                .add(
+                    HwButton::new("CUE", CUE_COLOUR, size)
+                        .font(12.0)
+                        .tinted(true)
+                        .lit(at_cue && self.pending.is_none()),
+                )
+                .on_hover_text("Cue: set, or jump back and preview while held");
+            if let Some(d) = held(ui, &r) {
+                self.control(actions, "cue_default", d as u8 as f64);
+            }
+            let playing = self.state.playing;
+            let r = ui
+                .add(
+                    HwButton::new("Play", PLAY_COLOUR, size)
+                        .icon(Icon::PlayPause)
+                        .font(14.0)
+                        .tinted(true)
+                        .lit(playing),
+                )
+                .on_hover_text("Play / pause");
+            if held(ui, &r) == Some(true) {
+                self.control(actions, "play", if playing { 0.0 } else { 1.0 });
+            }
+        });
+    }
+
+    fn pads(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let shift = ui.input(|i| i.modifiers.shift);
         egui::Grid::new(("pads", self.index))
-            .spacing(vec2(4.0, 3.0))
+            .spacing(vec2(3.0, 4.0))
             .show(ui, |ui| {
-                for row in 0..4 {
-                    for col in 0..2 {
-                        let i = col * 4 + row;
+                for row in 0..2 {
+                    for col in 0..4 {
+                        let i = row * 4 + col;
                         let set = self.state.hotcues[i];
-                        let c = util::HOTCUE[i];
-                        let label = RichText::new(format!(
-                            "{}   {}",
-                            &"ABCDEFGH"[i..i + 1],
-                            set.map(util::mmss).unwrap_or_default()
-                        ))
-                        .size(11.0)
-                        .color(if set.is_some() {
-                            c
-                        } else {
-                            util::MUTED
-                        });
-                        let b = Button::new(label)
-                            .min_size(pad)
-                            .fill(if set.is_some() {
-                                util::dim(c, 0.22)
-                            } else {
-                                Color32::from_rgb(0x12, 0x13, 0x17)
-                            })
-                            .stroke(Stroke::new(1.0, if set.is_some() { c } else { util::LINE }));
+                        let label = (i + 1).to_string();
+                        let tip = match set {
+                            Some(t) => format!(
+                                "Hot cue {} at {}\nClick: jump (held: preview) · Shift-click: clear",
+                                i + 1,
+                                util::fmt_tenths(t)
+                            ),
+                            None => format!("Hot cue {}: not set\nClick to set it here", i + 1),
+                        };
                         let r = ui
-                            .add_sized(pad, b)
-                            .on_hover_text("Click: set / jump · Shift-click: clear");
+                            .add(
+                                HwButton::new(&label, util::HOTCUE[i], vec2(BTN_W, BTN_H))
+                                    .font(12.0)
+                                    .tinted(set.is_some()),
+                            )
+                            .on_hover_text(tip);
                         match held(ui, &r) {
                             Some(true) if shift => {
                                 self.control(actions, &format!("hotcue_{}_clear", i + 1), 1.0)
@@ -536,9 +724,133 @@ impl DeckUi {
             });
     }
 
+    /// A loop button `w` wide that sends `key` 1 on press and 0 on release.
+    #[allow(clippy::too_many_arguments)]
+    fn hold_button(
+        &self,
+        ui: &mut Ui,
+        w: f32,
+        label: &str,
+        key: &str,
+        lit: bool,
+        tip: &str,
+        actions: &mut Vec<Action>,
+    ) {
+        let r = ui
+            .add(
+                HwButton::new(label, LOOP_COLOUR, vec2(w, BTN_H))
+                    .font(if label.len() > 4 { 9.0 } else { 10.0 })
+                    .lit(lit),
+            )
+            .on_hover_text(tip);
+        if let Some(d) = held(ui, &r) {
+            self.control(actions, key, d as u8 as f64);
+        }
+    }
+
+    /// Loop: ½ / LOOP n / ×2 over IN / OUT / EXIT. With no loop running, ½ and ×2
+    /// change the size the next loop will be, like Mixxx.
+    fn loops(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        let active = self.state.loop_active;
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                for (label, dir) in [("½", -1), ("×2", 1)] {
+                    if dir == 1 {
+                        let r = ui
+                            .add(
+                                HwButton::new(
+                                    &format!("⟲ {}", size_label(self.loop_size)),
+                                    LOOP_COLOUR,
+                                    vec2(BTN_W + 10.0, BTN_H),
+                                )
+                                .font(10.0)
+                                .lit(active),
+                            )
+                            .on_hover_text(format!(
+                                "Loop {} beats from the current beat (or end the loop)",
+                                size_label(self.loop_size)
+                            ));
+                        if let Some(d) = held(ui, &r) {
+                            self.control(actions, "beatloop_activate", d as u8 as f64);
+                        }
+                    }
+                    let tip = if dir < 0 { "Halve" } else { "Double" };
+                    let r = ui
+                        .add(HwButton::new(label, LOOP_COLOUR, vec2(BTN_W, BTN_H)).font(11.0))
+                        .on_hover_text(format!("{tip} the loop (or the next loop's size)"));
+                    let pressed = held(ui, &r);
+                    if active {
+                        if let Some(d) = pressed {
+                            let key = if dir < 0 { "loop_halve" } else { "loop_double" };
+                            self.control(actions, key, d as u8 as f64);
+                        }
+                    } else if pressed == Some(true) {
+                        self.loop_size = step_size(self.loop_size, dir);
+                        self.control(actions, "beatloop_size", self.loop_size);
+                    }
+                }
+            });
+            // As wide as the row above.
+            let w = (3.0 * BTN_W + 10.0) / 3.0;
+            ui.horizontal(|ui| {
+                self.hold_button(ui, w, "IN", "loop_in", false, "Loop in point", actions);
+                self.hold_button(
+                    ui,
+                    w,
+                    "OUT",
+                    "loop_out",
+                    false,
+                    "Loop out point: starts the loop",
+                    actions,
+                );
+                self.hold_button(
+                    ui,
+                    w,
+                    if active { "EXIT" } else { "RELOOP" },
+                    "reloop_toggle",
+                    active,
+                    "Leave the loop, or go back into the last one",
+                    actions,
+                );
+            });
+        });
+    }
+
+    /// Beat jump: ◀ n / n ▶ over size ½ / ×2.
+    fn jumps(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        let n = size_label(self.jump_size);
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                for (label, key, tip) in [
+                    (format!("◀ {n}"), "beatjump_backward", "Jump back"),
+                    (format!("{n} ▶"), "beatjump_forward", "Jump forward"),
+                ] {
+                    let r = ui
+                        .add(HwButton::new(&label, util::TEXT, vec2(BTN_W + 6.0, BTN_H)).font(10.0))
+                        .on_hover_text(format!("{tip} {n} beats"));
+                    if let Some(d) = held(ui, &r) {
+                        self.control(actions, key, d as u8 as f64);
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                for (label, dir) in [("½", -1), ("×2", 1)] {
+                    let r = ui
+                        .add(HwButton::new(label, util::TEXT, vec2(BTN_W + 6.0, BTN_H)).font(11.0))
+                        .on_hover_text("Beat jump size");
+                    if held(ui, &r) == Some(true) {
+                        self.jump_size = step_size(self.jump_size, dir);
+                        self.control(actions, "beatjump_size", self.jump_size);
+                    }
+                }
+            });
+        });
+    }
+
     fn grid_editor(&mut self, ui: &mut Ui, info: &DeckInfo, actions: &mut Vec<Action>) {
         let deck = self.index;
         let mut grid = |op| actions.push(Action::Grid { deck, op });
+        ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
         ui.horizontal(|ui| {
             if ui
                 .add(
@@ -574,7 +886,7 @@ impl DeckUi {
             }
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut self.bpm_text)
-                    .desired_width(56.0)
+                    .desired_width(52.0)
                     .horizontal_align(Align::Center),
             );
             if !edit.has_focus() {
@@ -628,200 +940,72 @@ impl DeckUi {
         });
     }
 
-    fn transport(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+    /// BPM and tempo readouts, SYNC, and the tempo fader with nudge buttons.
+    fn tempo(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        let s = self.state;
         ui.vertical(|ui| {
-            ui.set_width(150.0);
-            ui.spacing_mut().item_spacing = vec2(2.0, 4.0);
-            ui.horizontal(|ui| {
-                let r = ui.small_button("‹").on_hover_text("Beat jump back");
-                if let Some(d) = held(ui, &r) {
-                    self.control(actions, "beatjump_backward", d as u8 as f64);
-                }
-                if size_combo(
-                    ui,
-                    ("jump", self.index),
-                    &mut self.jump_size,
-                    &[1.0, 2.0, 4.0, 8.0, 16.0, 32.0],
-                ) {
-                    self.control(actions, "beatjump_size", self.jump_size);
-                }
-                let r = ui.small_button("›").on_hover_text("Beat jump forward");
-                if let Some(d) = held(ui, &r) {
-                    self.control(actions, "beatjump_forward", d as u8 as f64);
-                }
+            ui.set_width(TEMPO_W);
+            ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+            let bpm = match &self.pending {
+                Some(p) => p.bpm.map(|b| b * (1.0 + s.rate)),
+                None => s.bpm,
+            };
+            ui.with_layout(Layout::top_down(Align::Max), |ui| {
+                ui.label(
+                    RichText::new(bpm.map_or("-".into(), |b| format!("{b:.2}")))
+                        .size(19.0)
+                        .monospace()
+                        .color(util::TEXT),
+                )
+                .on_hover_text("BPM at the current tempo");
+                ui.label(
+                    RichText::new(format!("{:+.2} %", s.rate * 100.0))
+                        .size(10.0)
+                        .monospace()
+                        .color(util::MUTED),
+                );
             });
-            ui.horizontal(|ui| {
-                if size_combo(
-                    ui,
-                    ("loop", self.index),
-                    &mut self.loop_size,
-                    &[1.0, 2.0, 4.0, 8.0, 16.0],
-                ) {
-                    self.control(actions, "beatloop_size", self.loop_size);
+            let r = ui
+                .add(
+                    HwButton::new("SYNC", self.colour(), vec2(TEMPO_W, 20.0))
+                        .font(10.0)
+                        .lit(s.sync),
+                )
+                .on_hover_text("Match the other deck's tempo and beat");
+            if r.clicked() {
+                self.control(actions, "sync_enabled", if s.sync { 0.0 } else { 1.0 });
+            }
+            let h = (ui.available_height()).max(70.0);
+            ui.horizontal_top(|ui| {
+                ui.add_space(16.0); // the fader's range markings
+                let mut v = s.rate / RATE_RANGE;
+                let r = ui.add(
+                    Fader::vertical(&TEMPO, &mut v, vec2(26.0, h))
+                        .inverted(true)
+                        .ticks(17)
+                        .marks(&TEMPO_MARKS)
+                        .colour(self.colour()),
+                );
+                if r.changed() {
+                    self.control(actions, "rate", v);
                 }
-                for (label, key, lit) in [
-                    ("LOOP", "beatloop_activate", self.state.loop_active),
-                    ("½", "loop_halve", false),
-                    ("×2", "loop_double", false),
-                ] {
-                    let r = ui.add(Button::new(RichText::new(label).size(11.0)).selected(lit));
-                    if let Some(d) = held(ui, &r) {
-                        self.control(actions, key, d as u8 as f64);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    for (label, key, tip) in [
+                        ("−", "rate_temp_down", "Nudge slower (hold)"),
+                        ("+", "rate_temp_up", "Nudge faster (hold)"),
+                    ] {
+                        let r = ui
+                            .add(HwButton::new(label, util::TEXT, vec2(24.0, 24.0)).font(14.0))
+                            .on_hover_text(tip);
+                        if let Some(d) = held(ui, &r) {
+                            self.control(actions, key, d as u8 as f64);
+                        }
                     }
-                }
-            });
-            ui.horizontal(|ui| {
-                for (label, key, lit) in [
-                    ("IN", "loop_in", false),
-                    ("OUT", "loop_out", false),
-                    ("EXIT", "reloop_toggle", self.state.loop_active),
-                ] {
-                    let r = ui.add(Button::new(RichText::new(label).size(11.0)).selected(lit));
-                    if let Some(d) = held(ui, &r) {
-                        self.control(actions, key, d as u8 as f64);
-                    }
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.add_space(14.0);
-                let cue = round_button(ui, "CUE", Color32::from_rgb(0xf0, 0xb0, 0x40), false);
-                if let Some(d) = cue {
-                    self.control(actions, "cue_default", d as u8 as f64);
-                }
-                ui.add_space(8.0);
-                if round_button(
-                    ui,
-                    "▶",
-                    Color32::from_rgb(0x4f, 0xd4, 0x7a),
-                    self.state.playing,
-                ) == Some(true)
-                {
-                    self.control(actions, "play", if self.state.playing { 0.0 } else { 1.0 });
-                }
+                });
             });
         });
     }
-
-    fn jog(&self, ui: &mut Ui) {
-        let (rect, _) = ui.allocate_exact_size(vec2(112.0, 112.0), Sense::hover());
-        let p = ui.painter_at(rect.expand(2.0));
-        let c = rect.center();
-        let r = rect.width() / 2.0 - 2.0;
-        p.circle(
-            c,
-            r,
-            Color32::from_rgb(0x0c, 0x0d, 0x10),
-            Stroke::new(3.0, self.colour()),
-        );
-        p.circle_filled(c, r * 0.62, Color32::from_rgb(0x1b, 0x1d, 0x24));
-        // A marker that turns like a record at 33⅓ rpm (1.8 s a turn).
-        let a = ((self.shown / 1.8).fract() as f32) * TAU - TAU / 4.0;
-        p.circle_filled(c + vec2(a.cos(), a.sin()) * (r - 6.0), 3.5, util::BAD);
-        let bpm = self
-            .state
-            .bpm
-            .map(|b| format!("{b:.2}"))
-            .unwrap_or_else(|| "-".into());
-        p.text(
-            c - vec2(0.0, 6.0),
-            egui::Align2::CENTER_CENTER,
-            bpm,
-            FontId::proportional(21.0),
-            util::TEXT,
-        );
-        let rate = self.state.rate * 100.0;
-        p.text(
-            c + vec2(0.0, 14.0),
-            egui::Align2::CENTER_CENTER,
-            format!("{}{rate:.1}%", if rate >= 0.0 { "+" } else { "" }),
-            FontId::proportional(11.0),
-            util::MUTED,
-        );
-    }
-
-    fn tools(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
-        ui.horizontal(|ui| {
-            let r = ui.small_button("-").on_hover_text("Nudge slower (hold)");
-            if let Some(d) = held(ui, &r) {
-                self.control(actions, "rate_temp_down", d as u8 as f64);
-            }
-            ui.spacing_mut().slider_width = ui.available_width() - 30.0;
-            let slider = ui
-                .add(egui::Slider::new(&mut self.pitch, -1.0..=1.0).show_value(false))
-                .on_hover_text("Pitch ±8% (double-click to reset)");
-            if slider.double_clicked() {
-                self.pitch = 0.0;
-                self.control(actions, "rate", 0.0);
-            } else if slider.changed() {
-                self.control(actions, "rate", self.pitch);
-            } else if !slider.dragged() {
-                self.pitch = self.state.rate / earshot_engine::RATE_RANGE;
-            }
-            let r = ui.small_button("+").on_hover_text("Nudge faster (hold)");
-            if let Some(d) = held(ui, &r) {
-                self.control(actions, "rate_temp_up", d as u8 as f64);
-            }
-        });
-    }
-}
-
-// ---- small widgets -------------------------------------------------------------------
-
-/// Press and release edges of a button that acts while held: `Some(true)` on press,
-/// `Some(false)` on release.
-pub fn held(ui: &Ui, r: &egui::Response) -> Option<bool> {
-    let down = r.is_pointer_button_down_on();
-    let id = r.id.with("held");
-    let was = ui.ctx().data(|d| d.get_temp::<bool>(id).unwrap_or(false));
-    if down == was {
-        return None;
-    }
-    ui.ctx().data_mut(|d| d.insert_temp(id, down));
-    Some(down)
-}
-
-fn toggle(ui: &mut Ui, label: &str, on: bool, tip: &str) -> bool {
-    ui.add(Button::new(RichText::new(label).size(10.0).strong()).selected(on))
-        .on_hover_text(tip)
-        .clicked()
-}
-
-fn size_combo(ui: &mut Ui, id: (&str, usize), value: &mut f64, sizes: &[f64]) -> bool {
-    let before = *value;
-    egui::ComboBox::from_id_salt(id)
-        .width(40.0)
-        .selected_text(format!("{value}"))
-        .show_ui(ui, |ui| {
-            for s in sizes {
-                ui.selectable_value(value, *s, format!("{s}"));
-            }
-        });
-    *value != before
-}
-
-/// A round button like Rekordbox's CUE and PLAY. Returns press/release edges.
-fn round_button(ui: &mut Ui, label: &str, colour: Color32, lit: bool) -> Option<bool> {
-    let (rect, resp) = ui.allocate_exact_size(vec2(42.0, 42.0), Sense::click_and_drag());
-    let p = ui.painter();
-    let fill = if lit {
-        util::dim(colour, 0.4)
-    } else {
-        Color32::from_rgb(0x12, 0x13, 0x17)
-    };
-    let ring = if resp.hovered() {
-        colour
-    } else {
-        util::dim(colour, 0.75)
-    };
-    p.circle(rect.center(), 20.0, fill, Stroke::new(2.0, ring));
-    p.text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        label,
-        FontId::proportional(12.0),
-        colour,
-    );
-    held(ui, &resp)
 }
 
 pub fn key_chip(ui: &mut Ui, k: Camelot) {
@@ -836,4 +1020,73 @@ pub fn key_chip(ui: &mut Ui, k: Camelot) {
         .rect_filled(rect, CornerRadius::same(4), util::key_colour(k));
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, Color32::BLACK);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pending(id: i64, title: &str) -> PendingLoad {
+        PendingLoad {
+            track_id: id,
+            title: title.into(),
+            artist: "Someone".into(),
+            bpm: Some(124.0),
+            key: None,
+            duration: Some(300.0),
+        }
+    }
+
+    #[test]
+    fn newest_load_wins() {
+        let mut d = DeckUi::new(0);
+        d.start_load(pending(1, "First"));
+        d.start_load(pending(2, "Second"));
+        assert!(!d.finish_load(1), "a stale load is ignored");
+        assert_eq!(d.pending().map(|p| p.track_id), Some(2));
+        assert!(d.finish_load(2));
+        assert!(d.pending().is_none());
+    }
+
+    #[test]
+    fn loading_deck_shows_the_new_track_at_once() {
+        use egui_kittest::kittest::Queryable;
+        let mut deck = DeckUi::new(0);
+        deck.start_load(pending(7, "Glide"));
+        let info = DeckInfo {
+            title: "Old track".into(),
+            artist: String::new(),
+            grid: None,
+            grid_source: String::new(),
+            generation: 0,
+            waveform: Arc::default(),
+            detail: Arc::default(),
+            tag_bpm: None,
+            key: None,
+            analysing: None,
+        };
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(vec2(700.0, 260.0))
+            .build_ui_state(
+                move |ui, deck: &mut DeckUi| {
+                    let mut actions = vec![];
+                    deck.show(ui, 680.0, 200.0, &info, &mut actions);
+                },
+                deck,
+            );
+        h.run_steps(2);
+        assert!(h.query_by_label("Glide").is_some());
+        assert!(h.query_by_label("Old track").is_none());
+        h.state_mut().finish_load(7);
+        h.run_steps(2);
+        assert!(h.query_by_label("Old track").is_some());
+    }
+
+    #[test]
+    fn sizes_step() {
+        assert_eq!(step_size(4.0, 1), 8.0);
+        assert_eq!(step_size(4.0, -1), 2.0);
+        assert_eq!(step_size(32.0, 1), 32.0);
+        assert_eq!(size_label(0.25), "1/4");
+    }
 }
