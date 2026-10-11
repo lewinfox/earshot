@@ -1,0 +1,6 @@
+#!/bin/sh
+# The worker's venv Python, isolated (-I), pinned to cores 0-3 with threads capped to
+# match (unless the caller set OMP_NUM_THREADS lower). Override the Python with BG_PYTHON.
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}" PYTHONDONTWRITEBYTECODE=1
+export MKL_NUM_THREADS="$OMP_NUM_THREADS" OPENBLAS_NUM_THREADS="$OMP_NUM_THREADS"
+exec taskset -c 0-3 "${BG_PYTHON:-$(cd "$(dirname "$0")/../.." && git rev-parse --path-format=absolute --git-common-dir | xargs dirname)/worker/.venv/bin/python}" -I "$@"
