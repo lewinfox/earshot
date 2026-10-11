@@ -1,10 +1,11 @@
-//! Everything that isn't drawing: the database, library scanning, the analysis queue,
-//! the decks (player), the control bus and MIDI. The UI talks to it by calling
-//! functions and hears back through [`Event`]s.
+//! Everything that isn't drawing: the database, saved Flows, library scanning, the
+//! analysis queue, the decks (player), the control bus and MIDI. The UI talks to it by
+//! calling functions and hears back through [`Event`]s.
 
 pub mod analysis;
 pub mod controls;
 pub mod db;
+pub mod flows;
 pub mod keys;
 pub mod library;
 pub mod midi;
@@ -36,6 +37,8 @@ pub enum Event {
         result: Result<(), String>,
     },
     Scanned(Result<Vec<db::LibTrack>, String>),
+    /// A track's cover art (RGBA, `library::ART_SIZE` square), or `None` if it has none.
+    Art(i64, Option<Vec<u8>>),
 }
 
 /// Where background threads send [`Event`]s (the UI's channel, plus a repaint).

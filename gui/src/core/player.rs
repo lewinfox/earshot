@@ -115,9 +115,10 @@ pub fn routing(player: &Player, channels: u16) -> Routing {
         .unwrap_or(Routing::default_for(channels))
 }
 
-/// Play a library track on the headphones only. Blocking (decoding takes about a
-/// second, unless the track is on a deck): call it from a background thread.
-pub fn preview(player: &Player, db: &db::Db, id: i64) -> Result<(), String> {
+/// Play a library track on the headphones only, from `start` (0..1 of the way in).
+/// Blocking (decoding takes about a second, unless the track is on a deck): call it
+/// from a background thread.
+pub fn preview(player: &Player, db: &db::Db, id: i64, start: f64) -> Result<(), String> {
     let (seq, on_deck) = {
         let mut inner = player.lock().unwrap();
         inner.preview_seq += 1;
@@ -139,7 +140,20 @@ pub fn preview(player: &Player, db: &db::Db, id: i64) -> Result<(), String> {
     if inner.preview_seq != seq {
         return Ok(()); // another preview was asked for meanwhile
     }
-    inner.send(Command::Preview { audio, start: 0.0 })
+    let start = start * audio.duration();
+    inner.send(Command::Preview { audio, start })
+}
+
+/// Pause or resume the preview.
+pub fn play_preview(player: &Player, on: bool) -> Result<(), String> {
+    player.lock().unwrap().send(Command::PreviewPlay(on))
+}
+
+/// Move the preview to `at` (0..1 of the way in).
+pub fn seek_preview(player: &Player, at: f64) -> Result<(), String> {
+    let mut inner = player.lock().unwrap();
+    let d = inner.shared().map_or(0.0, |s| s.preview_duration.get());
+    inner.send(Command::PreviewSeek(at * d))
 }
 
 pub fn stop_preview(player: &Player) -> Result<(), String> {

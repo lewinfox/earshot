@@ -8,6 +8,7 @@ use earshot_engine::decode;
 
 use super::analysis::Analyser;
 use super::db::{self, Db, LibTrack, TrackRow};
+use super::{Event, Sink};
 
 pub struct Library {
     pub db: Db,
@@ -172,4 +173,43 @@ pub fn scan_library(db: &Db) -> Result<Vec<LibTrack>, String> {
             .filter(|t| found.contains(&t.path))
             .collect())
     }
+}
+
+/// Cover art is scaled to this many pixels square.
+pub const ART_SIZE: u32 = 96;
+
+/// A background thread that reads tracks' embedded covers, one at a time, and sends
+/// each as an `Event::Art` (`None` when the file has none). Send it track ids.
+pub fn start_art_loader(db: Db, sink: Sink) -> std::sync::mpsc::Sender<i64> {
+    let (tx, rx) = std::sync::mpsc::channel::<i64>();
+    std::thread::Builder::new()
+        .name("art".into())
+        .spawn(move || {
+            for id in rx {
+                let art = db::track_path(&db.lock().unwrap(), id)
+                    .ok()
+                    .and_then(|p| cover(Path::new(&p)));
+                sink(Event::Art(id, art));
+            }
+        })
+        .expect("art thread");
+    tx
+}
+
+/// The file's cover, cropped to a square and scaled down.
+fn cover(path: &Path) -> Option<Vec<u8>> {
+    let bytes = decode::read_cover(path).ok()??;
+    let img = image::load_from_memory(&bytes).ok()?;
+    let side = img.width().min(img.height());
+    let img = img.crop_imm(
+        (img.width() - side) / 2,
+        (img.height() - side) / 2,
+        side,
+        side,
+    );
+    Some(
+        img.thumbnail_exact(ART_SIZE, ART_SIZE)
+            .to_rgba8()
+            .into_raw(),
+    )
 }

@@ -85,6 +85,23 @@ pub fn read_tags(path: &Path) -> Result<TrackTags, String> {
     Ok(tags_of(&mut format))
 }
 
+/// The embedded cover picture (front cover if marked, else the first one), still
+/// encoded (usually JPEG or PNG). Doesn't decode audio.
+pub fn read_cover(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    use symphonia::core::meta::StandardVisualKey;
+    let mut format = open(path)?;
+    let mut meta = format.metadata();
+    let Some(rev) = meta.skip_to_latest() else {
+        return Ok(None);
+    };
+    let visuals = &rev.media.visuals;
+    Ok(visuals
+        .iter()
+        .find(|v| v.usage == Some(StandardVisualKey::FrontCover))
+        .or(visuals.first())
+        .map(|v| v.data.to_vec()))
+}
+
 /// Decode a whole file to stereo f32. Mono is duplicated, extra channels are dropped.
 pub fn decode_file(path: &Path) -> Result<(TrackAudio, TrackTags), String> {
     let mut format = open(path)?;

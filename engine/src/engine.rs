@@ -307,6 +307,10 @@ pub enum Command {
         start: f64,
     },
     PreviewStop,
+    /// Pause (`false`) or resume (`true`) the preview, keeping its place.
+    PreviewPlay(bool),
+    /// Move the preview to this many seconds in.
+    PreviewSeek(f64),
 }
 
 /// Things the audio thread must not free itself.
@@ -1002,6 +1006,20 @@ impl Renderer {
                     self.trash(Garbage::Audio(old));
                 }
             }
+            Command::PreviewPlay(on) => {
+                if let Some(audio) = &self.preview {
+                    // Resuming at the very end starts again.
+                    if on && self.preview_pos >= audio.duration() {
+                        self.preview_pos = 0.0;
+                    }
+                    self.preview_playing = on;
+                }
+            }
+            Command::PreviewSeek(t) => {
+                if let Some(audio) = &self.preview {
+                    self.preview_pos = t.clamp(0.0, audio.duration());
+                }
+            }
         }
     }
 
@@ -1414,6 +1432,21 @@ mod tests {
         assert!(p[2] > 0.01 && p[3] > 0.01, "phones play: {p:?}");
         assert!(rig.shared.preview_playing.load(Relaxed));
         assert!((rig.shared.preview_position.get() - 1.5).abs() < 0.02);
+        rig.send(Command::PreviewPlay(false));
+        rig.run(0.1);
+        assert_eq!(peaks(&rig.out, 4)[2], 0.0, "paused");
+        assert!(
+            (rig.shared.preview_position.get() - 1.5).abs() < 0.02,
+            "keeps its place"
+        );
+        rig.send(Command::PreviewSeek(0.25));
+        rig.send(Command::PreviewPlay(true));
+        rig.run(0.25);
+        assert!(peaks(&rig.out, 4)[2] > 0.01, "resumed");
+        assert!(
+            (rig.shared.preview_position.get() - 0.5).abs() < 0.02,
+            "from the seek"
+        );
         rig.send(Command::PreviewStop);
         rig.run(0.1);
         assert_eq!(peaks(&rig.out, 4)[2], 0.0);

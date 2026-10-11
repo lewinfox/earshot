@@ -9,6 +9,7 @@ earshot-engine = { version = "0.1.0", path = "../engine" }
 eframe = { version = "0.33.3", features = ["persistence"] }
 egui = "0.33.3"
 egui_extras = "0.33.3"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 midir = "0.11.0"
 rfd = "0.17.2"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
@@ -20,4 +21,3 @@ libc = "0.2.190"
 
 [dev-dependencies]
 egui_kittest = { version = "0.33.3", features = ["wgpu", "eframe", "snapshot"] }
-image = { version = "0.25.10", default-features = false, features = ["png"] }

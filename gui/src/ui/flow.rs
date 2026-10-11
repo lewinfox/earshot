@@ -5,7 +5,7 @@
 //! by dragging from one's "+" (out) to another's left port (in), or the other way.
 //! Saved with the window's other settings.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use egui::emath::TSTransform;
 use egui::epaint::CubicBezierShape;
@@ -16,12 +16,16 @@ use egui::{
 use serde::{Deserialize, Serialize};
 
 use super::deck::key_chip;
-use super::library_ui::{LibAction, LibraryUi, Track};
+use super::library_ui::{LibAction, LibraryUi, PreviewState, Track, want_art};
 use super::util::{self, Query};
+use super::wave;
+use crate::core::flows::Card;
 use crate::core::suggest::{self, Direction, Reference, Scored};
 
 const NODE_W: f32 = 236.0;
-const NODE_H: f32 = 92.0;
+const NODE_H: f32 = 104.0;
+/// The waveform seek bar along a card's bottom edge.
+const SEEK_H: f32 = 20.0;
 const GAP_X: f32 = 90.0;
 const GAP_Y: f32 = 22.0;
 /// Width of the "+" suggestions popup.
@@ -45,10 +49,15 @@ impl Node {
     }
 }
 
-/// What is kept between runs.
+/// What is kept between runs. The cards themselves are in `earshot.db`.
 #[derive(Serialize, Deserialize, Default)]
 pub struct Saved {
+    /// Cards from before Flows were saved in the database; moved there on start.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     nodes: Vec<Node>,
+    /// The saved Flow on the canvas.
+    #[serde(default)]
+    flow: Option<i64>,
     scene: Option<Rect>,
     open: bool,
 }
@@ -61,7 +70,12 @@ enum Pop {
 }
 
 pub struct FlowUi {
+    /// The saved Flow on the canvas (`None` until the first card is added).
+    pub flow: Option<i64>,
+    pub name: String,
     nodes: Vec<Node>,
+    /// The cards as last saved, to tell when they need saving again.
+    stored: Vec<Card>,
     /// The part of the canvas in view (egui's `Scene` keeps it as a rectangle).
     scene: Rect,
     next_id: u64,
@@ -81,6 +95,10 @@ pub struct FlowUi {
     picks_for: String,
     /// A link being dragged: from this card, starting at its out ("+") or in port.
     linking: Option<(u64, Port)>,
+    /// The card clicked on last; Delete or Backspace removes it.
+    selected: Option<u64>,
+    /// Waveform thumbnails for the seek bars, by track.
+    thumbs: HashMap<i64, egui::TextureHandle>,
     /// A card being dragged, and where it started. Dropped outside the canvas (e.g. on
     /// a deck, which loads it) it goes back there.
     moving: Option<(u64, Pos2)>,
@@ -99,14 +117,21 @@ enum CardAction {
     MoveEnd,
     StartLink(u64, Port),
     Unlink(u64),
+    Select(u64),
 }
 
 /// How a card is drawn this frame.
 struct CardState {
-    /// Preview progress (0..1) while this track plays in the headphones.
-    previewing: Option<f32>,
+    /// This track is in the headphones' preview player.
+    preview: Option<PreviewState>,
     /// A link being dragged would land here.
     link_target: bool,
+    /// Clicked on: Delete removes it.
+    selected: bool,
+    /// The pointer is over the card (or just outside it).
+    near: bool,
+    /// The track's waveform thumbnail, once it has one.
+    thumb: Option<egui::TextureId>,
 }
 
 const ZOOM: std::ops::RangeInclusive<f32> = 0.25..=1.5;
@@ -114,8 +139,11 @@ const ZOOM: std::ops::RangeInclusive<f32> = 0.25..=1.5;
 impl FlowUi {
     pub fn from_saved(s: Saved) -> FlowUi {
         FlowUi {
+            flow: s.flow,
+            name: String::new(),
             next_id: s.nodes.iter().map(|n| n.id + 1).max().unwrap_or(1),
             nodes: s.nodes,
+            stored: vec![],
             scene: s
                 .scene
                 .unwrap_or(Rect::from_min_size(pos2(-40.0, -40.0), vec2(1200.0, 500.0))),
@@ -130,16 +158,72 @@ impl FlowUi {
             picks: vec![],
             picks_for: String::new(),
             linking: None,
+            selected: None,
+            thumbs: HashMap::new(),
             moving: None,
         }
     }
 
     pub fn saved(&self) -> Saved {
         Saved {
-            nodes: self.nodes.clone(),
+            nodes: vec![],
+            flow: self.flow,
             scene: Some(self.scene),
             open: self.open,
         }
+    }
+
+    /// The cards on the canvas, for saving.
+    pub fn cards(&self) -> Vec<Card> {
+        self.nodes
+            .iter()
+            .map(|n| Card {
+                id: n.id,
+                track_id: n.track_id,
+                parent: n.parent,
+                x: n.pos.x,
+                y: n.pos.y,
+            })
+            .collect()
+    }
+
+    /// Show a saved Flow (or an empty canvas with `None`).
+    pub fn load(&mut self, flow: Option<(i64, String, Vec<Card>)>) {
+        let (id, name, cards) = match flow {
+            Some((id, name, cards)) => (Some(id), name, cards),
+            None => (None, String::new(), vec![]),
+        };
+        self.flow = id;
+        self.name = name;
+        self.nodes = cards
+            .iter()
+            .map(|c| Node {
+                id: c.id,
+                track_id: c.track_id,
+                parent: c.parent,
+                pos: pos2(c.x, c.y),
+            })
+            .collect();
+        self.next_id = self.nodes.iter().map(|n| n.id + 1).max().unwrap_or(1);
+        self.stored = cards;
+        self.pop = None;
+        self.linking = None;
+        self.moving = None;
+        self.fit = !self.nodes.is_empty();
+    }
+
+    /// The cards, if they changed since they were last saved and nothing is being
+    /// dragged. Counts them as saved.
+    pub fn changed_cards(&mut self) -> Option<Vec<Card>> {
+        if self.moving.is_some() || self.linking.is_some() {
+            return None;
+        }
+        let cards = self.cards();
+        if cards == self.stored {
+            return None;
+        }
+        self.stored = cards.clone();
+        Some(cards)
     }
 
     // ---- model --------------------------------------------------------------------------
@@ -233,6 +317,59 @@ impl FlowUi {
         self.nodes.iter().map(|n| n.track_id).collect()
     }
 
+    /// Lay the cards out tidily: a card's column is how many cards come before it, so
+    /// the width shows the set's length. A chain stays on one row; a branch's other
+    /// paths go on rows below. Separate chains are stacked, keeping their order.
+    fn reflow(&mut self) {
+        let ids: HashSet<u64> = self.nodes.iter().map(|n| n.id).collect();
+        let parent = |n: &Node| n.parent.filter(|p| ids.contains(p));
+        // Keep the current top-to-bottom order of starting cards and branches.
+        let mut by_y: Vec<&Node> = self.nodes.iter().collect();
+        by_y.sort_by(|a, b| a.pos.y.total_cmp(&b.pos.y));
+        let mut kids: HashMap<u64, Vec<u64>> = HashMap::new();
+        let mut roots = vec![];
+        for n in &by_y {
+            match parent(n) {
+                Some(p) => kids.entry(p).or_default().push(n.id),
+                None => roots.push(n.id),
+            }
+        }
+
+        // (column, row) per card, depth first.
+        let mut place: HashMap<u64, (usize, f32)> = HashMap::new();
+        let mut row = 0.0;
+        fn walk(
+            id: u64,
+            col: usize,
+            row: &mut f32,
+            kids: &HashMap<u64, Vec<u64>>,
+            place: &mut HashMap<u64, (usize, f32)>,
+        ) {
+            if place.contains_key(&id) {
+                return; // can't happen (links refuse loops), but never spin
+            }
+            place.insert(id, (col, *row));
+            let children = kids.get(&id).map(Vec::as_slice).unwrap_or(&[]);
+            for (i, &c) in children.iter().enumerate() {
+                if i > 0 {
+                    *row += 1.0;
+                }
+                walk(c, col + 1, row, kids, place);
+            }
+        }
+        for (i, &r) in roots.iter().enumerate() {
+            if i > 0 {
+                row += 1.5; // a gap between separate chains
+            }
+            walk(r, 0, &mut row, &kids, &mut place);
+        }
+        for n in &mut self.nodes {
+            if let Some(&(col, row)) = place.get(&n.id) {
+                n.pos = pos2(col as f32 * (NODE_W + GAP_X), row * (NODE_H + GAP_Y));
+            }
+        }
+    }
+
     fn bounds(&self) -> Option<Rect> {
         self.nodes.iter().map(Node::rect).reduce(|a, b| a.union(b))
     }
@@ -244,10 +381,19 @@ impl FlowUi {
         &mut self,
         ui: &mut Ui,
         lib: &LibraryUi,
-        preview: Option<(i64, f32)>,
+        preview: Option<PreviewState>,
         actions: &mut Vec<LibAction>,
     ) {
+        // To stop the preview if its card goes (removed, or Reset).
+        let had_preview = preview.is_some_and(|p| self.nodes.iter().any(|n| n.track_id == p.id));
         self.toolbar(ui, lib);
+        for n in &self.nodes {
+            if let Some(p) = lib.previews.get(&n.track_id) {
+                self.thumbs
+                    .entry(n.track_id)
+                    .or_insert_with(|| wave::thumbnail(ui.ctx(), n.track_id, p));
+            }
+        }
 
         if let Some(id) = self.reveal.take()
             && let Some(n) = self.nodes.iter().find(|n| n.id == id)
@@ -315,10 +461,14 @@ impl FlowUi {
                 for n in &self.nodes {
                     if let Some(t) = lib.track(n.track_id) {
                         let state = CardState {
-                            previewing: preview.filter(|(id, _)| *id == t.lib.id).map(|(_, p)| p),
+                            preview: preview.filter(|p| p.id == t.lib.id),
                             link_target: link_target == Some(n.id),
+                            selected: self.selected == Some(n.id),
+                            // Near enough to reach the corner button.
+                            near: at.is_some_and(|p| n.rect().expand(14.0).contains(p)),
+                            thumb: self.thumbs.get(&t.lib.id).map(|t| t.id()),
                         };
-                        card(ui, n, t, state, &mut card_actions, actions);
+                        card(ui, n, t, lib, state, &mut card_actions, actions);
                     }
                 }
             })
@@ -368,11 +518,22 @@ impl FlowUi {
         }
         if resp.clicked() || resp.drag_started() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.pop = None;
+            self.selected = None;
+        }
+        if let Some(id) = self.selected
+            && !ui.ctx().wants_keyboard_input()
+            && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
+        {
+            card_actions.push(CardAction::Remove(id));
         }
         for a in card_actions {
             match a {
+                CardAction::Select(id) => self.selected = Some(id),
                 CardAction::Remove(id) => {
                     self.remove(id);
+                    if self.selected == Some(id) {
+                        self.selected = None;
+                    }
                     if matches!(self.pop, Some(Pop::Suggest(p)) if p == id) {
                         self.pop = None;
                     }
@@ -414,6 +575,8 @@ impl FlowUi {
             }
         }
 
+        self.minimap(ui, canvas, preview);
+
         match self.pop {
             Some(Pop::Suggest(id)) => {
                 if let Some(n) = self.nodes.iter().find(|n| n.id == id) {
@@ -432,10 +595,88 @@ impl FlowUi {
             Some(Pop::Search(at)) => self.search_pop(ui, canvas, at, lib),
             None => {}
         }
+
+        if had_preview
+            && let Some(p) = preview
+            && !self.nodes.iter().any(|n| n.track_id == p.id)
+        {
+            actions.push(LibAction::PreviewStop(p.id));
+        }
+    }
+
+    /// Every card in miniature in the canvas's bottom-right corner, with the part in
+    /// view outlined. Click or drag on it to look somewhere else.
+    fn minimap(&mut self, ui: &mut Ui, canvas: Rect, preview: Option<PreviewState>) {
+        let Some(bounds) = self.bounds() else {
+            return;
+        };
+        // From the cards alone, so the map holds still while you drag the view around.
+        let world = bounds.expand(NODE_W / 2.0);
+        let max = vec2(220.0, 140.0);
+        let scale = (max.x / world.width()).min(max.y / world.height());
+        let size = world.size() * scale;
+        let map = Rect::from_min_size(canvas.right_bottom() - size - vec2(12.0, 12.0), size);
+        let to_map = |p: Pos2| map.min + (p - world.min) * scale;
+
+        egui::Area::new(ui.id().with("flow-minimap"))
+            .fixed_pos(map.min)
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                let (_, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
+                let p = ui.painter();
+                p.rect(
+                    map,
+                    4,
+                    Color32::from_black_alpha(200),
+                    Stroke::new(1.0, CARD_LINE),
+                    egui::StrokeKind::Outside,
+                );
+                for n in &self.nodes {
+                    if let Some(parent) = self.nodes.iter().find(|m| Some(m.id) == n.parent) {
+                        let a = to_map(pos2(parent.pos.x + NODE_W, parent.pos.y + NODE_H / 2.0));
+                        let b = to_map(pos2(n.pos.x, n.pos.y + NODE_H / 2.0));
+                        p.line_segment([a, b], Stroke::new(1.0, util::MUTED));
+                    }
+                }
+                for n in &self.nodes {
+                    let lit = self.selected == Some(n.id)
+                        || preview.is_some_and(|pv| pv.id == n.track_id);
+                    let r = Rect::from_min_max(to_map(n.pos), to_map(n.rect().max));
+                    p.rect_filled(
+                        r,
+                        1,
+                        if lit {
+                            util::ACCENT
+                        } else {
+                            Color32::from_gray(110)
+                        },
+                    );
+                }
+                let view = Rect::from_min_max(to_map(self.scene.min), to_map(self.scene.max))
+                    .intersect(map);
+                p.rect_stroke(
+                    view,
+                    2,
+                    Stroke::new(1.5, Color32::WHITE),
+                    egui::StrokeKind::Inside,
+                );
+                if (resp.clicked() || resp.dragged())
+                    && let Some(at) = resp.interact_pointer_pos()
+                {
+                    let centre = world.min + (at - map.min) / scale;
+                    self.scene = Rect::from_center_size(centre, self.scene.size());
+                }
+            });
     }
 
     fn toolbar(&mut self, ui: &mut Ui, lib: &LibraryUi) {
         ui.horizontal(|ui| {
+            if self.flow.is_some() {
+                ui.label(RichText::new(&self.name).strong());
+            } else {
+                ui.label(RichText::new("New Flow").color(util::MUTED))
+                    .on_hover_text("Saved when you add a card");
+            }
             let ts: Vec<&Track> = self
                 .nodes
                 .iter()
@@ -472,6 +713,14 @@ impl FlowUi {
                     .on_hover_text("Fit everything in view")
                     .clicked()
                 {
+                    self.fit = true;
+                }
+                if ui
+                    .add_enabled(!self.nodes.is_empty(), egui::Button::new("Reflow"))
+                    .on_hover_text("Tidy the layout: one column per step through the set")
+                    .clicked()
+                {
+                    self.reflow();
                     self.fit = true;
                 }
                 ui.toggle_value(&mut self.full, "Full screen")
@@ -576,7 +825,7 @@ impl FlowUi {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             for s in row {
                                 if let Some(c) = lib.track(s.id)
-                                    && pick_tile(ui, w, c, s.total).clicked()
+                                    && pick_tile(ui, w, c, lib, s.total).clicked()
                                 {
                                     picked = Some(s.id);
                                 }
@@ -587,6 +836,7 @@ impl FlowUi {
             });
         if let Some(id) = picked {
             self.add_child(node, id);
+            self.pop = None;
         }
         if close {
             self.pop = None;
@@ -689,6 +939,7 @@ fn card(
     ui: &mut Ui,
     n: &Node,
     t: &Track,
+    lib: &LibraryUi,
     state: CardState,
     out: &mut Vec<CardAction>,
     actions: &mut Vec<LibAction>,
@@ -701,6 +952,9 @@ fn card(
             Sense::click_and_drag(),
         )
         .on_hover_text(&t.lib.path);
+    if resp.clicked() || resp.drag_started() {
+        out.push(CardAction::Select(n.id));
+    }
     if resp.dragged() {
         out.push(CardAction::Move(n.id, resp.drag_delta()));
     }
@@ -734,7 +988,7 @@ fn card(
             ui.close();
         }
     });
-    let border = if resp.dragged() || state.link_target {
+    let border = if resp.dragged() || state.link_target || state.selected {
         util::ACCENT
     } else if resp.hovered() {
         Color32::from_rgb(0x5a, 0x5f, 0x73)
@@ -751,18 +1005,10 @@ fn card(
         rect,
         8,
         CARD,
-        Stroke::new(1.0, border),
+        Stroke::new(if state.selected { 2.0 } else { 1.0 }, border),
         egui::StrokeKind::Inside,
     );
-    if let Some(f) = state.previewing {
-        // Preview progress along the bottom edge.
-        let y = rect.bottom() - 2.0;
-        let x = rect.left() + 8.0 + (rect.width() - 16.0) * f.clamp(0.0, 1.0);
-        p.line_segment(
-            [pos2(rect.left() + 8.0, y), pos2(x, y)],
-            Stroke::new(2.0, util::ACCENT),
-        );
-    }
+    seek_bar(ui, n, t, &state, actions);
 
     let inner = rect.shrink2(vec2(8.0, 7.0));
     let mut ui = ui.new_child(
@@ -772,7 +1018,7 @@ fn card(
     );
     ui.spacing_mut().item_spacing = vec2(8.0, 7.0);
     ui.horizontal(|ui| {
-        art(ui, 34.0, t);
+        art(ui, 34.0, t, lib);
         let id_w = ui.available_width() - 28.0 - 8.0;
         ui.allocate_ui(vec2(id_w, 34.0), |ui| {
             ui.vertical(|ui| {
@@ -790,10 +1036,10 @@ fn card(
                 );
             });
         });
-        let playing = state.previewing.is_some();
+        let playing = state.preview.is_some_and(|p| p.playing);
         if play_button(ui, playing)
             .on_hover_text(if playing {
-                "Stop the preview"
+                "Pause the preview"
             } else {
                 "Preview in the headphones"
             })
@@ -808,18 +1054,28 @@ fn card(
                 .size(11.0)
                 .color(util::MUTED),
         );
-        if resp.hovered() || ui.rect_contains_pointer(rect) {
-            let x = ui
-                .add(
-                    egui::Label::new(RichText::new("x").size(11.0).color(util::MUTED))
-                        .sense(Sense::click()),
-                )
-                .on_hover_text("Remove from the Flow");
-            if x.clicked() {
-                out.push(CardAction::Remove(n.id));
-            }
-        }
     });
+
+    // A remove button on the top-right corner, while the pointer is near or it's selected.
+    if state.selected || state.near {
+        let c = rect.right_top();
+        let x = ui
+            .interact(
+                Rect::from_center_size(c, vec2(20.0, 20.0)),
+                ui.id().with(("flow-remove", n.id)),
+                Sense::click(),
+            )
+            .on_hover_text("Remove from the Flow (Delete)");
+        let col = if x.hovered() { util::WARN } else { util::MUTED };
+        ui.painter().circle(c, 9.0, util::BG, Stroke::new(1.5, col));
+        for d in [vec2(3.5, 3.5), vec2(3.5, -3.5)] {
+            ui.painter()
+                .line_segment([c - d, c + d], Stroke::new(1.5, col));
+        }
+        if x.clicked() {
+            out.push(CardAction::Remove(n.id));
+        }
+    }
 
     // The in port on the left: drag from it to another card to follow that card.
     let c_in = pos2(rect.left(), rect.center().y);
@@ -876,6 +1132,61 @@ fn card(
     }
 }
 
+/// The track's waveform along the card's bottom edge: click or drag to preview from
+/// there. Shows how far the preview has got.
+fn seek_bar(ui: &mut Ui, n: &Node, t: &Track, state: &CardState, actions: &mut Vec<LibAction>) {
+    let card = n.rect();
+    let bar = Rect::from_min_max(
+        pos2(card.left() + 8.0, card.bottom() - 6.0 - SEEK_H),
+        pos2(card.right() - 8.0, card.bottom() - 6.0),
+    );
+    let resp = ui
+        .interact(
+            bar,
+            ui.id().with(("flow-seek", n.id)),
+            Sense::click_and_drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let frac = |x: f32| ((x - bar.left()) / bar.width()).clamp(0.0, 1.0);
+    if (resp.clicked() || resp.dragged())
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        actions.push(LibAction::PreviewSeek(t.lib.id, frac(p.x)));
+    }
+    if let (Some(p), Some(d)) = (resp.hover_pos(), t.lib.duration) {
+        resp.on_hover_text_at_pointer(util::mmss(d * frac(p.x) as f64));
+    }
+
+    let p = ui.painter();
+    p.rect_filled(bar, 3, CHIPS_BG);
+    let tint = if state.preview.is_some() {
+        Color32::WHITE
+    } else {
+        Color32::from_gray(150)
+    };
+    if let Some(tex) = state.thumb {
+        p.image(
+            tex,
+            bar,
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            tint,
+        );
+    }
+    if let Some(s) = state.preview {
+        // Dim what's been played; a line at the playhead.
+        let x = bar.left() + bar.width() * s.at.clamp(0.0, 1.0);
+        p.rect_filled(
+            Rect::from_min_max(bar.min, pos2(x, bar.bottom())),
+            3,
+            Color32::from_black_alpha(130),
+        );
+        p.line_segment(
+            [pos2(x, bar.top() - 2.0), pos2(x, bar.bottom() + 2.0)],
+            Stroke::new(2.0, util::ACCENT),
+        );
+    }
+}
+
 /// BPM, key and energy chips on a dark strip, with `right` added at its right end.
 fn chips_row(ui: &mut Ui, t: &Track, right: impl FnOnce(&mut Ui)) {
     egui::Frame::new()
@@ -925,7 +1236,8 @@ fn chip(ui: &mut Ui, text: &str, fill: Color32, colour: Color32) -> egui::Respon
 }
 
 /// A coloured tile with the artist's initials, standing in for artwork.
-fn art(ui: &mut Ui, size: f32, t: &Track) {
+/// The track's cover art, or a gradient with the artist's initials until it has one.
+fn art(ui: &mut Ui, size: f32, t: &Track, lib: &LibraryUi) {
     let h = format!("{}{}", t.lib.artist, t.lib.title)
         .chars()
         .fold(0u32, |h, c| (h * 31 + c as u32) % 360) as f32;
@@ -940,6 +1252,16 @@ fn art(ui: &mut Ui, size: f32, t: &Track) {
     .collect::<String>()
     .to_uppercase();
     let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    match lib.art.get(&t.lib.id) {
+        Some(Some(tex)) => {
+            egui::Image::new((tex.id(), rect.size()))
+                .corner_radius(3)
+                .paint_at(ui, rect);
+            return;
+        }
+        Some(None) => {}
+        None => want_art(ui.ctx(), t.lib.id),
+    }
     // A diagonal two-colour gradient.
     let (a, b) = (util::hsl(h, 0.55, 0.42), util::hsl(h + 60.0, 0.6, 0.28));
     let mut mesh = egui::Mesh::default();
@@ -972,11 +1294,13 @@ fn play_button(ui: &mut Ui, playing: bool) -> egui::Response {
     };
     ui.painter().circle_filled(c, 14.0, fill);
     if playing {
-        ui.painter().rect_filled(
-            Rect::from_center_size(c, vec2(10.0, 10.0)),
-            1,
-            Color32::from_rgb(0x11, 0x11, 0x11),
-        );
+        for dx in [-3.0, 3.0] {
+            ui.painter().rect_filled(
+                Rect::from_center_size(c + vec2(dx, 0.0), vec2(3.5, 11.0)),
+                1,
+                Color32::from_rgb(0x11, 0x11, 0x11),
+            );
+        }
         return resp;
     }
     ui.painter().add(egui::Shape::convex_polygon(
@@ -992,7 +1316,7 @@ fn play_button(ui: &mut Ui, playing: bool) -> egui::Response {
 }
 
 /// A suggestion in the "+" grid: art, title, artist, chips and the match score.
-fn pick_tile(ui: &mut Ui, w: f32, t: &Track, score: f64) -> egui::Response {
+fn pick_tile(ui: &mut Ui, w: f32, t: &Track, lib: &LibraryUi, score: f64) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 70.0), Sense::click());
     let resp = resp
         .on_hover_text(&t.lib.path)
@@ -1018,7 +1342,7 @@ fn pick_tile(ui: &mut Ui, w: f32, t: &Track, score: f64) -> egui::Response {
     );
     ui.spacing_mut().item_spacing = vec2(7.0, 4.0);
     ui.horizontal(|ui| {
-        art(ui, 28.0, t);
+        art(ui, 28.0, t, lib);
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.add(

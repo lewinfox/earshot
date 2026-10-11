@@ -14,7 +14,8 @@ use egui::{Key, RichText, Stroke, Ui, vec2};
 use super::audio_ui::{AudioAction, AudioUi};
 use super::deck::{Action, DeckInfo, DeckUi, PendingLoad};
 use super::flow::FlowUi;
-use super::library_ui::{LibAction, LibraryUi};
+use super::flows_ui::{FlowsAction, FlowsUi, Item};
+use super::library_ui::{LibAction, LibraryUi, PreviewState, take_wanted_art};
 use super::mixer;
 use super::suggest_ui::{RefInfo, SuggestUi};
 use super::util;
@@ -23,7 +24,7 @@ use crate::core::library::{self, Library};
 use crate::core::midi::{self, Midi};
 use crate::core::player::{self, AudioSettings, Player};
 use crate::core::suggest::{self, Reference};
-use crate::core::{Event, Sink, controls, db};
+use crate::core::{Event, Sink, controls, db, flows};
 
 pub struct EarshotApp {
     player: Player,
@@ -41,6 +42,9 @@ pub struct EarshotApp {
     library: LibraryUi,
     suggest: SuggestUi,
     flow: FlowUi,
+    flows: FlowsUi,
+    /// Send track ids here to load their cover art.
+    art_loader: std::sync::mpsc::Sender<i64>,
     /// Which list the keyboard and the controller's browse knob move through.
     pane: Pane,
     /// The deck that most recently started playing (the live reference).
@@ -52,8 +56,8 @@ pub struct EarshotApp {
     show_keys: bool,
     audio_settings: AudioSettings,
     audio_ui: AudioUi,
-    /// The track asked to play in the headphones, and whether it's still decoding.
-    preview: Option<(i64, Arc<AtomicBool>)>,
+    /// The track in the headphones' preview player.
+    preview: Option<Preview>,
     /// Keys held down for deck buttons, so release sends 0.
     held_keys: HashSet<Key>,
     /// Folders picked in the import dialog (on its own thread).
@@ -71,6 +75,8 @@ const FLOW_KEY: &str = "earshot.flow";
 const AUDIO_KEY: &str = "earshot.audio";
 /// Waveform zoom: seconds either side of the playhead.
 const WAVE_ZOOM_KEY: &str = "earshot.wave_zoom";
+/// The name a new Flow gets until it's renamed.
+const UNTITLED: &str = "Untitled Flow";
 
 /// Start audio on the chosen device; failing that the default one, then the null
 /// output (so the app still runs without a sound card).
@@ -105,6 +111,15 @@ struct AnalysisSummary {
     running: HashMap<i64, f64>,
     failed: u32,
     last_error: String,
+}
+
+/// The track asked to play in the headphones.
+struct Preview {
+    id: i64,
+    /// Still decoding: the engine doesn't have it yet.
+    decoding: Arc<AtomicBool>,
+    /// Where it was asked to start (0..1), shown while it decodes.
+    start: f32,
 }
 
 #[derive(Default)]
@@ -149,6 +164,7 @@ impl EarshotApp {
         let db = db::open(&data_dir().join("earshot.db"))?;
         let analyser = Analyser::start(sink.clone(), player.clone(), db.clone());
         let lib = Arc::new(Library { db, analyser });
+        let art_loader = library::start_art_loader(lib.db.clone(), sink.clone());
         let mut app = EarshotApp {
             player,
             lib,
@@ -171,6 +187,8 @@ impl EarshotApp {
                     .and_then(|s| eframe::get_value(s, FLOW_KEY))
                     .unwrap_or_default(),
             ),
+            flows: FlowsUi::default(),
+            art_loader,
             pane: Pane::Library,
             last_started: None,
             play_started: [None; 2],
@@ -184,6 +202,7 @@ impl EarshotApp {
             picked: Arc::new(Mutex::new(None)),
         };
         app.library.folders = db::folders(&app.lib.db.lock().unwrap())?;
+        app.restore_flow();
         app.rescan();
         app.connect_midi();
         Ok(app)
@@ -198,6 +217,130 @@ impl EarshotApp {
                 eprintln!("MIDI: {e}");
                 (Midi::default(), vec![])
             });
+    }
+
+    // ---- saved Flows ------------------------------------------------------------------
+
+    /// Show the Flow that was open last time. Cards kept from before Flows were saved
+    /// in the database become an "Untitled Flow".
+    fn restore_flow(&mut self) {
+        let legacy = self.flow.cards();
+        let result = (|| {
+            let mut conn = self.lib.db.lock().unwrap();
+            let open = match self.flow.flow {
+                Some(id) => flows::list(&conn)?.1.into_iter().find(|f| f.id == id),
+                None => None,
+            };
+            let open = match open {
+                Some(f) => Some((f.id, f.name, flows::load(&conn, f.id)?)),
+                None if !legacy.is_empty() => {
+                    let id = flows::create(&conn, None, UNTITLED)?;
+                    flows::save(&mut conn, id, &legacy)?;
+                    Some((id, UNTITLED.to_string(), legacy))
+                }
+                None => None,
+            };
+            Ok::<_, String>(open)
+        })();
+        match result {
+            Ok(open) => self.flow.load(open),
+            Err(e) => eprintln!("flows: {e}"),
+        }
+        self.refresh_flows();
+    }
+
+    fn refresh_flows(&mut self) {
+        match flows::list(&self.lib.db.lock().unwrap()) {
+            Ok(list) => self.flows.set(list),
+            Err(e) => eprintln!("flows: {e}"),
+        }
+    }
+
+    /// Save the canvas if its cards changed, making a new Flow for the first card.
+    fn save_flow(&mut self) {
+        let Some(cards) = self.flow.changed_cards() else {
+            return;
+        };
+        let result = (|| {
+            let mut conn = self.lib.db.lock().unwrap();
+            let id = match self.flow.flow {
+                Some(id) => id,
+                None if cards.is_empty() => return Ok(false),
+                None => {
+                    self.flow.name = UNTITLED.to_string();
+                    *self.flow.flow.insert(flows::create(&conn, None, UNTITLED)?)
+                }
+            };
+            flows::save(&mut conn, id, &cards)?;
+            Ok::<_, String>(true)
+        })();
+        match result {
+            Ok(true) => self.refresh_flows(),
+            Ok(false) => {}
+            Err(e) => eprintln!("saving the Flow: {e}"),
+        }
+    }
+
+    fn flows_action(&mut self, a: FlowsAction) -> Result<(), String> {
+        let db = self.lib.db.clone();
+        let mut conn = db.lock().unwrap();
+        let open = |app: &mut Self, conn: &rusqlite::Connection, id: i64, name: String| {
+            let cards = flows::load(conn, id)?;
+            app.flow.load(Some((id, name, cards)));
+            app.flow.open = true;
+            Ok::<_, String>(())
+        };
+        let mut rename = None;
+        match a {
+            FlowsAction::Open(id) => {
+                if let Some(f) = self.flows.flows.iter().find(|f| f.id == id) {
+                    let name = f.name.clone();
+                    open(self, &conn, id, name)?;
+                }
+            }
+            FlowsAction::New(folder) => {
+                let id = flows::create(&conn, folder, UNTITLED)?;
+                open(self, &conn, id, UNTITLED.to_string())?;
+                rename = Some(Item::Flow(id));
+            }
+            FlowsAction::NewFolder(parent) => {
+                rename = Some(Item::Folder(flows::create_folder(
+                    &conn,
+                    parent,
+                    "New folder",
+                )?));
+            }
+            FlowsAction::Rename(Item::Flow(id), name) => {
+                flows::rename(&conn, id, &name)?;
+                if self.flow.flow == Some(id) {
+                    self.flow.name = name;
+                }
+            }
+            FlowsAction::Rename(Item::Folder(id), name) => flows::rename_folder(&conn, id, &name)?,
+            FlowsAction::Move(Item::Flow(id), to) => flows::move_to(&conn, id, to)?,
+            FlowsAction::Move(Item::Folder(id), to) => flows::move_folder(&conn, id, to)?,
+            FlowsAction::Duplicate(id) => {
+                rename = Some(Item::Flow(flows::duplicate(&mut conn, id)?));
+            }
+            FlowsAction::Delete(item) => {
+                match item {
+                    Item::Flow(id) => flows::delete(&conn, id)?,
+                    Item::Folder(id) => flows::delete_folder(&conn, id)?,
+                }
+                // The open Flow may have gone with it.
+                if let Some(open) = self.flow.flow
+                    && !flows::list(&conn)?.1.iter().any(|f| f.id == open)
+                {
+                    self.flow.load(None);
+                }
+            }
+        }
+        drop(conn);
+        self.refresh_flows();
+        if let Some(item) = rename {
+            self.flows.start_rename(item);
+        }
+        Ok(())
     }
 
     fn rescan(&mut self) {
@@ -353,43 +496,95 @@ impl EarshotApp {
         self.suggest.computed_for = stamp;
     }
 
-    /// Play a track in the headphones, or stop it if it's the one already playing.
-    fn toggle_preview(&mut self, id: i64) {
-        if self.preview_state().is_some_and(|(p, _)| p == id) {
-            self.preview = None;
-            if let Err(e) = player::stop_preview(&self.player) {
-                eprintln!("preview: {e}");
-            }
-            return;
+    /// Play a track in the headphones from `start` (0..1), decoding it first. A track
+    /// with no beatgrid yet is queued for analysis too.
+    fn start_preview(&mut self, id: i64, start: f32) {
+        if self
+            .library
+            .track(id)
+            .is_some_and(|t| !t.analysed && !t.queued && t.running.is_none() && t.error.is_none())
+        {
+            self.lib.analyser.queue(id, None, false, Mode::Static);
         }
         let decoding = Arc::new(AtomicBool::new(true));
-        self.preview = Some((id, decoding.clone()));
+        self.preview = Some(Preview {
+            id,
+            decoding: decoding.clone(),
+            start,
+        });
         let (player, db) = (self.player.clone(), self.lib.db.clone());
         std::thread::spawn(move || {
-            if let Err(e) = player::preview(&player, &db, id) {
+            if let Err(e) = player::preview(&player, &db, id, start as f64) {
                 eprintln!("preview: {e}");
             }
             decoding.store(false, Relaxed);
         });
     }
 
-    /// The track previewing (or about to) and how far through it is, 0..1.
-    fn preview_state(&self) -> Option<(i64, f32)> {
-        let (id, decoding) = self.preview.as_ref()?;
-        if decoding.load(Relaxed) {
-            return Some((*id, 0.0));
+    /// Play a track in the headphones, or pause / resume it if it's the one loaded.
+    fn toggle_preview(&mut self, id: i64) {
+        match self.preview_state() {
+            Some(p) if p.id == id => {
+                if self
+                    .preview
+                    .as_ref()
+                    .is_some_and(|p| p.decoding.load(Relaxed))
+                {
+                    return;
+                }
+                if let Err(e) = player::play_preview(&self.player, !p.playing) {
+                    eprintln!("preview: {e}");
+                }
+            }
+            _ => self.start_preview(id, 0.0),
+        }
+    }
+
+    /// Move the preview of `id` to `at` (0..1), starting it there if it isn't loaded.
+    fn seek_preview(&mut self, id: i64, at: f32) {
+        let loaded = self
+            .preview
+            .as_ref()
+            .is_some_and(|p| p.id == id && !p.decoding.load(Relaxed));
+        if !loaded {
+            return self.start_preview(id, at);
+        }
+        if let Err(e) = player::seek_preview(&self.player, at as f64) {
+            eprintln!("preview: {e}");
+        }
+    }
+
+    fn stop_preview(&mut self, id: i64) {
+        if self.preview.as_ref().is_some_and(|p| p.id == id) {
+            self.preview = None;
+            if let Err(e) = player::stop_preview(&self.player) {
+                eprintln!("preview: {e}");
+            }
+        }
+    }
+
+    /// The track in the preview player, how far through it is, and whether it's playing.
+    fn preview_state(&self) -> Option<PreviewState> {
+        let p = self.preview.as_ref()?;
+        if p.decoding.load(Relaxed) {
+            return Some(PreviewState {
+                id: p.id,
+                at: p.start,
+                playing: true,
+            });
         }
         let sh = self.shared.as_ref()?;
-        if !sh.preview_playing.load(Relaxed) {
-            return None;
-        }
         let d = sh.preview_duration.get();
-        let f = if d > 0.0 {
+        let at = if d > 0.0 {
             sh.preview_position.get() / d
         } else {
             0.0
         };
-        Some((*id, f as f32))
+        Some(PreviewState {
+            id: p.id,
+            at: at as f32,
+            playing: sh.preview_playing.load(Relaxed),
+        })
     }
 
     fn apply_audio(&mut self, a: AudioAction) {
@@ -431,9 +626,17 @@ impl EarshotApp {
 
     // ---- events from other threads ------------------------------------------------------
 
-    fn drain_events(&mut self) {
+    fn drain_events(&mut self, ctx: &egui::Context) {
         while let Ok(e) = self.rx.try_recv() {
             match e {
+                Event::Art(id, rgba) => {
+                    let s = library::ART_SIZE as usize;
+                    let tex = rgba.map(|px| {
+                        let img = egui::ColorImage::from_rgba_unmultiplied([s, s], &px);
+                        ctx.load_texture(format!("art-{id}"), img, egui::TextureOptions::LINEAR)
+                    });
+                    self.library.art.insert(id, tex);
+                }
                 Event::Scanned(Ok(tracks)) => {
                     self.library.scanning = false;
                     self.library.set_tracks(tracks);
@@ -703,35 +906,23 @@ impl EarshotApp {
 
     fn analysis_pill(&mut self, ui: &mut Ui) {
         let a = &self.analysis;
-        let waiting = a.busy.len() - a.running.len();
         let fail = if a.failed > 0 {
             format!(" · {} failed", a.failed)
         } else {
             String::new()
         };
-        let text = if !a.running.is_empty() {
-            let avg = a.running.values().sum::<f64>() / a.running.len() as f64;
-            let what = if a.running.len() == 1 {
-                a.running
-                    .keys()
-                    .next()
-                    .and_then(|id| self.library.track(*id))
-                    .map(|t| t.lib.title.clone())
-                    .unwrap_or_default()
+        let n = a.busy.len();
+        let text = if n > 0 {
+            let progress = if a.running.is_empty() {
+                String::new()
             } else {
-                format!("{} tracks", a.running.len())
+                let avg = a.running.values().sum::<f64>() / a.running.len() as f64;
+                format!(" · {:.0}%", avg * 100.0)
             };
             format!(
-                "analysing {what} · {:.0}%{}{fail}",
-                avg * 100.0,
-                if waiting > 0 {
-                    format!(" · {waiting} waiting")
-                } else {
-                    String::new()
-                }
+                "analysing {n} track{}{progress}{fail}",
+                if n == 1 { "" } else { "s" }
             )
-        } else if waiting > 0 {
-            format!("analysis · {waiting} waiting{fail}")
         } else if a.failed > 0 {
             format!("analysis: {} failed", a.failed)
         } else {
@@ -746,11 +937,18 @@ impl EarshotApp {
                 util::WARN
             },
         );
-        let r = r.on_hover_text(if a.last_error.is_empty() {
+        let running: Vec<String> = a
+            .running
+            .keys()
+            .filter_map(|id| self.library.track(*id))
+            .map(|t| format!("Now: {}", t.lib.title))
+            .collect();
+        let failures = if a.last_error.is_empty() {
             "Click to dismiss failures".to_string()
         } else {
             format!("Last error: {}\nClick to dismiss.", a.last_error)
-        });
+        };
+        let r = r.on_hover_text([running.join("\n"), failures].join("\n").trim().to_string());
         if r.clicked() {
             self.analysis.failed = 0;
             self.analysis.last_error.clear();
@@ -835,7 +1033,7 @@ impl eframe::App for EarshotApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.drain_events();
+        self.drain_events(ctx);
         self.keyboard(ctx);
         self.tick_hud(ctx);
         self.track_plays();
@@ -847,6 +1045,7 @@ impl eframe::App for EarshotApp {
         }
         let mut actions: Vec<Action> = vec![];
         let mut lib_actions: Vec<LibAction> = vec![];
+        let mut flows_actions: Vec<FlowsAction> = vec![];
 
         egui::TopBottomPanel::top("top")
             .frame(bar_frame())
@@ -907,7 +1106,10 @@ impl eframe::App for EarshotApp {
             .default_width(250.0)
             .width_range(140.0..=600.0)
             .show_animated(ctx, !planning, |ui| {
-                self.library.tree(ui, &mut lib_actions);
+                let (flows, open) = (&mut self.flows, self.flow.flow);
+                self.library.tree(ui, &mut lib_actions, |ui| {
+                    flows.show(ui, open, &mut flows_actions)
+                });
             });
         egui::SidePanel::right("suggest")
             .resizable(true)
@@ -975,6 +1177,8 @@ impl eframe::App for EarshotApp {
                 LibAction::Load { deck, track_id } => self.load(deck, track_id),
                 LibAction::Analyse { ids, dynamic } => self.analyse(ids, dynamic),
                 LibAction::Preview(id) => self.toggle_preview(id),
+                LibAction::PreviewSeek(id, at) => self.seek_preview(id, at),
+                LibAction::PreviewStop(id) => self.stop_preview(id),
                 LibAction::AddToFlow(ids) => {
                     self.flow.open = true;
                     for id in ids {
@@ -989,6 +1193,20 @@ impl eframe::App for EarshotApp {
                 }
             }
         }
+        // Save first, so opening another Flow doesn't lose the last change.
+        self.save_flow();
+        for id in take_wanted_art(ctx) {
+            if !self.library.art.contains_key(&id) {
+                self.library.art.insert(id, None);
+                let _ = self.art_loader.send(id);
+            }
+        }
+        for a in flows_actions {
+            if let Err(e) = self.flows_action(a) {
+                eprintln!("flows: {e}");
+            }
+        }
+        self.save_flow();
         // Waveforms move every frame.
         ctx.request_repaint();
     }
@@ -1211,7 +1429,11 @@ mod tests {
             app.flow.add_root(id);
         }
         app.flow.fit();
-        h.run_steps(5);
+        // Give the cover art a moment to load.
+        for _ in 0..30 {
+            h.step();
+            std::thread::sleep(Duration::from_millis(10));
+        }
         h.state_mut().flow.open_first_suggestions();
         h.run_steps(5);
         h.render().expect("render").save(&path).expect("save");

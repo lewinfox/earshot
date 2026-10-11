@@ -19,6 +19,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/002_energy.sql"),
     include_str!("../../migrations/003_waveform_preview.sql"),
     include_str!("../../migrations/004_analysis_mode.sql"),
+    include_str!("../../migrations/005_flows.sql"),
 ];
 
 pub fn open(path: &Path) -> Result<Db, String> {

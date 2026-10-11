@@ -62,9 +62,37 @@ pub enum LibAction {
         dynamic: bool,
     },
     AddToFlow(Vec<i64>),
-    /// Start (or stop) playing a track in the headphones.
+    /// Play a track in the headphones, or pause / resume it if it's the one loaded.
     Preview(i64),
+    /// Preview a track from this far in (0..1), starting it if needed.
+    PreviewSeek(i64, f32),
+    /// Stop the preview if it is this track.
+    PreviewStop(i64),
     RemoveFolder(String),
+}
+
+/// Ask for a track's cover art; the app loads it in the background.
+pub fn want_art(ctx: &egui::Context, id: i64) {
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<Vec<i64>>(art_wanted()).push(id));
+}
+
+/// The tracks whose art was asked for since last time.
+pub fn take_wanted_art(ctx: &egui::Context) -> Vec<i64> {
+    ctx.data_mut(|d| std::mem::take(d.get_temp_mut_or_default::<Vec<i64>>(art_wanted())))
+}
+
+fn art_wanted() -> egui::Id {
+    egui::Id::new("earshot-art-wanted")
+}
+
+/// The track in the headphones' preview player.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct PreviewState {
+    pub id: i64,
+    /// How far through, 0..1.
+    pub at: f32,
+    /// Playing (or about to, while it decodes) rather than paused or finished.
+    pub playing: bool,
 }
 
 #[derive(Default)]
@@ -84,6 +112,8 @@ pub struct LibraryUi {
     anchor: Option<usize>,
     scroll_to: Option<usize>,
     pub previews: HashMap<i64, Vec<u8>>,
+    /// Cover art by track: `None` while it loads, or when the file has none.
+    pub art: HashMap<i64, Option<TextureHandle>>,
     thumbs: HashMap<i64, TextureHandle>,
     pub scanning: bool,
     pub search_focus: bool,
@@ -198,7 +228,8 @@ impl LibraryUi {
 
     // ---- folder tree ----------------------------------------------------------------------
 
-    pub fn tree(&mut self, ui: &mut Ui, actions: &mut Vec<LibAction>) {
+    /// `flows` draws the saved Flows between *All tracks* and the folders.
+    pub fn tree(&mut self, ui: &mut Ui, actions: &mut Vec<LibAction>, flows: impl FnOnce(&mut Ui)) {
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
@@ -209,6 +240,8 @@ impl LibraryUi {
                     self.folder = None;
                     self.dirty = true;
                 }
+                ui.add_space(6.0);
+                flows(ui);
                 ui.add_space(6.0);
                 ui.label(RichText::new("EXPLORER").size(10.0).color(util::MUTED));
                 if self.folders.is_empty() {

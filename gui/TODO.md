@@ -41,6 +41,20 @@ The first pass was only checked off-screen (kittest renders and frame timing).
       way); loops are refused. Right-click > *Unlink from previous card*.
 - [x] Fit, Reset, Full screen (hides the decks and side panes).
 - [x] Kept across restarts in eframe's storage.
+- [x] Play / pause on each card, and a waveform seek bar along its bottom (click or drag
+      to preview from there). Removing a card stops its preview.
+- [x] Saved Flows in `earshot.db`, in folders (left pane, under *Flows*): new, rename,
+      duplicate, move (menu or drag), delete. Saved as you edit. A Flow that is one
+      chain of cards is a playlist (list icon; `flows::playlist_order`).
+- [x] Cover art from the file's tags on cards (loaded in the background, kept in memory).
+- [x] Select a card by clicking it; Delete or Backspace removes it. A × on the card's
+      top-right corner too.
+- [x] Reflow: one column per step through the set, chains on one row, branches below.
+- [x] Minimap in the canvas's bottom-right corner; click or drag it to move the view.
+- [x] Previewing an unanalysed track queues its analysis; the top bar shows
+      "analysing N tracks".
+- [ ] Playlists: import/export (e.g. cratelib), and a list view for linear Flows.
+- [ ] Try saved Flows and the seek bar on a real screen.
 - [x] Drag a card onto a deck to load it (the card goes back to where it was).
 - [ ] Try it on a real screen: zoom feel, popups, linking.
 

@@ -5,6 +5,7 @@ pub mod audio_ui;
 pub mod controls;
 pub mod deck;
 pub mod flow;
+pub mod flows_ui;
 pub mod library_ui;
 pub mod mixer;
 pub mod suggest_ui;
