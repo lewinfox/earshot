@@ -47,7 +47,6 @@ pub fn apply(inner: &mut Inner, group: &str, key: &str, value: f64) -> Result<Ou
     if group == "[Master]" {
         let cmd = match key {
             "crossfader" => Command::Crossfader { value },
-            "quantize" => Command::Quantize { on: value > 0.0 },
             "gain" => Command::MainGain { value },
             "balance" => Command::Balance { value },
             "headGain" => Command::HeadGain { value },
@@ -109,6 +108,7 @@ pub fn apply(inner: &mut Inner, group: &str, key: &str, value: f64) -> Result<Ou
         "play" => Command::Play { deck, on: pressed },
         "cue_default" => Command::Cue { deck, press },
         "sync_enabled" => Command::Sync { deck, on: pressed },
+        "quantize" => Command::Quantize { deck, on: pressed },
         "pfl" => Command::Pfl { deck, on: pressed },
         "volume" => Command::Volume { deck, value },
         "pregain" => Command::Pregain { deck, value },
@@ -174,6 +174,7 @@ pub fn current(inner: &Inner, group: &str, key: &str) -> Option<bool> {
     match key {
         "play" => Some(d.playing.load(Relaxed)),
         "sync_enabled" => Some(d.sync.load(Relaxed)),
+        "quantize" => Some(d.quantize.load(Relaxed)),
         "pfl" => Some(d.pfl.load(Relaxed)),
         _ => None,
     }

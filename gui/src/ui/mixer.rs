@@ -304,22 +304,6 @@ pub fn show(ui: &mut Ui, shared: Option<&Shared>, actions: &mut Vec<Action>) {
             |ui, v| ui.put(row(mx, r), Knob::new(range, v).diameter(KNOB).label(label)),
         );
     }
-    let quantize = shared.is_some_and(|s| s.quantize.load(Relaxed));
-    let r = ui
-        .put(
-            at(mx - 6.0, XF_TOP + 1.0, KNOB_COL + 6.0, XF_H - 2.0),
-            HwButton::new("QUANT", util::ACCENT, vec2(KNOB_COL + 6.0, XF_H - 2.0))
-                .font(9.0)
-                .lit(quantize),
-        )
-        .on_hover_text("Quantise: snap cues and loops to the beat grid");
-    if r.clicked() {
-        actions.push(Action::Control {
-            group: "[Master]",
-            key: "quantize".into(),
-            value: if quantize { 0.0 } else { 1.0 },
-        });
-    }
     // Separator between the channels and the main section.
     let x = area.left() + CHANNELS_W + MASTER_GAP / 2.0;
     ui.painter().line_segment(

@@ -61,6 +61,8 @@ pub struct DeckShared {
     /// The track's tempo (its grid's mean) × the tempo fader. NaN without a grid.
     pub bpm: AtomicF64,
     pub sync: AtomicBool,
+    /// Cues, loops and hot cues snap to the beat grid.
+    pub quantize: AtomicBool,
     pub loop_in: AtomicF64,
     pub loop_out: AtomicF64,
     pub loop_active: AtomicBool,
@@ -84,7 +86,6 @@ pub struct DeckShared {
 pub struct Shared {
     pub decks: [DeckShared; DECKS],
     pub crossfader: AtomicF64,
-    pub quantize: AtomicBool,
     /// Main output level, linear.
     pub main_gain: AtomicF64,
     /// Main output balance, -1 (left) .. 1 (right).
@@ -298,6 +299,7 @@ pub enum Command {
         value: f64,
     },
     Quantize {
+        deck: usize,
         on: bool,
     },
     SetRouting(Routing),
@@ -337,6 +339,7 @@ struct Deck {
     rate: f64,
     nudge: f64,
     sync: bool,
+    quantize: bool,
     speed: f64,
     cue_point: f64,
     preview: Preview,
@@ -377,6 +380,7 @@ impl Deck {
             rate: 0.0,
             nudge: 0.0,
             sync: false,
+            quantize: true,
             speed: 1.0,
             cue_point: 0.0,
             preview: Preview::None,
@@ -419,8 +423,9 @@ impl Deck {
             .map(|g| g.bpm_at(self.pos, SYNC_TEMPO_BEATS))
     }
 
-    fn snap(&self, t: f64, quantize: bool) -> f64 {
-        match (&self.grid, quantize) {
+    /// `t`, or the nearest beat when quantising.
+    fn snap(&self, t: f64) -> f64 {
+        match (&self.grid, self.quantize) {
             (Some(g), true) => g.quantize(t),
             _ => t,
         }
@@ -448,7 +453,6 @@ pub struct Renderer {
     shared: Arc<Shared>,
     decks: [Deck; DECKS],
     crossfader: f64,
-    quantize: bool,
     sample_rate: f64,
     /// Per-deck stereo scratch, master and headphone buses (interleaved stereo).
     deck_buf: [Vec<f32>; DECKS],
@@ -530,14 +534,12 @@ impl Renderer {
         sample_rate: u32,
     ) -> Self {
         shared.sample_rate.store(sample_rate, Relaxed);
-        shared.quantize.store(true, Relaxed);
         Renderer {
             commands,
             garbage,
             shared,
             decks: [Deck::new(), Deck::new()],
             crossfader: 0.0,
-            quantize: true,
             sample_rate: sample_rate as f64,
             deck_buf: [vec![0.0; MAX_BLOCK * 2], vec![0.0; MAX_BLOCK * 2]],
             master: vec![0.0; MAX_BLOCK * 2],
@@ -792,7 +794,6 @@ impl Renderer {
     }
 
     fn apply(&mut self, cmd: Command) {
-        let q = self.quantize;
         match cmd {
             Command::Load {
                 deck,
@@ -811,6 +812,7 @@ impl Renderer {
                     cue_point: first_beat,
                     rate: dk.rate,
                     sync: dk.sync,
+                    quantize: dk.quantize,
                     volume: dk.volume,
                     pfl: dk.pfl,
                     generation,
@@ -856,7 +858,7 @@ impl Renderer {
                             dk.preview = Preview::Cue;
                             dk.playing = true;
                         } else {
-                            dk.cue_point = dk.snap(dk.pos, q);
+                            dk.cue_point = dk.snap(dk.pos);
                             dk.pos = dk.cue_point;
                         }
                     }
@@ -887,20 +889,20 @@ impl Renderer {
                     dk.loop_active = false;
                     return;
                 }
-                let start = if q { dk.current_beat_start() } else { dk.pos };
+                let start = if dk.quantize { dk.current_beat_start() } else { dk.pos };
                 dk.loop_in = Some(start);
                 dk.loop_out = Some(dk.time_at(dk.beat_at(start) + beats));
                 dk.loop_active = true;
             }
             Command::LoopIn { deck } => {
                 let dk = &mut self.decks[deck];
-                dk.loop_in = Some(dk.snap(dk.pos, q));
+                dk.loop_in = Some(dk.snap(dk.pos));
                 dk.loop_out = None;
                 dk.loop_active = false;
             }
             Command::LoopOut { deck } => {
                 let dk = &mut self.decks[deck];
-                let out = dk.snap(dk.pos, q);
+                let out = dk.snap(dk.pos);
                 if let Some(i) = dk.loop_in {
                     if out > i {
                         dk.loop_out = Some(out);
@@ -939,7 +941,7 @@ impl Renderer {
                     return;
                 }
                 match (press, dk.hotcues[slot]) {
-                    (Press::Down, None) => dk.hotcues[slot] = Some(dk.snap(dk.pos, q)),
+                    (Press::Down, None) => dk.hotcues[slot] = Some(dk.snap(dk.pos)),
                     (Press::Down, Some(t)) => {
                         dk.pos = t;
                         if !dk.playing {
@@ -991,7 +993,11 @@ impl Renderer {
             Command::HeadGain { value } => self.head_gain = value.clamp(0.0, 5.0),
             Command::HeadMix { value } => self.head_mix = value.clamp(-1.0, 1.0),
             Command::Crossfader { value } => self.crossfader = value,
-            Command::Quantize { on } => self.quantize = on,
+            Command::Quantize { deck, on } => {
+                if let Some(dk) = self.decks.get_mut(deck) {
+                    dk.quantize = on;
+                }
+            }
             Command::SetRouting(r) => self.routing = r,
             Command::Preview { audio, start } => {
                 self.preview_pos = start.clamp(0.0, audio.duration());
@@ -1026,7 +1032,6 @@ impl Renderer {
     fn publish(&self) {
         let s = &self.shared;
         s.crossfader.set(self.crossfader);
-        s.quantize.store(self.quantize, Relaxed);
         s.preview_playing.store(self.preview_playing, Relaxed);
         s.preview_position.set(self.preview_pos);
         s.preview_duration
@@ -1062,6 +1067,7 @@ impl Renderer {
                     .map_or(f64::NAN, |g| g.mean_bpm() * (1.0 + dk.rate)),
             );
             sh.sync.store(dk.sync, Relaxed);
+            sh.quantize.store(dk.quantize, Relaxed);
             sh.loop_in.set(dk.loop_in.unwrap_or(f64::NAN));
             sh.loop_out.set(dk.loop_out.unwrap_or(f64::NAN));
             sh.loop_active.store(dk.loop_active, Relaxed);
