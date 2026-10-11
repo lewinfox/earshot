@@ -1,0 +1,7 @@
+#!/bin/sh
+# Python from the separate plotting venv (matplotlib; not the worker's venv), isolated,
+# on cores 0-3. Create it with:
+#   uv venv $BG_DATA/../plotvenv --python 3.12
+#   uv pip install --python $BG_DATA/../plotvenv/bin/python matplotlib numpy scipy soundfile
+DATA="${BG_DATA:-/tmp/claude-1000/-home-lewin-git-earshot/615b3b7a-7ddd-4410-b7a6-a8f3767fcbb6/scratchpad/bg/data}"
+PYTHONDONTWRITEBYTECODE=1 exec taskset -c 0-3 "$DATA/../plotvenv/bin/python" -I "$@"
