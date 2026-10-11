@@ -83,7 +83,7 @@ def clean_beats(beats: np.ndarray, env: np.ndarray, times: np.ndarray) -> tuple[
         if gap < 0.6 * local:
             dropped.append(float(b))  # too soon: spurious double detection
             continue
-        steps = max(1, int(round(gap / local)))
+        steps = max(1, round(gap / local))
         kept.append(b)
         index.append(index[-1] + steps)
         recent.append(gap / steps)

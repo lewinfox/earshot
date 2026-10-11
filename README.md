@@ -121,7 +121,7 @@ If the window is blank or the graph is very slow, try `WEBKIT_DISABLE_DMABUF_REN
   modes:
   - **Static** (the default): one steady tempo for the whole track, preferring whole
     numbers, in about 3–5 s. A fast tempo pass over the whole track, then Beat This!'s
-    small model on three 15 s excerpts for the phase and the downbeat
+    small model on five 15 s excerpts for the phase and the downbeat
     (`worker/earshot_worker/static_tempo.py`).
   - **Dynamic** (*Analyse (dynamic)*): Beat This! over the whole track, so the grid
     follows a drifting tempo (live drummers); about 15–30 s.
