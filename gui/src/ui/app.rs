@@ -66,9 +66,11 @@ enum Pane {
     Suggest,
 }
 
-/// Where the Flow and audio settings are kept in eframe's storage.
+/// Where the Flow, audio settings and waveform zoom are kept in eframe's storage.
 const FLOW_KEY: &str = "earshot.flow";
 const AUDIO_KEY: &str = "earshot.audio";
+/// Waveform zoom: seconds either side of the playhead.
+const WAVE_ZOOM_KEY: &str = "earshot.wave_zoom";
 
 /// Start audio on the chosen device; failing that the default one, then the null
 /// output (so the app still runs without a sound card).
@@ -158,7 +160,10 @@ impl EarshotApp {
             midi_ports: vec![],
             midi_log: VecDeque::new(),
             decks: [DeckUi::new(0), DeckUi::new(1)],
-            half_window: 4.0,
+            half_window: cc
+                .storage
+                .and_then(|s| eframe::get_value(s, WAVE_ZOOM_KEY))
+                .unwrap_or(4.0),
             library: LibraryUi::default(),
             suggest: SuggestUi::default(),
             flow: FlowUi::from_saved(
@@ -826,6 +831,7 @@ impl eframe::App for EarshotApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, AUDIO_KEY, &self.audio_settings);
         eframe::set_value(storage, FLOW_KEY, &self.flow.saved());
+        eframe::set_value(storage, WAVE_ZOOM_KEY, &self.half_window);
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {

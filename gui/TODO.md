@@ -9,7 +9,7 @@ The first pass was only checked off-screen (kittest renders and frame timing).
 - [ ] DDJ-400 over MIDI: every mapped control, and that the jog wheels feel right.
       (Waiting on the controller.)
 - [x] Keyboard shortcuts, including held buttons (cue, nudge) and Shift + hot cue to clear.
-- [ ] Panel sizes, zoom and UI size survive a restart.
+- [x] Panel sizes, zoom and UI size survive a restart.
 
 ## 2. Suggestions
 
