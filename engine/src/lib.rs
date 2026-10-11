@@ -10,6 +10,7 @@ pub mod dsp;
 pub mod energy;
 pub mod engine;
 pub mod keylock;
+pub mod loudness;
 pub mod output;
 pub mod tempo;
 pub mod waveform;

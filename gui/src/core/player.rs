@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::decode::{self, TrackAudio};
 use earshot_engine::{
-    Command, DECKS, Engine, OutputInfo, OutputOptions, Routing, Shared, energy, waveform,
+    Command, DECKS, Engine, OutputInfo, OutputOptions, Routing, Shared, energy, loudness, waveform,
 };
 use serde::{Deserialize, Serialize};
 
@@ -136,12 +136,17 @@ pub fn preview(player: &Player, db: &db::Db, id: i64, start: f64) -> Result<(), 
             Arc::new(decode::decode_file(&path)?.0)
         }
     };
+    // At the same auto-gain as on a deck.
+    let gain = match db::loudness(&db.lock().unwrap(), id)? {
+        Some(l) => l.auto_gain(),
+        None => loudness::measure(&audio).auto_gain(),
+    };
     let mut inner = player.lock().unwrap();
     if inner.preview_seq != seq {
         return Ok(()); // another preview was asked for meanwhile
     }
     let start = start * audio.duration();
-    inner.send(Command::Preview { audio, start })
+    inner.send(Command::Preview { audio, start, gain })
 }
 
 /// Pause or resume the preview.
@@ -194,9 +199,12 @@ pub fn load_track(player: &Player, lib: &Library, deck: usize, id: i64) -> Resul
     let db = &lib.db;
     let path = PathBuf::from(db::track_path(&db.lock().unwrap(), id)?);
     let (audio, tags) = decode::decode_file(&path)?;
+    // Measured every load (it's quick), so tracks analysed before auto-gain get it.
+    let level = loudness::measure(&audio);
     let (stored, cached_wave) = {
         let conn = db.lock().unwrap();
         db::set_energy(&conn, id, energy::energy(&audio))?;
+        db::set_loudness(&conn, id, &level)?;
         (
             db::grid(&conn, id)?,
             db::waveform(&conn, id, waveform::BINS_PER_SECOND)?,
@@ -258,6 +266,10 @@ pub fn load_track(player: &Player, lib: &Library, deck: usize, id: i64) -> Resul
         audio: audio.clone(),
         grid: grid.clone(),
         generation,
+    })?;
+    inner.send(Command::AutoGain {
+        deck,
+        gain: level.auto_gain(),
     })?;
     inner.decks[deck] = DeckSlot {
         track_id: Some(id),

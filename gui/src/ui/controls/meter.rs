@@ -1,11 +1,19 @@
-//! A segmented level meter (VU), green to yellow to red.
+//! A segmented level meter (VU): green, yellow for the last 6 dB below full scale,
+//! red only above it (over 0 dB: the master limiter is turning it down).
 
 use egui::{Color32, Rect, Response, Sense, Ui, Widget, pos2};
 
 use super::GROOVE;
 use crate::ui::util;
 
-const SEGMENTS: usize = 16;
+/// 2 dB a segment from -32 to +4 dB, so 0 dB falls between two segments.
+const SEGMENTS: usize = 18;
+const MIN_DB: f64 = -32.0;
+const MAX_DB: f64 = 4.0;
+
+fn segment_db(i: usize) -> f64 {
+    MIN_DB + (MAX_DB - MIN_DB) * i as f64 / SEGMENTS as f64
+}
 
 pub struct Meter {
     /// Peak level, linear: 1.0 is full scale.
@@ -19,13 +27,16 @@ impl Meter {
     }
 }
 
-/// Segments lit for a linear peak level: the meter spans -36 dB..0 dB.
+/// Segments lit for a linear peak level.
 pub fn lit(level: f64) -> usize {
     if level <= 0.0 {
         return 0;
     }
     let db = 20.0 * level.log10();
-    (((db + 36.0) / 36.0 * SEGMENTS as f64).ceil().max(0.0) as usize).min(SEGMENTS)
+    (((db - MIN_DB) / (MAX_DB - MIN_DB) * SEGMENTS as f64)
+        .ceil()
+        .max(0.0) as usize)
+        .min(SEGMENTS)
 }
 
 impl Widget for Meter {
@@ -45,9 +56,9 @@ impl Widget for Meter {
         let n = lit(level);
         let h = rect.height() / SEGMENTS as f32;
         for i in 0..SEGMENTS {
-            let colour = match i {
-                _ if i + 1 == SEGMENTS => util::BAD,
-                _ if i + 4 >= SEGMENTS => util::WARN,
+            let colour = match segment_db(i) {
+                db if db >= 0.0 => util::BAD,
+                db if db >= -6.0 => util::WARN,
                 _ => util::OK,
             };
             let y = rect.bottom() - (i as f32 + 1.0) * h;
@@ -65,6 +76,13 @@ impl Widget for Meter {
                 },
             );
         }
+        // A tick at 0 dB (full scale).
+        let zero = (0.0 - MIN_DB) / (MAX_DB - MIN_DB);
+        let y = rect.bottom() - zero as f32 * rect.height();
+        p.line_segment(
+            [pos2(rect.left(), y), pos2(rect.right(), y)],
+            egui::Stroke::new(1.0, util::TEXT),
+        );
         resp
     }
 }

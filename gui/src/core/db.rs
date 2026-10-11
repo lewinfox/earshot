@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use earshot_engine::beatgrid::Beatgrid;
+use earshot_engine::loudness::Loudness;
 use rusqlite::{Connection, OptionalExtension, params};
 
 pub type Db = Arc<Mutex<Connection>>;
@@ -20,6 +21,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/003_waveform_preview.sql"),
     include_str!("../../migrations/004_analysis_mode.sql"),
     include_str!("../../migrations/005_flows.sql"),
+    include_str!("../../migrations/006_loudness.sql"),
 ];
 
 pub fn open(path: &Path) -> Result<Db, String> {
@@ -259,6 +261,33 @@ pub fn set_mode(conn: &Connection, id: i64, dynamic: bool, drifts: bool) -> Resu
     )
     .map_err(err)?;
     Ok(())
+}
+
+pub fn set_loudness(conn: &Connection, id: i64, l: &Loudness) -> Result<(), String> {
+    if l.lufs.is_finite() {
+        conn.execute(
+            "UPDATE tracks SET loudness = ?2, peak = ?3 WHERE id = ?1",
+            params![id, l.lufs, l.peak],
+        )
+        .map_err(err)?;
+    }
+    Ok(())
+}
+
+/// The track's measured loudness, if it has been measured.
+pub fn loudness(conn: &Connection, id: i64) -> Result<Option<Loudness>, String> {
+    let row: Option<(Option<f64>, Option<f64>)> = conn
+        .query_row(
+            "SELECT loudness, peak FROM tracks WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(err)?;
+    Ok(match row {
+        Some((Some(lufs), Some(peak))) => Some(Loudness { lufs, peak }),
+        _ => None,
+    })
 }
 
 pub fn set_energy(conn: &Connection, id: i64, energy: f64) -> Result<(), String> {

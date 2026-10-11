@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use crate::beatgrid::Beatgrid;
 use crate::decode::TrackAudio;
-use crate::dsp::{self, DjFilter, Eq3, Smoothed};
+use crate::dsp::{self, DjFilter, Eq3, Limiter, Smoothed};
 use crate::keylock::{self, Keylock};
 use crate::tempo::TempoRange;
 
@@ -81,6 +81,8 @@ pub struct DeckShared {
     pub pfl: AtomicBool,
     /// Channel gain (trim) before the EQ, linear: 1 = unchanged.
     pub pregain: AtomicF64,
+    /// Auto-gain for the loaded track, linear (see `loudness::Loudness::auto_gain`).
+    pub auto_gain: AtomicF64,
     /// EQ band gains, linear, indexed by [`EQ_LOW`] etc.: 0 = killed, 1 = flat.
     pub eq: [AtomicF64; 3],
     /// Filter knob: -1 low-pass .. 0 off .. 1 high-pass.
@@ -105,6 +107,8 @@ pub struct Shared {
     pub head_mix: AtomicF64,
     /// Main output meters, left and right (peak).
     pub vu_main: [AtomicF64; 2],
+    /// How much the master limiter turned down in the last block, dB (0 = not at all).
+    pub limiting: AtomicF64,
     pub callbacks: AtomicU64,
     /// Callbacks that took more than 80 % of their time budget.
     pub slow_callbacks: AtomicU64,
@@ -332,6 +336,13 @@ pub enum Command {
     Preview {
         audio: Arc<TrackAudio>,
         start: f64,
+        /// Its auto-gain, linear.
+        gain: f64,
+    },
+    /// Auto-gain for the track just loaded on `deck`, linear.
+    AutoGain {
+        deck: usize,
+        gain: f64,
     },
     PreviewStop,
     /// Pause (`false`) or resume (`true`) the preview, keeping its place.
@@ -513,6 +524,9 @@ pub struct Renderer {
     preview: Option<Arc<TrackAudio>>,
     preview_pos: f64,
     preview_playing: bool,
+    preview_gain: f32,
+    limiters: [Limiter; 2],
+    limiting: f64,
     strips: [Strip; DECKS],
     main_gain: f64,
     balance: f64,
@@ -526,6 +540,8 @@ pub struct Renderer {
 /// A mixer channel's gain, EQ and filter. Kept apart from [`Deck`] so loading a
 /// track leaves the mixer as it is.
 struct Strip {
+    /// The loaded track's auto-gain, before the gain knob.
+    auto_gain: f64,
     pregain: Smoothed,
     eq_gain: [Smoothed; 3],
     eq: Eq3,
@@ -537,6 +553,7 @@ struct Strip {
 impl Strip {
     fn new(sr: f64) -> Strip {
         Strip {
+            auto_gain: 1.0,
             pregain: Smoothed::new(1.0),
             eq_gain: [Smoothed::new(1.0); 3],
             eq: Eq3::new(sr),
@@ -553,7 +570,7 @@ impl Strip {
         let filtering = self.filter.active();
         let mut peak = 0f32;
         for frame in buf.chunks_exact_mut(2) {
-            let pre = self.pregain.next(k);
+            let pre = self.auto_gain * self.pregain.next(k);
             let g = [
                 self.eq_gain[0].next(k),
                 self.eq_gain[1].next(k),
@@ -603,6 +620,12 @@ impl Renderer {
             preview: None,
             preview_pos: 0.0,
             preview_playing: false,
+            preview_gain: 1.0,
+            limiters: [
+                Limiter::new(sample_rate as f64),
+                Limiter::new(sample_rate as f64),
+            ],
+            limiting: 0.0,
             strips: [
                 Strip::new(sample_rate as f64),
                 Strip::new(sample_rate as f64),
@@ -755,16 +778,19 @@ impl Renderer {
                 }
             }
             let m = 0.8 * m;
-            let out = (m * main * side[f % 2]).clamp(-1.0, 1.0);
+            let out = m * main * side[f % 2];
+            // Metered before the limiter, so over 0 dB shows when it's working.
             peaks[f % 2] = peaks[f % 2].max(out.abs());
             self.master[f] = out;
             // With nothing cued the cue bus carries the main mix.
             let cue = if any_pfl { 0.8 * p } else { m };
-            self.phones[f] = (head * ((1.0 - mix) * cue + mix * m)).clamp(-1.0, 1.0);
+            self.phones[f] = head * ((1.0 - mix) * cue + mix * m);
         }
         for (v, p) in self.vu_main.iter_mut().zip(peaks) {
             *v = meter(*v, p, secs);
         }
+        let lowest = self.limiters[0].process(&mut self.master[..n * 2]);
+        self.limiting = -20.0 * (lowest as f64).log10();
 
         // The preview player plays at its own pace on the headphone bus only.
         if self.preview_playing
@@ -778,12 +804,14 @@ impl Renderer {
                     break;
                 }
                 let (l, r) = sample_at(audio, self.preview_pos * src_rate);
-                let g = 0.8 * self.head_gain as f32;
-                self.phones[2 * f] = (self.phones[2 * f] + g * l).clamp(-1.0, 1.0);
-                self.phones[2 * f + 1] = (self.phones[2 * f + 1] + g * r).clamp(-1.0, 1.0);
+                let g = 0.8 * self.head_gain as f32 * self.preview_gain;
+                self.phones[2 * f] += g * l;
+                self.phones[2 * f + 1] += g * r;
                 self.preview_pos += 1.0 / sr;
             }
         }
+        // The headphones get their own limiter, after the preview is mixed in.
+        self.limiters[1].process(&mut self.phones[..n * 2]);
     }
 
     /// Synced decks follow the other playing deck's tempo and beat phase, block by block,
@@ -973,7 +1001,11 @@ impl Renderer {
                     dk.loop_active = false;
                     return;
                 }
-                let start = if dk.quantize { dk.current_beat_start() } else { dk.pos };
+                let start = if dk.quantize {
+                    dk.current_beat_start()
+                } else {
+                    dk.pos
+                };
                 dk.loop_in = Some(start);
                 dk.loop_out = Some(dk.time_at(dk.beat_at(start) + beats));
                 dk.loop_active = true;
@@ -1117,7 +1149,13 @@ impl Renderer {
                 }
             }
             Command::SetRouting(r) => self.routing = r,
-            Command::Preview { audio, start } => {
+            Command::AutoGain { deck, gain } => {
+                if let Some(st) = self.strips.get_mut(deck) {
+                    st.auto_gain = gain.clamp(0.05, 8.0);
+                }
+            }
+            Command::Preview { audio, start, gain } => {
+                self.preview_gain = gain.clamp(0.05, 8.0) as f32;
                 self.preview_pos = start.clamp(0.0, audio.duration());
                 self.preview_playing = true;
                 if let Some(old) = self.preview.replace(audio) {
@@ -1155,6 +1193,7 @@ impl Renderer {
         s.preview_duration
             .set(self.preview.as_ref().map_or(0.0, |a| a.duration()));
         s.main_gain.set(self.main_gain);
+        s.limiting.set(self.limiting);
         s.balance.set(self.balance);
         s.head_gain.set(self.head_gain);
         s.head_mix.set(self.head_mix);
@@ -1163,6 +1202,7 @@ impl Renderer {
         }
         for (st, sh) in self.strips.iter().zip(&s.decks) {
             sh.pregain.set(st.pregain.target);
+            sh.auto_gain.set(st.auto_gain);
             for (e, g) in sh.eq.iter().zip(&st.eq_gain) {
                 e.set(g.target);
             }
@@ -1328,7 +1368,9 @@ mod tests {
 
     /// Frequency of a steady tone from its upward zero crossings.
     fn frequency(x: &[f32]) -> f64 {
-        let ups: Vec<usize> = (1..x.len()).filter(|&i| x[i - 1] < 0.0 && x[i] >= 0.0).collect();
+        let ups: Vec<usize> = (1..x.len())
+            .filter(|&i| x[i - 1] < 0.0 && x[i] >= 0.0)
+            .collect();
         (ups.len() - 1) as f64 * SR as f64 / (ups[ups.len() - 1] - ups[0]) as f64
     }
 
@@ -1336,16 +1378,30 @@ mod tests {
     fn keylock_keeps_the_key_at_another_tempo() {
         for (keylock, want) in [(false, 440.0 * 1.08), (true, 440.0)] {
             let mut rig = Rig::new();
-            load_fn(&mut rig, 20.0, |t| 0.5 * (std::f64::consts::TAU * 440.0 * t).sin() as f32);
-            rig.send(Command::Keylock { deck: 0, on: keylock });
-            rig.send(Command::Rate { deck: 0, value: 0.08 });
+            load_fn(&mut rig, 20.0, |t| {
+                0.5 * (std::f64::consts::TAU * 440.0 * t).sin() as f32
+            });
+            rig.send(Command::Keylock {
+                deck: 0,
+                on: keylock,
+            });
+            rig.send(Command::Rate {
+                deck: 0,
+                value: 0.08,
+            });
             rig.send(Command::Play { deck: 0, on: true });
             rig.run(0.5);
             let start = rig.pos(0);
             let f = frequency(&record(&mut rig, 1.0));
-            assert!((f - want).abs() < 2.0, "keylock {keylock}: {f:.1} Hz, want {want:.1}");
+            assert!(
+                (f - want).abs() < 2.0,
+                "keylock {keylock}: {f:.1} Hz, want {want:.1}"
+            );
             // The tempo moves either way.
-            assert!((rig.pos(0) - start - 1.08).abs() < 0.02, "tempo with keylock {keylock}");
+            assert!(
+                (rig.pos(0) - start - 1.08).abs() < 0.02,
+                "tempo with keylock {keylock}"
+            );
         }
     }
 
@@ -1377,8 +1433,14 @@ mod tests {
         let mut rig = Rig::new();
         load_fn(&mut rig, 30.0, click_track);
         rig.send(Command::Keylock { deck: 0, on: true });
-        rig.send(Command::Rate { deck: 0, value: 0.08 });
-        rig.send(Command::Seek { deck: 0, seconds: 0.25 });
+        rig.send(Command::Rate {
+            deck: 0,
+            value: 0.08,
+        });
+        rig.send(Command::Seek {
+            deck: 0,
+            seconds: 0.25,
+        });
         rig.send(Command::Play { deck: 0, on: true });
         let heard = clicks(&record(&mut rig, 3.0));
         // Click k (at 0.5 k s of track) should sound when the playhead gets there.
@@ -1386,14 +1448,24 @@ mod tests {
         for h in &heard {
             let track_time = 0.25 + h * 1.08;
             let off = (track_time / 0.5 - (track_time / 0.5).round()) * 0.5 / 1.08;
-            assert!(off.abs() < 0.008, "click at {h:.3}s is {:.1} ms off the playhead", off * 1000.0);
+            assert!(
+                off.abs() < 0.008,
+                "click at {h:.3}s is {:.1} ms off the playhead",
+                off * 1000.0
+            );
         }
 
         // After a jump the new place sounds straight away: no smear of the old one.
-        rig.send(Command::Seek { deck: 0, seconds: 10.4 });
+        rig.send(Command::Seek {
+            deck: 0,
+            seconds: 10.4,
+        });
         let heard = clicks(&record(&mut rig, 0.5));
         let first = heard.first().copied().unwrap_or(f64::NAN);
-        assert!((first - 0.1 / 1.08).abs() < 0.008, "first click after the jump at {first:.3}s");
+        assert!(
+            (first - 0.1 / 1.08).abs() < 0.008,
+            "first click after the jump at {first:.3}s"
+        );
     }
 
     #[test]
@@ -1416,17 +1488,32 @@ mod tests {
         // The tempo (-4.8 %) is below the fader (0); moving the fader up but not past
         // it does nothing.
         let at = TempoRange::Ten.fader(rate);
-        rig.send(Command::TempoFader { deck: 1, position: 0.2 });
-        rig.send(Command::TempoFader { deck: 1, position: at + 0.05 });
+        rig.send(Command::TempoFader {
+            deck: 1,
+            position: 0.2,
+        });
+        rig.send(Command::TempoFader {
+            deck: 1,
+            position: at + 0.05,
+        });
         rig.run(0.05);
-        assert!((rig.shared.decks[1].rate.get() - rate).abs() < 1e-9, "not picked up yet");
+        assert!(
+            (rig.shared.decks[1].rate.get() - rate).abs() < 1e-9,
+            "not picked up yet"
+        );
         // Past it: picked up, and the fader moves the tempo from then on.
-        rig.send(Command::TempoFader { deck: 1, position: at - 0.05 });
+        rig.send(Command::TempoFader {
+            deck: 1,
+            position: at - 0.05,
+        });
         rig.run(0.05);
         assert!(rig.shared.decks[1].fader_live.load(Relaxed));
         let want = TempoRange::Ten.rate(at - 0.05);
         assert!((rig.shared.decks[1].rate.get() - want).abs() < 1e-9);
-        rig.send(Command::TempoFader { deck: 1, position: 0.3 });
+        rig.send(Command::TempoFader {
+            deck: 1,
+            position: 0.3,
+        });
         rig.run(0.05);
         assert!((rig.shared.decks[1].rate.get() - 0.03).abs() < 1e-9);
     }
@@ -1437,21 +1524,39 @@ mod tests {
         let grid = rig.load(0, 120.0, 120.0);
         rig.run(0.01);
         // Two seconds early, snapped to the beat (cue points can go there too).
-        rig.send(Command::Seek { deck: 0, seconds: -2.1 });
-        rig.send(Command::Cue { deck: 0, press: Press::Down });
-        rig.send(Command::Cue { deck: 0, press: Press::Up });
+        rig.send(Command::Seek {
+            deck: 0,
+            seconds: -2.1,
+        });
+        rig.send(Command::Cue {
+            deck: 0,
+            press: Press::Down,
+        });
+        rig.send(Command::Cue {
+            deck: 0,
+            press: Press::Up,
+        });
         rig.run(0.01);
         let cue = rig.shared.decks[0].cue_point.get();
         assert!(cue < -1.9, "cue at {cue}");
-        assert!((grid.beat_at(cue) - grid.beat_at(cue).round()).abs() < 1e-6, "on a beat");
+        assert!(
+            (grid.beat_at(cue) - grid.beat_at(cue).round()).abs() < 1e-6,
+            "on a beat"
+        );
         rig.send(Command::Play { deck: 0, on: true });
         rig.run(0.5);
-        assert!(rig.out.iter().all(|&s| s == 0.0), "silence before the track");
+        assert!(
+            rig.out.iter().all(|&s| s == 0.0),
+            "silence before the track"
+        );
         rig.run(2.0);
         assert!(rig.pos(0) > 0.0);
         assert!(rig.out.iter().any(|&s| s.abs() > 0.01), "then the track");
         // Never further back than the lead-in.
-        rig.send(Command::Seek { deck: 0, seconds: -100.0 });
+        rig.send(Command::Seek {
+            deck: 0,
+            seconds: -100.0,
+        });
         rig.run(0.01);
         assert!(rig.pos(0) >= -LEAD_IN - 0.02);
     }
@@ -1714,6 +1819,7 @@ mod tests {
         rig.send(Command::Preview {
             audio: Arc::new(audio),
             start: 1.0,
+            gain: 1.0,
         });
         rig.run(0.5);
         let p = peaks(&rig.out, 4);

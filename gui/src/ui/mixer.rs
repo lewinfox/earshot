@@ -9,6 +9,7 @@
 use std::sync::atomic::Ordering::Relaxed;
 
 use earshot_engine::Shared;
+use earshot_engine::loudness::TARGET_LUFS;
 use egui::{Rect, Response, Sense, Ui, vec2};
 
 use super::controls::{
@@ -199,6 +200,7 @@ pub fn show(ui: &mut Ui, shared: Option<&Shared>, actions: &mut Vec<Action>) {
             GAIN.default,
             actions,
             |ui, v| {
+                let auto = shared.map_or(1.0, |s| s.decks[d].auto_gain.get());
                 ui.put(
                     at(fader_x, 0.0, FADER_COL, ROW),
                     Knob::new(&GAIN, v)
@@ -206,6 +208,11 @@ pub fn show(ui: &mut Ui, shared: Option<&Shared>, actions: &mut Vec<Action>) {
                         .label("GAIN")
                         .colour(colour),
                 )
+                .on_hover_text(format!(
+                    "Auto-gain for this track: {:+.1} dB (brings it to {:.0} LUFS)",
+                    20.0 * auto.log10(),
+                    TARGET_LUFS
+                ))
             },
         );
         let pfl = shared.is_some_and(|s| s.decks[d].pfl.load(Relaxed));
@@ -260,13 +267,28 @@ pub fn show(ui: &mut Ui, shared: Option<&Shared>, actions: &mut Vec<Action>) {
             Meter::new(level, vec2(VU_W - 1.0, FADER_BOTTOM - FADER_TOP)),
         );
     }
+    // "MAIN", or a red "LIMIT" while (and a moment after) the limiter turns the
+    // master down by more than a little.
     let main_label = at(main_x, PFL_TOP, CENTRE_W, PFL_H);
+    let now = ui.input(|i| i.time);
+    let held = egui::Id::new("earshot-limit-held");
+    if shared.is_some_and(|s| s.limiting.get() > 0.5) {
+        ui.ctx().data_mut(|d| d.insert_temp(held, now));
+    }
+    let limiting = ui
+        .ctx()
+        .data(|d| d.get_temp::<f64>(held))
+        .is_some_and(|t| now - t < 1.0);
+    let r = ui.interact(main_label, ui.id().with("main-label"), Sense::hover());
+    r.on_hover_text(
+        "The master limiter keeps the output under full scale; LIMIT lights while it's working",
+    );
     ui.painter().text(
         main_label.center(),
         egui::Align2::CENTER_CENTER,
-        "MAIN",
+        if limiting { "LIMIT" } else { "MAIN" },
         egui::FontId::proportional(9.0),
-        util::MUTED,
+        if limiting { util::BAD } else { util::MUTED },
     );
 
     let xf_w = CHANNELS_W - 2.0 * KNOB_COL;

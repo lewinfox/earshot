@@ -214,6 +214,50 @@ impl DjFilter {
     }
 }
 
+/// A peak limiter for a stereo bus, in place of hard clipping: when a frame would go
+/// over the ceiling the gain drops at once to just fit it, then recovers over
+/// [`LIMITER_RELEASE_SECS`]. Peaks are rounded off rather than chopped.
+pub struct Limiter {
+    gain: f32,
+    release: f32,
+}
+
+/// Just under full scale.
+pub const LIMITER_CEILING: f32 = 0.98;
+pub const LIMITER_RELEASE_SECS: f64 = 0.15;
+
+impl Limiter {
+    pub fn new(sample_rate: f64) -> Limiter {
+        Limiter {
+            gain: 1.0,
+            release: ease_per_sample(LIMITER_RELEASE_SECS, sample_rate) as f32,
+        }
+    }
+
+    /// Limit interleaved stereo `buf` in place. Returns the lowest gain used (1.0 =
+    /// untouched).
+    pub fn process(&mut self, buf: &mut [f32]) -> f32 {
+        let mut lowest = 1f32;
+        for f in buf.chunks_exact_mut(2) {
+            let peak = f[0].abs().max(f[1].abs());
+            let fits = if peak > LIMITER_CEILING {
+                LIMITER_CEILING / peak
+            } else {
+                1.0
+            };
+            self.gain = if fits < self.gain {
+                fits
+            } else {
+                self.gain + (fits - self.gain) * self.release
+            };
+            f[0] *= self.gain;
+            f[1] *= self.gain;
+            lowest = lowest.min(self.gain);
+        }
+        lowest
+    }
+}
+
 /// A value eased towards its target sample by sample, so knob moves don't click.
 #[derive(Clone, Copy, Debug)]
 pub struct Smoothed {
@@ -244,6 +288,26 @@ pub fn ease_per_sample(secs: f64, sr: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn limiter_keeps_peaks_under_the_ceiling_and_recovers() {
+        let sr = 48_000.0;
+        let mut lim = super::Limiter::new(sr);
+        // A 2x-over sine for a second, then quiet.
+        let mut buf: Vec<f32> = (0..48_000)
+            .flat_map(|i| {
+                let v = 2.0 * (std::f64::consts::TAU * 100.0 * i as f64 / sr).sin() as f32;
+                [v, v]
+            })
+            .collect();
+        let lowest = lim.process(&mut buf);
+        assert!(buf.iter().all(|s| s.abs() <= super::LIMITER_CEILING + 1e-6));
+        assert!(lowest < 0.5);
+        // Quiet afterwards: the gain comes back to 1 within a second.
+        let mut quiet = vec![0.1f32; 96_000];
+        lim.process(&mut quiet);
+        assert!((quiet[quiet.len() - 1] - 0.1).abs() < 1e-3);
+    }
+
     use super::*;
 
     const SR: f64 = 44_100.0;

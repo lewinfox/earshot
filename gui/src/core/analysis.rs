@@ -14,7 +14,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use earshot_engine::Command;
 use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::decode::{self, TrackAudio};
-use earshot_engine::{energy, waveform};
+use earshot_engine::{energy, loudness, waveform};
 use serde::Deserialize;
 
 use super::db::{self, Db};
@@ -222,7 +222,11 @@ fn run(
     };
 
     progress(DECODED, "waveform");
-    db::set_energy(&db.lock().unwrap(), job.id, energy::energy(&audio))?;
+    {
+        let conn = db.lock().unwrap();
+        db::set_energy(&conn, job.id, energy::energy(&audio))?;
+        db::set_loudness(&conn, job.id, &loudness::measure(&audio))?;
+    }
     // Waveform: cheap, done here, cached so later loads skip it.
     let cached = db::waveform(&db.lock().unwrap(), job.id, waveform::BINS_PER_SECOND)?.is_some();
     if job.force || !cached {
