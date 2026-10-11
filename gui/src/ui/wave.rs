@@ -211,14 +211,11 @@ pub fn scrolling(
     }
 
     if let Some(g) = marks.grid {
-        let times = g.times();
-        let start = times.partition_point(|&t| t < t_lo);
-        for (i, &t) in times.iter().enumerate().skip(start) {
-            if t > t_hi {
-                break;
-            }
-            let x = x_of(t);
-            if g.positions()[i] == 1 {
+        // Every beat in view, carried on past both ends of the track.
+        let (first, last) = (g.beat_at(t_lo).ceil() as i64, g.beat_at(t_hi).floor() as i64);
+        for i in first..=last {
+            let x = x_of(g.time_at(i as f64));
+            if g.position_of(i) == 1 {
                 painter.line_segment(
                     [pos2(x, rect.top()), pos2(x, rect.bottom())],
                     Stroke::new(1.5, Color32::from_rgba_unmultiplied(255, 70, 70, 230)),

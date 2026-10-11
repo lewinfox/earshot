@@ -135,11 +135,12 @@ pub fn apply(inner: &mut Inner, group: &str, key: &str, value: f64) -> Result<Ou
             deck,
             amount: if pressed { -0.04 } else { 0.0 },
         },
+        // Mixxx's 0..1 through the track; below 0 is the lead-in before it.
         "playposition" => {
             let duration = inner.shared().map_or(0.0, |s| s.decks[deck].duration.get());
             Command::Seek {
                 deck,
-                seconds: value.clamp(0.0, 1.0) * duration,
+                seconds: value.min(1.0) * duration,
             }
         }
         "beatjump_size" => {

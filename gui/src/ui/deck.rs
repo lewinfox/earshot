@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
 use earshot_engine::TempoRange;
+use earshot_engine::engine::LEAD_IN;
 use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::engine::DeckShared;
 use egui::{
@@ -421,8 +422,8 @@ impl DeckUi {
         if let (Some((x0, t0, _)), Some(p)) = (self.scrub, resp.interact_pointer_pos())
             && resp.dragged()
         {
-            let t =
-                (t0 - (p.x - x0) as f64 * (2.0 * half / rect.width() as f64)).clamp(0.0, duration);
+            let t = (t0 - (p.x - x0) as f64 * (2.0 * half / rect.width() as f64))
+                .clamp(-LEAD_IN, duration);
             self.shown = t;
             self.control(actions, "playposition", t / duration);
         }

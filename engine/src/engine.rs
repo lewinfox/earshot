@@ -398,6 +398,9 @@ const SYNC_PHASE_SECS: f64 = 0.25;
 /// Phase errors smaller than this (beats; ~4 ms at 120 BPM) are left alone.
 const SYNC_DEADBAND: f64 = 0.008;
 
+/// How far before the start of a track the playhead may go (seconds).
+pub const LEAD_IN: f64 = 30.0;
+
 /// The tempo fader picks the tempo up when it comes this close (in fader travel,
 /// -1..1) or moves past it.
 const PICKUP: f64 = 0.01;
@@ -475,8 +478,10 @@ impl Deck {
         self.time_at((self.beat_at(self.pos) + 0.05).floor())
     }
 
+    /// Move the playhead. It may go up to [`LEAD_IN`] before the track starts (silence
+    /// on the beat grid, for starting a track early so it comes in on time).
     fn seek(&mut self, t: f64) {
-        self.pos = t.clamp(0.0, self.duration());
+        self.pos = t.clamp(-LEAD_IN, self.duration());
     }
 
     /// After the tempo moved without the fader: the fader is in control again only
@@ -856,12 +861,7 @@ impl Renderer {
             self.decks[d].beat_at(self.decks[d].pos),
         );
         let me = &mut self.decks[d];
-        let mut beat = me.beat_at(me.pos) + err;
-        // At the very start of a track the matching phase may lie before 0:00; take
-        // the next matching beat instead.
-        if me.time_at(beat) < 0.0 {
-            beat += 1.0;
-        }
+        let beat = me.beat_at(me.pos) + err;
         let target = me.time_at(beat);
         me.seek(target);
     }
@@ -1429,6 +1429,31 @@ mod tests {
         rig.send(Command::TempoFader { deck: 1, position: 0.3 });
         rig.run(0.05);
         assert!((rig.shared.decks[1].rate.get() - 0.03).abs() < 1e-9);
+    }
+
+    #[test]
+    fn plays_from_before_the_start_on_the_grid() {
+        let mut rig = Rig::new();
+        let grid = rig.load(0, 120.0, 120.0);
+        rig.run(0.01);
+        // Two seconds early, snapped to the beat (cue points can go there too).
+        rig.send(Command::Seek { deck: 0, seconds: -2.1 });
+        rig.send(Command::Cue { deck: 0, press: Press::Down });
+        rig.send(Command::Cue { deck: 0, press: Press::Up });
+        rig.run(0.01);
+        let cue = rig.shared.decks[0].cue_point.get();
+        assert!(cue < -1.9, "cue at {cue}");
+        assert!((grid.beat_at(cue) - grid.beat_at(cue).round()).abs() < 1e-6, "on a beat");
+        rig.send(Command::Play { deck: 0, on: true });
+        rig.run(0.5);
+        assert!(rig.out.iter().all(|&s| s == 0.0), "silence before the track");
+        rig.run(2.0);
+        assert!(rig.pos(0) > 0.0);
+        assert!(rig.out.iter().any(|&s| s.abs() > 0.01), "then the track");
+        // Never further back than the lead-in.
+        rig.send(Command::Seek { deck: 0, seconds: -100.0 });
+        rig.run(0.01);
+        assert!(rig.pos(0) >= -LEAD_IN - 0.02);
     }
 
     #[test]
