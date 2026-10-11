@@ -44,11 +44,11 @@ The first pass was only checked off-screen (kittest renders and frame timing).
 - [x] Drag a card onto a deck to load it (the card goes back to where it was).
 - [ ] Try it on a real screen: zoom feel, popups, linking.
 
-## 4. Library graph
+## 4. Library graph (later)
 
-- [ ] Decide whether it is still wanted. If it is, build it as an egui painter: wheel
-      layout (Camelot) and vibe layout (PCA), key colours, hover and select synced with
-      the list. Plain egui shapes should cope with ~2,000 points; check that.
+Parked for now; we'll come back to it. The idea: an egui painter with a wheel layout
+(Camelot) and a vibe layout (PCA), key colours, hover and select synced with the list.
+Plain egui shapes should cope with ~2,000 points; check that.
 
 ## 5. Smaller gaps
 
@@ -59,7 +59,9 @@ The first pass was only checked off-screen (kittest renders and frame timing).
 - [x] Preview player in the engine: headphone bus only. In the Flow, and right-click >
       *Preview in headphones* in the library and Suggestions.
 - [ ] Try routing and preview on real hardware (laptop, then the DDJ-400).
-- [ ] Separate devices for master and headphones (two streams) isn't supported.
+- [ ] Separate devices for master and headphones, e.g. headphones to the laptop's
+      jack and master to HDMI. A plugged-in controller adds its outputs to the choices
+      and is the default when present.
 - [x] Reconnect MIDI by clicking the MIDI pill.
 - [x] Library control from MIDI: browse, switch between library and Suggestions, load.
 
