@@ -1,6 +1,8 @@
-//! Analysis queue: up to [`JOBS`] threads work through tracks in parallel, each
-//! computing the waveform here and the beatgrid in its own Python worker process
-//! (`earshot/worker`, Beat This!).
+//! Analysis queue: up to [`JOBS`] background threads work through tracks in
+//! parallel, plus one lane for tracks just loaded onto a deck; each computes the
+//! waveform here and the beatgrid in its own Python worker process
+//! (`earshot/worker`, Beat This!). See [`LOADED_NICE`] for how they share the CPU
+//! with playback.
 //!
 //! The worker never decodes files itself. We send it a mono WAV from our own decoder,
 //! so its beat times line up exactly with what the decks play.
@@ -9,6 +11,7 @@ use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use earshot_engine::Command;
@@ -79,21 +82,29 @@ impl AnalysisEvent {
 const DECODED: f64 = 0.1;
 const WORKER_START: f64 = 0.15;
 
-/// Parallel analysis jobs (override with `EARSHOT_ANALYSIS_JOBS`). Each runs its own
-/// worker process with its own copy of the model (a few hundred MB each).
+/// Parallel background analysis jobs (override with `EARSHOT_ANALYSIS_JOBS`). Each
+/// runs its own worker process with its own copy of the model (a few hundred MB each).
 const JOBS: usize = 4;
+
+/// Playback comes first. Background jobs (folders, previews) run in Linux's idle CPU
+/// and disk classes, and only one at a time while a deck is playing. A track just
+/// loaded onto a deck is analysed straight away on its own lane: normal scheduling,
+/// but at this nice value, below the audio engine and the UI.
+const LOADED_NICE: i32 = 5;
 
 #[derive(Default)]
 struct Queue {
-    jobs: Mutex<VecDeque<Job>>,
+    /// (tracks just loaded onto a deck, everything else)
+    jobs: Mutex<(VecDeque<Job>, VecDeque<Job>)>,
     ready: Condvar,
 }
 
 impl Queue {
-    fn pop(&self) -> Job {
+    fn pop(&self, urgent: bool) -> Job {
         let mut jobs = self.jobs.lock().unwrap();
         loop {
-            if let Some(j) = jobs.pop_front() {
+            let lane = if urgent { &mut jobs.0 } else { &mut jobs.1 };
+            if let Some(j) = lane.pop_front() {
                 return j;
             }
             jobs = self.ready.wait(jobs).unwrap();
@@ -105,6 +116,8 @@ pub struct Analyser {
     queue: Arc<Queue>,
     pending: Arc<Mutex<HashSet<i64>>>,
     sink: Sink,
+    /// A deck is playing (set by the UI every frame).
+    playing: Arc<AtomicBool>,
 }
 
 /// What the analysis threads need: where to report, and the decks to update.
@@ -131,16 +144,30 @@ impl Analyser {
         let threads = (cores / jobs).max(1);
         let queue = Arc::new(Queue::default());
         let pending = Arc::new(Mutex::new(HashSet::new()));
-        for n in 0..jobs {
+        let playing = Arc::new(AtomicBool::new(false));
+        let background_running = Arc::new(AtomicUsize::new(0));
+        // The loaded-track lane, then the background ones.
+        let lanes = std::iter::once((true, (cores / 2).max(1)))
+            .chain(std::iter::repeat_n((false, threads), jobs));
+        for (n, (urgent, threads)) in lanes.enumerate() {
             let (q, p, a, db) = (queue.clone(), pending.clone(), ctx.clone(), db.clone());
+            let (playing, running) = (playing.clone(), background_running.clone());
             std::thread::Builder::new()
                 .name(format!("earshot-analysis-{n}"))
                 .spawn(move || {
-                    lowest_priority();
+                    let priority = if urgent {
+                        Priority::Nice(LOADED_NICE)
+                    } else {
+                        Priority::Idle
+                    };
+                    priority.apply();
                     let mut worker: Option<Worker> = None;
                     loop {
-                        let job = q.pop();
-                        let ev = match run(&a, &db, &mut worker, threads, &job) {
+                        let job = q.pop(urgent);
+                        if !urgent {
+                            take_background_slot(&playing, &running);
+                        }
+                        let ev = match run(&a, &db, &mut worker, threads, priority, &job) {
                             Ok(ev) => ev,
                             Err(e) => {
                                 eprintln!("analysis of track {}: {e}", job.id);
@@ -150,6 +177,9 @@ impl Analyser {
                                 }
                             }
                         };
+                        if !urgent {
+                            running.fetch_sub(1, Ordering::SeqCst);
+                        }
                         p.lock().unwrap().remove(&job.id);
                         (a.sink)(Event::Analysis(ev));
                     }
@@ -160,16 +190,19 @@ impl Analyser {
             queue,
             pending,
             sink,
+            playing,
         }
     }
 
+    /// Tell the queue whether a deck is playing, which holds background jobs back.
+    pub fn set_playing(&self, on: bool) {
+        self.playing.store(on, Ordering::Relaxed);
+    }
+
     /// Queue a track unless it is already waiting. A track just loaded onto a deck
-    /// (`audio` given) goes to the front, ahead of any folder being analysed.
+    /// (`audio` given) goes on the loaded-track lane, ahead of any folder being
+    /// analysed, and is moved there if it was already waiting in the background.
     pub fn queue(&self, id: i64, audio: Option<Arc<TrackAudio>>, force: bool, mode: Mode) {
-        if !self.pending.lock().unwrap().insert(id) {
-            return;
-        }
-        (self.sink)(Event::Analysis(AnalysisEvent::new(id, "queued")));
         let urgent = audio.is_some();
         let job = Job {
             id,
@@ -178,12 +211,39 @@ impl Analyser {
             mode,
         };
         let mut jobs = self.queue.jobs.lock().unwrap();
-        if urgent {
-            jobs.push_front(job);
-        } else {
-            jobs.push_back(job);
+        if !self.pending.lock().unwrap().insert(id) {
+            if urgent && let Some(i) = jobs.1.iter().position(|j| j.id == id) {
+                jobs.1.remove(i);
+                jobs.0.push_back(job);
+                self.queue.ready.notify_all();
+            }
+            return;
         }
-        self.queue.ready.notify_one();
+        (self.sink)(Event::Analysis(AnalysisEvent::new(id, "queued")));
+        if urgent {
+            jobs.0.push_back(job);
+        } else {
+            jobs.1.push_back(job);
+        }
+        self.queue.ready.notify_all();
+    }
+}
+
+/// Wait for a turn to run a background job: any time while nothing is playing, but
+/// only one at a time while a deck plays.
+fn take_background_slot(playing: &AtomicBool, running: &AtomicUsize) {
+    loop {
+        let n = running.load(Ordering::SeqCst);
+        if playing.load(Ordering::Relaxed) && n >= 1 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            continue;
+        }
+        if running
+            .compare_exchange(n, n + 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return;
+        }
     }
 }
 
@@ -192,6 +252,7 @@ fn run(
     db: &Db,
     worker: &mut Option<Worker>,
     threads: usize,
+    priority: Priority,
     job: &Job,
 ) -> Result<AnalysisEvent, String> {
     let progress = |fraction: f64, stage: &'static str| {
@@ -248,7 +309,7 @@ fn run(
     write_mono_wav(&wav, &audio).map_err(|e| format!("writing {}: {e}", wav.display()))?;
     if worker.is_none() {
         progress(WORKER_START, "starting the analyser");
-        *worker = Some(Worker::spawn(threads)?);
+        *worker = Some(Worker::spawn(threads, priority)?);
     }
     progress(WORKER_START, "finding the tempo");
     let reply = worker.as_mut().unwrap().analyse(&wav, job.mode, &mut |f| {
@@ -312,16 +373,35 @@ fn run(
     })
 }
 
-/// Decoding, waveforms and energy run on these threads: put them in Linux's idle
-/// scheduling class so they only use CPU nothing else wants (the worker process does
-/// the same for itself).
-fn lowest_priority() {
-    #[cfg(target_os = "linux")]
-    // SAFETY: sched_setscheduler on the calling thread (pid 0) with a valid param.
-    unsafe {
-        let param = libc::sched_param { sched_priority: 0 };
-        if libc::sched_setscheduler(0, libc::SCHED_IDLE, &param) != 0 {
-            libc::setpriority(libc::PRIO_PROCESS, 0, 19);
+/// How hard an analysis thread and its worker process may compete for the machine.
+#[derive(Clone, Copy, Debug)]
+enum Priority {
+    /// Linux's idle CPU and disk classes: only what nothing else wants.
+    Idle,
+    /// Normal scheduling at this nice value (higher is nicer).
+    Nice(i32),
+}
+
+impl Priority {
+    /// Apply to the calling thread (on Linux, priorities are per thread). A new
+    /// process inherits it from the thread that starts it.
+    fn apply(self) {
+        #[cfg(target_os = "linux")]
+        // SAFETY: plain syscalls on the calling thread (pid/who 0) with valid args.
+        unsafe {
+            match self {
+                Priority::Idle => {
+                    let param = libc::sched_param { sched_priority: 0 };
+                    if libc::sched_setscheduler(0, libc::SCHED_IDLE, &param) != 0 {
+                        libc::setpriority(libc::PRIO_PROCESS, 0, 19);
+                    }
+                    // ioprio_set(IOPRIO_WHO_PROCESS, 0, IOPRIO_CLASS_IDLE << 13)
+                    libc::syscall(libc::SYS_ioprio_set, 1, 0, 3 << 13);
+                }
+                Priority::Nice(n) => {
+                    libc::setpriority(libc::PRIO_PROCESS, 0, n);
+                }
+            }
         }
     }
 }
@@ -425,7 +505,9 @@ struct Worker {
 
 impl Worker {
     /// `threads`: CPU threads the worker's torch may use.
-    fn spawn(threads: usize) -> Result<Worker, String> {
+    /// `priority`: the worker inherits it from this (analysis) thread; the env var
+    /// stops it putting itself in the idle class when it shouldn't.
+    fn spawn(threads: usize, priority: Priority) -> Result<Worker, String> {
         let dir = worker_dir();
         let python = dir.join(".venv/bin/python");
         if !python.exists() {
@@ -440,6 +522,13 @@ impl Worker {
             .env("OMP_NUM_THREADS", threads.to_string())
             .env("MKL_NUM_THREADS", threads.to_string())
             .env("OPENBLAS_NUM_THREADS", threads.to_string())
+            .env(
+                "EARSHOT_WORKER_PRIORITY",
+                match priority {
+                    Priority::Idle => "idle",
+                    Priority::Nice(_) => "inherit",
+                },
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -542,7 +631,7 @@ mod tests {
         let (audio, _) = decode::decode_file(Path::new(&path)).unwrap();
         let wav = std::env::temp_dir().join(format!("earshot-test-{}.wav", std::process::id()));
         write_mono_wav(&wav, &audio).unwrap();
-        let mut w = Worker::spawn(4).unwrap();
+        let mut w = Worker::spawn(4, Priority::Nice(LOADED_NICE)).unwrap();
         for mode in [Mode::Static, Mode::Dynamic] {
             let mut seen = Vec::new();
             let r = w.analyse(&wav, mode, &mut |f| seen.push(f)).unwrap();

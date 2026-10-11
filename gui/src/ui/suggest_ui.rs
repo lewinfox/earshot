@@ -47,6 +47,8 @@ pub struct SuggestUi {
     pub reference: Option<RefInfo>,
     /// Inputs the list was computed from; recomputed when they change.
     pub computed_for: String,
+    /// A new tempo waiting to hold still before the list follows it, and since when.
+    pub settling: Option<(String, std::time::Instant)>,
     /// Row with keyboard focus.
     focus: Option<usize>,
     scroll_to: Option<usize>,

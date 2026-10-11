@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=earshot
+Comment=DJ library explorer and performance decks
+Exec=@EXEC@
+Icon=earshot
+Terminal=false
+Categories=AudioVideo;Audio;
+StartupWMClass=earshot

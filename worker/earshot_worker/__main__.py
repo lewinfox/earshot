@@ -25,7 +25,13 @@ _proto = _claim_stdout()
 def _lowest_priority():
     """Analysis must never take CPU from playback or the UI. Linux's idle scheduling
     class only runs us when nothing else wants the CPU; elsewhere, nice 19. Done
-    before torch starts its threads, so they inherit it."""
+    before torch starts its threads, so they inherit it.
+
+    The app sets EARSHOT_WORKER_PRIORITY=inherit for the worker that analyses a track
+    just loaded onto a deck: that one keeps the (still lowered) priority it was
+    started with."""
+    if os.environ.get("EARSHOT_WORKER_PRIORITY") == "inherit":
+        return
     try:
         os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))
     except (AttributeError, OSError):

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use earshot_engine::{Command, OutputInfo, OutputOptions, Shared, TempoRange};
 use egui::{Key, RichText, Stroke, Ui, vec2};
@@ -103,6 +103,9 @@ fn start_audio(player: &Player, settings: &AudioSettings) -> Result<OutputInfo, 
             player::start_engine(player, &OutputOptions { null: true, ..opts })
         })
 }
+
+/// Suggestions follow a tempo change once the tempo has held still this long.
+const SUGGEST_SETTLE: Duration = Duration::from_secs(1);
 
 /// A track counts as played once it has been playing this long.
 const PLAYED_AFTER_SECS: f32 = 30.0;
@@ -493,16 +496,34 @@ impl EarshotApp {
         };
         let bpm = bpm.or(t.bpm());
         let key = suggest::effective_key(t.key, speed);
-        let stamp = format!(
-            "{id}|{deck:?}|{playing}|{:.1}|{key:?}|{:?}|{}|{}",
-            bpm.unwrap_or(0.0),
+        let what = format!(
+            "{id}|{deck:?}|{playing}|{:?}|{}|{}|",
             self.suggest.direction,
             self.library.played.len(),
             self.library.version,
         );
+        let tempo = format!("{:.1}|{key:?}", bpm.unwrap_or(0.0));
+        let stamp = format!("{what}{tempo}");
         if stamp == self.suggest.computed_for {
+            self.suggest.settling = None;
             return;
         }
+        // Only the tempo moved (someone's on the tempo fader): wait until it has held
+        // still for a moment rather than re-ranking on every step of the sweep.
+        if self.suggest.computed_for.starts_with(&what) {
+            match &self.suggest.settling {
+                Some((t, since)) if *t == tempo => {
+                    if since.elapsed() < SUGGEST_SETTLE {
+                        return;
+                    }
+                }
+                _ => {
+                    self.suggest.settling = Some((tempo, Instant::now()));
+                    return;
+                }
+            }
+        }
+        self.suggest.settling = None;
         let candidates = self.library.candidates();
         let reference = Reference {
             id,
@@ -1067,6 +1088,12 @@ impl eframe::App for EarshotApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events(ctx);
+        // Background analysis holds back while anything plays.
+        let playing = self
+            .shared
+            .as_ref()
+            .is_some_and(|sh| sh.decks.iter().any(|d| d.playing.load(Relaxed)));
+        self.lib.analyser.set_playing(playing);
         self.keyboard(ctx);
         self.tick_hud(ctx);
         self.track_plays();
