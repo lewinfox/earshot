@@ -76,63 +76,7 @@ pub fn band_colour(low: u8, mid: u8, high: u8) -> Color32 {
 
 // ---- Camelot keys ---------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Camelot {
-    pub n: u8, // 1..12
-    pub minor: bool,
-}
-
-const MAJOR_BY_PITCH: [u8; 12] = [8, 3, 10, 5, 12, 7, 2, 9, 4, 11, 6, 1]; // C, Db, D …
-
-/// Parse "8A", "Am", "C#m", "Ebmin", "F#" or "F# major".
-pub fn parse_key(raw: &str) -> Option<Camelot> {
-    let s = raw.trim();
-    if let Some(letter) = s
-        .chars()
-        .last()
-        .filter(|c| matches!(c, 'A' | 'B' | 'a' | 'b'))
-        && let Ok(n) = s[..s.len() - 1].trim().parse::<u8>()
-    {
-        return (1..=12).contains(&n).then_some(Camelot {
-            n,
-            minor: letter.eq_ignore_ascii_case(&'a'),
-        });
-    }
-    let mut chars = s.chars();
-    let note = chars.next()?.to_ascii_uppercase();
-    let mut pitch: i32 = match note {
-        'C' => 0,
-        'D' => 2,
-        'E' => 4,
-        'F' => 5,
-        'G' => 7,
-        'A' => 9,
-        'B' => 11,
-        _ => return None,
-    };
-    let rest: String = chars.collect();
-    let mut rest = rest.as_str();
-    if let Some(r) = rest.strip_prefix('#').or_else(|| rest.strip_prefix('♯')) {
-        pitch += 1;
-        rest = r;
-    } else if let Some(r) = rest.strip_prefix('b').or_else(|| rest.strip_prefix('♭')) {
-        pitch -= 1;
-        rest = r;
-    }
-    let rest = rest.trim().to_lowercase();
-    let minor = match rest.as_str() {
-        "" | "maj" | "major" => false,
-        "m" | "min" | "minor" => true,
-        _ => return None,
-    };
-    // A minor key's Camelot number is that of its relative major (3 semitones up).
-    let n = MAJOR_BY_PITCH[((pitch + if minor { 3 } else { 0 }).rem_euclid(12)) as usize];
-    Some(Camelot { n, minor })
-}
-
-pub fn key_name(k: Camelot) -> String {
-    format!("{}{}", k.n, if k.minor { "A" } else { "B" })
-}
+pub use crate::core::keys::{Camelot, key_name, parse_key};
 
 /// Key colour round the Camelot wheel; B (major) lighter.
 pub fn key_colour(k: Camelot) -> Color32 {
@@ -227,15 +171,6 @@ impl Query {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn keys() {
-        assert_eq!(parse_key("8A"), Some(Camelot { n: 8, minor: true }));
-        assert_eq!(parse_key("Am"), Some(Camelot { n: 8, minor: true }));
-        assert_eq!(parse_key("C"), Some(Camelot { n: 8, minor: false }));
-        assert_eq!(parse_key("F#m"), Some(Camelot { n: 11, minor: true }));
-        assert_eq!(parse_key("Ebmin"), Some(Camelot { n: 2, minor: true }));
-    }
 
     #[test]
     fn query() {

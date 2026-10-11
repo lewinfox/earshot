@@ -77,6 +77,10 @@ pub struct LibraryUi {
     thumbs: HashMap<i64, TextureHandle>,
     pub scanning: bool,
     pub search_focus: bool,
+    /// Tracks played this session (shown dimmed).
+    pub played: HashSet<i64>,
+    /// Bumped whenever track data changes (rescan, analysis), so derived lists refresh.
+    pub version: u64,
 }
 
 impl LibraryUi {
@@ -116,6 +120,7 @@ impl LibraryUi {
             };
         }
         self.dirty = true;
+        self.version += 1;
     }
 
     pub fn track_mut(&mut self, id: i64) -> Option<&mut Track> {
@@ -313,7 +318,8 @@ impl LibraryUi {
 
     // ---- track list -----------------------------------------------------------------------
 
-    pub fn list(&mut self, ui: &mut Ui, actions: &mut Vec<LibAction>) {
+    /// Returns true when a row was clicked (so the list takes keyboard focus).
+    pub fn list(&mut self, ui: &mut Ui, actions: &mut Vec<LibAction>) -> bool {
         if self.dirty {
             self.refilter();
         }
@@ -376,7 +382,7 @@ impl LibraryUi {
                         .color(util::MUTED),
                 )
             });
-            return;
+            return false;
         }
 
         let ctrl = ui.input(|i| i.modifiers.command);
@@ -430,7 +436,13 @@ impl LibraryUi {
                         }
                     });
                     row.col(|ui| {
-                        ui.add(egui::Label::new(&t.lib.title).truncate().selectable(false));
+                        let title = RichText::new(&t.lib.title);
+                        let title = if self.played.contains(&id) {
+                            title.color(util::MUTED)
+                        } else {
+                            title
+                        };
+                        ui.add(egui::Label::new(title).truncate().selectable(false));
                     });
                     row.col(|ui| {
                         ui.add(
@@ -492,6 +504,7 @@ impl LibraryUi {
                 self.select(r);
             }
         }
+        let any_click = clicked.is_some() || right_clicked.is_some();
         if let Some((r, m)) = clicked {
             let id = self.tracks[shown[r]].lib.id;
             if m.shift
@@ -513,6 +526,7 @@ impl LibraryUi {
                 self.select(r);
             }
         }
+        any_click
     }
 
     fn select(&mut self, r: usize) {

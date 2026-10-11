@@ -8,23 +8,26 @@ feature.
 
 The first pass was only checked off-screen (kittest renders and frame timing).
 
-- [ ] Run it in a window: frame rate, waveform smoothness while analysing, playing audio.
-- [ ] Import a folder through *Menu → Import → Folder…* (rfd dialog).
+- [x] Run it in a window: 59–60 fps, also while analysing several tracks.
+- [x] Import a folder through *Menu → Import → Folder…* (rfd dialog).
 - [ ] DDJ-400 over MIDI: every mapped control, and that the jog wheels feel right.
-- [ ] Keyboard shortcuts, including held buttons (cue, nudge) and Shift + hot cue to clear.
+      (Waiting on the controller.)
+- [x] Keyboard shortcuts, including held buttons (cue, nudge) and Shift + hot cue to clear.
 - [ ] Panel sizes, zoom and UI size survive a restart.
 
 ## 2. Suggestions (`app/src/suggest.ts`)
 
-- [ ] Port the scorer (key 0.35, tempo 0.3, vibe 0.25, energy 0.1). Include half and
-      double tempo matching and the per-part breakdown. Make it plain Rust under `core/`
-      with unit tests.
-- [ ] Reference track: the selected track, or the playing deck at its actual pitch
-      (effective BPM and key).
-- [ ] "Played this session" set: a track counts once it has played for 30 s. Show
-      played tracks dimmed in the library list.
-- [ ] Suggestions pane beside the library list: Drop / Hold / Build switch, ranked rows
-      with score breakdown, drag or double-click to a deck, and the free-deck rule.
+- [x] Scorer in `core/suggest.rs` (key 0.35, tempo 0.3, vibe 0.25, energy 0.1), half and
+      double tempo, per-part breakdown, unit tests. Vibe is a neutral 0.5 until there
+      are sound-alike embeddings.
+- [x] Reference track: the deck that started playing most recently, at its actual
+      tempo and pitch; otherwise the track selected in the library.
+- [x] "Played this session": counts after 30 s of play; dimmed in both lists and
+      scored lower.
+- [x] Suggestions pane on the right: Drop / Hold / Build, ranked rows with score bars
+      (hover for numbers), double-click, drag or right-click to load. Tab (or the
+      controller's browse button) switches the keyboard between library and suggestions.
+- [ ] Try it in a real set: are the rankings sensible?
 
 ## 3. Flow canvas (`app/src/flow.ts`)
 

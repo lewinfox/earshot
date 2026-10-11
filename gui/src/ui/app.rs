@@ -13,11 +13,13 @@ use egui::{Key, RichText, Stroke, Ui, vec2};
 
 use super::deck::{Action, DeckInfo, DeckUi};
 use super::library_ui::{LibAction, LibraryUi};
+use super::suggest_ui::{RefInfo, SuggestUi};
 use super::util;
 use crate::core::analysis::{Analyser, Mode};
 use crate::core::library::{self, Library};
 use crate::core::midi::{self, Midi};
 use crate::core::player::{self, Player};
+use crate::core::suggest::{self, Candidate, Reference};
 use crate::core::{Event, Sink, controls, db};
 
 pub struct EarshotApp {
@@ -34,6 +36,13 @@ pub struct EarshotApp {
     /// Real seconds of waveform either side of the playhead, shared by both decks.
     half_window: f64,
     library: LibraryUi,
+    suggest: SuggestUi,
+    /// Which list the keyboard and the controller's browse knob move through.
+    pane: Pane,
+    /// The deck that most recently started playing (the live reference).
+    last_started: Option<usize>,
+    /// When each deck started playing, to count a track as played after 30 s.
+    play_started: [Option<Instant>; 2],
     analysis: AnalysisSummary,
     mixer: Mixer,
     hud: Hud,
@@ -43,6 +52,15 @@ pub struct EarshotApp {
     /// Folders picked in the import dialog (on its own thread).
     picked: Arc<Mutex<Option<Vec<PathBuf>>>>,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pane {
+    Library,
+    Suggest,
+}
+
+/// A track counts as played once it has been playing this long.
+const PLAYED_AFTER_SECS: f32 = 30.0;
 
 #[derive(Default)]
 struct AnalysisSummary {
@@ -117,6 +135,10 @@ impl EarshotApp {
             decks: [DeckUi::new(0), DeckUi::new(1)],
             half_window: 4.0,
             library: LibraryUi::default(),
+            suggest: SuggestUi::default(),
+            pane: Pane::Library,
+            last_started: None,
+            play_started: [None; 2],
             analysis: AnalysisSummary::default(),
             mixer: Mixer {
                 volume: [1.0, 1.0],
@@ -172,14 +194,126 @@ impl EarshotApp {
     /// Controls the UI owns: library navigation and "load selected".
     fn ui_control(&mut self, group: &str, key: &str, value: f64) {
         match key {
-            "MoveVertical" => self.library.move_focus(value.round() as i32),
+            "MoveVertical" => match self.pane {
+                Pane::Library => self.library.move_focus(value.round() as i32),
+                Pane::Suggest => self.suggest.move_focus(value.round() as i32),
+            },
+            "TogglePane" if value > 0.0 => {
+                self.pane = match self.pane {
+                    Pane::Library => Pane::Suggest,
+                    Pane::Suggest => Pane::Library,
+                };
+            }
             "LoadSelectedTrack" if value > 0.0 => {
-                if let Some(id) = self.library.focused() {
+                let id = match self.pane {
+                    Pane::Library => self.library.focused(),
+                    Pane::Suggest => self.suggest.focused(),
+                };
+                if let Some(id) = id {
                     self.load(Some(if group == "[Channel2]" { 1 } else { 0 }), id);
                 }
             }
             _ => {}
         }
+    }
+
+    /// Note which deck started playing last, and mark tracks played after 30 s.
+    fn track_plays(&mut self) {
+        let Some(sh) = &self.shared else { return };
+        let now = Instant::now();
+        for d in 0..2 {
+            let playing = sh.decks[d].playing.load(Relaxed);
+            match (playing, self.play_started[d]) {
+                (true, None) => {
+                    self.play_started[d] = Some(now);
+                    self.last_started = Some(d);
+                }
+                (false, Some(_)) => self.play_started[d] = None,
+                (true, Some(t)) if now.duration_since(t).as_secs_f32() > PLAYED_AFTER_SECS => {
+                    if let Some(id) = self.player.lock().unwrap().decks[d].track_id {
+                        self.library.played.insert(id);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The live deck (most recently started, still playing) at its actual tempo and
+    /// pitch; otherwise the track selected in the library.
+    fn refresh_suggestions(&mut self) {
+        let live = self.shared.as_ref().and_then(|sh| {
+            let inner = self.player.lock().unwrap();
+            [self.last_started, Some(0), Some(1)]
+                .into_iter()
+                .flatten()
+                .find(|&d| sh.decks[d].playing.load(Relaxed) && inner.decks[d].track_id.is_some())
+                .map(|d| {
+                    let bpm = sh.decks[d].bpm.get();
+                    let speed = sh.decks[d].speed.get();
+                    (
+                        d,
+                        inner.decks[d].track_id.unwrap(),
+                        bpm.is_finite().then_some(bpm),
+                        speed,
+                    )
+                })
+        });
+        let (id, deck, bpm, speed) = match live {
+            Some((d, id, bpm, speed)) => (id, Some(d), bpm, speed),
+            None => match self.library.focused() {
+                Some(id) => (id, None, None, 1.0),
+                None => {
+                    self.suggest.reference = None;
+                    self.suggest.set(vec![]);
+                    self.suggest.computed_for.clear();
+                    return;
+                }
+            },
+        };
+        let Some(t) = self.library.track(id) else {
+            return;
+        };
+        let bpm = bpm.or(t.bpm());
+        let key = suggest::effective_key(t.key, speed);
+        let stamp = format!(
+            "{id}|{deck:?}|{:.1}|{key:?}|{:?}|{}|{}",
+            bpm.unwrap_or(0.0),
+            self.suggest.direction,
+            self.library.played.len(),
+            self.library.version,
+        );
+        if stamp == self.suggest.computed_for {
+            return;
+        }
+        let candidates: Vec<Candidate> = self
+            .library
+            .tracks
+            .iter()
+            .map(|t| Candidate {
+                id: t.lib.id,
+                bpm: t.bpm(),
+                key: t.key,
+                energy: t.energy,
+            })
+            .collect();
+        let reference = Reference {
+            id,
+            bpm,
+            key,
+            energy: t.energy,
+            direction: self.suggest.direction,
+            played: &self.library.played,
+        };
+        let list = suggest::suggest(&reference, &candidates, 80);
+        self.suggest.reference = Some(RefInfo {
+            title: t.lib.title.clone(),
+            bpm,
+            key,
+            deck,
+        });
+        self.suggest.set(list);
+        self.suggest.computed_for = stamp;
     }
 
     fn analyse(&self, ids: Vec<i64>, dynamic: bool) {
@@ -270,6 +404,7 @@ impl EarshotApp {
                         }
                     }
                     if ev.state == "done" {
+                        self.library.version += 1;
                         self.refresh_previews(Some(&[ev.track_id]));
                     }
                 }
@@ -331,6 +466,7 @@ impl EarshotApp {
                 continue;
             }
             match (key, modifiers.shift) {
+                (Key::Tab, _) if pressed => self.control("[Library]", "TogglePane", 1.0),
                 (Key::ArrowUp, _) if pressed => self.control("[Library]", "MoveVertical", -1.0),
                 (Key::ArrowDown, _) if pressed => self.control("[Library]", "MoveVertical", 1.0),
                 (Key::ArrowLeft, true) if pressed => {
@@ -626,6 +762,8 @@ impl eframe::App for EarshotApp {
         self.drain_events();
         self.keyboard(ctx);
         self.tick_hud(ctx);
+        self.track_plays();
+        self.refresh_suggestions();
         let infos = [self.deck_info(0), self.deck_info(1)];
         for (d, info) in infos.iter().enumerate() {
             let sh = self.shared.as_ref().map(|s| &s.decks[d]);
@@ -692,7 +830,24 @@ impl eframe::App for EarshotApp {
             .show(ctx, |ui| {
                 self.library.tree(ui, &mut lib_actions);
             });
-        egui::CentralPanel::default().show(ctx, |ui| self.library.list(ui, &mut lib_actions));
+        egui::SidePanel::right("suggest")
+            .resizable(true)
+            .default_width(380.0)
+            .width_range(240.0..=700.0)
+            .show(ctx, |ui| {
+                let focus = self.pane == Pane::Suggest;
+                if self
+                    .suggest
+                    .show(ui, &self.library, focus, &mut lib_actions)
+                {
+                    self.pane = Pane::Suggest;
+                }
+            });
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if self.library.list(ui, &mut lib_actions) {
+                self.pane = Pane::Library;
+            }
+        });
 
         if self.show_keys {
             egui::Window::new("Keyboard")
@@ -839,6 +994,7 @@ fn keys_help(ui: &mut Ui) {
             util::TEXT,
             &[
                 ("Up / Down", "previous / next track"),
+                ("Tab", "library / suggestions"),
                 ("Shift Left", "load to deck A"),
                 ("Shift Right", "load to deck B"),
                 ("Ctrl A", "select all"),

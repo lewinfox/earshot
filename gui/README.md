@@ -22,11 +22,11 @@ src/ui/     egui: app.rs (window and panels), deck.rs, wave.rs (waveforms),
 
 Done so far: decks (waveforms, overview, hot cues, grid editor, transport, jog, pitch),
 mixer, library folders and track list (thumbnails, multi-select, drag to deck,
-right-click analysis), static/dynamic analysis with progress, keyboard and MIDI, UI size
-(Ctrl −/=/0; panel sizes and zoom are remembered).
+right-click analysis), Suggestions (Drop / Hold / Build), static/dynamic analysis with
+progress, keyboard and MIDI, UI size (Ctrl −/=/0; panel sizes and zoom are remembered).
 
-Not yet ported from the Tauri app: the Flow canvas, Suggestions, the library graph and
-the benchmark. See `TODO.md` for the remaining steps.
+Not yet ported from the Tauri app: the Flow canvas, the library graph and the
+benchmark. See `TODO.md` for the remaining steps.
 
 Tests: `cargo test -p earshot-gui`. An off-screen screenshot of the whole window (and
 frame-build timing), on a copy of the library:

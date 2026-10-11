@@ -5,9 +5,11 @@
 pub mod analysis;
 pub mod controls;
 pub mod db;
+pub mod keys;
 pub mod library;
 pub mod midi;
 pub mod player;
+pub mod suggest;
 
 use std::sync::Arc;
 
