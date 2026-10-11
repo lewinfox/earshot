@@ -109,6 +109,7 @@ pub fn apply(inner: &mut Inner, group: &str, key: &str, value: f64) -> Result<Ou
         "cue_default" => Command::Cue { deck, press },
         "sync_enabled" => Command::Sync { deck, on: pressed },
         "quantize" => Command::Quantize { deck, on: pressed },
+        "keylock" => Command::Keylock { deck, on: pressed },
         "pfl" => Command::Pfl { deck, on: pressed },
         "volume" => Command::Volume { deck, value },
         "pregain" => Command::Pregain { deck, value },
@@ -175,6 +176,7 @@ pub fn current(inner: &Inner, group: &str, key: &str) -> Option<bool> {
         "play" => Some(d.playing.load(Relaxed)),
         "sync_enabled" => Some(d.sync.load(Relaxed)),
         "quantize" => Some(d.quantize.load(Relaxed)),
+        "keylock" => Some(d.keylock.load(Relaxed)),
         "pfl" => Some(d.pfl.load(Relaxed)),
         _ => None,
     }

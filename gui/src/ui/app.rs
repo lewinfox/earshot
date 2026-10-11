@@ -430,7 +430,7 @@ impl EarshotApp {
     }
 
     /// The live deck (most recently started, still playing) at its actual tempo and
-    /// pitch; otherwise the track selected in the library.
+    /// key; otherwise the track selected in the library.
     fn refresh_suggestions(&mut self) {
         let live = self.shared.as_ref().and_then(|sh| {
             let inner = self.player.lock().unwrap();
@@ -440,7 +440,12 @@ impl EarshotApp {
                 .find(|&d| sh.decks[d].playing.load(Relaxed) && inner.decks[d].track_id.is_some())
                 .map(|d| {
                     let bpm = sh.decks[d].bpm.get();
-                    let speed = sh.decks[d].tempo.get();
+                    // How far the key has moved: not at all with keylock.
+                    let speed = if sh.decks[d].keylock.load(Relaxed) {
+                        1.0
+                    } else {
+                        sh.decks[d].tempo.get()
+                    };
                     (
                         d,
                         inner.decks[d].track_id.unwrap(),

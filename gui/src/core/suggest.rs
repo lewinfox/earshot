@@ -50,7 +50,7 @@ pub struct Reference<'a> {
     pub id: i64,
     /// Effective BPM: what the deck is actually playing at.
     pub bpm: Option<f64>,
-    /// Effective key (shifted by pitch, as there is no key lock).
+    /// Effective key: shifted by the tempo fader unless the deck has keylock on.
     pub key: Option<Camelot>,
     pub energy: f32,
     pub direction: Direction,

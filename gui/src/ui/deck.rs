@@ -112,6 +112,7 @@ struct State {
     bpm: Option<f64>,
     sync: bool,
     quantize: bool,
+    keylock: bool,
     loop_in: Option<f64>,
     loop_out: Option<f64>,
     loop_active: bool,
@@ -139,6 +140,7 @@ fn read(sh: &DeckShared) -> State {
         bpm: finite(sh.bpm.get()),
         sync: sh.sync.load(Relaxed),
         quantize: sh.quantize.load(Relaxed),
+        keylock: sh.keylock.load(Relaxed),
         loop_in: finite(sh.loop_in.get()),
         loop_out: finite(sh.loop_out.get()),
         loop_active: sh.loop_active.load(Relaxed),
@@ -977,16 +979,29 @@ impl DeckUi {
             if r.clicked() {
                 self.control(actions, "sync_enabled", if s.sync { 0.0 } else { 1.0 });
             }
-            let r = ui
-                .add(
-                    HwButton::new("Q", util::ACCENT, vec2(24.0, 18.0))
-                        .font(10.0)
-                        .lit(s.quantize),
-                )
-                .on_hover_text("Quantise: snap this deck's cues, loops and hot cues to the beat");
-            if r.clicked() {
-                self.control(actions, "quantize", if s.quantize { 0.0 } else { 1.0 });
-            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let r = ui
+                    .add(
+                        HwButton::new("Q", util::ACCENT, vec2(24.0, 18.0))
+                            .font(10.0)
+                            .lit(s.quantize),
+                    )
+                    .on_hover_text("Quantise: snap this deck's cues, loops and hot cues to the beat");
+                if r.clicked() {
+                    self.control(actions, "quantize", if s.quantize { 0.0 } else { 1.0 });
+                }
+                let r = ui
+                    .add(
+                        HwButton::new("KEY", util::ACCENT, vec2(TEMPO_W - 28.0, 18.0))
+                            .font(9.0)
+                            .lit(s.keylock),
+                    )
+                    .on_hover_text("Keylock: the tempo fader changes the speed but not the key");
+                if r.clicked() {
+                    self.control(actions, "keylock", if s.keylock { 0.0 } else { 1.0 });
+                }
+            });
             let h = (ui.available_height()).max(70.0);
             ui.horizontal_top(|ui| {
                 ui.add_space(16.0); // the fader's range markings

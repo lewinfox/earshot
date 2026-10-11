@@ -9,6 +9,7 @@ pub mod demo;
 pub mod dsp;
 pub mod energy;
 pub mod engine;
+pub mod keylock;
 pub mod output;
 pub mod waveform;
 

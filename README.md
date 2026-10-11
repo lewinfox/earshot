@@ -19,7 +19,7 @@ docs/design.md decisions and roadmap
 System packages (Ubuntu/Debian names):
 
 ```bash
-sudo apt install build-essential pkg-config libasound2-dev libdbus-1-dev
+sudo apt install build-essential pkg-config libasound2-dev libdbus-1-dev libclang-dev
 ```
 
 You also need Rust (stable) and [uv](https://docs.astral.sh/uv/). Your user should be
@@ -125,6 +125,6 @@ See [`gui/README.md`](gui/README.md) for the code layout and an off-screen scree
 
 - No CLAP embeddings, key or energy analysis, playlists or cratelib sync yet.
 - Whole tracks are decoded into memory (about 10 MB per stereo minute).
-- No keylock, controller LED feedback or effects.
+- No controller LED feedback or effects.
 - Hot cues are not saved.
 - The worker has no timeout: if it hangs, the analysis queue stops until restart.

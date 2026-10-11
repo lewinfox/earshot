@@ -11,6 +11,7 @@ use std::time::Instant;
 use crate::beatgrid::Beatgrid;
 use crate::decode::TrackAudio;
 use crate::dsp::{self, DjFilter, Eq3, Smoothed};
+use crate::keylock::{self, Keylock};
 
 pub const DECKS: usize = 2;
 pub const HOTCUES: usize = 8;
@@ -63,6 +64,8 @@ pub struct DeckShared {
     pub sync: AtomicBool,
     /// Cues, loops and hot cues snap to the beat grid.
     pub quantize: AtomicBool,
+    /// The tempo fader leaves the key alone.
+    pub keylock: AtomicBool,
     pub loop_in: AtomicF64,
     pub loop_out: AtomicF64,
     pub loop_active: AtomicBool,
@@ -302,6 +305,10 @@ pub enum Command {
         deck: usize,
         on: bool,
     },
+    Keylock {
+        deck: usize,
+        on: bool,
+    },
     SetRouting(Routing),
     /// Play a track on the headphone bus only, from `start` seconds.
     Preview {
@@ -340,6 +347,7 @@ struct Deck {
     nudge: f64,
     sync: bool,
     quantize: bool,
+    keylock: bool,
     speed: f64,
     cue_point: f64,
     preview: Preview,
@@ -381,6 +389,7 @@ impl Deck {
             nudge: 0.0,
             sync: false,
             quantize: true,
+            keylock: false,
             speed: 1.0,
             cue_point: 0.0,
             preview: Preview::None,
@@ -456,6 +465,7 @@ pub struct Renderer {
     sample_rate: f64,
     /// Per-deck stereo scratch, master and headphone buses (interleaved stereo).
     deck_buf: [Vec<f32>; DECKS],
+    keylocks: [Keylock; DECKS],
     master: Vec<f32>,
     phones: Vec<f32>,
     routing: Routing,
@@ -542,6 +552,10 @@ impl Renderer {
             crossfader: 0.0,
             sample_rate: sample_rate as f64,
             deck_buf: [vec![0.0; MAX_BLOCK * 2], vec![0.0; MAX_BLOCK * 2]],
+            keylocks: [
+                Keylock::new(sample_rate, MAX_BLOCK),
+                Keylock::new(sample_rate, MAX_BLOCK),
+            ],
             master: vec![0.0; MAX_BLOCK * 2],
             phones: vec![0.0; MAX_BLOCK * 2],
             routing: Routing::default(),
@@ -609,34 +623,63 @@ impl Renderer {
             let buf = &mut self.deck_buf[d][..n * 2];
             buf.fill(0.0);
             let deck = &mut self.decks[d];
+            let kl = &mut self.keylocks[d];
             let Some(audio) = deck.audio.as_deref() else {
+                kl.idle();
                 continue;
             };
             if !deck.playing {
+                kl.idle();
                 continue;
             }
             let src_rate = audio.sample_rate as f64;
             let step = deck.speed / sr;
             let duration = audio.duration();
-            let looping = deck.loop_active && deck.loop_in.is_some() && deck.loop_out.is_some();
+            let looping = deck.loop_active
+                && deck.loop_in.is_some()
+                && deck.loop_out.is_some()
+                && deck.loop_out > deck.loop_in;
             let (lin, lout) = (
                 deck.loop_in.unwrap_or(0.0),
                 deck.loop_out.unwrap_or(f64::MAX),
             );
+            // Where the audio for a playhead position comes from: with keylock the
+            // deck reads ahead by the shifter's delay, wrapping round a loop.
+            let keylock = deck.keylock && keylock::SPEEDS.contains(&deck.speed);
+            let lead = if keylock { kl.lead(step) } else { 0.0 };
+            let source = |t: f64| {
+                if looping && t >= lout {
+                    lin + (t - lin) % (lout - lin)
+                } else {
+                    t
+                }
+            };
+            if keylock && kl.needs_restart(deck.pos) {
+                let len = kl.preroll_frames();
+                let start = deck.pos + lead - len as f64 * step;
+                kl.restart(|i| sample_at(audio, source(start + i as f64 * step) * src_rate));
+            }
+            let mut played = n;
             for f in 0..n {
-                let (l, r) = sample_at(audio, deck.pos * src_rate);
+                let (l, r) = sample_at(audio, source(deck.pos + lead) * src_rate);
                 buf[2 * f] = l;
                 buf[2 * f + 1] = r;
                 deck.pos += step;
-                if looping && deck.pos >= lout && lout > lin {
+                if looping && deck.pos >= lout {
                     deck.pos -= lout - lin;
                 }
                 if deck.pos >= duration {
                     deck.pos = duration;
                     deck.playing = false;
                     deck.preview = Preview::None;
+                    played = f + 1;
                     break;
                 }
+            }
+            if keylock {
+                kl.process(&mut buf[..played * 2], deck.speed, deck.pos);
+            } else {
+                kl.idle();
             }
         }
 
@@ -813,6 +856,7 @@ impl Renderer {
                     rate: dk.rate,
                     sync: dk.sync,
                     quantize: dk.quantize,
+                    keylock: dk.keylock,
                     volume: dk.volume,
                     pfl: dk.pfl,
                     generation,
@@ -998,6 +1042,11 @@ impl Renderer {
                     dk.quantize = on;
                 }
             }
+            Command::Keylock { deck, on } => {
+                if let Some(dk) = self.decks.get_mut(deck) {
+                    dk.keylock = on;
+                }
+            }
             Command::SetRouting(r) => self.routing = r,
             Command::Preview { audio, start } => {
                 self.preview_pos = start.clamp(0.0, audio.duration());
@@ -1068,6 +1117,7 @@ impl Renderer {
             );
             sh.sync.store(dk.sync, Relaxed);
             sh.quantize.store(dk.quantize, Relaxed);
+            sh.keylock.store(dk.keylock, Relaxed);
             sh.loop_in.set(dk.loop_in.unwrap_or(f64::NAN));
             sh.loop_out.set(dk.loop_out.unwrap_or(f64::NAN));
             sh.loop_active.store(dk.loop_active, Relaxed);
@@ -1171,6 +1221,107 @@ mod tests {
         fn pos(&self, d: usize) -> f64 {
             self.shared.decks[d].position.get()
         }
+    }
+
+    /// Load a made-up track (stereo, `secs` long, sample `f(t)` at time t) without a grid.
+    fn load_fn(rig: &mut Rig, secs: f64, f: impl Fn(f64) -> f32) {
+        let n = (secs * SR as f64) as usize;
+        let samples = (0..n)
+            .flat_map(|i| {
+                let v = f(i as f64 / SR as f64);
+                [v, v]
+            })
+            .collect();
+        rig.send(Command::Load {
+            deck: 0,
+            audio: Arc::new(TrackAudio {
+                samples,
+                sample_rate: SR,
+            }),
+            grid: None,
+            generation: 1,
+        });
+    }
+
+    /// Run for `seconds`, keeping the master's left channel.
+    fn record(rig: &mut Rig, seconds: f64) -> Vec<f32> {
+        let blocks = (seconds * SR as f64 / 256.0) as usize;
+        let mut out = vec![];
+        for _ in 0..blocks {
+            rig.r.process(&mut rig.out, 4);
+            out.extend(rig.out.chunks_exact(4).map(|f| f[0]));
+        }
+        out
+    }
+
+    /// Frequency of a steady tone from its upward zero crossings.
+    fn frequency(x: &[f32]) -> f64 {
+        let ups: Vec<usize> = (1..x.len()).filter(|&i| x[i - 1] < 0.0 && x[i] >= 0.0).collect();
+        (ups.len() - 1) as f64 * SR as f64 / (ups[ups.len() - 1] - ups[0]) as f64
+    }
+
+    #[test]
+    fn keylock_keeps_the_key_at_another_tempo() {
+        for (keylock, want) in [(false, 440.0 * 1.08), (true, 440.0)] {
+            let mut rig = Rig::new();
+            load_fn(&mut rig, 20.0, |t| 0.5 * (std::f64::consts::TAU * 440.0 * t).sin() as f32);
+            rig.send(Command::Keylock { deck: 0, on: keylock });
+            rig.send(Command::Rate { deck: 0, value: 0.08 });
+            rig.send(Command::Play { deck: 0, on: true });
+            rig.run(0.5);
+            let start = rig.pos(0);
+            let f = frequency(&record(&mut rig, 1.0));
+            assert!((f - want).abs() < 2.0, "keylock {keylock}: {f:.1} Hz, want {want:.1}");
+            // The tempo moves either way.
+            assert!((rig.pos(0) - start - 1.08).abs() < 0.02, "tempo with keylock {keylock}");
+        }
+    }
+
+    /// Times (s) where clicks start in `x`.
+    fn clicks(x: &[f32]) -> Vec<f64> {
+        let mut out = vec![];
+        let mut quiet_until = 0;
+        for (i, v) in x.iter().enumerate() {
+            if i >= quiet_until && v.abs() > 0.1 {
+                out.push(i as f64 / SR as f64);
+                quiet_until = i + SR as usize / 10;
+            }
+        }
+        out
+    }
+
+    /// A short burst every half second of track time.
+    fn click_track(t: f64) -> f32 {
+        let phase = t % 0.5;
+        if phase < 0.01 {
+            (0.8 * (std::f64::consts::TAU * 1000.0 * phase).sin()) as f32
+        } else {
+            0.0
+        }
+    }
+
+    #[test]
+    fn keylock_sounds_in_time_with_the_playhead() {
+        let mut rig = Rig::new();
+        load_fn(&mut rig, 30.0, click_track);
+        rig.send(Command::Keylock { deck: 0, on: true });
+        rig.send(Command::Rate { deck: 0, value: 0.08 });
+        rig.send(Command::Seek { deck: 0, seconds: 0.25 });
+        rig.send(Command::Play { deck: 0, on: true });
+        let heard = clicks(&record(&mut rig, 3.0));
+        // Click k (at 0.5 k s of track) should sound when the playhead gets there.
+        assert!(heard.len() >= 5, "{heard:?}");
+        for h in &heard {
+            let track_time = 0.25 + h * 1.08;
+            let off = (track_time / 0.5 - (track_time / 0.5).round()) * 0.5 / 1.08;
+            assert!(off.abs() < 0.008, "click at {h:.3}s is {:.1} ms off the playhead", off * 1000.0);
+        }
+
+        // After a jump the new place sounds straight away: no smear of the old one.
+        rig.send(Command::Seek { deck: 0, seconds: 10.4 });
+        let heard = clicks(&record(&mut rig, 0.5));
+        let first = heard.first().copied().unwrap_or(f64::NAN);
+        assert!((first - 0.1 / 1.08).abs() < 0.008, "first click after the jump at {first:.3}s");
     }
 
     #[test]
