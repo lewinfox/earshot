@@ -4,7 +4,8 @@
 //!
 //! The engine changes cues and loops itself (a pad press, a loop button) and says so
 //! with an [`EngineEvent`]; [`DeckSession::apply`] folds those in, dropping any about
-//! a track the deck has since replaced. Continuous state (position, tempo, faders)
+//! a track the deck has since replaced. If the engine had to drop events (the app fell
+//! behind), [`DeckSession::resync`] takes them from a snapshot instead. Continuous state (position, tempo, faders)
 //! comes from the snapshots ([`DeckSession::observe`]). After an audio restart
 //! [`DeckSession::restore_state`] gives it all back to the new engine.
 
@@ -153,6 +154,28 @@ impl DeckSession {
         None
     }
 
+    /// Events were lost: take what they'd have said (playing, cues, hot cues, the
+    /// loop) from a snapshot of this load. Returns what changed that should be saved.
+    pub fn resync(&mut self, d: &DeckSnap) -> Option<Change> {
+        if self.track_id.is_none() || d.generation != self.generation {
+            return None;
+        }
+        self.in_engine = true;
+        let st = &mut self.state;
+        st.playing = d.playing;
+        st.cues.main = Some(d.cue_point);
+        st.loop_ = LoopState {
+            start: d.loop_in,
+            end: d.loop_out,
+            active: d.loop_active,
+        };
+        if st.cues.hot == d.hotcues {
+            return None;
+        }
+        st.cues.hot = d.hotcues;
+        Some(Change::Hotcues)
+    }
+
     /// Take the continuous state from a snapshot: the channel and tempo always, the
     /// playhead only when the snapshot is of this load.
     pub fn observe(&mut self, d: &DeckSnap) {
@@ -238,6 +261,34 @@ mod tests {
 
     fn deck() -> DeckId {
         DeckId::new(1).unwrap()
+    }
+
+    #[test]
+    fn a_resync_takes_cues_and_the_loop_from_a_snapshot_of_this_load() {
+        let mut s = DeckSession::new(deck());
+        s.load(&track(3, [None; 8]));
+        let mut d = DeckSnap {
+            track_id: Some(7),
+            generation: 3,
+            playing: true,
+            cue_point: 2.0,
+            loop_in: Some(4.0),
+            loop_out: Some(6.0),
+            loop_active: true,
+            ..DeckSnap::default()
+        };
+        d.hotcues[1] = Some(8.0);
+        assert_eq!(s.resync(&d), Some(Change::Hotcues));
+        assert!(s.in_engine && s.state.playing);
+        assert_eq!(s.state.cues.main, Some(2.0));
+        assert_eq!(s.state.cues.hot[1], Some(8.0));
+        assert_eq!(s.state.loop_.bounds(), Some((4.0, 6.0)));
+        // Nothing new to save the second time; another load's snapshot is ignored.
+        assert_eq!(s.resync(&d), None);
+        d.generation = 2;
+        d.hotcues[1] = None;
+        assert_eq!(s.resync(&d), None);
+        assert_eq!(s.state.cues.hot[1], Some(8.0));
     }
 
     #[test]

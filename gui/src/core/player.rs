@@ -5,6 +5,7 @@
 //! engine's snapshots ([`Monitor`]) without taking it either.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
 
 use earshot_engine::beatgrid::Beatgrid;
@@ -51,6 +52,9 @@ pub struct Inner {
     pub routing: Option<Routing>,
     /// MIDI's own ring into the engine, refilled whenever audio (re)starts.
     pub midi: Lane,
+    /// The engine's count of events it had to drop, as last seen: when it grows, the
+    /// sessions are brought up to date from a snapshot.
+    dropped_seen: u64,
 }
 
 impl Inner {
@@ -86,7 +90,7 @@ impl Inner {
         };
         let snap = engine.snapshot();
         for (i, s) in self.decks.iter_mut().enumerate() {
-            s.observe(snap.decks.get(i).unwrap_or(&snap.prepare));
+            s.observe(slot_snap(&snap, i));
         }
         self.mixer = session::observe_mixer(&snap.mixer);
         self.sync_leader = snap.mixer.sync_leader;
@@ -96,6 +100,26 @@ impl Inner {
             if self.decks[deck.index()].apply(&e) == Some(Change::Hotcues)
                 && !changed.contains(&deck)
             {
+                changed.push(deck);
+            }
+        }
+        // Events were dropped (the ring was full): a cue or loop change may be among
+        // them. Take every player's from a snapshot newer than all the events.
+        let dropped = engine.monitor().stats().dropped_events.load(Relaxed);
+        if dropped == self.dropped_seen {
+            return (Some(snap), changed);
+        }
+        eprintln!(
+            "engine: {} events dropped; resyncing the players",
+            dropped - self.dropped_seen
+        );
+        self.dropped_seen = dropped;
+        let snap = engine.snapshot();
+        for (i, s) in self.decks.iter_mut().enumerate() {
+            let d = slot_snap(&snap, i);
+            s.observe(d);
+            let deck = session::slot(i);
+            if s.resync(d) == Some(Change::Hotcues) && !changed.contains(&deck) {
                 changed.push(deck);
             }
         }
@@ -116,6 +140,11 @@ impl Inner {
     }
 }
 
+/// Slot `i`'s player in a snapshot (the decks, then Prepare's).
+fn slot_snap(snap: &EngineSnapshot, i: usize) -> &earshot_engine::DeckSnap {
+    snap.decks.get(i).unwrap_or(&snap.prepare)
+}
+
 pub type Player = Arc<Mutex<Inner>>;
 
 pub fn new_player() -> Player {
@@ -129,6 +158,7 @@ pub fn new_player() -> Player {
         load_tickets: [0; SLOTS],
         routing: None,
         midi: Lane::default(),
+        dropped_seen: 0,
     }))
 }
 
@@ -299,6 +329,8 @@ pub fn start_engine(player: &Player, opts: &OutputOptions) -> Result<OutputInfo,
     inner.midi.set(None);
     inner.engine = None;
     let mut engine = Engine::start(opts, DECKS)?;
+    // A new engine counts its own dropped events.
+    inner.dropped_seen = 0;
     engine.send(Command::Restore(Box::new(inner.engine_state())))?;
     let p = &inner.preview;
     if let Some(audio) = p.audio.clone() {
@@ -636,10 +668,74 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use earshot_engine::{ChannelParam, DeckCmd, EQ_LOW, LoopState, MasterParam, ParamId, Press};
 
     use super::testing::*;
     use super::*;
+
+    /// More events than the ring holds, unread: the cue, hot cue and loop changes
+    /// among the dropped ones still reach the session, from a snapshot.
+    #[test]
+    fn dropped_events_are_made_up_from_a_snapshot() {
+        let p = running();
+        let a = DeckId::new(0).unwrap();
+        put_on(&p, a, 11);
+        wait(&p, |s| s.decks[0].track_id == Some(11));
+        {
+            let mut inner = p.lock().unwrap();
+            // Each sends an event; the ring holds 256.
+            for i in 0..400 {
+                inner
+                    .send(Command::Deck(a, DeckCmd::SetCue(Some(1.0 + i as f64 * 0.01))))
+                    .unwrap();
+            }
+            inner.send(Command::Deck(a, DeckCmd::Seek(12.0))).unwrap();
+            for press in [Press::Down, Press::Up] {
+                inner
+                    .send(Command::Deck(a, DeckCmd::Hotcue { slot: 3, press }))
+                    .unwrap();
+            }
+            inner
+                .send(Command::Deck(
+                    a,
+                    DeckCmd::SetLoop {
+                        start: 5.0,
+                        end: 7.0,
+                    },
+                ))
+                .unwrap();
+        }
+        // Not caught up meanwhile, so the ring overflows.
+        let t = Instant::now();
+        loop {
+            let inner = p.lock().unwrap();
+            let s = inner.snapshot().unwrap();
+            if s.decks[0].loop_active && s.decks[0].hotcues[3].is_some() {
+                break;
+            }
+            drop(inner);
+            assert!(t.elapsed() < Duration::from_secs(5), "timed out");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (snap, changed) = p.lock().unwrap().catch_up();
+        let d = snap.unwrap().decks[0];
+        assert!(p.lock().unwrap().monitor().unwrap().stats().dropped_events.load(Relaxed) > 0);
+        assert_eq!(changed, vec![a], "the hot cue is saved");
+        let inner = p.lock().unwrap();
+        let st = &inner.session(a).state;
+        assert_eq!(st.cues.hot[3], d.hotcues[3]);
+        assert_eq!(st.cues.main, Some(d.cue_point));
+        assert_eq!(
+            st.loop_,
+            LoopState {
+                start: Some(5.0),
+                end: Some(7.0),
+                active: true
+            }
+        );
+    }
 
     #[test]
     fn a_restart_puts_every_player_back() {
