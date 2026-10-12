@@ -769,32 +769,34 @@ impl EarshotApp {
                 }
                 Event::Analysis(ev) => {
                     let a = &mut self.analysis;
-                    match ev.state {
-                        "queued" | "running" => {
+                    match &ev.state {
+                        Some(AnalysisState::Queued | AnalysisState::Running { .. }) => {
                             a.busy.insert(ev.track_id);
                         }
                         _ => {
                             a.busy.remove(&ev.track_id);
                         }
                     }
-                    if ev.state == "running" {
-                        a.running.insert(ev.track_id, ev.progress.unwrap_or(0.0));
-                    } else {
-                        a.running.remove(&ev.track_id);
+                    match &ev.state {
+                        Some(AnalysisState::Running { progress, .. }) => {
+                            a.running.insert(ev.track_id, *progress);
+                        }
+                        _ => {
+                            a.running.remove(&ev.track_id);
+                        }
                     }
                     let title = self
                         .index
                         .get(ev.track_id)
                         .map(|t| t.title.clone())
                         .unwrap_or_default();
-                    if let Some(e) = &ev.error {
+                    if let Some(AnalysisState::Failed(e)) = &ev.state {
                         a.failed += 1;
                         a.last_error = format!("{title}: {e}");
                     }
                     // The results themselves (BPM, grid, thumbnail) come from the
                     // Store as `TracksChanged` and `Previews`.
-                    self.index
-                        .set_analysis(ev.track_id, AnalysisState::from_event(&ev));
+                    self.index.set_analysis(ev.track_id, ev.state);
                 }
                 Event::Midi {
                     port,

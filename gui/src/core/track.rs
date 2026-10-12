@@ -2,7 +2,6 @@
 //! BPM and key, and a lowercase `search_text` worked out once. Everything outside the
 //! Store (lists, suggestions, decks, queries) reads tracks as this.
 
-use super::analysis::AnalysisEvent;
 use super::keys::{Camelot, parse_key};
 use super::store::LibTrack;
 
@@ -123,31 +122,14 @@ impl Track {
     }
 }
 
-/// Where a track's analysis is, while it's queued or running, or after it failed.
-/// Kept beside the index (not in [`Track`]): it's transient and comes from the
-/// analyser, not the Store.
+/// Where a track's analysis is, while it's queued or running, or after it failed;
+/// what the analyser reports (`AnalysisEvent`). Kept beside the index (not in
+/// [`Track`]): it's transient and comes from the analyser, not the Store.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AnalysisState {
     Queued,
     Running { progress: f64, stage: &'static str },
     Failed(String),
-}
-
-impl AnalysisState {
-    /// What an analyser event leaves the track in; `None` once it's done.
-    pub fn from_event(e: &AnalysisEvent) -> Option<AnalysisState> {
-        if let Some(err) = &e.error {
-            return Some(AnalysisState::Failed(err.clone()));
-        }
-        match e.state {
-            "queued" => Some(AnalysisState::Queued),
-            "running" => Some(AnalysisState::Running {
-                progress: e.progress.unwrap_or(0.0),
-                stage: e.stage.unwrap_or("analysing"),
-            }),
-            _ => None,
-        }
-    }
 }
 
 #[cfg(test)]

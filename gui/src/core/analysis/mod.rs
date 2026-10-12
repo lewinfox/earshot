@@ -37,6 +37,7 @@ use self::queue::{Batch, JobQueue, Lane, Req, Want};
 use self::registry::{AnalyserId, REGISTRY, RunsIn};
 use super::player::Player;
 use super::store::{AnalysisSave, GridSave, GridSource, JobRow, ResultState, Store, StoreCmd};
+use super::track::AnalysisState;
 use super::worker_client::{
     self, GridData, GridMode, JobPriority, Role, Update, WorkerClient, WorkerConfig,
 };
@@ -72,27 +73,16 @@ impl Mode {
 #[derive(Clone, Debug)]
 pub struct AnalysisEvent {
     pub track_id: i64,
-    /// "queued", "running", "done" or "error".
-    pub state: &'static str,
-    /// 0..1 while running.
-    pub progress: Option<f64>,
-    /// What it's doing now, while running.
-    pub stage: Option<&'static str>,
-    pub error: Option<String>,
+    /// Queued, running or failed; `None` once it's done.
+    pub state: Option<AnalysisState>,
 }
 
 /// The results themselves (BPM, grid, drift) reach the UI from the Store, as
 /// `StoreEvent::TracksChanged`.
 
 impl AnalysisEvent {
-    fn new(track_id: i64, state: &'static str) -> Self {
-        AnalysisEvent {
-            track_id,
-            state,
-            progress: None,
-            stage: None,
-            error: None,
-        }
+    fn new(track_id: i64, state: Option<AnalysisState>) -> Self {
+        AnalysisEvent { track_id, state }
     }
 }
 
@@ -285,7 +275,7 @@ impl Shared {
             self.worker(lane).cancel(job);
         }
         if r.new_track || r.superseded.is_some() {
-            self.emit(AnalysisEvent::new(track, "queued"));
+            self.emit(AnalysisEvent::new(track, Some(AnalysisState::Queued)));
         }
         self.ready.notify_all();
     }
@@ -337,12 +327,9 @@ impl Shared {
             self.ready.notify_all();
             self.emit(match result {
                 // More was asked for meanwhile (or this was taken over): still waiting.
-                _ if !idle => AnalysisEvent::new(track, "queued"),
-                Ok(()) => AnalysisEvent::new(track, "done"),
-                Err(e) => AnalysisEvent {
-                    error: Some(e),
-                    ..AnalysisEvent::new(track, "error")
-                },
+                _ if !idle => AnalysisEvent::new(track, Some(AnalysisState::Queued)),
+                Ok(()) => AnalysisEvent::new(track, None),
+                Err(e) => AnalysisEvent::new(track, Some(AnalysisState::Failed(e))),
             });
         }
     }
@@ -351,11 +338,13 @@ impl Shared {
         let id = batch.track;
         let store = &self.store;
         let progress = |fraction: f64, stage: &'static str| {
-            self.emit(AnalysisEvent {
-                progress: Some(fraction),
-                stage: Some(stage),
-                ..AnalysisEvent::new(id, "running")
-            });
+            self.emit(AnalysisEvent::new(
+                id,
+                Some(AnalysisState::Running {
+                    progress: fraction,
+                    stage,
+                }),
+            ));
         };
         let started_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
