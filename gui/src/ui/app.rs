@@ -575,6 +575,7 @@ impl EarshotApp {
             energy: t.energy,
             direction: self.suggest.direction,
             played: &self.library.played,
+            exclude: &HashSet::new(),
         };
         let list = suggest::suggest(&reference, &candidates, 80);
         self.suggest.reference = Some(RefInfo {

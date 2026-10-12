@@ -762,9 +762,10 @@ impl FlowUi {
         let Some(t) = lib.track(track_id) else { return };
         let exclude = self.in_flow();
         let stamp = format!(
-            "{track_id}|{:?}|{}|{}",
+            "{track_id}|{:?}|{}|{}|{}",
             self.direction,
             exclude.len(),
+            lib.played.len(),
             lib.version
         );
         if stamp != self.picks_for {
@@ -774,13 +775,10 @@ impl FlowUi {
                 key: t.key,
                 energy: t.energy,
                 direction: self.direction,
-                played: &exclude,
+                played: &lib.played,
+                exclude: &exclude,
             };
-            self.picks = suggest::suggest(&reference, &lib.candidates(), 40)
-                .into_iter()
-                .filter(|s| !exclude.contains(&s.id))
-                .take(9)
-                .collect();
+            self.picks = suggest::suggest(&reference, &lib.candidates(), 9);
             self.picks_for = stamp;
         }
         let mut picked = None;

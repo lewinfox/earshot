@@ -178,7 +178,7 @@ impl SuggestUi {
         table.body(|body| {
             body.rows(34.0, self.list.len(), |mut row| {
                 let r = row.index();
-                let s = self.list[r];
+                let s = &self.list[r];
                 let Some(t) = lib.track(s.id) else { return };
                 row.set_selected(has_focus && self.focus == Some(r));
                 let played = lib.played.contains(&s.id);
@@ -229,7 +229,7 @@ impl SuggestUi {
                 row.col(|ui| {
                     ui.label(RichText::new(format!("{:.0}", s.total * 100.0)).strong());
                 });
-                row.col(|ui| bars(ui, &s));
+                row.col(|ui| bars(ui, s));
                 let resp = row.response();
                 if resp.clicked() || resp.secondary_clicked() {
                     clicked = Some(r);
@@ -269,7 +269,8 @@ impl SuggestUi {
 /// One small bar per part of the score, with the numbers on hover.
 fn bars(ui: &mut Ui, s: &Scored) {
     let (rect, resp) = ui.allocate_exact_size(vec2(50.0, 18.0), Sense::hover());
-    let values = [s.key, s.tempo, s.energy];
+    // A part that couldn't be scored (no key, say) shows as an empty bar.
+    let values = BARS.map(|(name, _)| s.part(name));
     let h = 4.0;
     for (i, ((_, colour), v)) in BARS.iter().zip(values).enumerate() {
         let y = rect.top() + 2.0 + i as f32 * (h + 1.5);
@@ -277,14 +278,17 @@ fn bars(ui: &mut Ui, s: &Scored) {
         ui.painter()
             .rect_filled(track, CornerRadius::same(2), util::LINE);
         let mut fill = track;
-        fill.set_width(track.width() * v.clamp(0.0, 1.0) as f32);
+        fill.set_width(track.width() * v.unwrap_or(0.0).clamp(0.0, 1.0) as f32);
         ui.painter()
             .rect_filled(fill, CornerRadius::same(2), *colour);
     }
     resp.on_hover_text(
         BARS.iter()
             .zip(values)
-            .map(|((name, _), v)| format!("{name} {:.0}%", v * 100.0))
+            .map(|((name, _), v)| match v {
+                Some(v) => format!("{name} {:.0}%", v * 100.0),
+                None => format!("{name} unknown"),
+            })
             .collect::<Vec<_>>()
             .join("\n"),
     );
