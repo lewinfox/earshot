@@ -200,7 +200,10 @@ pub struct Cx<'a> {
   `LibraryPane::aside`. The Flow editor's suggestions can be another stack built the
   same way (`widgets::icon_stack`, `Opens::Left`).
 - **A Prepare tool tab:** a variant of `core::view::Tool`, an entry in `TOOLS` in
-  `views/prepare.rs`, and an arm in `views::prepare::tool`. Today only "Cues & Grid".
+  `views/prepare.rs`, and an arm in `views::prepare::tool`. Today: "Cues & Grid",
+  and a placeholder "Tempo lock" for B4. The tempo lock tool (`core::tempo_lock`)
+  already starts with the shell: `Command::TempoLock` goes to `TempoLock::run`, and
+  its events arrive as `Event::TempoLock`, ignored for now in `app/events.rs`.
 - **A modal:** a variant of `core::view::Modal`, a module in `modals/`, an arm in
   `Modals::show` (and in `Modals::open` if it should start afresh). Open it with
   `ViewCmd::ToggleModal`.
