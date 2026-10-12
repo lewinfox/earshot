@@ -1,11 +1,15 @@
 [workspace]
-members = ["engine", "gui"]
+members = ["audio", "engine", "gui"]
 resolver = "2"
 
 [profile.dev.package."*"]
 opt-level = 2
 
 [profile.dev.package.earshot-engine]
+opt-level = 2
+
+# Decoding and waveform/loudness measurement run on every load.
+[profile.dev.package.earshot-audio]
 opt-level = 2
 
 # The egui app draws waveforms on the CPU every frame: keep it fast in dev builds too.

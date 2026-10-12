@@ -5,11 +5,11 @@ edition = "2024"
 
 [dependencies]
 cpal = "0.18.2"
+earshot-audio = { version = "0.1.0", path = "../audio" }
 rtrb = "0.4.0"
 serde = { version = "1.0.229", features = ["derive"] }
 # Keylock: pitch-shifting (C++, built with the system compiler; bindgen needs libclang).
 signalsmith-stretch = "0.1.3"
-symphonia = { version = "0.6.1", features = ["mp3", "aac", "isomp4", "alac"] }
 
 # Ask rtkit for real-time priority on the audio thread (cpal's `realtime` alone is a
 # no-op on Linux). Needs libdbus-1-dev to build.

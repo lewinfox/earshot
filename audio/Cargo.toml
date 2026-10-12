@@ -1,0 +1,8 @@
+[package]
+name = "earshot-audio"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+symphonia = { version = "0.6.1", features = ["mp3", "aac", "isomp4", "alac"] }

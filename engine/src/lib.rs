@@ -1,19 +1,17 @@
-//! earshot's audio engine: beatgrids, decoding and the real-time deck/mixer.
+//! earshot's real-time audio engine: decks, mixer and output.
 //!
 //! [`Engine`] is the control-side handle: it owns the output stream, sends
 //! [`Command`]s to the audio thread and exposes the [`Shared`] state it publishes.
 
-pub mod beatgrid;
-pub mod decode;
-pub mod demo;
 pub mod dsp;
-pub mod energy;
 pub mod engine;
 pub mod keylock;
-pub mod loudness;
 pub mod output;
 pub mod tempo;
-pub mod waveform;
+
+// The offline code moved to `earshot-audio`. Re-exported so existing imports keep
+// working; new code should use `earshot_audio` directly.
+pub use earshot_audio::{beatgrid, decode, demo, energy, loudness, waveform};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
