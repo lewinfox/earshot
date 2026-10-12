@@ -1,7 +1,8 @@
 //! Prepare: one player. Its waveform across the top with the cue pane on the right
-//! (as in Rekordbox), then the tool tabs (what we're doing to the track) over the
-//! tool's body, and the library below. The Flow tab takes everything under the tabs:
-//! `| library | canvas | suggestions |`.
+//! (as in Rekordbox), then the tool tabs (what we're doing to the track). Cues & Grid's
+//! body (the player's controls) runs under the tabs with the library below; the other
+//! tools have the library on their left: `| library | tool |` (Flow adds its
+//! suggestions on the right).
 //!
 //! To add a tool: a variant of `core::view::Tool`, an entry in [`TOOLS`] and an arm
 //! in [`tool`].
@@ -42,9 +43,9 @@ const TABS_H: f32 = 34.0;
 
 pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
     let current = cx.prefs.prepare.tool;
-    let flow = current == Tool::Flow;
+    let beside = current != Tool::CuesGrid;
     // The Flow editor's full screen hides the player.
-    let planning = flow && panels.flow.full;
+    let planning = current == Tool::Flow && panels.flow.full;
     let waves_h = cx.prefs.prepare.sizes.waves;
     let r = egui::TopBottomPanel::top("waves-prepare")
         .resizable(true)
@@ -71,15 +72,12 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
     if let Some(r) = r {
         resized(ctx, r.response.rect.height(), Region::Waves, waves_h, cx);
     }
-    // The player row is as tall as Perform's decks, plus the tabs. Tempo lock's
-    // charts take most of what's left. The Flow tab's body is below, so for it this
-    // row is just the tabs.
-    let height = match current {
-        Tool::TempoLock => (ctx.available_rect().height() * 0.62).max(mixer::HEIGHT + 12.0),
-        _ => mixer::HEIGHT + 12.0,
-    };
+    // Cues & Grid's controls are as tall as Perform's decks, plus the tabs. The other
+    // tools' bodies are below, beside the library, so for them this row is just the
+    // tabs.
+    let height = mixer::HEIGHT + 12.0;
     egui::TopBottomPanel::top("tools-prepare")
-        .exact_height(if flow { 30.0 } else { height + 8.0 + TABS_H })
+        .exact_height(if beside { 30.0 } else { height + 8.0 + TABS_H })
         .frame(row_frame(cx, Margin::symmetric(6, 4)))
         .show(ctx, |ui| {
             ui.allocate_ui(vec2(ui.available_width(), 22.0), |ui| {
@@ -87,49 +85,51 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
                     cx.send(ViewCmd::Tool(t));
                 }
             });
-            if !flow {
-                tool(ui, current, height, panels, cx);
+            if !beside {
+                cues_grid(ui, height, panels, cx);
             }
         });
-    if flow {
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(cx.theme.bg))
-            .show(ctx, |ui| {
-                FlowTab {
-                    flow: &mut panels.flow,
-                    library: &mut panels.library,
-                }
-                .ui(ui, cx)
-            });
-    } else {
-        library(ctx, panels, cx);
+    if !beside {
+        return library(ctx, panels, cx);
     }
+    egui::CentralPanel::default()
+        .frame(egui::Frame::new().fill(cx.theme.bg))
+        .show(ctx, |ui| match current {
+            Tool::Flow => FlowTab {
+                flow: &mut panels.flow,
+                library: &mut panels.library,
+            }
+            .ui(ui, cx),
+            _ => {
+                panels.library.show_beside(ui, cx);
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new().fill(cx.theme.bg).inner_margin(6))
+                    .show_inside(ui, |ui| tool(ui, current, panels, cx));
+            }
+        });
 }
 
-/// The tool tab's body, `height` tall.
-fn tool(ui: &mut Ui, tool: Tool, height: f32, panels: &mut Panels, cx: &mut Cx) {
+/// Cues & Grid's body: the player's controls, `height` tall.
+fn cues_grid(ui: &mut Ui, height: f32, panels: &mut Panels, cx: &mut Cx) {
+    let deck = &mut panels.decks[DeckId::PREPARE.index()];
+    let width = ui.available_width();
+    PreparePlayer {
+        deck,
+        width,
+        height,
+    }
+    .ui(ui, cx);
+}
+
+/// A tool's body, right of the library.
+fn tool(ui: &mut Ui, tool: Tool, panels: &mut Panels, cx: &mut Cx) {
     match tool {
-        Tool::CuesGrid => {
-            let deck = &mut panels.decks[DeckId::PREPARE.index()];
-            let width = ui.available_width();
-            PreparePlayer {
-                deck,
-                width,
-                height,
-            }
-            .ui(ui, cx);
+        // Drawn above (Cues & Grid) or by its own tab (Flow).
+        Tool::CuesGrid | Tool::Flow => {}
+        Tool::TempoLock => TempoLockPanel {
+            tab: &mut panels.tempo_lock,
+            roots: &panels.library.browser.folders,
         }
-        // Drawn under the tabs instead (see `show`).
-        Tool::Flow => {}
-        Tool::TempoLock => {
-            let size = vec2(ui.available_width(), height);
-            ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
-                TempoLockPanel {
-                    tab: &mut panels.tempo_lock,
-                    roots: &panels.library.browser.folders,
-                }
-                .ui(ui, cx);
-            });
-        }
+        .ui(ui, cx),
     }
 }

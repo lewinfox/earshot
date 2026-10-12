@@ -307,7 +307,9 @@ impl Panel for TempoLockPanel<'_> {
 /// The track's name, and what the tool is doing (with Cancel) or how it last ended.
 fn header(ui: &mut Ui, tab: &mut TempoLockUi, cx: &mut Cx) {
     let theme = cx.theme;
-    ui.horizontal(|ui| {
+    // Wrapping, and the status on a row of its own: the tool sits beside the library,
+    // so a long path mustn't push the whole tab wider than the window.
+    ui.horizontal_wrapped(|ui| {
         match tab.track.and_then(|id| cx.core.lib.get(id)) {
             Some(t) => {
                 ui.label(RichText::new(&t.title).size(16.0).strong());
@@ -332,23 +334,23 @@ fn header(ui: &mut Ui, tab: &mut TempoLockUi, cx: &mut Cx) {
                 .color(theme.muted),
             );
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if let Some((stage, fraction)) = tab.busy {
-                if stage != Stage::SaveToLibrary && ui.button("Cancel").clicked() {
-                    cx.send(TempoLockCmd::Cancel);
-                }
-                ui.add(
-                    egui::ProgressBar::new(fraction as f32)
-                        .desired_width(160.0)
-                        .show_percentage(),
-                );
-                ui.spinner();
-                ui.label(RichText::new(stage_text(stage)).color(theme.warn));
-            } else if let Some(note) = &tab.note {
-                note_label(ui, theme, note);
+    });
+    if let Some((stage, fraction)) = tab.busy {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(stage_text(stage)).color(theme.warn));
+            ui.spinner();
+            ui.add(
+                egui::ProgressBar::new(fraction as f32)
+                    .desired_width(160.0)
+                    .show_percentage(),
+            );
+            if stage != Stage::SaveToLibrary && ui.button("Cancel").clicked() {
+                cx.send(TempoLockCmd::Cancel);
             }
         });
-    });
+    } else if let Some(note) = &tab.note {
+        note_label(ui, theme, note);
+    }
 }
 
 /// The BPM to straighten to, how the detected beats relate to it, the engine, the
@@ -459,7 +461,7 @@ fn controls(ui: &mut Ui, tab: &mut TempoLockUi, roots: &[String], cx: &mut Cx) {
 fn transport(ui: &mut Ui, tab: &mut TempoLockUi, cx: &mut Cx) {
     let theme = cx.theme;
     let playing = tab.playing(cx);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let play = if playing { "Pause" } else { "Play" };
         if ui
             .add(egui::Button::new(RichText::new(play).strong()).min_size(vec2(60.0, 0.0)))
@@ -801,7 +803,16 @@ fn wave_input(
 /// A stat tile: its name, value and a note under it. `flag` marks it in amber.
 fn stat(ui: &mut Ui, theme: &Theme, name: &str, value: &str, note: &str, flag: bool) {
     let stroke = if flag { theme.warn } else { theme.line };
-    egui::Frame::new()
+    // A wrapped row can't see a card's width before drawing it, so it never wraps one:
+    // start a new row when last frame's width doesn't fit.
+    let id = ui.id().with(("stat", name));
+    let last: Option<f32> = ui.data(|d| d.get_temp(id));
+    // (A wrapped row's `available_width` is the whole row's.)
+    let left = ui.max_rect().right() - ui.cursor().min.x;
+    if last.is_some_and(|w| w > left) {
+        ui.end_row();
+    }
+    let r = egui::Frame::new()
         .fill(theme.wave_bg)
         .stroke(Stroke::new(1.0_f32, stroke))
         .corner_radius(CornerRadius::same(6))
@@ -822,6 +833,8 @@ fn stat(ui: &mut Ui, theme: &Theme, name: &str, value: &str, note: &str, flag: b
                 });
             });
         });
+    let w = r.response.rect.width();
+    ui.data_mut(|d| d.insert_temp(id, w));
 }
 
 fn stats_a(ui: &mut Ui, theme: &Theme, a: &TempoAnalysis) {

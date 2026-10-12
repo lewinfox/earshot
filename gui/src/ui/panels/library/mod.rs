@@ -187,6 +187,24 @@ impl LibraryPane {
         }
     }
 
+    /// Draw it on the left of a Prepare tool (Flow, Tempo lock), without its own side
+    /// panes. One width for every tool, so the library stays put when switching.
+    pub fn show_beside(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let saved = cx.prefs.prepare.sizes.flow_library;
+        let r = egui::SidePanel::left("tool-library")
+            .resizable(true)
+            .default_width(saved)
+            .width_range(320.0..=1400.0)
+            .frame(egui::Frame::new().fill(cx.theme.bg))
+            .show_inside(ui, |ui| {
+                // The panel keeps the width its contents take: all of it.
+                ui.expand_to_include_rect(ui.max_rect());
+                self.show(ui, cx, false)
+            });
+        let w = r.response.rect.width();
+        resized(ui.ctx(), w, Region::FlowLibrary, saved, cx);
+    }
+
     /// Draw it, with or without the right icon stack and its panes (`asides`; the
     /// Flow editor has its own).
     pub fn show(&mut self, ui: &mut Ui, cx: &mut Cx, asides: bool) {

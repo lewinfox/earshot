@@ -60,24 +60,7 @@ impl Panel for FlowTab<'_> {
             let w = r.response.rect.width();
             resized(ui.ctx(), w, Region::Aside, layout.sizes.aside, cx);
         }
-        let r = egui::SidePanel::left("flow-library")
-            .resizable(true)
-            .default_width(layout.sizes.flow_library)
-            .width_range(320.0..=1400.0)
-            .frame(egui::Frame::new().fill(cx.theme.bg))
-            .show_inside(ui, |ui| {
-                // The panel keeps the width its contents take: all of it.
-                ui.expand_to_include_rect(ui.max_rect());
-                self.library.show(ui, cx, false)
-            });
-        let w = r.response.rect.width();
-        resized(
-            ui.ctx(),
-            w,
-            Region::FlowLibrary,
-            layout.sizes.flow_library,
-            cx,
-        );
+        self.library.show_beside(ui, cx);
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(cx.theme.bg).inner_margin(4))
             .show_inside(ui, |ui| {
