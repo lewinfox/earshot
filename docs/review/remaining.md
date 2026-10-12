@@ -1,0 +1,51 @@
+# What's left after batches 1 and 2
+
+Batches 1 and 2 of the rebuild (review steps 0–6) are merged as of `b0ed7bb`.
+This list collects what the agents left undone, for the UI rebuild (step 7) and
+after.
+
+## Step 7: UI rebuild
+- [ ] Recreate everything in [post-review-ui-changes.md](post-review-ui-changes.md).
+- [ ] Theme module: one place for colours (no raw RGB in widgets).
+- [ ] `Shell` with modes (Prepare, Perform, later Library), panels and modals.
+  Layout saved per mode in `UiPrefs`.
+- [ ] One `TrackTable` with configurable, sortable columns (`ColumnDef`).
+- [ ] One `focused_pane`: keyboard, MIDI browse and *Selected* suggestions follow
+  it, including the Flow.
+- [ ] Multi-track drag payload (`DragPayload::Tracks { ids, origin }`). Drags carry
+  one id today.
+- [ ] On-demand repaint.
+- [ ] Inject `Services` so the app-level kittest tests run in CI.
+- [ ] UI for up to 4 decks, crossfader side per deck.
+- [ ] Reordering playlist rows.
+
+## Library and curation
+- [ ] Save play history to the `plays` table.
+- [ ] Save the last-open Flow and its camera position in the DB (still in eframe
+  storage).
+- [ ] Undo/redo (`core::edit::History`): metadata, grid edits, collections, Flow
+  edits. `Command::Undo/Redo` are placeholders.
+- [ ] Metadata editing UI (the Store keeps user values with `source='user'`).
+- [ ] Duplicates view (`Reader::duplicates()` exists).
+- [ ] Fill `tracks.key_pc` / `key_minor` so key search in SQL doesn't need text
+  matching.
+- [ ] `TrackId` is an `i64` alias; consider a newtype.
+
+## Analysis
+- [ ] Check at worker start-up that its grid analyser version (sent in `hello`)
+  matches the Rust registry's. Today the number is written in both places and
+  nothing compares them.
+- [ ] UI for "re-analyse stale tracks" (`Analyser::queue_stale`).
+- [ ] UI for the background worker cap (`analysis.background_workers` setting,
+  default 4).
+- [ ] Removing a track should cancel its queued jobs (they fail harmlessly now).
+- [ ] CLAP embeddings: load once into one contiguous in-memory block and search
+  there. Registry fields `AudioNeeds` and `depends_on` are ready for it.
+
+## Performance and control
+- [ ] Resync `DeckSession` if the engine event ring overflows (a hot cue change
+  could be missed).
+- [ ] Load a user keymap from disk (built in for now).
+- [ ] LED feedback to controllers (`ControlSpec` getters + `EngineEvent`s).
+- [ ] Effects on the `Processor` chain; slip, reverse, censor via
+  `Transport::jump`.
