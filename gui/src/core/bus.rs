@@ -335,6 +335,9 @@ pub enum LibraryControl {
     TogglePane,
     /// Put the cursor in the search box.
     Search,
+    /// Take back the last edit (metadata, collections, grids, the Flow).
+    Undo,
+    Redo,
 }
 
 impl DeckControl {
@@ -581,13 +584,17 @@ impl LibraryControl {
                 spec("toggle_pane", "library / suggestions", Kind::Button)
             }
             LibraryControl::Search => spec("search", "search", Kind::Button),
+            LibraryControl::Undo => spec("undo", "undo", Kind::Button),
+            LibraryControl::Redo => spec("redo", "redo", Kind::Button),
         }
     }
 
-    const ALL: [LibraryControl; 3] = [
+    pub const ALL: [LibraryControl; 5] = [
         LibraryControl::Browse,
         LibraryControl::TogglePane,
         LibraryControl::Search,
+        LibraryControl::Undo,
+        LibraryControl::Redo,
     ];
 
     pub fn command(self, value: f64) -> Option<Command> {
@@ -596,6 +603,8 @@ impl LibraryControl {
             LibraryControl::Browse if value != 0.0 => view(ViewCmd::Browse(value.round() as i32)),
             LibraryControl::TogglePane if value > 0.0 => view(ViewCmd::TogglePane),
             LibraryControl::Search if value > 0.0 => view(ViewCmd::FocusSearch),
+            LibraryControl::Undo if value > 0.0 => Some(Command::Undo),
+            LibraryControl::Redo if value > 0.0 => Some(Command::Redo),
             _ => None,
         }
     }
@@ -762,6 +771,9 @@ impl Control {
                 Some(("[Library]".into(), "TogglePane".into()))
             }
             Control::Library(LibraryControl::Search) => None,
+            // Mixxx has no undo; these names are earshot's own, for MIDI mappings.
+            Control::Library(LibraryControl::Undo) => Some(("[Library]".into(), "Undo".into())),
+            Control::Library(LibraryControl::Redo) => Some(("[Library]".into(), "Redo".into())),
         }
     }
 
@@ -969,6 +981,12 @@ mod tests {
             Control::from_mixxx("[Library]", "MoveVertical"),
             Some(Control::Library(LibraryControl::Browse))
         );
+        // Undo from a controller: earshot's own name, as a button press.
+        let undo = Control::from_mixxx("[Library]", "Undo").unwrap();
+        assert!(matches!(undo.command(1.0), Some(Command::Undo)));
+        assert!(undo.command(0.0).is_none());
+        let redo = Control::from_mixxx("[Library]", "Redo").unwrap();
+        assert!(matches!(redo.command(1.0), Some(Command::Redo)));
         assert_eq!(Control::from_mixxx("[Channel9]", "play"), None);
         assert_eq!(Control::from_mixxx("[Channel1]", "nonsense"), None);
     }

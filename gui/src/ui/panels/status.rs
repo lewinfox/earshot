@@ -7,7 +7,7 @@ use earshot_engine::OutputInfo;
 use egui::{RichText, Ui};
 
 use super::{Cx, Panel};
-use crate::core::command::{AppCmd, ViewCmd};
+use crate::core::command::{AppCmd, Command, ViewCmd};
 use crate::core::index::LibraryCmd;
 use crate::core::view::{Modal, Mode};
 
@@ -26,6 +26,9 @@ pub struct TopBar<'a> {
     pub analysis: &'a AnalysisSummary,
     /// Frame timing, and the audio callback's.
     pub hud: [&'a str; 2],
+    /// What undo and redo would do ("edit title"), if anything.
+    pub undo: Option<String>,
+    pub redo: Option<String>,
 }
 
 impl Panel for TopBar<'_> {
@@ -78,6 +81,22 @@ impl Panel for TopBar<'_> {
                         }
                     });
                 });
+            });
+            ui.menu_button("Edit", |ui| {
+                for (label, what, keys, cmd) in [
+                    ("Undo", &self.undo, "Ctrl+Z", Command::Undo),
+                    ("Redo", &self.redo, "Ctrl+Shift+Z", Command::Redo),
+                ] {
+                    let text = match what {
+                        Some(w) => format!("{label} {w}"),
+                        None => label.to_string(),
+                    };
+                    let b = egui::Button::new(text).shortcut_text(keys);
+                    if ui.add_enabled(what.is_some(), b).clicked() {
+                        cx.send(cmd);
+                        ui.close();
+                    }
+                }
             });
             let (audio, ok) = match self.audio {
                 Ok(i) => (

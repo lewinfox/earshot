@@ -25,6 +25,8 @@ pub struct Binding {
     /// file has it.
     pub code: String,
     pub shift: bool,
+    /// Ctrl (Cmd on a Mac) held too.
+    pub ctrl: bool,
     pub control: Control,
     /// The number after the control, if any.
     pub arg: Option<f64>,
@@ -62,7 +64,7 @@ impl Binding {
         self.control.describe(self.arg)
     }
 
-    /// The key as the help shows it: `Shift ←`.
+    /// The key as the help shows it: `Shift ←`, `Ctrl Shift Z`.
     pub fn label(&self) -> String {
         let key = match self.key.as_str() {
             "Left" => "←",
@@ -71,11 +73,9 @@ impl Binding {
             "Down" => "↓",
             k => k,
         };
-        if self.shift {
-            format!("Shift {key}")
-        } else {
-            key.to_string()
-        }
+        let ctrl = if self.ctrl { "Ctrl " } else { "" };
+        let shift = if self.shift { "Shift " } else { "" };
+        format!("{ctrl}{shift}{key}")
     }
 
     fn applies(&self, mode: Mode) -> bool {
@@ -86,6 +86,7 @@ impl Binding {
     fn clashes(&self, other: &Binding) -> bool {
         self.code == other.code
             && self.shift == other.shift
+            && self.ctrl == other.ctrl
             && (self.mode.is_none() || other.mode.is_none() || self.mode == other.mode)
     }
 }
@@ -146,11 +147,23 @@ impl Keymap {
 
     /// What a key does in `mode`. A shifted key with no binding of its own does what
     /// it does unshifted.
+    #[allow(dead_code)] // the app asks with Ctrl too (`find_with_ctrl`); tests use it
     pub fn find(&self, mode: Mode, key: &str, shift: bool) -> Option<&Binding> {
+        self.find_with_ctrl(mode, key, shift, false)
+    }
+
+    /// [`Keymap::find`], with Ctrl held (`ctrl`) or not.
+    pub fn find_with_ctrl(
+        &self,
+        mode: Mode,
+        key: &str,
+        shift: bool,
+        ctrl: bool,
+    ) -> Option<&Binding> {
         let find = |shift| {
             self.bindings
                 .iter()
-                .find(|b| b.applies(mode) && b.shift == shift && b.code == key)
+                .find(|b| b.applies(mode) && b.shift == shift && b.ctrl == ctrl && b.code == key)
         };
         find(shift).or_else(|| if shift { find(false) } else { None })
     }
@@ -177,6 +190,9 @@ impl Keymap {
                     None => ("Player".to_string(), Some(d)),
                 },
                 Control::Master(_) => ("Mixer".to_string(), None),
+                Control::Library(LibraryControl::Undo | LibraryControl::Redo) => {
+                    ("Edit".to_string(), None)
+                }
                 Control::Library(_) => ("Library".to_string(), None),
             };
             let row = (b.label(), b.describe());
@@ -204,10 +220,17 @@ fn parse_line(line: &str) -> Result<Binding, String> {
         "any" => None,
         m => return Err(format!("unknown mode {m}")),
     };
-    let (shift, key) = match key.strip_prefix("Shift+") {
-        Some(k) => (true, k),
-        None => (false, *key),
-    };
+    // Ctrl+ and Shift+, in either order.
+    let (mut key, mut shift, mut ctrl) = (*key, false, false);
+    loop {
+        if let Some(k) = key.strip_prefix("Shift+") {
+            (key, shift) = (k, true);
+        } else if let Some(k) = key.strip_prefix("Ctrl+") {
+            (key, ctrl) = (k, true);
+        } else {
+            break;
+        }
+    }
     let arg = match rest {
         [] => None,
         [n] => Some(
@@ -219,14 +242,10 @@ fn parse_line(line: &str) -> Result<Binding, String> {
     let unknown = || format!("no control {control} on {target}");
     let control = match *target {
         "library" => Control::Library(
-            [
-                LibraryControl::Browse,
-                LibraryControl::TogglePane,
-                LibraryControl::Search,
-            ]
-            .into_iter()
-            .find(|c| c.spec().name == *control)
-            .ok_or_else(unknown)?,
+            LibraryControl::ALL
+                .into_iter()
+                .find(|c| c.spec().name == *control)
+                .ok_or_else(unknown)?,
         ),
         "mixer" => Control::Master(
             [
@@ -257,6 +276,7 @@ fn parse_line(line: &str) -> Result<Binding, String> {
         key: key.to_string(),
         code: key.to_string(),
         shift,
+        ctrl,
         control,
         arg,
     })
@@ -410,11 +430,40 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_z_undoes_in_both_modes() {
+        let km = Keymap::built_in();
+        for mode in [Mode::Prepare, Mode::Perform] {
+            let undo = km.find_with_ctrl(mode, "Z", false, true).unwrap();
+            assert!(matches!(undo.press(), Some(Command::Undo)));
+            assert!(undo.release().is_none());
+            assert_eq!(undo.label(), "Ctrl Z");
+            for (key, shift) in [("Z", true), ("Y", false)] {
+                let redo = km.find_with_ctrl(mode, key, shift, true).unwrap();
+                assert!(matches!(redo.press(), Some(Command::Redo)), "{key}");
+            }
+        }
+        // Without Ctrl, Z is still deck 1's nudge.
+        assert!(!matches!(
+            km.find(Mode::Perform, "Z", false).unwrap().press(),
+            Some(Command::Undo)
+        ));
+        let help = km.help(Mode::Perform);
+        let edit = help.iter().find(|s| s.title == "Edit").unwrap();
+        assert!(edit.rows.contains(&("Ctrl Shift Z".into(), "redo".into())));
+        assert!(
+            Keymap::parse("any Shift+Ctrl+Z library redo")
+                .unwrap()
+                .bindings[0]
+                .ctrl
+        );
+    }
+
+    #[test]
     fn help_comes_from_the_map() {
         let km = Keymap::built_in();
         let help = km.help(Mode::Perform);
         let titles: Vec<&str> = help.iter().map(|s| s.title.as_str()).collect();
-        assert_eq!(titles, ["Deck A", "Deck B", "Library"]);
+        assert_eq!(titles, ["Deck A", "Deck B", "Library", "Edit"]);
         let a = &help[0].rows;
         assert!(a.contains(&("S".into(), "play / pause".into())));
         assert!(a.contains(&("4".into(), "hot cue 4".into())));

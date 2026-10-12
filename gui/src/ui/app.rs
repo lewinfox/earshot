@@ -442,6 +442,8 @@ impl EarshotApp {
                     midi_ports: &self.midi_ports,
                     analysis: &self.analysis,
                     hud: [&self.hud.text, &self.hud.audio],
+                    undo: self.edits.next_undo().map(|e| e.label()),
+                    redo: self.edits.next_redo().map(|e| e.label()),
                 }
                 .ui(ui, &mut cx)
             });

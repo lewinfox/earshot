@@ -3,8 +3,8 @@
 #   <mode>  <key>  <target>  <control>  [<number>]
 #
 # mode     perform, prepare, or any (both)
-# key      a key's name: A, 1, ;, Left, Up, Space, Tab, Enter, … with Shift+ in front
-#          for the shifted key. Keys go by where they are on the keyboard, named as on
+# key      a key's name: A, 1, ;, Left, Up, Space, Tab, Enter, … with Shift+ and/or
+#          Ctrl+ in front for the shifted key (Ctrl is Cmd on a Mac). Keys go by where they are on the keyboard, named as on
 #          a US layout. A shifted key with no binding of its own does what it does
 #          unshifted.
 # target   deck1 … deck4, prepare (Prepare mode's player), mixer, or library
@@ -75,3 +75,8 @@ any  Up     library  browse -1
 any  Down   library  browse 1
 any  Tab    library  toggle_pane
 any  /      library  search
+
+# ---- Edits (both modes; not while typing in a text field) ------------------------------
+any  Ctrl+Z        library  undo
+any  Ctrl+Shift+Z  library  redo
+any  Ctrl+Y        library  redo

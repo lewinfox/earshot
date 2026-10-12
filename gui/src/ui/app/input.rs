@@ -34,13 +34,15 @@ impl EarshotApp {
                 }
                 continue;
             }
-            if typing || modifiers.command || modifiers.alt {
+            if typing || modifiers.alt {
                 continue;
             }
-            let Some(b) = self
-                .keymap
-                .find(self.prefs.mode, key.name(), modifiers.shift)
-            else {
+            let Some(b) = self.keymap.find_with_ctrl(
+                self.prefs.mode,
+                key.name(),
+                modifiers.shift,
+                modifiers.command,
+            ) else {
                 continue;
             };
             if repeat && !b.repeats() {
