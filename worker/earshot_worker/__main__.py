@@ -62,6 +62,7 @@ from dataclasses import dataclass, field  # noqa: E402
 import numpy as np  # noqa: E402
 import soundfile as sf  # noqa: E402
 
+from . import audio, tempo_lock  # noqa: E402
 from .analysis import analyse  # noqa: E402
 from .detectors import detector_name, loaded_models  # noqa: E402
 from .static_tempo import analyse_static  # noqa: E402
@@ -73,6 +74,10 @@ PROTOCOL = 2
 # results made by an older one. grid 2: dynamic grids snapped to the kicks. grid 3:
 # first_beat.
 ANALYSERS = {"grid": 3}
+# Results of the other job types, by the name in their `result` messages, with
+# their versions (bumped the same way). Sent in the hello with the analysers.
+STEPS = tempo_lock.VERSIONS
+JOB_TYPES = ("analyse", "tempo_lock", "straighten")
 # Lower runs first; equal priorities run in the order they arrived.
 PRIORITIES = {"deck": 0, "preview": 1, "background": 2}
 HEARTBEAT_S = float(os.environ.get("EARSHOT_WORKER_HEARTBEAT_S", "2"))
@@ -92,11 +97,13 @@ def send(msg: dict) -> None:
             os._exit(0)
 
 
-class Cancelled(Exception):
+# Not Exceptions: a step that carries on past its own failures (`except Exception`)
+# must still stop for these.
+class Cancelled(BaseException):
     pass
 
 
-class DeadlineExceeded(Exception):
+class DeadlineExceeded(BaseException):
     pass
 
 
@@ -105,8 +112,10 @@ class Job:
     id: int
     priority: int
     wav: str
-    analysers: dict  # name -> its parameters
+    analysers: dict  # name -> its parameters ("analyse" jobs)
     deadline_s: float
+    kind: str = "analyse"  # the request's type
+    params: dict = field(default_factory=dict)  # the request ("straighten" jobs)
     cancel: threading.Event = field(default_factory=threading.Event)
     order: int = 0  # place in the queue among jobs of its priority
 
@@ -229,18 +238,24 @@ def check_params(name: str, params) -> None:
 
 
 def parse_job(req: dict) -> Job:
+    kind = req.get("type")
     job_id = req.get("id")
     if not isinstance(job_id, int) or isinstance(job_id, bool) or job_id < 0:
-        raise ValueError("analyse needs an 'id': a non-negative integer")
+        raise ValueError(f"{kind} needs an 'id': a non-negative integer")
     wav = req.get("wav")
     if not isinstance(wav, str) or not wav:
-        raise ValueError("analyse needs a 'wav' path")
+        raise ValueError(f"{kind} needs a 'wav' path")
     priority = req.get("priority")
     if priority not in PRIORITIES:
         raise ValueError(f"'priority' must be one of {', '.join(PRIORITIES)}")
     deadline = req.get("deadline_s")
     if not isinstance(deadline, (int, float)) or isinstance(deadline, bool) or not deadline > 0:
-        raise ValueError("analyse needs a 'deadline_s' above 0")
+        raise ValueError(f"{kind} needs a 'deadline_s' above 0")
+    if kind == "tempo_lock":
+        return Job(job_id, PRIORITIES[priority], wav, {}, float(deadline), kind)
+    if kind == "straighten":
+        tempo_lock.check_straighten(req)
+        return Job(job_id, PRIORITIES[priority], wav, {}, float(deadline), kind, req)
     analysers = req.get("analysers")
     if not isinstance(analysers, dict) or not analysers:
         raise ValueError("analyse needs 'analysers': an object of name -> parameters")
@@ -252,9 +267,10 @@ def parse_job(req: dict) -> Job:
 
 
 def run_job(job: Job) -> None:
-    """Run every analyser the job asks for, one result message each, then `done`.
-    Ends with `cancelled` or `error` instead if the job is cancelled, runs past its
-    deadline or can't read its audio."""
+    """Run every analyser the job asks for (or the tempo lock job's steps), one
+    result message each, then `done`. Ends with `cancelled` or `error` instead if the
+    job is cancelled, runs past its deadline or can't read its audio (or a tempo lock
+    job's main step fails)."""
     t0 = time.perf_counter()
     send({"id": job.id, "type": "started"})
 
@@ -268,20 +284,36 @@ def run_job(job: Job) -> None:
 
         return progress
 
+    def failed(name: str, error: str) -> None:
+        send({"id": job.id, "type": "failed", "analyser": name, "error": error})
+
+    def emit(name: str, data: dict) -> None:
+        version = ANALYSERS[name] if job.kind == "analyse" else STEPS[name]
+        send({"id": job.id, "type": "result", "analyser": name, "version": version, "data": data})
+
     try:
+        if job.kind != "analyse":
+            # Any audio file; the app sends its own decode as a float WAV (all channels).
+            y, sr = audio.load(job.wav)
+            if y.size == 0:
+                raise ValueError(f"{job.wav}: no audio")
+            if job.kind == "tempo_lock":
+                emit("tempo_lock", tempo_lock.chart(y, sr, progress_for("tempo_lock")))
+            else:
+                tempo_lock.straighten(y, sr, job.params, progress_for, emit, failed)
+            send({"id": job.id, "type": "done", "seconds": float(time.perf_counter() - t0)})
+            return
         y, sr = sf.read(job.wav, dtype="float32", always_2d=False)
         if y.size == 0:
             raise ValueError(f"{job.wav}: no audio")
         for name, params in job.analysers.items():
             try:
                 data = RUN[name](y, int(sr), params, progress_for(name))
-            except (Cancelled, DeadlineExceeded):
-                raise
             except Exception as e:
                 traceback.print_exc(file=sys.stderr)
-                send({"id": job.id, "type": "failed", "analyser": name, "error": str(e) or type(e).__name__})
+                failed(name, str(e) or type(e).__name__)
                 continue
-            send({"id": job.id, "type": "result", "analyser": name, "version": ANALYSERS[name], "data": data})
+            emit(name, data)
         send({"id": job.id, "type": "done", "seconds": float(time.perf_counter() - t0)})
     except Cancelled:
         send({"id": job.id, "type": "cancelled"})
@@ -314,11 +346,12 @@ def handle(req: dict, queue: Queue) -> None:
                 "type": "hello",
                 "protocol": PROTOCOL,
                 "analysers": ANALYSERS,
+                "steps": STEPS,
                 "detector": detector_name(),
                 "models_loaded": loaded_models(),
             }
         )
-    elif kind == "analyse":
+    elif kind in JOB_TYPES:
         queue.submit(parse_job(req))
     elif kind == "cancel":
         job_id = req.get("id")

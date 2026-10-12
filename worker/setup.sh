@@ -3,6 +3,21 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# The tempo lock tool runs Rubber Band and ffmpeg as programs (see README.md). Only
+# installed when missing, so a re-run doesn't ask for sudo.
+if ! { command -v rubberband >/dev/null || command -v rubberband-r3 >/dev/null; } \
+   || ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+  if command -v apt-get >/dev/null; then
+    echo ">> system packages (rubberband-cli, ffmpeg)"
+    sudo apt-get install -y rubberband-cli ffmpeg
+  elif command -v brew >/dev/null; then
+    echo ">> system packages (rubberband, ffmpeg)"
+    brew install rubberband ffmpeg
+  else
+    echo "!! install the Rubber Band CLI and ffmpeg yourself (the tempo lock tool needs them)" >&2
+  fi
+fi
+
 UV="$(command -v uv || echo "$HOME/.local/bin/uv")"
 if [ ! -x "$UV" ]; then
   echo "!! uv not found; install it from https://docs.astral.sh/uv/" >&2

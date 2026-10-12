@@ -679,23 +679,39 @@ fn update_decks(
 
 /// 32-bit float mono WAV, the average of both channels.
 pub(super) fn write_mono_wav(path: &Path, audio: &TrackAudio) -> std::io::Result<()> {
+    write_wav(path, audio, false)
+}
+
+/// A float WAV of both channels (the tempo lock tool stretches the stereo).
+pub(super) fn write_stereo_wav(path: &Path, audio: &TrackAudio) -> std::io::Result<()> {
+    write_wav(path, audio, true)
+}
+
+fn write_wav(path: &Path, audio: &TrackAudio, stereo: bool) -> std::io::Result<()> {
     let mut w = BufWriter::new(std::fs::File::create(path)?);
+    let channels: u16 = if stereo { 2 } else { 1 };
+    let frame = 4 * channels as u32;
     let n = audio.frames() as u32;
     let sr = audio.sample_rate;
     w.write_all(b"RIFF")?;
-    w.write_all(&(36 + n * 4).to_le_bytes())?;
+    w.write_all(&(36 + n * frame).to_le_bytes())?;
     w.write_all(b"WAVEfmt ")?;
     w.write_all(&16u32.to_le_bytes())?;
     w.write_all(&3u16.to_le_bytes())?; // IEEE float
-    w.write_all(&1u16.to_le_bytes())?; // mono
+    w.write_all(&channels.to_le_bytes())?;
     w.write_all(&sr.to_le_bytes())?;
-    w.write_all(&(sr * 4).to_le_bytes())?;
-    w.write_all(&4u16.to_le_bytes())?;
+    w.write_all(&(sr * frame).to_le_bytes())?;
+    w.write_all(&(frame as u16).to_le_bytes())?;
     w.write_all(&32u16.to_le_bytes())?;
     w.write_all(b"data")?;
-    w.write_all(&(n * 4).to_le_bytes())?;
+    w.write_all(&(n * frame).to_le_bytes())?;
     for f in audio.samples.chunks_exact(2) {
-        w.write_all(&(0.5 * (f[0] + f[1])).to_le_bytes())?;
+        if stereo {
+            w.write_all(&f[0].to_le_bytes())?;
+            w.write_all(&f[1].to_le_bytes())?;
+        } else {
+            w.write_all(&(0.5 * (f[0] + f[1])).to_le_bytes())?;
+        }
     }
     w.flush()
 }

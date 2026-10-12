@@ -21,6 +21,7 @@ pub mod selection;
 pub mod session;
 pub mod store;
 pub mod suggest;
+pub mod tempo_lock;
 pub mod track;
 pub mod worker_client;
 

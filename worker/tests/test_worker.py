@@ -41,8 +41,8 @@ TERMINAL = {"done", "error", "cancelled"}
 
 
 class Worker:
-    def __init__(self):
-        env = {**os.environ, "EARSHOT_WORKER_PRIORITY": "inherit", "EARSHOT_WORKER_HEARTBEAT_S": "0.5"}
+    def __init__(self, env=None):
+        env = {**os.environ, "EARSHOT_WORKER_PRIORITY": "inherit", "EARSHOT_WORKER_HEARTBEAT_S": "0.5", **(env or {})}
         self.p = subprocess.Popen(
             [sys.executable, "-m", "earshot_worker"],
             cwd=WORKER_DIR, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None, text=True, env=env,

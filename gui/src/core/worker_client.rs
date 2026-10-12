@@ -366,6 +366,27 @@ impl WorkerClient {
         self.send(Ctl::Cancel(id));
     }
 
+    /// Queue a job of another type (the tempo lock tool's `tempo_lock` and
+    /// `straighten`): `req` is its request without the `id`. Wait for it with
+    /// [`Job::wait_events`].
+    pub fn submit_job(
+        &self,
+        mut req: serde_json::Map<String, serde_json::Value>,
+        deadline: Duration,
+    ) -> Job {
+        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel();
+        req.insert("id".into(), id.into());
+        req.insert("deadline_s".into(), deadline.as_secs_f64().into());
+        self.send(Ctl::Submit {
+            id,
+            req: req.into(),
+            deadline,
+            tx,
+        });
+        Job { id, rx }
+    }
+
     /// Submit a job and wait for it.
     #[cfg_attr(not(test), allow(dead_code))] // the queue submits, to be able to cancel
     pub fn analyse(
@@ -417,6 +438,45 @@ impl Job {
             }
         }
     }
+
+    /// Block until the job ends, passing on everything it sends as it comes (for jobs
+    /// whose results arrive one step at a time). Ok(seconds in the worker), or why
+    /// the job as a whole failed, as for [`Job::wait`].
+    pub fn wait_events(self, on_event: &mut dyn FnMut(JobEvent)) -> Result<f64, String> {
+        loop {
+            let msg = self
+                .rx
+                .recv()
+                .map_err(|_| "the worker has stopped".to_string())?;
+            match msg {
+                JobMsg::Update(u) => on_event(JobEvent::Update(u)),
+                JobMsg::Result { analyser, data, .. } => on_event(JobEvent::Result {
+                    step: analyser,
+                    data,
+                }),
+                JobMsg::Failed { analyser, error } => on_event(JobEvent::Failed {
+                    step: analyser,
+                    error,
+                }),
+                JobMsg::End(result) => return result,
+            }
+        }
+    }
+}
+
+/// What a job sends while it runs (see [`Job::wait_events`]). `step` is the
+/// `analyser` of the worker's message: an analyser, or a tempo lock job's step.
+#[derive(Debug)]
+pub enum JobEvent {
+    Update(Update),
+    Result {
+        step: String,
+        data: serde_json::Value,
+    },
+    Failed {
+        step: String,
+        error: String,
+    },
 }
 
 // ---- the supervisor ---------------------------------------------------------------------

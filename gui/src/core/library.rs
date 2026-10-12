@@ -99,12 +99,7 @@ pub fn scan_library(store: &Store) -> Result<(), StoreError> {
         let Ok(meta) = std::fs::metadata(p) else {
             continue;
         };
-        let size = meta.len() as i64;
-        let mtime_ns = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_nanos() as i64);
+        let (size, mtime_ns) = stamp(&meta);
         if known.get(&path_bytes(p)) != Some(&(size, mtime_ns)) {
             changed.push((p.clone(), size, mtime_ns));
         }
@@ -119,13 +114,7 @@ pub fn scan_library(store: &Store) -> Result<(), StoreError> {
             .map(|c| {
                 s.spawn(move || {
                     c.iter()
-                        .map(|(p, size, mtime_ns)| ScannedFile {
-                            tags: decode::read_tags(p).unwrap_or_default(),
-                            tag_hash: hash::tag_hash(p),
-                            path: p.clone(),
-                            size: *size,
-                            mtime_ns: *mtime_ns,
-                        })
+                        .map(|(p, size, mtime_ns)| scanned(p, *size, *mtime_ns))
                         .collect::<Vec<_>>()
                 })
             })
@@ -136,6 +125,41 @@ pub fn scan_library(store: &Store) -> Result<(), StoreError> {
             .collect()
     });
     store.call(move |w| w.apply_scan(&roots, &files, &rows))
+}
+
+/// Record one file, new or changed, without walking the library folders: for a file
+/// just put in one (the tempo lock tool's "Save to library"). The Store then sends
+/// the library as a `StoreEvent::Library`. Blocking: call from a background thread.
+pub fn scan_file(store: &Store, path: &Path) -> Result<(), StoreError> {
+    let meta = std::fs::metadata(path).map_err(|source| StoreError::Io {
+        path: path.into(),
+        source,
+    })?;
+    let (size, mtime_ns) = stamp(&meta);
+    let row = scanned(path, size, mtime_ns);
+    let found = vec![path.to_path_buf()];
+    // No roots: nothing else is looked at, so nothing is marked missing.
+    store.call(move |w| w.apply_scan(&[], &found, &[row]))
+}
+
+/// (size, modified time in ns): how a scan tells a file has changed.
+fn stamp(meta: &std::fs::Metadata) -> (i64, i64) {
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos() as i64);
+    (meta.len() as i64, mtime_ns)
+}
+
+fn scanned(path: &Path, size: i64, mtime_ns: i64) -> ScannedFile {
+    ScannedFile {
+        tags: decode::read_tags(path).unwrap_or_default(),
+        tag_hash: hash::tag_hash(path),
+        path: path.to_path_buf(),
+        size,
+        mtime_ns,
+    }
 }
 
 /// A background thread that works out the audio hash of files that don't have one

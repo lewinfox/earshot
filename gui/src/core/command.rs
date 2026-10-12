@@ -17,6 +17,7 @@ use super::collections::{CollectionCmd, FlowCmd};
 use super::index::LibraryCmd;
 use super::player::{self, AudioSettings, GridOp, Player};
 use super::store::{Memory, Store, StoreCmd};
+use super::tempo_lock::TempoLockCmd;
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -34,6 +35,9 @@ pub enum Command {
     Collection(CollectionCmd),
     /// The Flow on the canvas.
     Flow(FlowCmd),
+    /// The tempo lock tool (`TempoLock::run`). Run by the UI, like `Library`.
+    #[allow(dead_code)] // the Tempo lock tab isn't built yet (step 7, B4)
+    TempoLock(TempoLockCmd),
     /// Placeholders until there is an edit history.
     #[allow(dead_code)]
     Undo,
@@ -332,5 +336,11 @@ impl From<CollectionCmd> for Command {
 impl From<FlowCmd> for Command {
     fn from(c: FlowCmd) -> Command {
         Command::Flow(c)
+    }
+}
+
+impl From<TempoLockCmd> for Command {
+    fn from(c: TempoLockCmd) -> Command {
+        Command::TempoLock(c)
     }
 }
