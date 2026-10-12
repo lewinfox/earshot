@@ -1138,11 +1138,19 @@ fn library_columns_fit_their_contents_until_dragged() {
     let auto = auto_widths(&h.ctx, &h.state().index);
     let head = at(&h, "Title");
     let artist = at(&h, "Artist");
-    // The Title header cell starts where its column does: its width is the fit.
+    // The text columns share the spare room: Title is wider than its fit, and the
+    // last column ends near the pane's right edge.
     assert!(
-        (artist.left() - head.left() - auto[&ColumnId::Title]).abs() < 12.0,
+        artist.left() - head.left() > auto[&ColumnId::Title] + 50.0,
         "{head:?} {artist:?} {auto:?}"
     );
+    let pane = at(&h, "4 tracks");
+    let time = h
+        .get_all_by_label("Time")
+        .map(|n| n.rect())
+        .find(|r| r.top() > pane.bottom())
+        .expect("the Time header");
+    assert!(pane.right() - time.left() < 120.0, "{time:?} {pane:?}");
     let row = title(&h, ids(&h)[0]);
     h.get_by_label(&row).click();
     steps(&mut h, 3);

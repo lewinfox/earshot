@@ -673,20 +673,50 @@ impl TrackTable<'_> {
         res.changed |= filter_chips(ui, state);
 
         let auto = auto_widths(ui.ctx(), v.lib);
-        // Hand-sized columns keep their width; the text ones fit their contents.
-        let shown: Vec<(ColumnId, f32)> = state
+        // Hand-sized columns keep their width; the text ones fit their contents and
+        // the rest start at their usual width. Then the spare room goes to the text
+        // columns not sized by hand, so the table fills the pane.
+        let natural: Vec<(ColumnId, f32)> = state
             .columns
             .iter()
-            .map(|&(c, w)| match auto.get(&c) {
-                Some(&a) if !state.sized.contains(&c) => (c, a),
-                _ => (c, w),
+            .map(|&(c, w)| {
+                let w = match auto.get(&c) {
+                    _ if state.sized.contains(&c) => w,
+                    Some(&a) => a,
+                    None => def(c).width,
+                };
+                (c, w)
             })
             .collect();
+        let gaps = ui.spacing().item_spacing.x * natural.len() as f32
+            + ui.spacing().scroll.allocated_width();
+        let filled = fill(&natural, ui.available_width() - gaps, |c| {
+            auto.contains_key(&c) && !state.sized.contains(&c)
+        });
+        // Kept as they are while a column is dragged: a new layout would end the drag.
+        let keep = ui.id().with((id, "filled"));
+        let dragging = ui.input(|i| i.pointer.primary_down());
+        let shown: Vec<(ColumnId, f32)> = match ui.data(|d| d.get_temp(keep)) {
+            Some(old) if dragging => old,
+            _ => {
+                ui.data_mut(|d| d.insert_temp(keep, filled.clone()));
+                filled
+            }
+        };
         // A different set of columns is a different table to egui (its saved widths
-        // are by position), and so are new contents widths, so they take effect.
+        // are by position), and so are new fitted widths, so they take effect.
         let salt: Vec<(ColumnId, u32)> = shown
             .iter()
-            .map(|&(c, _)| (c, auto.get(&c).map_or(0, |w| *w as u32)))
+            .map(|&(c, w)| {
+                (
+                    c,
+                    if state.sized.contains(&c) {
+                        0
+                    } else {
+                        w as u32
+                    },
+                )
+            })
             .collect();
         let mut table = TableBuilder::new(ui)
             .id_salt((id, salt, state.fitted))
@@ -1070,6 +1100,25 @@ fn filter_chips(ui: &mut Ui, s: &mut TableState) -> bool {
 
 // ---- cells ---------------------------------------------------------------------------
 
+/// Widen the columns `grows` picks, each by its share of their width, so all of
+/// them add up to `room`. Never narrows anything.
+fn fill(
+    natural: &[(ColumnId, f32)],
+    room: f32,
+    grows: impl Fn(ColumnId) -> bool,
+) -> Vec<(ColumnId, f32)> {
+    let used: f32 = natural.iter().map(|c| c.1).sum();
+    let growing: f32 = natural.iter().filter(|c| grows(c.0)).map(|c| c.1).sum();
+    let spare = (room - used).max(0.0);
+    natural
+        .iter()
+        .map(|&(c, w)| match growing > 0.0 && grows(c) {
+            true => (c, (w + spare * w / growing).floor()),
+            false => (c, w),
+        })
+        .collect()
+}
+
 /// The widest a column grows to fit its contents.
 const AUTO_MAX: f32 = 420.0;
 
@@ -1312,6 +1361,21 @@ fn bars(ui: &mut Ui, s: &Scored) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spare_room_goes_to_the_growing_columns_by_their_width() {
+        use ColumnId::*;
+        let natural = [(Title, 200.0), (Artist, 100.0), (Bpm, 56.0)];
+        let grows = |c| c != Bpm;
+        assert_eq!(
+            fill(&natural, 656.0, grows),
+            [(Title, 400.0), (Artist, 200.0), (Bpm, 56.0)]
+        );
+        // Too little room: nothing narrows.
+        assert_eq!(fill(&natural, 100.0, grows), natural);
+        // Nothing to grow: left as it is.
+        assert_eq!(fill(&natural, 900.0, |_| false), natural);
+    }
 
     #[test]
     fn column_filters_become_query_terms() {
