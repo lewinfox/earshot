@@ -420,6 +420,38 @@ fn ctrl_arrows_load_the_next_track() {
     assert_eq!(h.state().panels.library.browser.focused(), Some(list[2]));
 }
 
+/// Two loads onto one player in quick succession: only the newer one lands, so the
+/// player and the screen agree, whichever finishes decoding first.
+#[test]
+fn only_the_newest_load_lands() {
+    let mut h = start_prepare("newest-load", 0);
+    let prep = DeckId::PREPARE;
+    let ids = ids(&h);
+    let shown = |a: &EarshotApp| a.panels.decks[prep.index()].pending().map(|p| p.track_id);
+
+    // Two quick Ctrl+↓: the second track wins, not the first.
+    h.state_mut().dispatch(ViewCmd::Browse(-100).into());
+    press(&mut h, egui::Modifiers::COMMAND, Key::ArrowDown);
+    press(&mut h, egui::Modifiers::COMMAND, Key::ArrowDown);
+    let want = h.state().panels.library.browser.focused();
+    settle_until(&mut h, |a| shown(a).is_none() && prepared(a) == want);
+    steps(&mut h, 30);
+    assert_eq!(prepared(h.state()), want);
+
+    // An older request finishing last, forced: it doesn't replace the newer track.
+    let (old, new) = (ids[2], ids[3]);
+    let player = h.state().player.clone();
+    let lib = h.state().lib.clone();
+    let first = player::request_load(&player, prep);
+    let second = player::request_load(&player, prep);
+    player::load_track(&player, &lib, prep, new, second).unwrap();
+    assert_eq!(
+        player::load_track(&player, &lib, prep, old, first),
+        Err(player::SUPERSEDED.into())
+    );
+    assert_eq!(prepared(h.state()), Some(new));
+}
+
 /// C sets the cue on the beat (quantising) and the playhead goes there with it.
 #[test]
 fn c_puts_the_playhead_on_the_cue() {

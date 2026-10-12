@@ -44,6 +44,9 @@ pub struct Inner {
     pub mixer: MixerState,
     pub sync_leader: Option<DeckId>,
     pub generation: u64,
+    /// The newest load asked for on each player (see [`request_load`]). Only that
+    /// one may put its track on.
+    pub load_tickets: [u64; SLOTS],
     /// Output routing; `None` means the default for the device's channel count.
     pub routing: Option<Routing>,
     /// MIDI's own ring into the engine, refilled whenever audio (re)starts.
@@ -123,6 +126,7 @@ pub fn new_player() -> Player {
         mixer: MixerState::default(),
         sync_leader: None,
         generation: 0,
+        load_tickets: [0; SLOTS],
         routing: None,
         midi: Lane::default(),
     }))
@@ -313,9 +317,33 @@ pub fn start_engine(player: &Player, opts: &OutputOptions) -> Result<OutputInfo,
     Ok(info)
 }
 
-/// Decode a library track and put it on a deck. Blocking (about a second): call it
-/// from a background thread.
-pub fn load_track(player: &Player, lib: &Library, deck: DeckId, id: i64) -> Result<(), String> {
+/// Why [`load_track`] didn't put its track on: a newer load for the player was asked
+/// for meanwhile.
+pub const SUPERSEDED: &str = "a newer load replaced it";
+
+/// Note a new load for `deck`, before starting it. Returns its ticket for
+/// [`load_track`]: any older load still decoding won't land after it.
+pub fn request_load(player: &Player, deck: DeckId) -> u64 {
+    let mut inner = player.lock().unwrap();
+    let t = &mut inner.load_tickets[deck.index()];
+    *t += 1;
+    *t
+}
+
+/// Decode a library track and put it on a deck, unless a newer load (than `ticket`,
+/// from [`request_load`]) was asked for meanwhile: then it fails with [`SUPERSEDED`].
+/// Blocking (about a second): call it from a background thread.
+pub fn load_track(
+    player: &Player,
+    lib: &Library,
+    deck: DeckId,
+    id: i64,
+    ticket: u64,
+) -> Result<(), String> {
+    // Already replaced: don't decode for nothing.
+    if player.lock().unwrap().load_tickets[deck.index()] != ticket {
+        return Err(SUPERSEDED.into());
+    }
     let reader = &lib.store.reader;
     let track = reader.track(id).map_err(|e| e.to_string())?;
     let path = reader.track_path(id).map_err(|e| e.to_string())?;
@@ -377,6 +405,11 @@ pub fn load_track(player: &Player, lib: &Library, deck: DeckId, id: i64) -> Resu
     let main = initial_cue(grid.as_ref(), first_beat);
 
     let mut inner = player.lock().unwrap();
+    // Checked under the same lock as the load itself, so an older request finishing
+    // late can't replace a newer one.
+    if inner.load_tickets[deck.index()] != ticket {
+        return Err(SUPERSEDED.into());
+    }
     inner.generation += 1;
     let track = Arc::new(LoadedTrack {
         track_id: id,

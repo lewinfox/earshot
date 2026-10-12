@@ -300,14 +300,19 @@ impl EarshotApp {
                 .unwrap_or(DeckId::new(0).expect("deck 1")),
         });
         // Show the track's details at once; the audio follows when it has decoded.
-        self.panels.decks[deck.index()]
-            .start_load(PendingLoad::new(track_id, self.index.get(track_id)));
+        // Only the newest request lands: an older one still decoding is dropped.
+        let ticket = player::request_load(&self.player, deck);
+        self.panels.decks[deck.index()].start_load(PendingLoad::new(
+            ticket,
+            track_id,
+            self.index.get(track_id),
+        ));
         let (player, lib, sink) = (self.player.clone(), self.lib.clone(), self.sink.clone());
         std::thread::spawn(move || {
-            let result = player::load_track(&player, &lib, deck, track_id);
+            let result = player::load_track(&player, &lib, deck, track_id, ticket);
             sink(Event::Loaded {
                 deck,
-                track_id,
+                ticket,
                 result,
             });
         });

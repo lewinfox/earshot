@@ -22,15 +22,17 @@ impl EarshotApp {
                 }
                 Event::Loaded {
                     deck,
-                    track_id,
+                    ticket,
                     result,
                 } => {
                     // Stop showing the pending track (on failure the deck shows what
-                    // it had). A stale result, for an older request, changes nothing.
-                    self.panels.decks[deck.index()].finish_load(track_id);
-                    match result {
-                        Ok(()) => self.refresh_cues(deck),
-                        Err(e) => eprintln!("load to deck {}: {e}", deck.index() + 1),
+                    // it had). An older request's result changes nothing: the player
+                    // didn't take it either.
+                    if self.panels.decks[deck.index()].finish_load(ticket) {
+                        match result {
+                            Ok(()) => self.refresh_cues(deck),
+                            Err(e) => eprintln!("load to deck {}: {e}", deck.index() + 1),
+                        }
                     }
                 }
                 Event::Analysis(ev) => {

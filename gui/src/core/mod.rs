@@ -46,7 +46,8 @@ pub enum Event {
     Command(command::Command),
     Loaded {
         deck: earshot_engine::DeckId,
-        track_id: i64,
+        /// The request's ticket (`player::request_load`).
+        ticket: u64,
         result: Result<(), String>,
     },
     /// A library scan finished (the tracks themselves arrive as a

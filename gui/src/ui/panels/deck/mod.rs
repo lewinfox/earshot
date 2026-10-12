@@ -76,6 +76,8 @@ pub struct DeckInfo {
 /// straight away, and a placeholder where the waveforms go.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PendingLoad {
+    /// The load's ticket (`player::request_load`): which request this is.
+    pub ticket: u64,
     pub track_id: i64,
     pub title: String,
     pub artist: String,
@@ -86,8 +88,9 @@ pub struct PendingLoad {
 
 impl PendingLoad {
     /// From the library's row for the track, if it has one.
-    pub fn new(track_id: i64, t: Option<&Track>) -> PendingLoad {
+    pub fn new(ticket: u64, track_id: i64, t: Option<&Track>) -> PendingLoad {
         PendingLoad {
+            ticket,
             track_id,
             title: t.map(|t| t.title.clone()).unwrap_or_default(),
             artist: t.map(|t| t.artist.clone()).unwrap_or_default(),
@@ -262,15 +265,15 @@ impl DeckUi {
         self.pending = Some(p);
     }
 
-    /// A load finished (or failed). Returns false, and keeps waiting, if it is for an
-    /// older request than the one shown.
-    pub fn finish_load(&mut self, track_id: i64) -> bool {
+    /// The load with `ticket` finished (or failed). Returns false, and keeps waiting,
+    /// unless it is the request shown.
+    pub fn finish_load(&mut self, ticket: u64) -> bool {
         match &self.pending {
-            Some(p) if p.track_id != track_id => false,
-            _ => {
+            Some(p) if p.ticket == ticket => {
                 self.pending = None;
                 true
             }
+            _ => false,
         }
     }
 
@@ -687,6 +690,7 @@ mod tests {
 
     fn pending(id: i64, title: &str) -> PendingLoad {
         PendingLoad {
+            ticket: id as u64,
             track_id: id,
             title: title.into(),
             artist: "Someone".into(),
