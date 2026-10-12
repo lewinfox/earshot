@@ -84,6 +84,21 @@ CREATE TABLE analysis_runs (
 ) STRICT;
 CREATE INDEX analysis_runs_track ON analysis_runs(track_id);
 
+-- The latest result of each analyser (gui/src/core/analysis/registry.rs) for each
+-- track. Stale when `version` is below the analyser's, or `content_hash` isn't the
+-- audio the track has now (NULL on either side: not known, so not stale). A failed
+-- run is a row with `error` set.
+CREATE TABLE analysis_results (
+  track_id      INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+  analyser      TEXT NOT NULL,           -- waveform, loudness, energy, grid
+  version       INTEGER NOT NULL,
+  content_hash  BLOB,                    -- files.content_hash of the audio analysed
+  run_id        INTEGER REFERENCES analysis_runs(id) ON DELETE SET NULL,
+  error         TEXT,
+  analysed_at   INTEGER NOT NULL,
+  PRIMARY KEY (track_id, analyser)
+) STRICT;
+
 -- Derived numbers: energy, lufs, peak, bpm_min, bpm_max, drifts (0/1) …
 CREATE TABLE track_features (
   track_id  INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
@@ -93,15 +108,30 @@ CREATE TABLE track_features (
   PRIMARY KEY (track_id, name)
 ) STRICT;
 
--- Every grid a track has had. `beats` is engine/src/beatgrid.rs's binary format.
+-- Every grid a track has had, as its model (audio/src/beatgrid.rs `GridModel`):
+--   constant: a beat at `anchor_s`, then one every 60 / `bpm` s either way. That beat
+--             is beat `anchor_pos` (1 = the downbeat) of a bar of `meter` beats.
+--   markers:  every beat, in `beats` (beatgrid.rs's binary format); `bpm` is their
+--             average, rounded to 0.01.
+-- Times are seconds of our decoded audio. Export to Rekordbox or Mixxx will need the
+-- grid's timebase here too (decoder, offset from the file's first sample).
 CREATE TABLE beatgrids (
   id          INTEGER PRIMARY KEY,
   track_id    INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
   source      TEXT NOT NULL CHECK (source IN ('analysis', 'analysis-dynamic', 'user', 'sidecar', 'import')),
   run_id      INTEGER REFERENCES analysis_runs(id) ON DELETE SET NULL,
-  bpm         REAL,
-  beats       BLOB NOT NULL,
-  created_at  INTEGER NOT NULL
+  kind        TEXT NOT NULL CHECK (kind IN ('constant', 'markers')),
+  bpm         REAL NOT NULL,
+  anchor_s    REAL,
+  anchor_pos  INTEGER,
+  meter       INTEGER,
+  beats       BLOB,
+  created_at  INTEGER NOT NULL,
+  CHECK (CASE kind
+           WHEN 'constant' THEN anchor_s IS NOT NULL AND anchor_pos IS NOT NULL
+                                AND meter IS NOT NULL AND beats IS NULL
+           ELSE beats IS NOT NULL AND anchor_s IS NULL AND anchor_pos IS NULL AND meter IS NULL
+         END)
 ) STRICT;
 CREATE INDEX beatgrids_track ON beatgrids(track_id);
 
@@ -245,7 +275,9 @@ CREATE TABLE external_links (
 CREATE INDEX external_links_track ON external_links(track_id);
 
 -- Background work that should survive a restart. (Audio hashing doesn't need it:
--- its queue is `files.content_hash IS NULL`.)
+-- its queue is `files.content_hash IS NULL`.) Analysis jobs: `kind` is
+-- 'analyse:<analyser>', one row per track and analyser while it's queued (deleted when
+-- done). `want` is missing | stale | force; `params` the grid mode.
 CREATE TABLE jobs (
   id           INTEGER PRIMARY KEY,
   kind         TEXT NOT NULL,
@@ -253,8 +285,11 @@ CREATE TABLE jobs (
   status       TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'done', 'error')),
   error        TEXT,
   created_at   INTEGER NOT NULL,
-  finished_at  INTEGER
+  finished_at  INTEGER,
+  want         TEXT,
+  params       TEXT
 ) STRICT;
+CREATE UNIQUE INDEX jobs_track_kind ON jobs(track_id, kind);
 
 -- ---- settings ---------------------------------------------------------------------
 
@@ -265,6 +300,8 @@ CREATE TABLE library_roots (
   added_at  INTEGER NOT NULL
 ) STRICT;
 
+-- Settings the analysis reads: 'analysis.background_workers' (how many background
+-- worker processes may run at once).
 CREATE TABLE settings (
   key    TEXT PRIMARY KEY,
   value  TEXT NOT NULL

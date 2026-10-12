@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use earshot_engine::beatgrid::Beatgrid;
+use earshot_engine::beatgrid::{Beatgrid, Constant, GridModel};
 use earshot_engine::decode::TrackTags;
 
 use super::*;
@@ -54,39 +54,57 @@ fn grid(bpm: f64) -> Beatgrid {
 }
 
 #[test]
-fn migration_2_carries_over_earlier_results() {
-    let c = rusqlite::Connection::open_in_memory().unwrap();
-    c.execute_batch(MIGRATIONS[0]).unwrap();
-    c.execute_batch(
-        "INSERT INTO tracks(id, added_at) VALUES (1, 0), (2, 0);
-         INSERT INTO files(track_id, path, size, mtime_ns, content_hash) VALUES (1, x'61', 1, 1, x'07');
-         INSERT INTO beatgrids(id, track_id, source, beats, created_at) VALUES (5, 1, 'analysis', x'00', 0),
-                                                                            (6, 2, 'user', x'00', 0);
-         UPDATE tracks SET active_grid_id = id + 4;
-         INSERT INTO blobs(track_id, kind, format_version, data) VALUES (1, 'waveform', 1, x'00');
-         INSERT INTO track_features(track_id, name, value) VALUES (1, 'lufs', -9), (1, 'peak', 1),
-                                                                  (1, 'energy', 0.5);",
-    )
-    .unwrap();
-    c.execute_batch(MIGRATIONS[1]).unwrap();
-    let rows: Vec<(i64, String, u32, Option<Vec<u8>>)> = c
-        .prepare("SELECT track_id, analyser, version, content_hash FROM analysis_results ORDER BY 1, 2")
-        .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-        .unwrap()
-        .collect::<rusqlite::Result<_>>()
+fn an_old_development_database_is_refused() {
+    let (dir, w) = setup("older");
+    w.conn().pragma_update(None, "user_version", 2).unwrap();
+    drop(w);
+    let err = open_writer(&dir.join(FILE_NAME)).unwrap_err();
+    assert!(matches!(err, StoreError::TooOld { found: 2 }));
+    assert!(err.to_string().contains("delete library.db"), "{err}");
+}
+
+/// A steady grid is saved as its numbers (no beat list), a markers grid as its beats,
+/// and both come back exactly. The track's BPM is a steady grid's own.
+#[test]
+fn grids_are_saved_as_their_models() {
+    let (_dir, mut w, id) = one_track("models");
+    let c = Constant {
+        bpm: 128.37,
+        anchor: 12.3456789,
+        anchor_pos: 3,
+        meter: 4,
+    };
+    let steady = Beatgrid::from_model(GridModel::Constant(c), 300.0).unwrap();
+    let g = w.save_user_grid(id, &steady).unwrap();
+    let row: (String, f64, Option<f64>, Option<Vec<u8>>) = w
+        .conn()
+        .query_row(
+            "SELECT kind, bpm, anchor_s, beats FROM beatgrids WHERE id = ?1",
+            [g],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
         .unwrap();
-    let h = Some(vec![7u8]);
-    assert_eq!(
-        rows,
-        [
-            (1, "energy".into(), 1, h.clone()),
-            // An analysed grid of unknown version: kept, but stale. A hand-fixed one
-            // isn't an analysis result.
-            (1, "grid".into(), 0, h.clone()),
-            (1, "loudness".into(), 1, h.clone()),
-            (1, "waveform".into(), 1, h),
-        ]
+    assert_eq!(row, ("constant".into(), 128.37, Some(12.3456789), None));
+    assert_eq!(library(&mut w)[0].bpm, Some(128.37));
+    let (model, src) = read::grid(w.conn(), id).unwrap().unwrap();
+    assert_eq!((model, src), (GridModel::Constant(c), GridSource::User));
+
+    let markers = Beatgrid::new(vec![0.25, 0.75, 1.27, 1.76, 2.3], vec![4, 1, 2, 3, 4]).unwrap();
+    w.save_user_grid(id, &markers).unwrap();
+    let (model, _) = read::grid(w.conn(), id).unwrap().unwrap();
+    assert_eq!(model, markers.model());
+    assert_eq!(Beatgrid::from_model(model, 3.0).unwrap(), markers);
+    assert_eq!(library(&mut w)[0].bpm, Some(117.07), "the average, to 0.01");
+
+    // A row with the wrong columns for its kind can't be saved.
+    assert!(
+        w.conn()
+            .execute(
+                "INSERT INTO beatgrids(track_id, source, kind, bpm, beats, created_at)
+                 VALUES (?1, 'user', 'constant', 120, x'00', 0)",
+                [id],
+            )
+            .is_err()
     );
 }
 
@@ -309,7 +327,6 @@ fn analysis(track: i64, bpm: f64, expected: Option<i64>, force: bool) -> Analysi
         grid: Some(GridSave {
             grid: grid(bpm),
             source: GridSource::Analysis,
-            bpm,
             expected_active: expected,
             force,
         }),
@@ -478,7 +495,7 @@ fn analysis_of_a_new_track_sets_grid_bpm_and_thumbnail() {
         |e| matches!(e, StoreEvent::TracksChanged(t) if t[0].bpm == Some(125.0) && t[0].energy == Some(0.5))
     ));
     let (g, src) = read::grid(w.conn(), id).unwrap().unwrap();
-    assert_eq!((g.len(), src), (grid(125.0).len(), GridSource::Analysis));
+    assert_eq!((g, src), (grid(125.0).model(), GridSource::Analysis));
     assert!(
         read::waveform(w.conn(), id, earshot_engine::waveform::BINS_PER_SECOND)
             .unwrap()
@@ -1005,4 +1022,16 @@ fn a_grid_edit_doesnt_wait_for_the_database() {
         (t.bpm, t.grid_source),
         (Some(127.0), Some(GridSource::User))
     );
+    // Saved as a steady grid's numbers: the new tempo, the 1 where it was.
+    let (model, _) = store.reader.grid(id).unwrap().unwrap();
+    assert!(matches!(model, GridModel::Constant(c) if c.bpm == 127.0));
+    // Nudged and anchored: the anchor moves, the tempo stays exactly as typed.
+    player::edit_grid(&p, &store, deck, GridOp::Nudge(-10.0)).unwrap();
+    player::edit_grid(&p, &store, deck, GridOp::AnchorHere).unwrap();
+    store.call(|_| Ok(())).unwrap();
+    let (model, _) = store.reader.grid(id).unwrap().unwrap();
+    let GridModel::Constant(c) = model else {
+        panic!("{model:?}")
+    };
+    assert_eq!((c.bpm, c.anchor_pos), (127.0, 1));
 }

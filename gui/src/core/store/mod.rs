@@ -21,7 +21,7 @@ use earshot_engine::HOTCUES;
 use rusqlite::{Connection, OpenFlags};
 
 pub use read::{JobRow, LibTrack, Memory, Preview, ResultState, TrackCues};
-pub use write::{AnalysisSave, GridSave, ScannedFile, Writer};
+pub use write::{AnalysisSave, GridSave, ScannedFile, Writer, grid_bpm};
 
 use super::collections::{Collection, CollectionKind, FlowGraph, NodeId};
 
@@ -32,10 +32,13 @@ pub const WAVEFORM_VERSION: i64 = 1;
 /// scratch, and an old database is left alone rather than migrated.
 pub const FILE_NAME: &str = "library.db";
 
-const MIGRATIONS: &[&str] = &[
-    include_str!("../../../migrations/001_baseline.sql"),
-    include_str!("../../../migrations/002_analysis_results.sql"),
-];
+/// The whole schema. There are no migrations yet: development databases from before
+/// it are refused (see [`SCHEMA_VERSION`]).
+const BASELINE: &str = include_str!("../../../migrations/001_baseline.sql");
+
+/// `user_version` of a database made from [`BASELINE`]. Development builds used 1 and
+/// 2 (before beatgrids stored their model); those are refused, not converted.
+pub const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -46,13 +49,15 @@ pub enum StoreError {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("migration {step}: {source}")]
-    Migration {
-        step: usize,
-        source: rusqlite::Error,
-    },
+    #[error("creating the database: {0}")]
+    Create(rusqlite::Error),
     #[error("the database is from a newer earshot (schema {found}, this one knows {known})")]
-    TooNew { found: i64, known: usize },
+    TooNew { found: i64, known: i64 },
+    #[error(
+        "the database is from an older development build (schema {found}); \
+         delete {FILE_NAME} in the data folder to start a new library"
+    )]
+    TooOld { found: i64 },
     #[error("no track {0}")]
     NoTrack(i64),
     #[error("no Flow or folder {0}")]
@@ -417,27 +422,25 @@ fn open_writer(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Apply migrations in order; `user_version` records how many have run.
+/// Create the schema in a new database (`user_version` 0), and refuse any other
+/// version than [`SCHEMA_VERSION`].
 fn migrate(conn: &mut Connection) -> Result<()> {
-    let done: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if done > MIGRATIONS.len() as i64 {
-        return Err(StoreError::TooNew {
-            found: done,
-            known: MIGRATIONS.len(),
-        });
+    let found: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    match found {
+        0 => {
+            let tx = conn.transaction().map_err(StoreError::Create)?;
+            tx.execute_batch(BASELINE).map_err(StoreError::Create)?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(StoreError::Create)?;
+            tx.commit().map_err(StoreError::Create)
+        }
+        SCHEMA_VERSION => Ok(()),
+        found if found > SCHEMA_VERSION => Err(StoreError::TooNew {
+            found,
+            known: SCHEMA_VERSION,
+        }),
+        found => Err(StoreError::TooOld { found }),
     }
-    for (i, sql) in MIGRATIONS.iter().enumerate().skip(done as usize) {
-        let step = |source| StoreError::Migration {
-            step: i + 1,
-            source,
-        };
-        let tx = conn.transaction().map_err(step)?;
-        tx.execute_batch(sql).map_err(step)?;
-        tx.pragma_update(None, "user_version", (i + 1) as i64)
-            .map_err(step)?;
-        tx.commit().map_err(step)?;
-    }
-    Ok(())
 }
 
 /// Read-only connections, opened as needed and kept for reuse. The mutex is only
@@ -492,11 +495,11 @@ impl Reader {
         self.with(|c| read::track_path(c, id))
     }
 
-    /// The active grid and where it came from.
+    /// The active grid's model and where it came from.
     pub fn grid(
         &self,
         id: i64,
-    ) -> Result<Option<(earshot_engine::beatgrid::Beatgrid, GridSource)>> {
+    ) -> Result<Option<(earshot_engine::beatgrid::GridModel, GridSource)>> {
         self.with(|c| read::grid(c, id))
     }
 

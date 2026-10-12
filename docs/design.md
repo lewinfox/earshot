@@ -129,7 +129,17 @@ On-screen controls ───────┘        └──► feedback: UI sta
 
 ## Beatgrids
 
-A grid is **every beat stored individually**, each with its **position in the bar**
+A grid is saved as what it is meant to be (`GridModel` in `audio/src/beatgrid.rs`):
+
+- **Constant** (a steady track): a tempo and an anchor, "a 1 here, then a beat every
+  60 / bpm seconds", both ways, plus where the anchor is in the bar and the beats per
+  bar. Saved as those numbers (`beatgrids.kind = 'constant'`); the beats are worked
+  out from them, so edits change the numbers and never drift.
+- **Markers** (a drifting track): every detected beat, as below
+  (`kind = 'markers'`, the `beats` blob).
+
+The decks always use the beat list (`Beatgrid`), worked out from the model and kept,
+so lookups don't allocate. A markers grid is **every beat stored individually**, each with its **position in the bar**
 (1, 2, 3, 4 …). "Is this a 1-beat" is `position == 1`. Storing the position rather
 than a boolean costs nothing and handles odd-length bars. Rekordbox's own grid
 format is the same shape (per beat: time, tempo, beat number 1–4).
@@ -138,7 +148,7 @@ Tempo segments ("124.0 drifting to 126.3") are *derived* from the beats, for
 display, for suggestion scoring, and for export to Serato/Mixxx, whose formats are
 compressed marker lists.
 
-### Storage format (`beatgrids.beats` BLOB, v1)
+### Storage format (`beatgrids.beats` BLOB, v1; markers only)
 
 All little-endian. Struct-of-arrays so times can be read without touching positions.
 
@@ -178,10 +188,10 @@ Nearly all edits act on the whole grid:
 
 | Edit | Behaviour |
 |---|---|
-| Set BPM to *x* | Scale every inter-beat interval about an anchor beat so the mean tempo is *x*. Exact for a steady grid; preserves the drift shape of a drifting one. |
-| Nudge ±*ms* | Shift every beat. |
-| Set this beat as the 1 | Renumber bar positions in 4/4 outward from the chosen beat. |
-| Halve / double | Drop every other beat (keeping the 1s) / insert midpoints. |
+| Set BPM to *x* | Constant: the tempo becomes *x*, the anchor stays. Markers: scale every inter-beat interval about the beat nearest the playhead so the mean tempo is *x*, which keeps the drift's shape. |
+| Nudge ±*ms* | Constant: move the anchor. Markers: shift every beat. |
+| Set this beat as the 1 | Constant: anchor a 1 exactly at the playhead. Markers: shift the nearest beat onto it and renumber in 4/4 from it. |
+| Halve / double | Halve or double the tempo, keeping the 1s (markers: drop every other beat / insert midpoints). |
 
 After any edit the grid is re-extended or trimmed to cover the whole track. Moving a
 single beat is supported by the format but deliberately not a first-class tool.

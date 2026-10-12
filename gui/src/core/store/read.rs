@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use earshot_engine::HOTCUES;
-use earshot_engine::beatgrid::Beatgrid;
+use earshot_engine::beatgrid::{Beatgrid, Constant, GridModel};
 use earshot_engine::loudness::Loudness;
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -231,22 +231,56 @@ pub fn active_grid(c: &Connection, id: i64) -> Result<Option<(i64, GridSource)>>
     Ok(row.and_then(|(g, s)| Some((g, GridSource::parse(&s)?))))
 }
 
-pub fn grid(c: &Connection, id: i64) -> Result<Option<(Beatgrid, GridSource)>> {
-    let row: Option<(Vec<u8>, String)> = c
+/// The active grid's model and where it came from.
+pub fn grid(c: &Connection, id: i64) -> Result<Option<(GridModel, GridSource)>> {
+    type Row = (
+        String,
+        String,
+        f64,
+        Option<f64>,
+        Option<i64>,
+        Option<i64>,
+        Option<Vec<u8>>,
+    );
+    let row: Option<Row> = c
         .query_row(
-            "SELECT g.beats, g.source FROM tracks t JOIN beatgrids g ON g.id = t.active_grid_id
-             WHERE t.id = ?1",
+            "SELECT g.source, g.kind, g.bpm, g.anchor_s, g.anchor_pos, g.meter, g.beats
+             FROM tracks t JOIN beatgrids g ON g.id = t.active_grid_id WHERE t.id = ?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            },
         )
         .optional()?;
-    let Some((bytes, source)) = row else {
+    let Some((source, kind, bpm, anchor, anchor_pos, meter, beats)) = row else {
         return Ok(None);
     };
     let bad = |reason: String| StoreError::BadGrid { track: id, reason };
-    let grid = Beatgrid::from_bytes(&bytes).map_err(|e| bad(e.to_string()))?;
     let source = GridSource::parse(&source).ok_or_else(|| bad(format!("source {source}")))?;
-    Ok(Some((grid, source)))
+    let model = match (kind.as_str(), anchor, anchor_pos, meter, beats) {
+        ("constant", Some(anchor), Some(anchor_pos), Some(meter), None) => {
+            let small = |n: i64| u8::try_from(n).map_err(|_| bad(format!("bar position {n}")));
+            GridModel::Constant(Constant {
+                bpm,
+                anchor,
+                anchor_pos: small(anchor_pos)?,
+                meter: small(meter)?,
+            })
+        }
+        ("markers", None, None, None, Some(bytes)) => Beatgrid::from_bytes(&bytes)
+            .map_err(|e| bad(e.to_string()))?
+            .model(),
+        _ => return Err(bad(format!("a {kind} grid with the wrong columns set"))),
+    };
+    Ok(Some((model, source)))
 }
 
 pub(super) fn waveform_params(bins_per_s: f64) -> String {

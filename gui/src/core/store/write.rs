@@ -51,9 +51,9 @@ pub struct AnalysisSave {
 
 #[derive(Debug)]
 pub struct GridSave {
+    /// Saved as its model; the track's BPM comes from it ([`grid_bpm`]).
     pub grid: Beatgrid,
     pub source: GridSource,
-    pub bpm: f64,
     /// The active grid when the job started. The new grid only becomes the active
     /// one if that hasn't changed since (compare-and-set), so a grid fixed by hand
     /// while the job ran is kept.
@@ -412,13 +412,13 @@ impl Writer {
         };
         let mut switched = false;
         if let Some(g) = &s.grid {
-            let id = insert_grid(&tx, s.track, &g.grid, g.source, g.bpm, Some(run))?;
+            let id = insert_grid(&tx, s.track, &g.grid, g.source, Some(run))?;
             let current = read::active_grid(&tx, s.track)?;
             let hand_fixed = current.is_some_and(|(_, src)| src == GridSource::User);
             // Compare-and-set: only if nobody changed the grid while the job ran, and
             // never over a hand-fixed grid unless the user asked for this analysis.
             if current.map(|c| c.0) == g.expected_active && (g.force || !hand_fixed) {
-                activate_grid(&tx, s.track, id, g.bpm)?;
+                activate_grid(&tx, s.track, id, grid_bpm(&g.grid))?;
                 switched = true;
             }
         }
@@ -438,10 +438,9 @@ impl Writer {
     /// A grid fixed by hand: a new row, made active, with the track's BPM from it.
     /// The grid it replaces stays, so it can be gone back to.
     pub fn save_user_grid(&mut self, track: i64, grid: &Beatgrid) -> Result<i64> {
-        let bpm = (grid.mean_bpm() * 100.0).round() / 100.0;
         let tx = self.conn.transaction()?;
-        let id = insert_grid(&tx, track, grid, GridSource::User, bpm, None)?;
-        activate_grid(&tx, track, id, bpm)?;
+        let id = insert_grid(&tx, track, grid, GridSource::User, None)?;
+        activate_grid(&tx, track, id, grid_bpm(grid))?;
         tx.commit()?;
         self.tracks_changed(&[track])?;
         Ok(id)
@@ -999,18 +998,50 @@ fn put_waveform(c: &Connection, track: i64, data: &[u8]) -> Result<Vec<u8>> {
     Ok(preview)
 }
 
+/// A grid's BPM, as the track list shows it: a steady grid's own tempo, exactly; the
+/// average of a markers grid's beats, to 0.01.
+pub fn grid_bpm(grid: &Beatgrid) -> f64 {
+    match grid.as_constant() {
+        Some(c) => c.bpm,
+        None => (grid.mean_bpm() * 100.0).round() / 100.0,
+    }
+}
+
+/// Save a grid's model: a steady grid's numbers, or a markers grid's beats.
 fn insert_grid(
     c: &Connection,
     track: i64,
     grid: &Beatgrid,
     source: GridSource,
-    bpm: f64,
     run: Option<i64>,
 ) -> Result<i64> {
+    let bpm = grid_bpm(grid);
+    let (kind, anchor, anchor_pos, meter, beats) = match grid.as_constant() {
+        Some(k) => (
+            "constant",
+            Some(k.anchor),
+            Some(k.anchor_pos),
+            Some(k.meter),
+            None,
+        ),
+        None => ("markers", None, None, None, Some(grid.to_bytes())),
+    };
     c.execute(
-        "INSERT INTO beatgrids(track_id, source, run_id, bpm, beats, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![track, source.as_str(), run, bpm, grid.to_bytes(), now()],
+        "INSERT INTO beatgrids(track_id, source, run_id, kind, bpm, anchor_s, anchor_pos,
+                               meter, beats, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            track,
+            source.as_str(),
+            run,
+            kind,
+            bpm,
+            anchor,
+            anchor_pos,
+            meter,
+            beats,
+            now()
+        ],
     )?;
     Ok(c.last_insert_rowid())
 }

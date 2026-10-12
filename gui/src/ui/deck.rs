@@ -440,20 +440,9 @@ impl DeckUi {
     }
 
     fn bar_beat(&self, info: &DeckInfo) -> Option<String> {
-        let g = info.grid.as_ref()?;
-        let t = g.times();
-        if t.is_empty() || self.shown < t[0] {
-            return None;
-        }
-        let i = t
-            .partition_point(|&x| x <= self.shown + 1e-6)
-            .saturating_sub(1);
-        let bar = g.positions()[..=i]
-            .iter()
-            .filter(|&&p| p == 1)
-            .count()
-            .max(1);
-        Some(format!("{bar}.{} Bars", g.positions()[i]))
+        // Counts on before the first 1 and before 0 s (the lead-in): 0, -1 ….
+        let (bar, beat) = info.grid.as_ref()?.bar_beat(self.shown)?;
+        Some(format!("{bar}.{beat} Bars"))
     }
 
     // ---- the deck panel -----------------------------------------------------------------

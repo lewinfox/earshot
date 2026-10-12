@@ -310,7 +310,10 @@ pub fn load_track(player: &Player, lib: &Library, deck: DeckId, id: i64) -> Resu
     let analysed = stored.is_some();
     let first_beat = reader.first_beat(id).map_err(|e| e.to_string())?;
     let (grid, source) = match stored {
-        Some((g, src)) => (Some(g), src.label().to_string()),
+        Some((model, src)) => (
+            Some(Beatgrid::from_model(model, audio.duration()).map_err(|e| e.to_string())?),
+            src.label().to_string(),
+        ),
         None => grid_for_file(&path, &tags, audio.duration()),
     };
     // The library's title and artist, so the deck agrees with the track list.
@@ -400,6 +403,8 @@ pub fn edit_grid(player: &Player, store: &Store, deck: DeckId, op: GridOp) -> Re
         // No grid yet: start a 120 BPM one with its 1 at the playhead.
         None => Arc::new(Beatgrid::constant(120.0, playhead, duration).map_err(|e| e.to_string())?),
     };
+    // A steady grid's edits change its model (tempo, anchor); markers are scaled
+    // about the beat nearest the playhead.
     let nearest = grid
         .beat_at(playhead)
         .round()
@@ -408,13 +413,7 @@ pub fn edit_grid(player: &Player, store: &Store, deck: DeckId, op: GridOp) -> Re
         GridOp::SetBpm(bpm) if bpm > 20.0 && bpm < 400.0 => grid.with_bpm(bpm, nearest, duration),
         GridOp::SetBpm(_) => return Err("BPM out of range".into()),
         GridOp::Nudge(ms) => grid.nudged(ms / 1000.0, duration),
-        GridOp::AnchorHere => grid
-            .nudged(playhead - grid.times()[nearest], duration)
-            .map(|g| {
-                // Re-fitting may add beats at the start, so find the beat again.
-                let i = g.beat_at(playhead).round().clamp(0.0, (g.len() - 1) as f64) as usize;
-                g.with_downbeat(i)
-            }),
+        GridOp::AnchorHere => grid.anchored_at(playhead, duration),
         GridOp::Halve => grid.halved(duration),
         GridOp::Double => grid.doubled(duration),
     }

@@ -28,7 +28,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex};
 
 use earshot_engine::Command;
-use earshot_engine::beatgrid::Beatgrid;
+use earshot_engine::beatgrid::{Beatgrid, Constant, GridError, GridModel};
 use earshot_engine::decode::{self, TrackAudio};
 use earshot_engine::{energy, loudness, waveform};
 use serde::Deserialize;
@@ -36,7 +36,9 @@ use serde::Deserialize;
 use self::queue::{Batch, JobQueue, Lane, Req, Want};
 use self::registry::{AnalyserId, REGISTRY, RunsIn};
 use super::player::Player;
-use super::store::{AnalysisSave, GridSave, GridSource, JobRow, ResultState, Store, StoreCmd};
+use super::store::{
+    AnalysisSave, GridSave, GridSource, JobRow, ResultState, Store, StoreCmd, grid_bpm,
+};
 use super::track::AnalysisState;
 use super::worker_client::{
     self, GridData, GridMode, JobPriority, Role, Update, WorkerClient, WorkerConfig,
@@ -493,41 +495,14 @@ impl Shared {
             Some(Err(e)) => return Err(fail(e)),
             None => return Err(fail("the worker sent no grid".into())),
         };
-        let duration = audio.duration();
-        let (grid, bpm, source, min, max, steady) = match &reply.grid {
-            // One tempo: a straight grid with a 1 at the worker's downbeat.
-            GridData::Constant {
-                bpm,
-                downbeat,
-                steady,
-                ..
-            } => {
-                let g = Beatgrid::constant(*bpm, *downbeat, duration)
-                    .map_err(|e| fail(format!("worker returned an unusable tempo: {e}")))?;
-                (g, *bpm, GridSource::Analysis, *bpm, *bpm, *steady)
-            }
-            // Every detected beat, so the grid follows the drift. Its BPM is the average.
+        let (grid, source) = grid_from_result(&reply.grid, audio.duration())
+            .map_err(|e| fail(format!("worker returned an unusable grid: {e}")))?;
+        let bpm = grid_bpm(&grid);
+        let (min, max, steady) = match &reply.grid {
+            GridData::Constant { bpm, steady, .. } => (*bpm, *bpm, *steady),
             GridData::Markers {
-                beats,
-                beat_index,
-                is_downbeat,
-                min_bpm,
-                max_bpm,
-                ..
-            } => {
-                let g = Beatgrid::from_indexed(beats, beat_index, is_downbeat)
-                    .and_then(|g| g.refit(duration))
-                    .map_err(|e| fail(format!("worker returned an unusable grid: {e}")))?;
-                let bpm = (g.mean_bpm() * 100.0).round() / 100.0;
-                (
-                    g,
-                    bpm,
-                    GridSource::AnalysisDynamic,
-                    *min_bpm,
-                    *max_bpm,
-                    true,
-                )
-            }
+                min_bpm, max_bpm, ..
+            } => (*min_bpm, *max_bpm, true),
         };
         let drifts = grid_req.mode == Mode::Static && !steady;
 
@@ -546,7 +521,6 @@ impl Shared {
             Some(GridSave {
                 grid: grid.clone(),
                 source,
-                bpm,
                 expected_active: existing.map(|e| e.0),
                 force: grid_req.want == Want::Force,
             }),
@@ -570,6 +544,30 @@ impl Shared {
         );
         Ok(())
     }
+}
+
+/// The grid a worker's result describes, and where it came from. One tempo: a steady
+/// grid with a 1 at the worker's downbeat, saved as just those numbers. Otherwise
+/// every detected beat, so the grid follows the drift.
+fn grid_from_result(data: &GridData, duration: f64) -> Result<(Beatgrid, GridSource), GridError> {
+    Ok(match data {
+        GridData::Constant { bpm, downbeat, .. } => (
+            Beatgrid::from_model(
+                GridModel::Constant(Constant::new(*bpm, *downbeat)),
+                duration,
+            )?,
+            GridSource::Analysis,
+        ),
+        GridData::Markers {
+            beats,
+            beat_index,
+            is_downbeat,
+            ..
+        } => (
+            Beatgrid::from_indexed(beats, beat_index, is_downbeat)?.refit(duration)?,
+            GridSource::AnalysisDynamic,
+        ),
+    })
 }
 
 /// Whether analyser `a` still has to run for a track, given what it asked for, the
@@ -758,6 +756,49 @@ mod tests {
         assert_eq!(inner.session(untouched).state.cues.main, Some(12.25));
         // Every player got the grid, touched or not.
         assert!(inner.decks[..2].iter().all(|d| d.grid.is_some()));
+    }
+
+    #[test]
+    fn worker_results_become_grid_models() {
+        let constant = GridData::Constant {
+            bpm: 123.45,
+            downbeat: 30.07,
+            steady: true,
+            spread_ms: 3.0,
+            drift_pct: 0.1,
+        };
+        let (g, source) = grid_from_result(&constant, 200.0).unwrap();
+        assert_eq!(source, GridSource::Analysis);
+        assert_eq!(
+            g.model(),
+            GridModel::Constant(Constant::new(123.45, 30.07)),
+            "exactly the worker's tempo and downbeat"
+        );
+        assert_eq!(
+            grid_bpm(&g),
+            123.45,
+            "the track's BPM is the grid's, unrounded"
+        );
+
+        let beats: Vec<f64> = (0..40).map(|i| 4.02 + i as f64 * 0.48).collect();
+        let markers = GridData::Markers {
+            beat_index: (0..40).collect(),
+            is_downbeat: (0..40).map(|i| i % 4 == 1).collect(),
+            beats: beats.clone(),
+            median_bpm: 125.0,
+            min_bpm: 124.0,
+            max_bpm: 126.0,
+        };
+        let (g, source) = grid_from_result(&markers, 60.0).unwrap();
+        assert_eq!(source, GridSource::AnalysisDynamic);
+        assert!(g.as_constant().is_none());
+        // The detected beats are kept, and the grid carried on to cover the track.
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(beats.iter().all(|&b| g.times().iter().any(|&t| near(t, b))));
+        assert!(g.times()[0] < 0.48 && *g.times().last().unwrap() > 59.5);
+        let one = g.times().iter().position(|&t| near(t, 4.5)).unwrap();
+        assert_eq!(g.positions()[one], 1);
+        assert_eq!(grid_bpm(&g), 125.0);
     }
 
     #[test]
