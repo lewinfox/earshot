@@ -131,3 +131,99 @@ See decision 5.
    graphs and histograms for now. "Normalise tempo" in the track menu opens the tab
    with the track loaded. Port tempo-lock (`../tempo-lock/`) into the worker by
    copying its modules and tests, as docs/design.md says.
+
+## Phase A: what landed
+
+The app works as before inside the new layout. Every colour is in `ui/theme.rs`.
+
+### Module layout
+
+```
+core/
+  view.rs        Mode, Source, Aside, Tool, Modal, Pane, Region, ViewCmd: what's on
+                 screen, as plain data (no egui)
+  settings.rs    deck and audio settings in the Store's `settings` table (JSON)
+  services.rs    Services: database path, null audio, worker launcher, MIDI on/off
+  command.rs     + AppCmd (reconnect MIDI, dismiss failures); ViewCmd moved to view.rs
+ui/
+  app.rs         the shell: EarshotApp, new(cc, Services), dispatch, update, draw
+  app/           the shell's command handlers: events.rs, library_ops.rs,
+                 preview.rs, input.rs (keys), frame.rs (engine read, repaint), tests.rs
+  theme.rs       Theme + THEME, CUE_PALETTE, rgb()
+  prefs.rs       UiPrefs (one eframe key, "earshot.ui")
+  views/         mod.rs (Panels, show), perform.rs, prepare.rs
+  panels/        mod.rs (Panel, Cx, CoreView, EngineFrame, PreviewState, resized)
+    deck/        mod.rs (DeckUi + DeckPanel, WavePanel, PreparePlayer, CuePane), wave.rs
+    library/     mod.rs (LibraryPane: icon stacks + panes), browser.rs (tree, track
+                 list), collections.rs, suggest.rs, tracks.rs (track menu, Media)
+    flow/        mod.rs (today's canvas, unchanged)
+    mixer.rs     + MixerPanel
+    status.rs    TopBar, MidiLog, AnalysisSummary
+  widgets/       knob, fader, button, meter, chips (key_chip), icon_stack, tool_tabs
+  modals/        mod.rs (Modals stack), audio.rs, keys.rs
+```
+
+### Panel and Cx
+
+```rust
+pub trait Panel { fn ui(&mut self, ui: &mut Ui, cx: &mut Cx); }
+
+pub struct Cx<'a> {
+    pub core: CoreView<'a>,      // library index, history, collections, open Flow
+    pub engine: &'a EngineFrame, // snapshot, each player's DeckInfo, preview: read once a frame
+    pub theme: &'a Theme,
+    pub prefs: &'a UiPrefs,      // read only; change them by command
+    pub out: &'a mut Vec<Command>,
+}
+```
+
+- Panels keep their own view state (selection, scroll, text being typed, the Flow's
+  camera). Everything else goes out as a `Command` (`cx.send(..)`), and the shell's
+  `dispatch` carries it out after the frame. Mode, layout, focus, windows, zoom and
+  panel sizes are `ViewCmd`s.
+- A panel that needs layout numbers (a deck's width and side) is a small struct
+  holding `&mut` its state plus those numbers, e.g. `DeckPanel { deck, width,
+  height, side }`.
+- `EngineFrame::deck(id)` gives a player's `DeckInfo`; `cx.engine.snap` the engine
+  snapshot. Don't lock the player in a panel.
+- `UiPrefs` holds the mode, a `Layout` per mode (source, aside, tool, panel sizes),
+  wave zoom, UI scale, the 2/4 deck toggle (not used yet) and the Flow's saved
+  camera. Audio settings and tempo ranges are in the Store (`core::settings`); the
+  old eframe keys are no longer read, so the audio device is picked again once.
+
+### Extension points
+
+- **A library source (left icon stack):** add a variant to `core::view::Source`, an
+  item to `SOURCES` in `panels/library/mod.rs`, and an arm in `LibraryPane::source`.
+  `StackItem { enabled: false, .. }` greys out a placeholder.
+- **A right-hand pane (right icon stack):** `core::view::Aside`, `ASIDES`, and
+  `LibraryPane::aside`. The Flow editor's suggestions can be another stack built the
+  same way (`widgets::icon_stack`, `Opens::Left`).
+- **A Prepare tool tab:** a variant of `core::view::Tool`, an entry in `TOOLS` in
+  `views/prepare.rs`, and an arm in `views::prepare::tool`. Today only "Cues & Grid".
+- **A modal:** a variant of `core::view::Modal`, a module in `modals/`, an arm in
+  `Modals::show` (and in `Modals::open` if it should start afresh). Open it with
+  `ViewCmd::ToggleModal`.
+- **A command for the UI:** a `ViewCmd` (screen state) or `AppCmd`, handled in
+  `EarshotApp::view_cmd` / `dispatch_ui`.
+- **A colour:** a field on `Theme`. Panels read `cx.theme`; code without a `Cx`
+  (widgets) reads `THEME`.
+
+### Tests and repaint
+
+- `ui/app/tests.rs` starts the whole app with `Services { null_audio: true, worker:
+  stand_in, midi: false, db: <temp> }` on four generated WAV tracks, analysed by the
+  stand-in worker (`worker_client::testing::stand_in`, needs `python3`). They run in
+  `cargo test`. With `EARSHOT_SHOT=/tmp/shot.png` each writes
+  `/tmp/shot-<test>.png` (perform, prepare, flow).
+- The app asks for a frame only while something moves (a deck, Prepare's player or
+  the preview playing, a preview decoding, a load, a scrub, analysis) and for 0.5 s
+  after. Otherwise input or an event wakes it: every `Sink` event requests a repaint.
+
+### Not the same as before
+
+- The library's left pane and the suggestions pane now sit beside icon stacks; the
+  suggestions pane can be closed. Panel sizes are per mode and start from defaults
+  once (new panel ids).
+- Prepare's tool row is 34 points taller (the tab bar).
+- The frame-time readout shows the real (low) idle rate, since idle frames stop.
