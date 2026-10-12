@@ -3,59 +3,36 @@
 //! and on the right the BPM, SYNC and a tempo fader with nudge buttons. Its scrolling
 //! waveform is drawn separately, in the stacked row above the decks.
 //!
-//! Drawing reads the engine's atomics directly; every button becomes an [`Action`] the
-//! app applies after the frame, through the same control bus as keyboard and MIDI.
+//! Drawing reads the engine's snapshot; every button becomes a [`Command`] (from the
+//! control registry, where there is a control for it) that the app dispatches after
+//! the frame, the same way as keyboard and MIDI.
 
 use std::f32::consts::TAU;
 use std::sync::Arc;
 
-use earshot_engine::{HOTCUES, LEAD_IN, TempoRange};
 use earshot_engine::beatgrid::Beatgrid;
-use earshot_engine::DeckSnap;
+use earshot_engine::{DeckCmd as EngineCmd, DeckId, DeckSnap, LEAD_IN, Set, TempoRange};
 
-use crate::core::player::DECKS;
 use egui::{
-    Align, Color32, CornerRadius, FontId, Layout, Rect, RichText, Sense, Stroke,
-    StrokeKind, Ui, pos2, vec2,
+    Align, Color32, CornerRadius, FontId, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Ui,
+    pos2, vec2,
 };
 
 use super::controls::{Fader, HwButton, Icon, Range, held};
 use super::library_ui::Track;
 use super::util::{self, Camelot};
 use super::wave::{self, DeckWave, Marks};
-use crate::core::controls::CHANNELS;
-use crate::core::store::Memory;
+use crate::core::bus::{Control, DeckControl, JUMP_STEPS, deck_letter};
+use crate::core::command::{Command, DeckCmd, MixerCmd};
 use crate::core::player::GridOp;
+use crate::core::store::Memory;
 
-pub enum Action {
-    Control {
-        group: &'static str,
-        key: String,
-        value: f64,
-    },
-    Grid {
-        deck: usize,
-        op: GridOp,
-    },
-    Load {
-        deck: usize,
-        track_id: i64,
-    },
-    TempoRange {
-        deck: usize,
-        range: TempoRange,
-    },
-    /// Save the deck's cue point (or its loop, while looping) as a memory cue.
-    SaveMemory {
-        deck: usize,
-    },
-    RecallMemory {
-        deck: usize,
-        memory: Memory,
-    },
-    DeleteMemory {
-        id: i64,
-    },
+/// Which side of the mixer a deck sits on. Its tempo fader goes on the outside edge
+/// and its controls run outwards from the mixer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Side {
+    Left,
+    Right,
 }
 
 /// What a deck shows this frame, gathered by the app.
@@ -71,6 +48,11 @@ pub struct DeckInfo {
     pub key: Option<Camelot>,
     /// (progress, stage) while this track is being analysed.
     pub analysing: Option<(f64, String)>,
+    /// Beats a beat jump moves, and the loop button loops (from the deck's session).
+    pub jump_size: f64,
+    pub loop_size: f64,
+    /// Synced decks follow this one (the mixer's chosen sync leader).
+    pub leader: bool,
 }
 
 /// A track asked for but still decoding. The deck shows its details from the library
@@ -114,61 +96,14 @@ impl PendingLoad {
             tag_bpm: self.bpm,
             key: self.key,
             analysing: None,
+            jump_size: 4.0,
+            loop_size: 4.0,
+            leader: false,
         }
     }
 }
 
-/// One snapshot of the engine's deck state.
-#[derive(Default, Clone, Copy)]
-struct State {
-    position: f64,
-    duration: f64,
-    playing: bool,
-    speed: f64,
-    tempo: f64,
-    rate: f64,
-    range: TempoRange,
-    /// The tempo fader's position, and whether it's in control (see
-    /// `DeckSnap::fader`).
-    fader: f64,
-    fader_live: bool,
-    bpm: Option<f64>,
-    sync: bool,
-    quantize: bool,
-    keylock: bool,
-    loop_in: Option<f64>,
-    loop_out: Option<f64>,
-    loop_active: bool,
-    cue: f64,
-    hotcues: [Option<f64>; HOTCUES],
-    generation: u64,
-}
-
-fn read(sh: &DeckSnap) -> State {
-    State {
-        position: sh.position,
-        duration: sh.duration,
-        playing: sh.playing,
-        speed: sh.speed,
-        tempo: sh.tempo,
-        rate: sh.rate,
-        range: sh.range,
-        fader: sh.fader,
-        fader_live: sh.fader_live,
-        bpm: sh.bpm,
-        sync: sh.sync,
-        quantize: sh.quantize,
-        keylock: sh.keylock,
-        loop_in: sh.loop_in,
-        loop_out: sh.loop_out,
-        loop_active: sh.loop_active,
-        cue: sh.cue_point,
-        hotcues: sh.hotcues,
-        generation: sh.generation,
-    }
-}
-
-/// The tempo fader, in the control bus's units (-1..1 across the deck's range), and
+/// The tempo fader, in the registry's units (-1..1 across the deck's range), and
 /// the range markings beside it (it runs minus at the top, like Mixxx's).
 fn tempo_fader(range: TempoRange) -> (&'static Range, &'static [(f64, &'static str)]) {
     const fn fader(format: fn(f64) -> String) -> Range {
@@ -206,10 +141,6 @@ const TRANSPORT: f32 = BTN_H;
 const CONTROLS_H: f32 = 2.0 * BTN_H + 4.0;
 /// The jog ring (with the BPM in it) fills the height of the controls.
 const JOG: f32 = CONTROLS_H;
-/// Beat jump steps to pick from.
-const JUMP_STEPS: [f64; 6] = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
-const SIZES: [f64; 9] = [0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
-
 const CUE_COLOUR: Color32 = Color32::from_rgb(0xf0, 0xa0, 0x30);
 const PLAY_COLOUR: Color32 = Color32::from_rgb(0x4f, 0xd4, 0x7a);
 const LOOP_COLOUR: Color32 = Color32::from_rgb(0x3c, 0xd3, 0x6b);
@@ -222,18 +153,8 @@ fn size_label(s: f64) -> String {
     }
 }
 
-/// The next size up (`dir` 1) or down (-1) in [`SIZES`].
-fn step_size(s: f64, dir: i32) -> f64 {
-    let i = SIZES
-        .iter()
-        .position(|&x| x >= s)
-        .unwrap_or(SIZES.len() - 1) as i32;
-    SIZES[(i + dir).clamp(0, SIZES.len() as i32 - 1) as usize]
-}
-
 pub struct DeckUi {
-    pub index: usize,
-    group: &'static str,
+    pub id: DeckId,
     /// Smoothed playhead used for drawing.
     shown: f64,
     seen_generation: u64,
@@ -241,31 +162,30 @@ pub struct DeckUi {
     scrub: Option<(f32, f64, bool)>,
     pub wave: Option<DeckWave>,
     grid_mode: bool,
-    /// Width of the controls row last frame, to right-align deck 1's.
+    /// Width of the controls row last frame, to right-align a left deck's.
     controls_w: f32,
+    /// Where it was drawn last (see [`DeckUi::show`]).
+    side: Side,
     bpm_text: String,
-    jump_size: f64,
-    loop_size: f64,
-    state: State,
+    /// The engine's state for this frame.
+    state: DeckSnap,
     /// A load in progress; see [`PendingLoad`].
     pending: Option<PendingLoad>,
 }
 
 impl DeckUi {
-    pub fn new(index: usize) -> DeckUi {
+    pub fn new(id: DeckId) -> DeckUi {
         DeckUi {
-            index,
-            group: CHANNELS[index],
+            id,
             shown: 0.0,
             seen_generation: u64::MAX,
             scrub: None,
             wave: None,
             grid_mode: false,
             controls_w: 0.0,
+            side: Side::Left,
             bpm_text: String::new(),
-            jump_size: 4.0,
-            loop_size: 4.0,
-            state: State::default(),
+            state: DeckSnap::default(),
             pending: None,
         }
     }
@@ -298,21 +218,27 @@ impl DeckUi {
     }
 
     fn colour(&self) -> Color32 {
-        util::DECK[self.index]
+        util::deck_colour(self.id)
     }
 
-    fn control(&self, actions: &mut Vec<Action>, key: &str, value: f64) {
-        actions.push(Action::Control {
-            group: self.group,
-            key: key.into(),
-            value,
-        });
+    /// Send what one of this deck's controls sends for `value`.
+    fn control(&self, out: &mut Vec<Command>, c: DeckControl, value: f64) {
+        out.extend(Control::Deck(self.id, c).command(value));
+    }
+
+    /// A deck command that isn't a registry control.
+    fn send(&self, out: &mut Vec<Command>, c: DeckCmd) {
+        out.push(Command::Deck(self.id, c));
+    }
+
+    /// A deck command straight for the engine.
+    fn engine(&self, out: &mut Vec<Command>, c: EngineCmd) {
+        self.send(out, DeckCmd::Engine(c));
     }
 
     /// Read the engine and advance the smoothed playhead. Once per frame, before drawing.
     pub fn tick(&mut self, ctx: &egui::Context, sh: Option<&DeckSnap>, info: &DeckInfo) {
-        let Some(sh) = sh else { return };
-        let s = read(sh);
+        let Some(&s) = sh else { return };
         let dt = ctx.input(|i| i.stable_dt).min(0.1) as f64;
         if self.scrub.is_none() {
             let next = if s.playing {
@@ -334,7 +260,7 @@ impl DeckUi {
             self.wave = (!info.detail.is_empty()).then(|| {
                 DeckWave::new(
                     ctx,
-                    &format!("overview-{}", self.index),
+                    &format!("overview-{}", self.id.index()),
                     info.waveform.clone(),
                     info.detail.clone(),
                 )
@@ -345,7 +271,7 @@ impl DeckUi {
     fn marks<'a>(&self, info: &'a DeckInfo, hotcues: &'a [Option<f64>]) -> Marks<'a> {
         Marks {
             grid: info.grid.as_deref(),
-            cue: self.state.cue,
+            cue: self.state.cue_point,
             hotcues,
             loop_range: self.state.loop_in.zip(self.state.loop_out),
             loop_active: self.state.loop_active,
@@ -377,17 +303,14 @@ impl DeckUi {
         height: f32,
         info: &DeckInfo,
         half_window: &mut f64,
-        actions: &mut Vec<Action>,
+        out: &mut Vec<Command>,
     ) {
         let (rect, resp) =
             ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click_and_drag());
         if self.pending.is_some() {
             self.loading(ui, rect);
             if let Some(id) = resp.dnd_release_payload::<i64>() {
-                actions.push(Action::Load {
-                    deck: self.index,
-                    track_id: *id,
-                });
+                self.send(out, DeckCmd::Load(*id));
             }
             return;
         }
@@ -423,7 +346,7 @@ impl DeckUi {
             let x = resp.interact_pointer_pos().map_or(0.0, |p| p.x);
             self.scrub = Some((x, self.shown, self.state.playing));
             if self.state.playing {
-                self.control(actions, "play", 0.0);
+                self.engine(out, EngineCmd::Play(Set::Off));
             }
         }
         if let (Some((x0, t0, _)), Some(p)) = (self.scrub, resp.interact_pointer_pos())
@@ -432,11 +355,11 @@ impl DeckUi {
             let t = (t0 - (p.x - x0) as f64 * (2.0 * half / rect.width() as f64))
                 .clamp(-LEAD_IN, duration);
             self.shown = t;
-            self.control(actions, "playposition", t / duration);
+            self.control(out, DeckControl::Position, t / duration);
         }
         if resp.drag_stopped() {
             if let Some((_, _, true)) = self.scrub {
-                self.control(actions, "play", 1.0);
+                self.engine(out, EngineCmd::Play(Set::On));
             }
             self.scrub = None;
         }
@@ -448,10 +371,7 @@ impl DeckUi {
             }
         }
         if let Some(id) = resp.dnd_release_payload::<i64>() {
-            actions.push(Action::Load {
-                deck: self.index,
-                track_id: *id,
-            });
+            self.send(out, DeckCmd::Load(*id));
         }
     }
 
@@ -480,9 +400,11 @@ impl DeckUi {
         ui: &mut Ui,
         width: f32,
         height: f32,
+        side: Side,
         info: &DeckInfo,
-        actions: &mut Vec<Action>,
+        out: &mut Vec<Command>,
     ) {
+        self.side = side;
         let loading = self.pending.as_ref().map(PendingLoad::info);
         let info = loading.as_ref().unwrap_or(info);
         let frame = egui::Frame::new()
@@ -498,10 +420,10 @@ impl DeckUi {
                 ui.spacing_mut().item_spacing = vec2(4.0, 5.0);
                 let left = inner - TEMPO_W - 8.0;
                 let inner_h = height - 12.0;
-                // The tempo fader on the outside edge: deck 1's left, deck 2's right.
+                // The tempo fader on the outside edge.
                 ui.horizontal_top(|ui| {
-                    if self.index == 0 {
-                        self.tempo(ui, actions, inner_h);
+                    if side == Side::Left {
+                        self.tempo(ui, info, out, inner_h);
                         ui.add_space(4.0);
                     }
                     ui.vertical(|ui| {
@@ -511,14 +433,14 @@ impl DeckUi {
                         // The overview takes what the header and controls leave, so the
                         // controls sit on the bottom edge.
                         let used = ui.cursor().min.y - top;
-                        let overview_h = (inner_h - used - CONTROLS_H - ui.spacing().item_spacing.y)
-                            .max(24.0);
-                        self.overview(ui, info, actions, overview_h);
-                        self.controls(ui, info, actions);
+                        let overview_h =
+                            (inner_h - used - CONTROLS_H - ui.spacing().item_spacing.y).max(24.0);
+                        self.overview(ui, info, out, overview_h);
+                        self.controls(ui, info, out);
                     });
-                    if self.index == 1 {
+                    if side == Side::Right {
                         ui.add_space(4.0);
-                        self.tempo(ui, actions, inner_h);
+                        self.tempo(ui, info, out, inner_h);
                     }
                 });
             })
@@ -532,10 +454,7 @@ impl DeckUi {
             );
         }
         if let Some(id) = resp.dnd_release_payload::<i64>() {
-            actions.push(Action::Load {
-                deck: self.index,
-                track_id: *id,
-            });
+            self.send(out, DeckCmd::Load(*id));
         }
     }
 
@@ -549,7 +468,7 @@ impl DeckUi {
         height: f32,
         info: &DeckInfo,
         memories: &[Memory],
-        actions: &mut Vec<Action>,
+        out: &mut Vec<Command>,
     ) {
         let loading = self.pending.as_ref().map(PendingLoad::info);
         let info = loading.as_ref().unwrap_or(info);
@@ -568,16 +487,16 @@ impl DeckUi {
                 let used = ui.cursor().min.y - top;
                 let overview_h =
                     (inner_h - used - CONTROLS_H - ui.spacing().item_spacing.y).max(24.0);
-                self.overview(ui, info, actions, overview_h);
+                self.overview(ui, info, out, overview_h);
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing = vec2(3.0, 4.0);
-                    self.transport(ui, actions);
+                    self.transport(ui, out);
                     ui.add_space(6.0);
-                    self.pads(ui, actions);
+                    self.pads(ui, out);
                     ui.add_space(6.0);
-                    self.loops(ui, actions);
+                    self.loops(ui, info, out);
                     ui.add_space(6.0);
-                    self.jumps(ui, actions);
+                    self.jumps(ui, info, out);
                     ui.add_space(10.0);
                     ui.vertical(|ui| {
                         ui.set_height(CONTROLS_H);
@@ -590,20 +509,20 @@ impl DeckUi {
                                     .lit(s.quantize),
                             )
                             .on_hover_text("Quantise: snap cues, loops and hot cues to the beat");
-                        if r.clicked() {
-                            self.control(actions, "quantize", if s.quantize { 0.0 } else { 1.0 });
+                        if held(ui, &r) == Some(true) {
+                            self.control(out, DeckControl::Quantize, 1.0);
                         }
-                        self.grid_editor(ui, info, actions);
+                        self.grid_editor(ui, info, out);
                     });
                     ui.add_space(10.0);
-                    self.memory_list(ui, memories, actions);
+                    self.memory_list(ui, memories, out);
                 });
             });
     }
 
     /// The track's memory cues and loops: click one to go there, × to forget it.
-    fn memory_list(&mut self, ui: &mut Ui, memories: &[Memory], actions: &mut Vec<Action>) {
-        let deck = self.index;
+    fn memory_list(&mut self, ui: &mut Ui, memories: &[Memory], out: &mut Vec<Command>) {
+        let deck = self.id;
         ui.vertical(|ui| {
             ui.set_height(CONTROLS_H);
             ui.horizontal(|ui| {
@@ -613,11 +532,11 @@ impl DeckUi {
                     .on_hover_text("Save the cue point, or the loop while looping (M)")
                     .clicked()
                 {
-                    actions.push(Action::SaveMemory { deck });
+                    out.push(Command::Deck(deck, DeckCmd::SaveMemory));
                 }
             });
             egui::ScrollArea::vertical()
-                .id_salt(("memories", deck))
+                .id_salt(("memories", deck.index()))
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     if memories.is_empty() {
@@ -637,7 +556,11 @@ impl DeckUi {
                                 ),
                                 None => format!("● {}", util::fmt_tenths(m.start)),
                             };
-                            let colour = if m.end.is_some() { LOOP_COLOUR } else { util::WARN };
+                            let colour = if m.end.is_some() {
+                                LOOP_COLOUR
+                            } else {
+                                util::WARN
+                            };
                             if ui
                                 .add(
                                     egui::Label::new(
@@ -648,7 +571,7 @@ impl DeckUi {
                                 .on_hover_text("Go here")
                                 .clicked()
                             {
-                                actions.push(Action::RecallMemory { deck, memory: *m });
+                                out.push(Command::Deck(deck, DeckCmd::RecallMemory(*m)));
                             }
                             if ui
                                 .add(
@@ -658,7 +581,7 @@ impl DeckUi {
                                 .on_hover_text("Forget this one")
                                 .clicked()
                             {
-                                actions.push(Action::DeleteMemory { id: m.id });
+                                out.push(Command::Deck(deck, DeckCmd::DeleteMemory(m.id)));
                             }
                         });
                     }
@@ -675,9 +598,9 @@ impl DeckUi {
         };
         ui.horizontal(|ui| {
             // Deck number (Prepare's single player has none).
-            if self.index < DECKS {
+            if !self.id.is_prepare() {
                 ui.label(
-                    RichText::new((self.index + 1).to_string())
+                    RichText::new((self.id.index() + 1).to_string())
                         .strong()
                         .size(16.0)
                         .color(self.colour()),
@@ -764,7 +687,11 @@ impl DeckUi {
         );
         if self.pending.is_none() {
             let a = ((self.shown / 1.8).fract() as f32) * TAU - TAU / 4.0;
-            p.circle_filled(c + vec2(a.cos(), a.sin()) * r, 3.5, Color32::from_rgb(0xe8, 0x3a, 0x3a));
+            p.circle_filled(
+                c + vec2(a.cos(), a.sin()) * r,
+                3.5,
+                Color32::from_rgb(0xe8, 0x3a, 0x3a),
+            );
         }
         let bpm = match &self.pending {
             Some(pl) => pl.bpm.map(|b| b * (1.0 + s.rate)),
@@ -803,11 +730,9 @@ impl DeckUi {
         p.galley(pos2(c.x - w / 2.0 + pct.size().x, y), range, self.colour());
     }
 
-    fn overview(&mut self, ui: &mut Ui, info: &DeckInfo, actions: &mut Vec<Action>, height: f32) {
-        let (rect, resp) = ui.allocate_exact_size(
-            vec2(ui.available_width(), height),
-            Sense::click_and_drag(),
-        );
+    fn overview(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>, height: f32) {
+        let (rect, resp) =
+            ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click_and_drag());
         if self.pending.is_some() {
             self.loading(ui, rect);
             return;
@@ -826,18 +751,15 @@ impl DeckUi {
         if (resp.clicked() || resp.dragged())
             && let Some(p) = resp.interact_pointer_pos()
         {
-            self.control(
-                actions,
-                "playposition",
-                ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64,
-            );
+            let at = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64;
+            self.control(out, DeckControl::Position, at);
         }
     }
 
     /// CUE / play and the BPM ring nearest the mixer (like Rekordbox), then the hot cue
-    /// pads (or the grid editor), loops and beat jumps towards the outside. Deck 1's
-    /// row is right-aligned, with those groups in the opposite order.
-    fn controls(&mut self, ui: &mut Ui, info: &DeckInfo, actions: &mut Vec<Action>) {
+    /// pads (or the grid editor), loops and beat jumps towards the outside. A left
+    /// deck's row is right-aligned, with those groups in the opposite order.
+    fn controls(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
         #[derive(Clone, Copy)]
         enum Part {
             Transport,
@@ -858,7 +780,7 @@ impl DeckUi {
             outer.extend([Pads, Gap(6.0), Loops, Gap(6.0), Jumps]);
         }
         outer.extend([Gap(6.0), GridButton]);
-        let mirrored = self.index == 0;
+        let mirrored = self.side == Side::Left;
         let parts: Vec<Part> = if mirrored {
             outer.into_iter().rev().chain(centre).collect()
         } else {
@@ -873,14 +795,14 @@ impl DeckUi {
             let start = ui.cursor().min.x;
             for part in parts {
                 match part {
-                    Transport => self.transport(ui, actions),
-                    Pads => self.pads(ui, actions),
-                    Loops => self.loops(ui, actions),
-                    Jumps => self.jumps(ui, actions),
+                    Transport => self.transport(ui, out),
+                    Pads => self.pads(ui, out),
+                    Loops => self.loops(ui, info, out),
+                    Jumps => self.jumps(ui, info, out),
                     GridEditor => {
                         ui.vertical(|ui| {
                             ui.set_height(CONTROLS_H);
-                            self.grid_editor(ui, info, actions);
+                            self.grid_editor(ui, info, out);
                         });
                     }
                     GridButton => {
@@ -903,21 +825,21 @@ impl DeckUi {
     }
 
     /// One unit, like Rekordbox's: CUE above play, and the BPM ring to their right.
-    fn transport(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+    fn transport(&mut self, ui: &mut Ui, out: &mut Vec<Command>) {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            self.cue_play(ui, actions);
+            self.cue_play(ui, out);
             self.jog(ui);
         });
     }
 
-    fn cue_play(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+    fn cue_play(&mut self, ui: &mut Ui, out: &mut Vec<Command>) {
         ui.vertical(|ui| {
             let size = vec2(TRANSPORT, TRANSPORT);
             // CUE lights while the deck sits at its cue point, ready to go.
             let at_cue = !self.state.playing
                 && self.state.duration > 0.0
-                && (self.state.position - self.state.cue).abs() < 0.01;
+                && (self.state.position - self.state.cue_point).abs() < 0.01;
             let r = ui
                 .add(
                     HwButton::new("CUE", CUE_COLOUR, size)
@@ -928,7 +850,7 @@ impl DeckUi {
                 )
                 .on_hover_text("Cue: set, or jump back and preview while held");
             if let Some(d) = held(ui, &r) {
-                self.control(actions, "cue_default", d as u8 as f64);
+                self.control(out, DeckControl::Cue, d as u8 as f64);
             }
             let playing = self.state.playing;
             let r = ui
@@ -942,14 +864,14 @@ impl DeckUi {
                 )
                 .on_hover_text("Play / pause");
             if held(ui, &r) == Some(true) {
-                self.control(actions, "play", if playing { 0.0 } else { 1.0 });
+                self.control(out, DeckControl::Play, 1.0);
             }
         });
     }
 
-    fn pads(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+    fn pads(&mut self, ui: &mut Ui, out: &mut Vec<Command>) {
         let shift = ui.input(|i| i.modifiers.shift);
-        egui::Grid::new(("pads", self.index))
+        egui::Grid::new(("pads", self.id.index()))
             .spacing(vec2(3.0, 4.0))
             .show(ui, |ui| {
                 for row in 0..2 {
@@ -972,15 +894,14 @@ impl DeckUi {
                                     .tinted(set.is_some()),
                             )
                             .on_hover_text(tip);
+                        let slot = i as u8;
                         match held(ui, &r) {
                             Some(true) if shift => {
-                                self.control(actions, &format!("hotcue_{}_clear", i + 1), 1.0)
+                                self.control(out, DeckControl::HotcueClear(slot), 1.0)
                             }
-                            Some(down) => self.control(
-                                actions,
-                                &format!("hotcue_{}_activate", i + 1),
-                                down as u8 as f64,
-                            ),
+                            Some(down) => {
+                                self.control(out, DeckControl::Hotcue(slot), down as u8 as f64)
+                            }
                             None => {}
                         }
                     }
@@ -989,17 +910,17 @@ impl DeckUi {
             });
     }
 
-    /// A loop button `w` wide that sends `key` 1 on press and 0 on release.
+    /// A loop button `w` wide that sends `control` 1 on press and 0 on release.
     #[allow(clippy::too_many_arguments)]
     fn hold_button(
         &self,
         ui: &mut Ui,
         w: f32,
         label: &str,
-        key: &str,
+        control: DeckControl,
         lit: bool,
         tip: &str,
-        actions: &mut Vec<Action>,
+        out: &mut Vec<Command>,
     ) {
         let r = ui
             .add(
@@ -1009,22 +930,26 @@ impl DeckUi {
             )
             .on_hover_text(tip);
         if let Some(d) = held(ui, &r) {
-            self.control(actions, key, d as u8 as f64);
+            self.control(out, control, d as u8 as f64);
         }
     }
 
     /// Loop: ½ / LOOP n / ×2 over IN / OUT / EXIT. With no loop running, ½ and ×2
     /// change the size the next loop will be, like Mixxx.
-    fn loops(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+    fn loops(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
         let active = self.state.loop_active;
+        let size = size_label(info.loop_size);
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                for (label, dir) in [("½", -1), ("×2", 1)] {
-                    if dir == 1 {
+                for (label, control) in [
+                    ("½", DeckControl::LoopHalve),
+                    ("×2", DeckControl::LoopDouble),
+                ] {
+                    if control == DeckControl::LoopDouble {
                         let r = ui
                             .add(
                                 HwButton::new(
-                                    &format!("⟲ {}", size_label(self.loop_size)),
+                                    &format!("⟲ {size}"),
                                     LOOP_COLOUR,
                                     vec2(BTN_W + 10.0, BTN_H),
                                 )
@@ -1032,69 +957,73 @@ impl DeckUi {
                                 .lit(active),
                             )
                             .on_hover_text(format!(
-                                "Loop {} beats from the current beat (or end the loop)",
-                                size_label(self.loop_size)
+                                "Loop {size} beats from the current beat (or end the loop)"
                             ));
                         if let Some(d) = held(ui, &r) {
-                            self.control(actions, "beatloop_activate", d as u8 as f64);
+                            self.control(out, DeckControl::Loop, d as u8 as f64);
                         }
                     }
-                    let tip = if dir < 0 { "Halve" } else { "Double" };
+                    let tip = if control == DeckControl::LoopHalve {
+                        "Halve"
+                    } else {
+                        "Double"
+                    };
                     let r = ui
                         .add(HwButton::new(label, LOOP_COLOUR, vec2(BTN_W, BTN_H)).font(11.0))
                         .on_hover_text(format!("{tip} the loop (or the next loop's size)"));
-                    let pressed = held(ui, &r);
-                    if active {
-                        if let Some(d) = pressed {
-                            let key = if dir < 0 { "loop_halve" } else { "loop_double" };
-                            self.control(actions, key, d as u8 as f64);
-                        }
-                    } else if pressed == Some(true) {
-                        self.loop_size = step_size(self.loop_size, dir);
-                        self.control(actions, "beatloop_size", self.loop_size);
+                    if held(ui, &r) == Some(true) {
+                        self.control(out, control, 1.0);
                     }
                 }
             });
             // As wide as the row above.
             let w = (3.0 * BTN_W + 10.0) / 3.0;
             ui.horizontal(|ui| {
-                self.hold_button(ui, w, "IN", "loop_in", false, "Loop in point", actions);
+                self.hold_button(
+                    ui,
+                    w,
+                    "IN",
+                    DeckControl::LoopIn,
+                    false,
+                    "Loop in point",
+                    out,
+                );
                 self.hold_button(
                     ui,
                     w,
                     "OUT",
-                    "loop_out",
+                    DeckControl::LoopOut,
                     false,
                     "Loop out point: starts the loop",
-                    actions,
+                    out,
                 );
                 self.hold_button(
                     ui,
                     w,
                     if active { "EXIT" } else { "RELOOP" },
-                    "reloop_toggle",
+                    DeckControl::Reloop,
                     active,
                     "Leave the loop, or go back into the last one",
-                    actions,
+                    out,
                 );
             });
         });
     }
 
     /// Beat jump: ◀ n / n ▶ over the step picker.
-    fn jumps(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
-        let n = size_label(self.jump_size);
+    fn jumps(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
+        let n = size_label(info.jump_size);
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                for (label, key, tip) in [
-                    (format!("◀ {n}"), "beatjump_backward", "Jump back"),
-                    (format!("{n} ▶"), "beatjump_forward", "Jump forward"),
+                for (label, control, tip) in [
+                    (format!("◀ {n}"), DeckControl::JumpBack, "Jump back"),
+                    (format!("{n} ▶"), DeckControl::JumpForward, "Jump forward"),
                 ] {
                     let r = ui
                         .add(HwButton::new(&label, util::TEXT, vec2(BTN_W + 6.0, BTN_H)).font(10.0))
                         .on_hover_text(format!("{tip} {n} beats"));
                     if let Some(d) = held(ui, &r) {
-                        self.control(actions, key, d as u8 as f64);
+                        self.control(out, control, d as u8 as f64);
                     }
                 }
             });
@@ -1112,9 +1041,8 @@ impl DeckUi {
             egui::Popup::menu(&r).show(|ui| {
                 for beats in JUMP_STEPS {
                     let label = format!("{beats} beat{}", if beats == 1.0 { "" } else { "s" });
-                    if ui.radio(self.jump_size == beats, label).clicked() {
-                        self.jump_size = beats;
-                        self.control(actions, "beatjump_size", beats);
+                    if ui.radio(info.jump_size == beats, label).clicked() {
+                        self.control(out, DeckControl::JumpSize, beats);
                         ui.close();
                     }
                 }
@@ -1122,9 +1050,9 @@ impl DeckUi {
         });
     }
 
-    fn grid_editor(&mut self, ui: &mut Ui, info: &DeckInfo, actions: &mut Vec<Action>) {
-        let deck = self.index;
-        let mut grid = |op| actions.push(Action::Grid { deck, op });
+    fn grid_editor(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
+        let deck = self.id;
+        let mut grid = |op| out.push(Command::Deck(deck, DeckCmd::Grid(op)));
         ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
         ui.horizontal(|ui| {
             if ui
@@ -1210,21 +1138,48 @@ impl DeckUi {
 
     /// BPM and tempo readouts, SYNC, and the tempo fader with nudge buttons.
     /// SYNC, Q and KEY over the tempo fader, `height` tall in all.
-    fn tempo(&mut self, ui: &mut Ui, actions: &mut Vec<Action>, height: f32) {
+    fn tempo(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>, height: f32) {
         let s = self.state;
         ui.vertical(|ui| {
             ui.set_width(TEMPO_W);
             ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+            let following = match s.following.and_then(deck_letter) {
+                Some(l) if s.sync => format!("\nFollowing deck {l}"),
+                _ => String::new(),
+            };
+            let leading = if info.leader {
+                "\nThe sync leader: synced decks follow this one"
+            } else {
+                ""
+            };
             let r = ui
                 .add(
-                    HwButton::new("SYNC", self.colour(), vec2(TEMPO_W, 20.0))
-                        .font(10.0)
-                        .lit(s.sync),
+                    HwButton::new(
+                        if info.leader { "SYNC ★" } else { "SYNC" },
+                        self.colour(),
+                        vec2(TEMPO_W, 20.0),
+                    )
+                    .font(10.0)
+                    .lit(s.sync),
                 )
-                .on_hover_text("Match the other deck's tempo and beat");
-            if r.clicked() {
-                self.control(actions, "sync_enabled", if s.sync { 0.0 } else { 1.0 });
+                .on_hover_text(format!(
+                    "Match the leader's tempo and beat (right-click: make this deck the \
+                     leader){following}{leading}"
+                ));
+            if held(ui, &r) == Some(true) {
+                self.control(out, DeckControl::Sync, 1.0);
             }
+            r.context_menu(|ui| {
+                let (label, leader) = if info.leader {
+                    ("Stop leading", None)
+                } else {
+                    ("Lead: synced decks follow this one", Some(self.id))
+                };
+                if ui.button(label).clicked() {
+                    out.push(Command::Mixer(MixerCmd::SyncLeader(leader)));
+                    ui.close();
+                }
+            });
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let r = ui
@@ -1233,9 +1188,11 @@ impl DeckUi {
                             .font(10.0)
                             .lit(s.quantize),
                     )
-                    .on_hover_text("Quantise: snap this deck's cues, loops and hot cues to the beat");
-                if r.clicked() {
-                    self.control(actions, "quantize", if s.quantize { 0.0 } else { 1.0 });
+                    .on_hover_text(
+                        "Quantise: snap this deck's cues, loops and hot cues to the beat",
+                    );
+                if held(ui, &r) == Some(true) {
+                    self.control(out, DeckControl::Quantize, 1.0);
                 }
                 let r = ui
                     .add(
@@ -1244,8 +1201,8 @@ impl DeckUi {
                             .lit(s.keylock),
                     )
                     .on_hover_text("Keylock: the tempo fader changes the speed but not the key");
-                if r.clicked() {
-                    self.control(actions, "keylock", if s.keylock { 0.0 } else { 1.0 });
+                if held(ui, &r) == Some(true) {
+                    self.control(out, DeckControl::Keylock, 1.0);
                 }
             });
             // The fader gets exactly what's left, so it never stretches the deck.
@@ -1266,19 +1223,19 @@ impl DeckUi {
                         .colour(self.colour()),
                 );
                 if r.changed() {
-                    self.control(actions, "rate", v);
+                    self.control(out, DeckControl::Tempo, v);
                 }
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 4.0;
-                    for (label, key, tip) in [
-                        ("−", "rate_temp_down", "Nudge slower (hold)"),
-                        ("+", "rate_temp_up", "Nudge faster (hold)"),
+                    for (label, control, tip) in [
+                        ("−", DeckControl::NudgeDown, "Nudge slower (hold)"),
+                        ("+", DeckControl::NudgeUp, "Nudge faster (hold)"),
                     ] {
                         let r = ui
                             .add(HwButton::new(label, util::TEXT, vec2(24.0, 24.0)).font(14.0))
                             .on_hover_text(tip);
                         if let Some(d) = held(ui, &r) {
-                            self.control(actions, key, d as u8 as f64);
+                            self.control(out, control, d as u8 as f64);
                         }
                     }
                     // The fader's range: click for the next, right-click to pick one.
@@ -1286,15 +1243,12 @@ impl DeckUi {
                         .add(HwButton::new(s.range.label(), util::TEXT, vec2(24.0, 18.0)).font(8.0))
                         .on_hover_text("Tempo range: ±6, ±10, ±16 % or WIDE (0 to 256 % speed)");
                     if r.clicked() {
-                        self.control(actions, "rateRange", 1.0);
+                        self.control(out, DeckControl::TempoRangeNext, 1.0);
                     }
                     r.context_menu(|ui| {
                         for range in TempoRange::ALL {
                             if ui.radio(s.range == range, range.label()).clicked() {
-                                actions.push(Action::TempoRange {
-                                    deck: self.index,
-                                    range,
-                                });
+                                self.engine(out, EngineCmd::TempoRange(range));
                                 ui.close();
                             }
                         }
@@ -1336,7 +1290,7 @@ mod tests {
 
     #[test]
     fn newest_load_wins() {
-        let mut d = DeckUi::new(0);
+        let mut d = DeckUi::new(DeckId::new(0).unwrap());
         d.start_load(pending(1, "First"));
         d.start_load(pending(2, "Second"));
         assert!(!d.finish_load(1), "a stale load is ignored");
@@ -1348,7 +1302,7 @@ mod tests {
     #[test]
     fn loading_deck_shows_the_new_track_at_once() {
         use egui_kittest::kittest::Queryable;
-        let mut deck = DeckUi::new(0);
+        let mut deck = DeckUi::new(DeckId::new(0).unwrap());
         deck.start_load(pending(7, "Glide"));
         let info = DeckInfo {
             title: "Old track".into(),
@@ -1361,13 +1315,16 @@ mod tests {
             tag_bpm: None,
             key: None,
             analysing: None,
+            jump_size: 4.0,
+            loop_size: 4.0,
+            leader: false,
         };
         let mut h = egui_kittest::Harness::builder()
             .with_size(vec2(700.0, 260.0))
             .build_ui_state(
                 move |ui, deck: &mut DeckUi| {
-                    let mut actions = vec![];
-                    deck.show(ui, 680.0, 200.0, &info, &mut actions);
+                    let mut out = vec![];
+                    deck.show(ui, 680.0, 200.0, Side::Left, &info, &mut out);
                 },
                 deck,
             );
@@ -1380,10 +1337,8 @@ mod tests {
     }
 
     #[test]
-    fn sizes_step() {
-        assert_eq!(step_size(4.0, 1), 8.0);
-        assert_eq!(step_size(4.0, -1), 2.0);
-        assert_eq!(step_size(32.0, 1), 32.0);
+    fn size_labels() {
         assert_eq!(size_label(0.25), "1/4");
+        assert_eq!(size_label(8.0), "8");
     }
 }

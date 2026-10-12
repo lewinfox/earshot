@@ -9,12 +9,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use earshot_engine::{
-    Command, DeckCmd, EngineSnapshot, HOTCUES, Monitor, OutputInfo, OutputOptions, TempoRange,
+    DeckCmd as EngineCmd, DeckId, EngineSnapshot, MAX_DECKS, Monitor, OutputInfo, OutputOptions,
+    TempoRange,
 };
 use egui::{Key, RichText, Stroke, Ui, vec2};
 
-use super::audio_ui::{AudioAction, AudioUi};
-use super::deck::{Action, DeckInfo, DeckUi, PendingLoad};
+use super::audio_ui::AudioUi;
+use super::deck::{DeckInfo, DeckUi, PendingLoad, Side};
 use super::flow::FlowUi;
 use super::flows_ui::{FlowsAction, FlowsUi, Item};
 use super::library_ui::{LibAction, LibraryUi, PreviewState, take_wanted_art};
@@ -22,13 +23,15 @@ use super::mixer;
 use super::suggest_ui::{RefInfo, Source, SuggestUi};
 use super::util;
 use crate::core::analysis::{Analyser, Mode};
+use crate::core::command::{self, AudioCmd, Command, DeckCmd, PreviewCmd, ViewCmd};
+use crate::core::keymap::{self, Keymap};
 use crate::core::library::{self, Library};
 use crate::core::midi::{self, Midi};
-use crate::core::controls::CHANNELS;
-use crate::core::player::{self, DECKS, PLAYERS, PREP, AudioSettings, GridOp, Player};
-use crate::core::suggest::{self, Reference};
+use crate::core::player::{self, AudioSettings, DECKS, Player};
+use crate::core::session::{self, SLOTS};
 use crate::core::store::{self, EventSink, Store, StoreCmd, StoreEvent};
-use crate::core::{Event, Sink, controls};
+use crate::core::suggest::{self, Reference};
+use crate::core::{Event, Sink};
 
 pub struct EarshotApp {
     player: Player,
@@ -42,13 +45,12 @@ pub struct EarshotApp {
     _midi: Midi,
     midi_ports: Vec<String>,
     midi_log: VecDeque<String>,
-    decks: [DeckUi; PLAYERS],
-    /// Prepare (one player, grid and cue editing) or Perform (two decks and a mixer).
+    /// Each player's view, indexed by `DeckId::index()`.
+    decks: [DeckUi; SLOTS],
+    /// Prepare (one player, grid and cue editing) or Perform (the decks and a mixer).
     mode: UiMode,
     /// Memory cues and loops of the track in Prepare's player.
     memories: Vec<store::Memory>,
-    /// Each player's hot cues as last saved, with the load they belong to.
-    hotcues_saved: [Option<(u64, [Option<f64>; HOTCUES])>; PLAYERS],
     /// Real seconds of waveform either side of the playhead, shared by both decks.
     half_window: f64,
     library: LibraryUi,
@@ -66,7 +68,7 @@ pub struct EarshotApp {
     /// The deck that most recently started playing (the live reference).
     last_started: Option<usize>,
     /// When each deck started playing, to count a track as played after 30 s.
-    play_started: [Option<Instant>; 2],
+    play_started: [Option<Instant>; MAX_DECKS],
     analysis: AnalysisSummary,
     hud: Hud,
     show_keys: bool,
@@ -74,8 +76,9 @@ pub struct EarshotApp {
     audio_ui: AudioUi,
     /// The track in the headphones' preview player.
     preview: Option<Preview>,
-    /// Keys held down for deck buttons, so release sends 0.
-    held_keys: HashSet<Key>,
+    keymap: Keymap,
+    /// Keys held down for buttons that act while held, and what letting go sends.
+    held_keys: HashMap<Key, Command>,
     /// Folders picked in the import dialog (on its own thread).
     picked: Arc<Mutex<Option<Vec<PathBuf>>>>,
 }
@@ -91,7 +94,7 @@ const FLOW_KEY: &str = "earshot.flow";
 const AUDIO_KEY: &str = "earshot.audio";
 /// Waveform zoom: seconds either side of the playhead.
 const WAVE_ZOOM_KEY: &str = "earshot.wave_zoom";
-/// Each deck's tempo fader range.
+/// Each deck's tempo fader range, deck 1 first.
 const TEMPO_RANGE_KEY: &str = "earshot.tempo_ranges";
 const MODE_KEY: &str = "earshot.mode";
 
@@ -100,9 +103,18 @@ const MODE_KEY: &str = "earshot.mode";
 enum UiMode {
     /// One player across the top for setting cues, fixing grids and building playlists.
     Prepare,
-    /// Two decks and the mixer, for playing a set.
+    /// The decks and the mixer, for playing a set.
     #[default]
     Perform,
+}
+
+impl UiMode {
+    fn keys(self) -> keymap::Mode {
+        match self {
+            UiMode::Prepare => keymap::Mode::Prepare,
+            UiMode::Perform => keymap::Mode::Perform,
+        }
+    }
 }
 /// The name a new Flow gets until it's renamed.
 const UNTITLED: &str = "Untitled Flow";
@@ -210,13 +222,12 @@ impl EarshotApp {
             _midi: Midi::default(),
             midi_ports: vec![],
             midi_log: VecDeque::new(),
-            decks: std::array::from_fn(DeckUi::new),
+            decks: std::array::from_fn(|i| DeckUi::new(session::slot(i))),
             mode: cc
                 .storage
                 .and_then(|s| eframe::get_value(s, MODE_KEY))
                 .unwrap_or_default(),
             memories: vec![],
-            hotcues_saved: [None; PLAYERS],
             half_window: cc
                 .storage
                 .and_then(|s| eframe::get_value(s, WAVE_ZOOM_KEY))
@@ -234,23 +245,25 @@ impl EarshotApp {
             pending_rename: None,
             pane: Pane::Library,
             last_started: None,
-            play_started: [None; 2],
+            play_started: [None; MAX_DECKS],
             analysis: AnalysisSummary::default(),
             hud: Hud::default(),
             show_keys: false,
             audio_settings,
             audio_ui: AudioUi::default(),
             preview: None,
-            held_keys: HashSet::new(),
+            keymap: Keymap::built_in()
+                .spell_keys(|name| Key::from_name(name).map(|k| k.name().to_string()))?,
+            held_keys: HashMap::new(),
             picked: Arc::new(Mutex::new(None)),
         };
         app.lib.store.send(StoreCmd::ListRoots);
-        let ranges: [TempoRange; 2] = cc
+        let ranges: Vec<TempoRange> = cc
             .storage
             .and_then(|s| eframe::get_value(s, TEMPO_RANGE_KEY))
             .unwrap_or_default();
-        for (deck, range) in ranges.into_iter().enumerate() {
-            app.set_tempo_range(deck, range);
+        for (deck, range) in DeckId::first(DECKS).zip(ranges) {
+            app.dispatch((deck, EngineCmd::TempoRange(range)).into());
         }
         app.restore_flow();
         app.rescan();
@@ -262,148 +275,35 @@ impl EarshotApp {
     fn connect_midi(&mut self) {
         // Close the old ports first so they can be reopened.
         self._midi = Midi::default();
-        (self._midi, self.midi_ports) =
-            midi::connect_all(&self.sink, &self.player).unwrap_or_else(|e| {
-                eprintln!("MIDI: {e}");
-                (Midi::default(), vec![])
-            });
-    }
-
-    fn set_tempo_range(&mut self, deck: usize, range: TempoRange) {
-        let Ok(id) = player::deck_id(deck) else { return };
-        let cmd = Command::Deck(id, DeckCmd::TempoRange(range));
-        if let Err(e) = self.player.lock().unwrap().send(cmd) {
-            eprintln!("tempo range: {e}");
-        }
+        let lane = self.player.lock().unwrap().midi.clone();
+        (self._midi, self.midi_ports) = midi::connect_all(&self.sink, &lane).unwrap_or_else(|e| {
+            eprintln!("MIDI: {e}");
+            (Midi::default(), vec![])
+        });
     }
 
     /// Each deck's tempo range, as the engine has it.
-    fn tempo_ranges(&self) -> [TempoRange; 2] {
+    fn tempo_ranges(&self) -> Vec<TempoRange> {
         let Some(sh) = &self.snap else {
-            return Default::default();
+            return vec![];
         };
-        [0, 1].map(|d| sh.decks[d].range)
+        sh.live().iter().map(|d| d.range).collect()
     }
 
     // ---- Prepare mode -----------------------------------------------------------------
 
-    /// Rekordbox's keys: ←/→ beat jump, Shift+←/→ nudge the grid, C sets the cue, M
-    /// saves it (or the loop) to memory, 6-9 loop 1, 2, 4 or 8 bars (the same again
-    /// ends it), Space plays and pauses, ↑/↓ browse and Enter loads.
-    fn prepare_key(&mut self, key: Key, shift: bool) {
-        let g = CHANNELS[PREP];
-        match (key, shift) {
-            (Key::ArrowUp, _) => self.control("[Library]", "MoveVertical", -1.0),
-            (Key::ArrowDown, _) => self.control("[Library]", "MoveVertical", 1.0),
-            (Key::Tab, _) => self.control("[Library]", "TogglePane", 1.0),
-            (Key::Enter, _) => self.control(g, "LoadSelectedTrack", 1.0),
-            (Key::ArrowLeft | Key::ArrowRight, true) => {
-                let ms = if key == Key::ArrowLeft { -10.0 } else { 10.0 };
-                if let Err(e) = player::edit_grid(&self.player, &self.lib.store, PREP, GridOp::Nudge(ms)) {
-                    eprintln!("grid edit: {e}");
-                }
-            }
-            (Key::ArrowLeft, false) => self.control(g, "beatjump_backward", 1.0),
-            (Key::ArrowRight, false) => self.control(g, "beatjump_forward", 1.0),
-            (Key::Space, _) => {
-                if let Err(e) = controls::toggle(&mut self.player.lock().unwrap(), g, "play") {
-                    eprintln!("play: {e}");
-                }
-            }
-            (Key::C, _) => self.control(g, "cue_set", 1.0),
-            (Key::M, _) => self.save_memory(PREP),
-            (Key::Num6 | Key::Num7 | Key::Num8 | Key::Num9, _) => {
-                let bars = match key {
-                    Key::Num6 => 1,
-                    Key::Num7 => 2,
-                    Key::Num8 => 4,
-                    _ => 8,
-                };
-                self.control(g, &format!("beatloop_{}_toggle", bars * 4), 1.0);
-            }
-            _ => {}
-        }
-    }
-
     /// Ask for the memory cues of the track in Prepare's player (they arrive as
     /// `StoreEvent::Memories`).
     fn refresh_memories(&mut self) {
-        match self.player.lock().unwrap().decks[PREP].track_id {
-            Some(id) => self
-                .lib
-                .store
-                .request_memories(id, store_sink(&self.sink)),
+        match self
+            .player
+            .lock()
+            .unwrap()
+            .session(DeckId::PREPARE)
+            .track_id
+        {
+            Some(id) => self.lib.store.request_memories(id, store_sink(&self.sink)),
             None => self.memories.clear(),
-        }
-    }
-
-    /// Save the deck's loop (while looping) or cue point to the track's memory.
-    fn save_memory(&mut self, deck: usize) {
-        let (Some(sh), Some(track)) = (
-            self.snap,
-            self.player.lock().unwrap().decks[deck].track_id,
-        ) else {
-            return;
-        };
-        let d = player::deck_snap(&sh, deck);
-        let (start, end) = match (d.loop_active, d.loop_in, d.loop_out) {
-            (true, Some(start), Some(end)) => (start, Some(end)),
-            (true, _, _) => return,
-            (false, _, _) => (d.cue_point, None),
-        };
-        // Prepare's list is updated from the `Memories` event that comes back.
-        self.lib
-            .store
-            .send(StoreCmd::AddMemory { track, start, end });
-    }
-
-    /// Go to a memory cue (it becomes the cue point) or start a memory loop.
-    fn recall_memory(&mut self, deck: usize, m: store::Memory) {
-        let Ok(id) = player::deck_id(deck) else { return };
-        let mut inner = self.player.lock().unwrap();
-        let sent = match m.end {
-            Some(end) => inner.send(Command::Deck(
-                id,
-                DeckCmd::SetLoop {
-                    start: m.start,
-                    end,
-                },
-            )),
-            None => inner
-                .send(Command::Deck(id, DeckCmd::SetCue(Some(m.start))))
-                .and_then(|_| inner.send(Command::Deck(id, DeckCmd::Seek(m.start)))),
-        };
-        if let Err(e) = sent {
-            eprintln!("memory cue: {e}");
-        }
-    }
-
-    /// Save any player's hot cues that changed since they were loaded or last saved.
-    fn save_hotcues(&mut self) {
-        let Some(sh) = self.snap else { return };
-        for d in 0..PLAYERS {
-            let (track, generation) = {
-                let inner = self.player.lock().unwrap();
-                (inner.decks[d].track_id, inner.decks[d].generation)
-            };
-            // Only once the engine shows this load (its hot cues came with it).
-            let Some(track) = track else { continue };
-            let snap = player::deck_snap(&sh, d);
-            if snap.generation != generation {
-                continue;
-            }
-            let now: [Option<f64>; HOTCUES] = snap.hotcues;
-            match self.hotcues_saved[d] {
-                Some((g, saved)) if g == generation && saved == now => {}
-                Some((g, _)) if g == generation => {
-                    self.lib
-                        .store
-                        .send(StoreCmd::SaveHotcues { track, cues: now });
-                    self.hotcues_saved[d] = Some((generation, now));
-                }
-                // A new load: what the engine has is what was saved.
-                _ => self.hotcues_saved[d] = Some((generation, now)),
-            }
         }
     }
 
@@ -511,17 +411,17 @@ impl EarshotApp {
         });
     }
 
-    fn load(&mut self, deck: Option<usize>, track_id: i64) {
-        // Double-click: Prepare's player, or a deck that isn't playing, preferring A.
-        let deck = deck.unwrap_or(if self.mode == UiMode::Prepare {
-            PREP
-        } else if self.decks[0].playing() && !self.decks[1].playing() {
-            1
-        } else {
-            0
+    fn load(&mut self, deck: Option<DeckId>, track_id: i64) {
+        // Double-click: Prepare's player, or the first deck that isn't playing.
+        let deck = deck.unwrap_or_else(|| match self.mode {
+            UiMode::Prepare => DeckId::PREPARE,
+            UiMode::Perform => DeckId::first(DECKS)
+                .find(|d| !self.decks[d.index()].playing())
+                .unwrap_or(DeckId::new(0).expect("deck 1")),
         });
         // Show the track's details at once; the audio follows when it has decoded.
-        self.decks[deck].start_load(PendingLoad::new(track_id, self.library.track(track_id)));
+        self.decks[deck.index()]
+            .start_load(PendingLoad::new(track_id, self.library.track(track_id)));
         let (player, lib, sink) = (self.player.clone(), self.lib.clone(), self.sink.clone());
         std::thread::spawn(move || {
             let result = player::load_track(&player, &lib, deck, track_id);
@@ -533,42 +433,51 @@ impl EarshotApp {
         });
     }
 
-    fn control(&mut self, group: &str, key: &str, value: f64) {
-        let mut inner = self.player.lock().unwrap();
-        match controls::apply(&mut inner, group, key, value) {
-            Ok(controls::Outcome::Ui) => {
-                drop(inner);
-                self.ui_control(group, key, value);
-            }
-            Ok(_) => {}
-            Err(e) => eprintln!("control {group} {key}: {e}"),
+    /// Carry out a command, from whichever input. The decks, mixer and engine's are
+    /// done in core; what's left is the UI's.
+    fn dispatch(&mut self, cmd: Command) {
+        match command::dispatch(&self.player, &self.lib.store, cmd) {
+            Ok(Some(cmd)) => self.dispatch_ui(cmd),
+            Ok(None) => {}
+            Err(e) => eprintln!("command: {e}"),
         }
     }
 
-    /// Controls the UI owns: library navigation and "load selected".
-    fn ui_control(&mut self, group: &str, key: &str, value: f64) {
-        match key {
-            "MoveVertical" => match self.pane {
-                Pane::Library => self.library.move_focus(value.round() as i32),
-                Pane::Suggest => self.suggest.move_focus(value.round() as i32),
+    /// Commands about what's on screen, loads, previews and restarting audio.
+    fn dispatch_ui(&mut self, cmd: Command) {
+        match cmd {
+            Command::View(ViewCmd::Browse(n)) => match self.pane {
+                Pane::Library => self.library.move_focus(n),
+                Pane::Suggest => self.suggest.move_focus(n),
             },
-            "TogglePane" if value > 0.0 => {
+            Command::View(ViewCmd::TogglePane) => {
                 self.pane = match self.pane {
                     Pane::Library => Pane::Suggest,
                     Pane::Suggest => Pane::Library,
                 };
             }
-            "LoadSelectedTrack" if value > 0.0 => {
+            Command::View(ViewCmd::FocusSearch) => self.library.search_focus = true,
+            Command::View(ViewCmd::LoadSelected(deck)) => {
                 let id = match self.pane {
                     Pane::Library => self.library.focused(),
                     Pane::Suggest => self.suggest.focused(),
                 };
                 if let Some(id) = id {
-                    let deck = CHANNELS.iter().position(|g| *g == group).unwrap_or(0);
                     self.load(Some(deck), id);
                 }
             }
-            _ => {}
+            Command::Deck(deck, DeckCmd::Load(id)) => self.load(Some(deck), id),
+            Command::Preview(PreviewCmd::Toggle(id)) => self.toggle_preview(id),
+            Command::Preview(PreviewCmd::Seek(id, at)) => self.seek_preview(id, at),
+            Command::Preview(PreviewCmd::Stop(id)) => self.stop_preview(id),
+            Command::Audio(AudioCmd::Restart(settings)) => {
+                self.audio_settings = settings;
+                self.preview = None;
+                self.audio = start_audio(&self.player, &self.audio_settings);
+                self.shared = self.player.lock().unwrap().monitor();
+                self.snap = self.shared.as_ref().map(|m| m.snapshot());
+            }
+            other => eprintln!("command: nothing handles {other:?}"),
         }
     }
 
@@ -576,8 +485,8 @@ impl EarshotApp {
     fn track_plays(&mut self) {
         let Some(sh) = &self.snap else { return };
         let now = Instant::now();
-        for d in 0..2 {
-            let playing = sh.decks[d].playing;
+        for (d, deck) in sh.live().iter().enumerate() {
+            let playing = deck.playing;
             match (playing, self.play_started[d]) {
                 (true, None) => {
                     self.play_started[d] = Some(now);
@@ -606,9 +515,10 @@ impl EarshotApp {
             Some((d, id, sh.bpm, speed, sh.playing))
         };
         let source = match self.suggest.source {
-            Source::Master => [self.last_started, Some(0), Some(1)]
+            Source::Master => self
+                .last_started
                 .into_iter()
-                .flatten()
+                .chain(0..DECKS)
                 .filter_map(on_deck)
                 .find(|r| r.4),
             Source::Deck(d) => on_deck(d),
@@ -768,28 +678,6 @@ impl EarshotApp {
         })
     }
 
-    fn apply_audio(&mut self, a: AudioAction) {
-        match a {
-            AudioAction::Route(r) => {
-                self.audio_settings.routing = Some(r);
-                if let Err(e) = player::set_routing(&self.player, r) {
-                    eprintln!("routing: {e}");
-                }
-            }
-            AudioAction::Restart(settings) => {
-                let ranges = self.tempo_ranges();
-                self.audio_settings = settings;
-                self.preview = None;
-                self.audio = start_audio(&self.player, &self.audio_settings);
-                self.shared = self.player.lock().unwrap().monitor();
-                self.snap = self.shared.as_ref().map(|m| m.snapshot());
-                for (deck, range) in ranges.into_iter().enumerate() {
-                    self.set_tempo_range(deck, range);
-                }
-            }
-        }
-    }
-
     fn analyse(&self, ids: Vec<i64>, dynamic: bool) {
         for id in ids {
             self.lib.analyser.queue(
@@ -803,9 +691,7 @@ impl EarshotApp {
 
     /// Load waveform thumbnails (on a reader thread; they arrive as an event).
     fn refresh_previews(&mut self, ids: Option<Vec<i64>>) {
-        self.lib
-            .store
-            .request_previews(ids, store_sink(&self.sink));
+        self.lib.store.request_previews(ids, store_sink(&self.sink));
     }
 
     fn store_event(&mut self, e: StoreEvent) {
@@ -834,7 +720,14 @@ impl EarshotApp {
             }
             StoreEvent::Memories { track, memories } => {
                 // Only the track still in Prepare's player.
-                if self.player.lock().unwrap().decks[PREP].track_id == Some(track) {
+                if self
+                    .player
+                    .lock()
+                    .unwrap()
+                    .session(DeckId::PREPARE)
+                    .track_id
+                    == Some(track)
+                {
                     self.memories = memories;
                 }
             }
@@ -874,11 +767,11 @@ impl EarshotApp {
                 } => {
                     // Stop showing the pending track (on failure the deck shows what
                     // it had). A stale result, for an older request, changes nothing.
-                    self.decks[deck].finish_load(track_id);
+                    self.decks[deck.index()].finish_load(track_id);
                     match result {
-                        Ok(()) if deck == PREP => self.refresh_memories(),
+                        Ok(()) if deck == DeckId::PREPARE => self.refresh_memories(),
                         Ok(()) => {}
-                        Err(e) => eprintln!("load to deck {}: {e}", deck + 1),
+                        Err(e) => eprintln!("load to deck {}: {e}", deck.index() + 1),
                     }
                 }
                 Event::Analysis(ev) => {
@@ -932,7 +825,7 @@ impl EarshotApp {
                     self.midi_log.truncate(6);
                     let _ = port;
                 }
-                Event::UiControl { group, key, value } => self.ui_control(&group, &key, value),
+                Event::Command(cmd) => self.dispatch(cmd),
             }
         }
         let picked = self.picked.lock().unwrap().take();
@@ -944,80 +837,56 @@ impl EarshotApp {
 
     // ---- keyboard ---------------------------------------------------------------------------
 
+    /// Keys do what the keymap says. Deck keys work unless a text field has focus;
+    /// Esc leaves the field.
     fn keyboard(&mut self, ctx: &egui::Context) {
         let typing = ctx.wants_keyboard_input();
-        let events = ctx.input(|i| i.events.clone());
-        for e in events {
-            let egui::Event::Key {
-                key,
-                physical_key,
-                pressed,
-                repeat,
-                modifiers,
-            } = e
-            else {
-                continue;
-            };
-            let key = physical_key.unwrap_or(key);
+        let events: Vec<_> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match *e {
+                    egui::Event::Key {
+                        key,
+                        physical_key,
+                        pressed,
+                        repeat,
+                        modifiers,
+                    } => Some((physical_key.unwrap_or(key), pressed, repeat, modifiers)),
+                    _ => None,
+                })
+                .collect()
+        });
+        for (key, pressed, repeat, modifiers) in events {
             if key == Key::Escape {
                 ctx.memory_mut(|m| m.stop_text_input());
+                continue;
+            }
+            if !pressed {
+                // Let go of a held button, whatever the modifiers are now.
+                if let Some(cmd) = self.held_keys.remove(&key) {
+                    self.dispatch(cmd);
+                }
                 continue;
             }
             if typing || modifiers.command || modifiers.alt {
                 continue;
             }
-            if pressed && key == Key::Slash {
-                self.library.search_focus = true;
-                continue;
-            }
-            if self.mode == UiMode::Prepare {
-                if pressed && !repeat {
-                    self.prepare_key(key, modifiers.shift);
-                } else if pressed && matches!(key, Key::ArrowUp | Key::ArrowDown) {
-                    self.prepare_key(key, modifiers.shift); // browse keeps repeating
-                }
-                continue;
-            }
-            match (key, modifiers.shift) {
-                (Key::Tab, _) if pressed => self.control("[Library]", "TogglePane", 1.0),
-                (Key::ArrowUp, _) if pressed => self.control("[Library]", "MoveVertical", -1.0),
-                (Key::ArrowDown, _) if pressed => self.control("[Library]", "MoveVertical", 1.0),
-                (Key::ArrowLeft, true) if pressed => {
-                    self.control("[Channel1]", "LoadSelectedTrack", 1.0)
-                }
-                (Key::ArrowRight, true) if pressed => {
-                    self.control("[Channel2]", "LoadSelectedTrack", 1.0)
-                }
-                _ => {}
-            }
-            let Some((group, control, toggle)) = deck_key(key) else {
+            let Some(b) = self
+                .keymap
+                .find(self.mode.keys(), key.name(), modifiers.shift)
+            else {
                 continue;
             };
-            if pressed && repeat {
+            if repeat && !b.repeats() {
                 continue;
             }
-            if !pressed && !self.held_keys.remove(&key) {
-                continue;
+            let (press, release) = (b.press(), b.release());
+            if let Some(release) = release {
+                self.held_keys.insert(key, release);
             }
-            if toggle {
-                if pressed
-                    && let Err(e) = controls::toggle(&mut self.player.lock().unwrap(), group, control)
-                {
-                    eprintln!("control {group} {control}: {e}");
-                }
-                continue;
+            if let Some(cmd) = press {
+                self.dispatch(cmd);
             }
-            if pressed {
-                self.held_keys.insert(key);
-            }
-            // Shift + a hot cue key clears it.
-            if modifiers.shift && control.starts_with("hotcue_") {
-                if pressed {
-                    self.control(group, &control.replace("_activate", "_clear"), 1.0);
-                }
-                continue;
-            }
-            self.control(group, control, pressed as u8 as f64);
         }
     }
 
@@ -1171,9 +1040,9 @@ impl EarshotApp {
         }
     }
 
-    fn deck_info(&self, d: usize) -> DeckInfo {
+    fn deck_info(&self, deck: DeckId) -> DeckInfo {
         let inner = self.player.lock().unwrap();
-        let s = &inner.decks[d];
+        let s = inner.session(deck);
         let t = s.track_id.and_then(|id| self.library.track(id));
         DeckInfo {
             title: s.title.clone(),
@@ -1189,6 +1058,9 @@ impl EarshotApp {
                 t.filter(|t| t.queued)
                     .map(|_| (0.0, "waiting to analyse".into()))
             }),
+            jump_size: s.jump_size,
+            loop_size: s.loop_size,
+            leader: inner.sync_leader == Some(deck),
         }
     }
 
@@ -1253,8 +1125,9 @@ impl eframe::App for EarshotApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events(ctx);
+        // Catch the decks' sessions up with the engine (and save changed hot cues).
+        self.snap = player::poll(&self.player, &self.lib.store);
         // Background analysis holds back while anything plays.
-        self.snap = self.shared.as_ref().map(|m| m.snapshot());
         let playing = self
             .snap
             .as_ref()
@@ -1264,12 +1137,18 @@ impl eframe::App for EarshotApp {
         self.tick_hud(ctx);
         self.track_plays();
         self.refresh_suggestions();
-        let infos: [DeckInfo; PLAYERS] = std::array::from_fn(|d| self.deck_info(d));
-        for (d, info) in infos.iter().enumerate() {
-            let sh = self.snap.as_ref().map(|s| player::deck_snap(s, d));
-            self.decks[d].tick(ctx, sh, info);
+        let players: Vec<DeckId> = session::players(DECKS).collect();
+        let decks: Vec<DeckId> = DeckId::first(DECKS).collect();
+        let mut infos: [Option<DeckInfo>; SLOTS] = Default::default();
+        for &id in &players {
+            let info = self.deck_info(id);
+            let sh = self.snap.as_ref().map(|s| s.deck(id));
+            self.decks[id.index()].tick(ctx, sh, &info);
+            infos[id.index()] = Some(info);
         }
-        let mut actions: Vec<Action> = vec![];
+        let info = |id: DeckId| infos[id.index()].as_ref().expect("a player's info");
+        let prep = DeckId::PREPARE.index();
+        let mut out: Vec<Command> = vec![];
         let mut lib_actions: Vec<LibAction> = vec![];
         let mut flows_actions: Vec<FlowsAction> = vec![];
 
@@ -1298,13 +1177,21 @@ impl eframe::App for EarshotApp {
                 ui.spacing_mut().item_spacing.y = 3.0;
                 if self.mode == UiMode::Prepare {
                     let h = ui.available_height();
-                    let (deck, info) = (&mut self.decks[PREP], &infos[PREP]);
-                    deck.show_wave(ui, h, info, &mut self.half_window, &mut actions);
+                    let deck = &mut self.decks[prep];
+                    deck.show_wave(
+                        ui,
+                        h,
+                        info(DeckId::PREPARE),
+                        &mut self.half_window,
+                        &mut out,
+                    );
                     return;
                 }
-                let h = (ui.available_height() - 3.0) / 2.0;
-                for d in 0..DECKS {
-                    self.decks[d].show_wave(ui, h, &infos[d], &mut self.half_window, &mut actions);
+                let n = decks.len() as f32;
+                let h = (ui.available_height() - 3.0 * (n - 1.0)) / n;
+                for &d in &decks {
+                    let deck = &mut self.decks[d.index()];
+                    deck.show_wave(ui, h, info(d), &mut self.half_window, &mut out);
                 }
             });
         // A fixed height (the mixer's), so the decks can't be stretched by a height
@@ -1321,14 +1208,25 @@ impl eframe::App for EarshotApp {
                 let height = decks_h;
                 if self.mode == UiMode::Prepare {
                     let w = ui.available_width();
-                    let memories = &self.memories;
-                    self.decks[PREP].show_prepare(ui, w, height, &infos[PREP], memories, &mut actions);
+                    let (memories, info) = (&self.memories, info(DeckId::PREPARE));
+                    self.decks[prep].show_prepare(ui, w, height, info, memories, &mut out);
                     return;
                 }
-                let mixer_w = mixer::WIDTH + 16.0;
-                let w = (ui.available_width() - mixer_w - 12.0) / 2.0;
+                // Decks on the crossfader's left, the mixer, then the rest.
+                let side = |d: &DeckId| {
+                    if mixer::on_left(*d) {
+                        Side::Left
+                    } else {
+                        Side::Right
+                    }
+                };
+                let mixer_w = mixer::width(&decks) + 16.0;
+                let n = decks.len() as f32;
+                let w = (ui.available_width() - mixer_w - 6.0 * n) / n;
                 ui.horizontal_top(|ui| {
-                    self.decks[0].show(ui, w, height, &infos[0], &mut actions);
+                    for d in decks.iter().filter(|d| side(d) == Side::Left) {
+                        self.decks[d.index()].show(ui, w, height, Side::Left, info(*d), &mut out);
+                    }
                     ui.allocate_ui(vec2(mixer_w, 0.0), |ui| {
                         egui::Frame::new()
                             .fill(util::PANEL)
@@ -1337,10 +1235,12 @@ impl eframe::App for EarshotApp {
                             .inner_margin(egui::Margin::symmetric(8, 6))
                             .show(ui, |ui| {
                                 ui.set_width(mixer_w - 16.0);
-                                mixer::show(ui, self.snap.as_ref(), &mut actions);
+                                mixer::show(ui, self.snap.as_ref(), &decks, &mut out);
                             });
                     });
-                    self.decks[1].show(ui, w, height, &infos[1], &mut actions);
+                    for d in decks.iter().filter(|d| side(d) == Side::Right) {
+                        self.decks[d.index()].show(ui, w, height, Side::Right, info(*d), &mut out);
+                    }
                 });
             });
         egui::SidePanel::left("tree")
@@ -1389,46 +1289,38 @@ impl eframe::App for EarshotApp {
         });
 
         let routing = player::routing(&self.player, self.audio.as_ref().map_or(2, |i| i.channels));
-        if let Some(a) = self
+        if let Some(c) = self
             .audio_ui
             .show(ctx, &self.audio_settings, &self.audio, routing)
         {
-            self.apply_audio(a);
+            if let Command::Audio(AudioCmd::Route(r)) = c {
+                self.audio_settings.routing = Some(r);
+            }
+            out.push(c);
         }
 
         if self.show_keys {
+            let (keymap, mode) = (&self.keymap, self.mode.keys());
             egui::Window::new("Keyboard")
                 .open(&mut self.show_keys)
                 .resizable(false)
-                .show(ctx, keys_help);
+                .show(ctx, |ui| keys_help(ui, keymap, mode));
         }
 
-        for a in actions {
-            match a {
-                Action::Control { group, key, value } => self.control(group, &key, value),
-                Action::Grid { deck, op } => {
-                    if let Err(e) = player::edit_grid(&self.player, &self.lib.store, deck, op) {
-                        eprintln!("grid edit: {e}");
-                    }
-                }
-                Action::Load { deck, track_id } => self.load(Some(deck), track_id),
-                Action::TempoRange { deck, range } => self.set_tempo_range(deck, range),
-                Action::SaveMemory { deck } => self.save_memory(deck),
-                Action::RecallMemory { deck, memory } => self.recall_memory(deck, memory),
-                Action::DeleteMemory { id } => {
-                    if let Some(track) = self.player.lock().unwrap().decks[PREP].track_id {
-                        self.lib.store.send(StoreCmd::DeleteMemory { track, id });
-                    }
-                }
-            }
+        for c in out {
+            self.dispatch(c);
         }
         for a in lib_actions {
             match a {
-                LibAction::Load { deck, track_id } => self.load(deck, track_id),
+                LibAction::Load { deck, track_id } => {
+                    self.load(deck.and_then(DeckId::new), track_id)
+                }
                 LibAction::Analyse { ids, dynamic } => self.analyse(ids, dynamic),
-                LibAction::Preview(id) => self.toggle_preview(id),
-                LibAction::PreviewSeek(id, at) => self.seek_preview(id, at),
-                LibAction::PreviewStop(id) => self.stop_preview(id),
+                LibAction::Preview(id) => self.dispatch(Command::Preview(PreviewCmd::Toggle(id))),
+                LibAction::PreviewSeek(id, at) => {
+                    self.dispatch(Command::Preview(PreviewCmd::Seek(id, at)))
+                }
+                LibAction::PreviewStop(id) => self.dispatch(Command::Preview(PreviewCmd::Stop(id))),
                 LibAction::AddToFlow(ids) => {
                     self.flow.open = true;
                     for id in ids {
@@ -1440,7 +1332,6 @@ impl eframe::App for EarshotApp {
         }
         // Save first, so opening another Flow doesn't lose the last change.
         self.save_flow();
-        self.save_hotcues();
         for id in take_wanted_art(ctx) {
             if !self.library.art.contains_key(&id) {
                 self.library.art.insert(id, None);
@@ -1479,106 +1370,36 @@ fn pill(ui: &mut Ui, text: &str, border: egui::Color32) -> egui::Response {
         .interact(egui::Sense::click())
 }
 
-/// Physical keys → deck controls: left hand plays deck A, right hand deck B.
-/// (group, control, toggles on press)
-fn deck_key(key: Key) -> Option<(&'static str, &'static str, bool)> {
-    const A: &str = "[Channel1]";
-    const B: &str = "[Channel2]";
-    Some(match key {
-        Key::A => (A, "cue_default", false),
-        Key::S => (A, "play", true),
-        Key::D => (A, "sync_enabled", true),
-        Key::F => (A, "pfl", true),
-        Key::Q => (A, "beatjump_backward", false),
-        Key::W => (A, "beatjump_forward", false),
-        Key::E => (A, "beatloop_activate", false),
-        Key::R => (A, "reloop_toggle", false),
-        Key::Z => (A, "rate_temp_down", false),
-        Key::X => (A, "rate_temp_up", false),
-        Key::Num1 => (A, "hotcue_1_activate", false),
-        Key::Num2 => (A, "hotcue_2_activate", false),
-        Key::Num3 => (A, "hotcue_3_activate", false),
-        Key::Num4 => (A, "hotcue_4_activate", false),
-        Key::J => (B, "cue_default", false),
-        Key::K => (B, "play", true),
-        Key::L => (B, "sync_enabled", true),
-        Key::Semicolon => (B, "pfl", true),
-        Key::U => (B, "beatjump_backward", false),
-        Key::I => (B, "beatjump_forward", false),
-        Key::O => (B, "beatloop_activate", false),
-        Key::P => (B, "reloop_toggle", false),
-        Key::M => (B, "rate_temp_down", false),
-        Key::Comma => (B, "rate_temp_up", false),
-        Key::Num7 => (B, "hotcue_1_activate", false),
-        Key::Num8 => (B, "hotcue_2_activate", false),
-        Key::Num9 => (B, "hotcue_3_activate", false),
-        Key::Num0 => (B, "hotcue_4_activate", false),
-        _ => return None,
-    })
-}
-
-fn keys_help(ui: &mut Ui) {
-    ui.label(RichText::new("Deck keys work unless a text field has focus. Esc leaves the field, / jumps to search. Shift + a hot cue key clears it.").color(util::MUTED));
+/// The key help, made from the keymap: a column per deck (or player), then the library.
+fn keys_help(ui: &mut Ui, keymap: &Keymap, mode: keymap::Mode) {
+    ui.label(
+        RichText::new(
+            "Deck keys work unless a text field has focus. Esc leaves the field. \
+             Shift + a hot cue key clears it.",
+        )
+        .color(util::MUTED),
+    );
     ui.add_space(6.0);
-    ui.columns(3, |c| {
-        let rows = |ui: &mut Ui, title: &str, colour: egui::Color32, keys: &[(&str, &str)]| {
-            ui.label(RichText::new(title).strong().color(colour));
-            egui::Grid::new(title).show(ui, |ui| {
-                for (k, what) in keys {
-                    ui.label(RichText::new(*k).monospace());
-                    ui.label(*what);
+    let mut sections = keymap.help(mode);
+    // Built into egui and the lists rather than the keymap.
+    if let Some(lib) = sections.iter_mut().find(|s| s.title == "Library") {
+        lib.rows.extend([
+            ("Ctrl A".into(), "select all".into()),
+            ("Ctrl - / = / 0".into(), "UI size".into()),
+        ]);
+    }
+    ui.columns(sections.len().max(1), |c| {
+        for (ui, s) in c.iter_mut().zip(&sections) {
+            let colour = s.deck.map_or(util::TEXT, util::deck_colour);
+            ui.label(RichText::new(&s.title).strong().color(colour));
+            egui::Grid::new(&s.title).show(ui, |ui| {
+                for (k, what) in &s.rows {
+                    ui.label(RichText::new(k).monospace());
+                    ui.label(what);
                     ui.end_row();
                 }
             });
-        };
-        let deck = |k: [&'static str; 14]| -> Vec<(&'static str, &'static str)> {
-            let what = [
-                "cue",
-                "play / pause",
-                "sync",
-                "headphone cue",
-                "beat jump back",
-                "beat jump forward",
-                "loop on/off",
-                "reloop / exit",
-                "nudge slower",
-                "nudge faster",
-                "hot cue 1",
-                "hot cue 2",
-                "hot cue 3",
-                "hot cue 4",
-            ];
-            k.into_iter().zip(what).collect()
-        };
-        rows(
-            &mut c[0],
-            "Deck A",
-            util::DECK[0],
-            &deck([
-                "A", "S", "D", "F", "Q", "W", "E", "R", "Z", "X", "1", "2", "3", "4",
-            ]),
-        );
-        rows(
-            &mut c[1],
-            "Deck B",
-            util::DECK[1],
-            &deck([
-                "J", "K", "L", ";", "U", "I", "O", "P", "M", ",", "7", "8", "9", "0",
-            ]),
-        );
-        rows(
-            &mut c[2],
-            "Library",
-            util::TEXT,
-            &[
-                ("Up / Down", "previous / next track"),
-                ("Tab", "library / suggestions"),
-                ("Shift Left", "load to deck A"),
-                ("Shift Right", "load to deck B"),
-                ("Ctrl A", "select all"),
-                ("Ctrl - / = / 0", "UI size"),
-            ],
-        );
+        }
     });
 }
 
@@ -1620,16 +1441,19 @@ mod tests {
             .take(2)
             .map(|t| t.lib.id)
             .collect();
-        for (deck, id) in ids.iter().enumerate() {
-            h.state_mut().load(Some(deck), *id);
+        let decks: Vec<DeckId> = DeckId::first(DECKS).collect();
+        for (deck, id) in decks.iter().zip(&ids) {
+            h.state_mut().load(Some(*deck), *id);
         }
         settle(&mut h, 120);
-        h.state_mut().control("[Channel1]", "playposition", 0.3);
-        h.state_mut().control("[Channel1]", "play", 1.0);
+        let play = |d| Command::from((d, EngineCmd::Play(earshot_engine::Set::On)));
+        h.state_mut()
+            .dispatch(Command::Deck(decks[0], DeckCmd::SeekFraction(0.3)));
+        h.state_mut().dispatch(play(decks[0]));
         h.state_mut().library.move_focus(3);
         settle(&mut h, 90);
         // How long the app takes to build a frame (layout + waveforms), both decks playing.
-        h.state_mut().control("[Channel2]", "play", 1.0);
+        h.state_mut().dispatch(play(decks[1]));
         let t = Instant::now();
         let n = 300;
         let mut worst = 0f64;
@@ -1671,11 +1495,11 @@ mod tests {
             .map(|t| t.lib.id)
             .expect("an analysed track");
         h.state_mut().mode = UiMode::Prepare;
-        h.state_mut().load(Some(PREP), id);
+        h.state_mut().load(Some(DeckId::PREPARE), id);
         for _ in 0..300 {
             h.step();
             std::thread::sleep(Duration::from_millis(16));
-            if h.state().decks[PREP].wave.is_some() {
+            if h.state().decks[DeckId::PREPARE.index()].wave.is_some() {
                 break;
             }
         }

@@ -617,14 +617,14 @@ fn a_grid_edit_doesnt_wait_for_the_database() {
         },
     )
     .unwrap();
-    p.lock().unwrap().decks[0] = player::DeckSlot {
-        track_id: Some(id),
-        audio: Some(Arc::new(TrackAudio {
+    {
+        let mut inner = p.lock().unwrap();
+        inner.decks[0].track_id = Some(id);
+        inner.decks[0].audio = Some(Arc::new(TrackAudio {
             samples: vec![0.0; 2 * 44100 * 20],
             sample_rate: 44100,
-        })),
-        ..Default::default()
-    };
+        }));
+    }
     // Keep the writer busy, as if a big scan were being written.
     let (release, wait) = std::sync::mpsc::channel::<()>();
     let busy = store.clone();
@@ -636,7 +636,8 @@ fn a_grid_edit_doesnt_wait_for_the_database() {
     });
     std::thread::sleep(std::time::Duration::from_millis(50));
     let t = std::time::Instant::now();
-    player::edit_grid(&p, &store, 0, GridOp::SetBpm(127.0)).unwrap();
+    let deck = earshot_engine::DeckId::new(0).unwrap();
+    player::edit_grid(&p, &store, deck, GridOp::SetBpm(127.0)).unwrap();
     assert!(t.elapsed() < std::time::Duration::from_millis(500));
     assert!(p.try_lock().is_ok(), "the player lock isn't held");
     release.send(()).unwrap();

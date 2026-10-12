@@ -9,16 +9,10 @@ use earshot_engine::{Out, OutputInfo, Routing};
 use egui::{RichText, Ui};
 
 use super::util;
+use crate::core::command::{AudioCmd, Command};
 use crate::core::player::AudioSettings;
 
 const BUFFERS: [u32; 6] = [64, 128, 256, 512, 1024, 2048];
-
-pub enum AudioAction {
-    /// Restart audio with a new device or buffer size.
-    Restart(AudioSettings),
-    /// Change routing live.
-    Route(Routing),
-}
 
 #[derive(Default)]
 pub struct AudioUi {
@@ -55,7 +49,7 @@ impl AudioUi {
         saved: &AudioSettings,
         info: &Result<OutputInfo, String>,
         routing: Routing,
-    ) -> Option<AudioAction> {
+    ) -> Option<Command> {
         if !self.open {
             return None;
         }
@@ -77,7 +71,7 @@ impl AudioUi {
                     Err(_) => 2,
                 };
                 if let Some(r) = routing_section(ui, routing, channels) {
-                    action = Some(AudioAction::Route(r));
+                    action = Some(Command::Audio(AudioCmd::Route(r)));
                 }
             });
         self.open = open;
@@ -89,7 +83,7 @@ impl AudioUi {
         ui: &mut Ui,
         saved: &AudioSettings,
         info: &Result<OutputInfo, String>,
-    ) -> Option<AudioAction> {
+    ) -> Option<Command> {
         let mut action = None;
         match info {
             Ok(i) => ui.label(
@@ -180,10 +174,10 @@ impl AudioUi {
                 .on_hover_text("Restart audio on this device. Loaded tracks stay loaded.")
                 .clicked()
             {
-                action = Some(AudioAction::Restart(AudioSettings {
+                action = Some(Command::Audio(AudioCmd::Restart(AudioSettings {
                     routing: saved.routing,
                     ..draft.clone()
-                }));
+                })));
             }
             ui.label(
                 RichText::new("Smaller buffers respond faster but may crackle.")

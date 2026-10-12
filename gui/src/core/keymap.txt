@@ -1,0 +1,77 @@
+# earshot's keyboard. One binding per line:
+#
+#   <mode>  <key>  <target>  <control>  [<number>]
+#
+# mode     perform, prepare, or any (both)
+# key      a key's name: A, 1, ;, Left, Up, Space, Tab, Enter, … with Shift+ in front
+#          for the shifted key. Keys go by where they are on the keyboard, named as on
+#          a US layout. A shifted key with no binding of its own does what it does
+#          unshifted.
+# target   deck1 … deck4, prepare (Prepare mode's player), mixer, or library
+# control  a control's name (core/bus.rs). The number is its parameter (the hot cue
+#          pad, the loop's beats, the grid nudge in ms) or the value it sends (how far
+#          to browse).
+#
+# The key help (the Keys button) is made from this file.
+
+# ---- Perform: left hand plays deck 1, right hand deck 2 ----------------------------
+perform  A        deck1  cue
+perform  S        deck1  play
+perform  D        deck1  sync
+perform  F        deck1  pfl
+perform  Q        deck1  jump_back
+perform  W        deck1  jump_forward
+perform  E        deck1  loop
+perform  R        deck1  reloop
+perform  Z        deck1  nudge_down
+perform  X        deck1  nudge_up
+perform  1        deck1  hotcue 1
+perform  2        deck1  hotcue 2
+perform  3        deck1  hotcue 3
+perform  4        deck1  hotcue 4
+perform  Shift+1  deck1  hotcue_clear 1
+perform  Shift+2  deck1  hotcue_clear 2
+perform  Shift+3  deck1  hotcue_clear 3
+perform  Shift+4  deck1  hotcue_clear 4
+
+perform  J        deck2  cue
+perform  K        deck2  play
+perform  L        deck2  sync
+perform  ;        deck2  pfl
+perform  U        deck2  jump_back
+perform  I        deck2  jump_forward
+perform  O        deck2  loop
+perform  P        deck2  reloop
+perform  M        deck2  nudge_down
+perform  ,        deck2  nudge_up
+perform  7        deck2  hotcue 1
+perform  8        deck2  hotcue 2
+perform  9        deck2  hotcue 3
+perform  0        deck2  hotcue 4
+perform  Shift+7  deck2  hotcue_clear 1
+perform  Shift+8  deck2  hotcue_clear 2
+perform  Shift+9  deck2  hotcue_clear 3
+perform  Shift+0  deck2  hotcue_clear 4
+
+perform  Shift+Left   deck1  load_selected
+perform  Shift+Right  deck2  load_selected
+
+# ---- Prepare: Rekordbox's keys --------------------------------------------------------
+prepare  Space        prepare  play
+prepare  Left         prepare  jump_back
+prepare  Right        prepare  jump_forward
+prepare  Shift+Left   prepare  grid_nudge -10
+prepare  Shift+Right  prepare  grid_nudge 10
+prepare  C            prepare  set_cue
+prepare  M            prepare  save_memory
+prepare  6            prepare  beatloop 4
+prepare  7            prepare  beatloop 8
+prepare  8            prepare  beatloop 16
+prepare  9            prepare  beatloop 32
+prepare  Enter        prepare  load_selected
+
+# ---- Library (both modes) ---------------------------------------------------------------
+any  Up     library  browse -1
+any  Down   library  browse 1
+any  Tab    library  toggle_pane
+any  /      library  search

@@ -1,101 +1,21 @@
 //! The mixer between the decks, laid out like Mixxx's: each channel has gain, high /
 //! mid / low EQ and filter knobs, a headphone cue button and a fader with a level
 //! meter; the main meters and the crossfader sit in the middle, main and headphone
-//! knobs on the right.
+//! knobs on the right. Channels on the crossfader's left side sit left of the middle,
+//! the others mirrored on the right.
 //!
-//! Every control shows the engine's current value (so keyboard and MIDI moves show)
-//! and sends changes through the control bus as an [`Action`].
+//! Every control is bound to its entry in the control registry: it shows the engine's
+//! current value (so keyboard and MIDI moves show) and sends the registry's
+//! [`Command`] when changed.
 
-
-use earshot_engine::EngineSnapshot;
 use earshot_engine::loudness::TARGET_LUFS;
+use earshot_engine::{DeckId, EQ_HIGH, EQ_LOW, EQ_MID, EngineSnapshot, MasterParam, XfSide};
 use egui::{Rect, Response, Sense, Ui, vec2};
 
-use super::controls::{
-    Fader, HwButton, Knob, Meter, Range, fmt_balance, fmt_db, fmt_filter, fmt_percent,
-};
-use super::deck::Action;
+use super::controls::{Fader, HwButton, Knob, Meter, Range, held};
 use super::util;
-use crate::core::controls::{CHANNELS, EQ_GROUPS, FILTER_GROUPS, value};
-
-pub const GAIN: Range = Range {
-    name: "Gain",
-    min: 0.0,
-    max: 4.0,
-    default: 1.0,
-    centre: Some(1.0),
-    format: fmt_db,
-};
-/// Low, mid, high: Mixxx's `parameter1..3`.
-pub const EQ: [Range; 3] = [
-    Range {
-        name: "Low",
-        ..GAIN
-    },
-    Range {
-        name: "Mid",
-        ..GAIN
-    },
-    Range {
-        name: "High",
-        ..GAIN
-    },
-];
-const EQ_KEYS: [&str; 3] = ["parameter1", "parameter2", "parameter3"];
-pub const FILTER: Range = Range {
-    name: "Filter",
-    min: 0.0,
-    max: 1.0,
-    default: 0.5,
-    centre: Some(0.5),
-    format: fmt_filter,
-};
-pub const VOLUME: Range = Range {
-    name: "Volume",
-    min: 0.0,
-    max: 1.0,
-    default: 1.0,
-    centre: None,
-    format: fmt_percent,
-};
-pub const CROSSFADER: Range = Range {
-    name: "Crossfader",
-    min: -1.0,
-    max: 1.0,
-    default: 0.0,
-    centre: Some(0.0),
-    format: fmt_balance,
-};
-pub const MAIN_GAIN: Range = Range {
-    name: "Main level",
-    min: 0.0,
-    max: 5.0,
-    default: 1.0,
-    centre: Some(1.0),
-    format: fmt_db,
-};
-pub const BALANCE: Range = Range {
-    name: "Balance",
-    ..CROSSFADER
-};
-pub const HEAD_GAIN: Range = Range {
-    name: "Headphone level",
-    ..MAIN_GAIN
-};
-pub const HEAD_MIX: Range = Range {
-    name: "Headphone mix",
-    min: -1.0,
-    max: 1.0,
-    default: -1.0,
-    centre: None,
-    format: |v| {
-        format!(
-            "{:.0} % cue, {:.0} % main",
-            (1.0 - v) * 50.0,
-            (v + 1.0) * 50.0
-        )
-    },
-};
+use crate::core::bus::{Control, DeckControl};
+use crate::core::command::Command;
 
 // Layout, in points from the mixer's top left. Columns from the left: deck A's knobs,
 // its gain / cue / fader, its meter, the main meters, then deck B mirrored, then the
@@ -115,59 +35,89 @@ const FADER_TOP: f32 = PFL_TOP + PFL_H + 6.0;
 const FADER_BOTTOM: f32 = 4.0 * ROW;
 const XF_TOP: f32 = FADER_BOTTOM + 6.0;
 const XF_H: f32 = 20.0;
-const CHANNELS_W: f32 = 2.0 * (KNOB_COL + FADER_COL + VU_W) + CENTRE_W;
-pub const WIDTH: f32 = CHANNELS_W + MASTER_GAP + KNOB_COL;
+const STRIP_W: f32 = KNOB_COL + FADER_COL + VU_W;
 pub const HEIGHT: f32 = XF_TOP + XF_H;
 
-/// One control bound to `group key`: shows the engine's value (the default without
+/// The mixer's width for these channels.
+pub fn width(decks: &[DeckId]) -> f32 {
+    channels_w(decks.len()) + MASTER_GAP + KNOB_COL
+}
+
+fn channels_w(n: usize) -> f32 {
+    n as f32 * STRIP_W + CENTRE_W
+}
+
+/// Which side of the middle a deck's channel (and the deck itself) sits: the side of
+/// the crossfader it starts on, so decks 1 and 3 left, 2 and 4 right.
+pub fn on_left(deck: DeckId) -> bool {
+    XfSide::default_for(deck) == XfSide::Left
+}
+
+/// A knob or fader bound to `control`: shows the engine's value (the default without
 /// an engine) and sends what the user changes.
 fn bound(
     ui: &mut Ui,
     shared: Option<&EngineSnapshot>,
-    (group, key): (&'static str, &'static str),
-    default: f64,
-    actions: &mut Vec<Action>,
-    add: impl FnOnce(&mut Ui, &mut f64) -> Response,
-) {
-    let mut v = shared.and_then(|s| value(s, group, key)).unwrap_or(default);
-    if add(ui, &mut v).changed() {
-        actions.push(Action::Control {
-            group,
-            key: key.into(),
-            value: v,
-        });
+    control: Control,
+    out: &mut Vec<Command>,
+    add: impl FnOnce(&mut Ui, &Range, &mut f64) -> Response,
+) -> Response {
+    let range = control.range().expect("a knob or fader");
+    let mut v = shared.and_then(|s| control.get(s)).unwrap_or(range.default);
+    let r = add(ui, &range, &mut v);
+    if r.changed() {
+        out.extend(control.command(v));
     }
+    r
 }
 
-pub fn show(ui: &mut Ui, shared: Option<&EngineSnapshot>, actions: &mut Vec<Action>) {
-    let (area, _) = ui.allocate_exact_size(vec2(WIDTH, HEIGHT), Sense::hover());
+/// `decks`: the channels, in order.
+pub fn show(
+    ui: &mut Ui,
+    shared: Option<&EngineSnapshot>,
+    decks: &[DeckId],
+    out: &mut Vec<Command>,
+) {
+    let width = width(decks);
+    let (area, _) = ui.allocate_exact_size(vec2(width, HEIGHT), Sense::hover());
     let at =
         |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(area.min + vec2(x, y), vec2(w, h));
     let row = |x: f32, r: usize| at(x, r as f32 * ROW, KNOB_COL, ROW);
+    let left: Vec<DeckId> = decks.iter().copied().filter(|d| on_left(*d)).collect();
+    let right: Vec<DeckId> = decks.iter().copied().filter(|d| !on_left(*d)).collect();
+    let main_x = left.len() as f32 * STRIP_W;
+    let channels_w = channels_w(decks.len());
 
-    for d in 0..2 {
-        let group = CHANNELS[d];
-        let colour = util::DECK[d];
-        // Deck A's knobs on the far left; deck B's mirrored on the right.
-        let (knob_x, fader_x, vu_x) = if d == 0 {
-            (0.0, KNOB_COL, KNOB_COL + FADER_COL)
+    let strips = left
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (*d, i as f32 * STRIP_W, true))
+        .chain(
+            right
+                .iter()
+                .enumerate()
+                .map(|(i, d)| (*d, main_x + CENTRE_W + i as f32 * STRIP_W, false)),
+        );
+    for (deck, base, left_side) in strips {
+        let colour = util::deck_colour(deck);
+        let ch = |c| Control::Deck(deck, c);
+        // Knobs on the outside, then the fader, then the meter by the middle.
+        let (knob_x, fader_x, vu_x) = if left_side {
+            (base, base + KNOB_COL, base + KNOB_COL + FADER_COL)
         } else {
-            let base = KNOB_COL + FADER_COL + VU_W + CENTRE_W;
             (base + VU_W + FADER_COL, base + VU_W, base)
         };
         // High, mid, low, filter down the outside, like Mixxx.
-        for (r, band) in [(0, 2), (1, 1), (2, 0)] {
-            let label = ["LOW", "MID", "HIGH"][band];
+        for (r, band, label) in [(0, EQ_HIGH, "HIGH"), (1, EQ_MID, "MID"), (2, EQ_LOW, "LOW")] {
             bound(
                 ui,
                 shared,
-                (EQ_GROUPS[d], EQ_KEYS[band]),
-                1.0,
-                actions,
-                |ui, v| {
+                ch(DeckControl::Eq(band)),
+                out,
+                |ui, range, v| {
                     ui.put(
                         row(knob_x, r),
-                        Knob::new(&EQ[band], v)
+                        Knob::new(range, v)
                             .diameter(KNOB)
                             .label(label)
                             .colour(colour),
@@ -175,46 +125,34 @@ pub fn show(ui: &mut Ui, shared: Option<&EngineSnapshot>, actions: &mut Vec<Acti
                 },
             );
         }
-        bound(
-            ui,
-            shared,
-            (FILTER_GROUPS[d], "super1"),
-            FILTER.default,
-            actions,
-            |ui, v| {
-                ui.put(
-                    row(knob_x, 3),
-                    Knob::new(&FILTER, v)
-                        .diameter(KNOB)
-                        .label("FILTER")
-                        .colour(colour),
-                )
-            },
-        );
+        bound(ui, shared, ch(DeckControl::Filter), out, |ui, range, v| {
+            ui.put(
+                row(knob_x, 3),
+                Knob::new(range, v)
+                    .diameter(KNOB)
+                    .label("FILTER")
+                    .colour(colour),
+            )
+        });
         // Gain over the headphone cue button over the fader.
-        bound(
-            ui,
-            shared,
-            (group, "pregain"),
-            GAIN.default,
-            actions,
-            |ui, v| {
-                let auto = shared.map_or(1.0, |s| s.decks[d].auto_gain);
-                ui.put(
-                    at(fader_x, 0.0, FADER_COL, ROW),
-                    Knob::new(&GAIN, v)
-                        .diameter(KNOB)
-                        .label("GAIN")
-                        .colour(colour),
-                )
-                .on_hover_text(format!(
-                    "Auto-gain for this track: {:+.1} dB (brings it to {:.0} LUFS)",
-                    20.0 * auto.log10(),
-                    TARGET_LUFS
-                ))
-            },
-        );
-        let pfl = shared.is_some_and(|s| s.decks[d].pfl);
+        let r = bound(ui, shared, ch(DeckControl::Trim), out, |ui, range, v| {
+            ui.put(
+                at(fader_x, 0.0, FADER_COL, ROW),
+                Knob::new(range, v)
+                    .diameter(KNOB)
+                    .label("GAIN")
+                    .colour(colour),
+            )
+        });
+        if r.hovered() {
+            let auto = shared.map_or(1.0, |s| s.deck(deck).auto_gain);
+            r.on_hover_text(format!(
+                "Auto-gain for this track: {:+.1} dB (brings it to {:.0} LUFS)",
+                20.0 * auto.log10(),
+                TARGET_LUFS
+            ));
+        }
+        let pfl = shared.is_some_and(|s| s.deck(deck).pfl);
         let r = ui
             .put(
                 at(fader_x + 2.0, PFL_TOP, FADER_COL - 4.0, PFL_H),
@@ -223,29 +161,18 @@ pub fn show(ui: &mut Ui, shared: Option<&EngineSnapshot>, actions: &mut Vec<Acti
                     .lit(pfl),
             )
             .on_hover_text("Headphone cue (PFL)");
-        if r.clicked() {
-            actions.push(Action::Control {
-                group,
-                key: "pfl".into(),
-                value: if pfl { 0.0 } else { 1.0 },
-            });
+        if held(ui, &r) == Some(true) {
+            out.extend(ch(DeckControl::Pfl).command(1.0));
         }
         let fader_rect = at(fader_x, FADER_TOP, FADER_COL, FADER_BOTTOM - FADER_TOP);
-        bound(
-            ui,
-            shared,
-            (group, "volume"),
-            VOLUME.default,
-            actions,
-            |ui, v| {
-                ui.put(
-                    fader_rect,
-                    Fader::vertical(&VOLUME, v, vec2(FADER_COL - 8.0, fader_rect.height()))
-                        .colour(colour),
-                )
-            },
-        );
-        let level = shared.map_or(0.0, |s| s.decks[d].vu);
+        bound(ui, shared, ch(DeckControl::Volume), out, |ui, range, v| {
+            ui.put(
+                fader_rect,
+                Fader::vertical(range, v, vec2(FADER_COL - 8.0, fader_rect.height()))
+                    .colour(colour),
+            )
+        });
+        let level = shared.map_or(0.0, |s| s.deck(deck).vu);
         ui.put(
             at(vu_x, FADER_TOP, VU_W, FADER_BOTTOM - FADER_TOP),
             Meter::new(level, vec2(VU_W - 2.0, FADER_BOTTOM - FADER_TOP)),
@@ -253,7 +180,6 @@ pub fn show(ui: &mut Ui, shared: Option<&EngineSnapshot>, actions: &mut Vec<Acti
     }
 
     // Main meters, left and right, between the channels.
-    let main_x = KNOB_COL + FADER_COL + VU_W;
     for side in 0..2 {
         let level = shared.map_or(0.0, |s| s.mixer.vu_main[side]);
         ui.put(
@@ -290,43 +216,32 @@ pub fn show(ui: &mut Ui, shared: Option<&EngineSnapshot>, actions: &mut Vec<Acti
         if limiting { util::BAD } else { util::MUTED },
     );
 
-    let xf_w = CHANNELS_W - 2.0 * KNOB_COL;
-    bound(
-        ui,
-        shared,
-        ("[Master]", "crossfader"),
-        0.0,
-        actions,
-        |ui, v| {
-            ui.put(
-                at(KNOB_COL, XF_TOP, xf_w, XF_H),
-                Fader::horizontal(&CROSSFADER, v, vec2(xf_w, XF_H)).ticks(9),
-            )
-        },
-    );
+    let xf_w = channels_w - 2.0 * KNOB_COL;
+    let crossfader = Control::Master(MasterParam::Crossfader);
+    bound(ui, shared, crossfader, out, |ui, range, v| {
+        ui.put(
+            at(KNOB_COL, XF_TOP, xf_w, XF_H),
+            Fader::horizontal(range, v, vec2(xf_w, XF_H)).ticks(9),
+        )
+    });
 
     // Main and headphone knobs on the right.
-    let mx = CHANNELS_W + MASTER_GAP;
-    for (r, (key, range, label)) in [
-        ("gain", &MAIN_GAIN, "MAIN"),
-        ("balance", &BALANCE, "BAL"),
-        ("headGain", &HEAD_GAIN, "HEAD"),
-        ("headMix", &HEAD_MIX, "MIX"),
+    let mx = channels_w + MASTER_GAP;
+    for (r, (param, label)) in [
+        (MasterParam::Gain, "MAIN"),
+        (MasterParam::Balance, "BAL"),
+        (MasterParam::HeadGain, "HEAD"),
+        (MasterParam::HeadMix, "MIX"),
     ]
     .into_iter()
     .enumerate()
     {
-        bound(
-            ui,
-            shared,
-            ("[Master]", key),
-            range.default,
-            actions,
-            |ui, v| ui.put(row(mx, r), Knob::new(range, v).diameter(KNOB).label(label)),
-        );
+        bound(ui, shared, Control::Master(param), out, |ui, range, v| {
+            ui.put(row(mx, r), Knob::new(range, v).diameter(KNOB).label(label))
+        });
     }
     // Separator between the channels and the main section.
-    let x = area.left() + CHANNELS_W + MASTER_GAP / 2.0;
+    let x = area.left() + channels_w + MASTER_GAP / 2.0;
     ui.painter().line_segment(
         [
             egui::pos2(x, area.top()),

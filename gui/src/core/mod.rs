@@ -1,16 +1,19 @@
 //! Everything that isn't drawing: the database (the Store), Flows, library scanning,
-//! the analysis queue, the decks (player), the control bus and MIDI. The UI talks to
-//! it by calling functions and sending Store commands, and hears back through
-//! [`Event`]s.
+//! the analysis queue, the decks (player and their sessions), commands, the control
+//! registry, the keymap and MIDI. The UI talks to it by dispatching commands, calling
+//! functions and sending Store commands, and hears back through [`Event`]s.
 
 pub mod analysis;
-pub mod controls;
+pub mod bus;
+pub mod command;
 pub mod flows;
 pub mod hash;
+pub mod keymap;
 pub mod keys;
 pub mod library;
 pub mod midi;
 pub mod player;
+pub mod session;
 pub mod store;
 pub mod suggest;
 pub mod worker_client;
@@ -28,14 +31,10 @@ pub enum Event {
         bytes: Vec<u8>,
         mapped: Option<String>,
     },
-    /// A control the UI owns (library navigation, load selected), e.g. from MIDI.
-    UiControl {
-        group: String,
-        key: String,
-        value: f64,
-    },
+    /// A command for the UI to dispatch (one that needs app state, e.g. from MIDI).
+    Command(command::Command),
     Loaded {
-        deck: usize,
+        deck: earshot_engine::DeckId,
         track_id: i64,
         result: Result<(), String>,
     },

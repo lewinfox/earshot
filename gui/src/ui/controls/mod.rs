@@ -37,98 +37,10 @@ pub const LABEL_SIZE: f32 = 9.0;
 
 // ---- values -------------------------------------------------------------------------------
 
-/// What a knob or fader controls: its range, default and how its value reads.
-#[derive(Clone, Copy)]
-pub struct Range {
-    pub name: &'static str,
-    pub min: f64,
-    pub max: f64,
-    /// Double-click goes back here.
-    pub default: f64,
-    /// The value at the middle of the travel, for controls whose middle means "as is"
-    /// (EQ, filter, balance). The travel either side maps linearly to min..centre and
-    /// centre..max, and value arcs start from it.
-    pub centre: Option<f64>,
-    pub format: fn(f64) -> String,
-}
-
-impl Range {
-    /// Value to travel, 0..1.
-    pub fn to_pos(&self, v: f64) -> f64 {
-        let v = v.clamp(self.min, self.max);
-        match self.centre {
-            Some(c) if v < c => 0.5 * (v - self.min) / (c - self.min),
-            Some(c) => 0.5 + 0.5 * (v - c) / (self.max - c),
-            None => (v - self.min) / (self.max - self.min),
-        }
-    }
-
-    /// Travel (0..1) to value.
-    pub fn from_pos(&self, p: f64) -> f64 {
-        let p = p.clamp(0.0, 1.0);
-        match self.centre {
-            Some(c) if p < 0.5 => self.min + (c - self.min) * p * 2.0,
-            Some(c) => c + (self.max - c) * (p - 0.5) * 2.0,
-            None => self.min + (self.max - self.min) * p,
-        }
-    }
-
-    /// Where value arcs and fills start, as travel.
-    pub fn origin(&self) -> f64 {
-        self.centre.map_or(0.0, |c| self.to_pos(c))
-    }
-
-    pub fn tooltip(&self, v: f64) -> String {
-        format!(
-            "{}: {}\nDrag (Shift: fine) or scroll · double-click resets to {}",
-            self.name,
-            (self.format)(v),
-            (self.format)(self.default)
-        )
-    }
-}
-
-// ---- value formats ------------------------------------------------------------------------
-
-/// Linear gain as decibels.
-pub fn fmt_db(v: f64) -> String {
-    if v <= 1e-4 {
-        "-∞ dB (kill)".into()
-    } else {
-        format!("{:+.1} dB", 20.0 * v.log10())
-    }
-}
-
-pub fn fmt_percent(v: f64) -> String {
-    format!("{:.0} %", v * 100.0)
-}
-
-/// Mixxx's filter knob (0..1, off at 0.5).
-pub fn fmt_filter(v: f64) -> String {
-    let x = v * 2.0 - 1.0;
-    if x.abs() < 0.02 {
-        "off".into()
-    } else {
-        format!(
-            "{} {:.0} %",
-            if x < 0.0 { "low-pass" } else { "high-pass" },
-            x.abs() * 100.0
-        )
-    }
-}
-
-/// -1 left .. 1 right.
-pub fn fmt_balance(v: f64) -> String {
-    if v.abs() < 0.005 {
-        "centre".into()
-    } else {
-        format!(
-            "{:.0} % {}",
-            v.abs() * 100.0,
-            if v < 0.0 { "left" } else { "right" }
-        )
-    }
-}
+// What a knob or fader controls lives with the control registry, in core.
+pub use crate::core::bus::Range;
+#[cfg(test)]
+use crate::core::bus::{fmt_db, fmt_filter};
 
 // ---- shared behaviour -------------------------------------------------------------------
 
@@ -229,6 +141,7 @@ mod tests {
             assert!((eq.from_pos(eq.to_pos(v)) - v).abs() < 1e-12);
         }
         assert_eq!(fmt_db(1.0), "+0.0 dB");
-        assert_eq!(fmt_filter(0.5), "off");
+        assert_eq!(fmt_filter(0.0), "off");
+        assert_eq!(fmt_filter(-0.5), "low-pass 50 %");
     }
 }
