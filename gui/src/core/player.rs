@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::decode::{self, TrackAudio};
 use earshot_engine::{
-    Command, DECKS, Engine, OutputInfo, OutputOptions, Routing, Shared, energy, loudness, waveform,
+    Command, Engine, HOTCUES, PLAYERS, OutputInfo, OutputOptions, Routing, Shared, energy, loudness, waveform,
 };
 use serde::{Deserialize, Serialize};
 
@@ -35,10 +35,10 @@ pub struct DeckSlot {
 
 pub struct Inner {
     pub engine: Option<Engine>,
-    pub decks: [DeckSlot; DECKS],
+    pub decks: [DeckSlot; PLAYERS],
     pub generation: u64,
-    pub jump_size: [f64; DECKS],
-    pub loop_size: [f64; DECKS],
+    pub jump_size: [f64; PLAYERS],
+    pub loop_size: [f64; PLAYERS],
     /// Output routing; `None` means the default for the device's channel count.
     pub routing: Option<Routing>,
     /// Bumped on every preview request, so a slow decode can't start a stale one.
@@ -65,8 +65,8 @@ pub fn new_player() -> Player {
         engine: None,
         decks: Default::default(),
         generation: 0,
-        jump_size: [4.0; DECKS],
-        loop_size: [4.0; DECKS],
+        jump_size: [4.0; PLAYERS],
+        loop_size: [4.0; PLAYERS],
         routing: None,
         preview_seq: 0,
     }))
@@ -170,6 +170,15 @@ pub fn stop_preview(player: &Player) -> Result<(), String> {
 /// Start (or restart) audio and reload whatever was on the decks.
 pub fn start_engine(player: &Player, opts: &OutputOptions) -> Result<OutputInfo, String> {
     let mut inner = player.lock().unwrap();
+    // Hot cues live in the engine: carry them over.
+    let hotcues = |d: usize| match inner.shared() {
+        Some(sh) => sh.decks[d].hotcues.each_ref().map(|h| {
+            let t = h.get();
+            t.is_finite().then_some(t)
+        }),
+        None => [None; HOTCUES],
+    };
+    let kept: Vec<_> = (0..PLAYERS).map(hotcues).collect();
     inner.engine = None; // stop the old stream first so the device is free
     let mut engine = Engine::start(opts)?;
     for (deck, slot) in inner.decks.iter().enumerate() {
@@ -179,6 +188,7 @@ pub fn start_engine(player: &Player, opts: &OutputOptions) -> Result<OutputInfo,
                 audio: audio.clone(),
                 grid: slot.grid.clone(),
                 generation: 0,
+                hotcues: kept[deck],
             })?;
         }
     }
@@ -193,7 +203,7 @@ pub fn start_engine(player: &Player, opts: &OutputOptions) -> Result<OutputInfo,
 /// Decode a library track and put it on a deck. Blocking (about a second): call it
 /// from a background thread.
 pub fn load_track(player: &Player, lib: &Library, deck: usize, id: i64) -> Result<(), String> {
-    if deck >= DECKS {
+    if deck >= PLAYERS {
         return Err("no such deck".into());
     }
     let db = &lib.db;
@@ -257,6 +267,7 @@ pub fn load_track(player: &Player, lib: &Library, deck: usize, id: i64) -> Resul
             .queue(id, Some(audio.clone()), false, Mode::Static);
     }
     let grid = grid.map(Arc::new);
+    let hotcues = db::hotcues(&db.lock().unwrap(), id)?;
 
     let mut inner = player.lock().unwrap();
     inner.generation += 1;
@@ -266,6 +277,7 @@ pub fn load_track(player: &Player, lib: &Library, deck: usize, id: i64) -> Resul
         audio: audio.clone(),
         grid: grid.clone(),
         generation,
+        hotcues,
     })?;
     inner.send(Command::AutoGain {
         deck,
@@ -291,8 +303,6 @@ pub enum GridOp {
     SetBpm(f64),
     /// Milliseconds; negative is earlier.
     Nudge(f64),
-    /// Make the beat nearest the playhead the 1.
-    SetDownbeat,
     /// Shift the grid so a beat lands exactly on the playhead, and make it the 1.
     AnchorHere,
     Halve,
@@ -317,7 +327,6 @@ pub fn edit_grid(player: &Player, db: &db::Db, deck: usize, op: GridOp) -> Resul
         GridOp::SetBpm(bpm) if bpm > 20.0 && bpm < 400.0 => grid.with_bpm(bpm, nearest, duration),
         GridOp::SetBpm(_) => return Err("BPM out of range".into()),
         GridOp::Nudge(ms) => grid.nudged(ms / 1000.0, duration),
-        GridOp::SetDownbeat => Ok(grid.with_downbeat(nearest)),
         GridOp::AnchorHere => grid
             .nudged(playhead - grid.times()[nearest], duration)
             .map(|g| {

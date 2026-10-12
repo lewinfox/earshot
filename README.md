@@ -106,8 +106,8 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   Ctrl −/=/0 scales the whole UI.
 - **Search** with free text plus `bpm:120-126` and `key:8A` (or `key:Am`). It searches
   within the selected folder.
-- **Beatgrids** are fixed with the grid buttons under each deck (*BPM*, ◁ ▷ nudge
-  10 ms, *1* = make the nearest beat a downbeat, ÷2, ×2). A tempo-lock
+- **Beatgrids** are fixed in the grid editor (Prepare mode, or *GRID* on a deck): the
+  red-over-white bar puts the 1 at the playhead, plus *BPM*, nudge, ÷2 and ×2. A tempo-lock
   `<file>.beats.json` sidecar next to a file is still used if there's no analysed grid.
 
 ## Tests

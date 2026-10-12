@@ -7,7 +7,7 @@
 //! The worker never decodes files itself. We send it a mono WAV from our own decoder,
 //! so its beat times line up exactly with what the decks play.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
@@ -114,7 +114,8 @@ impl Queue {
 
 pub struct Analyser {
     queue: Arc<Queue>,
-    pending: Arc<Mutex<HashSet<i64>>>,
+    /// Tracks waiting or running, and whether on the loaded-track lane.
+    pending: Arc<Mutex<HashMap<i64, bool>>>,
     sink: Sink,
     /// A deck is playing (set by the UI every frame).
     playing: Arc<AtomicBool>,
@@ -143,7 +144,7 @@ impl Analyser {
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
         let threads = (cores / jobs).max(1);
         let queue = Arc::new(Queue::default());
-        let pending = Arc::new(Mutex::new(HashSet::new()));
+        let pending = Arc::new(Mutex::new(HashMap::new()));
         let playing = Arc::new(AtomicBool::new(false));
         let background_running = Arc::new(AtomicUsize::new(0));
         // The loaded-track lane, then the background ones.
@@ -162,6 +163,14 @@ impl Analyser {
                     };
                     priority.apply();
                     let mut worker: Option<Worker> = None;
+                    if urgent {
+                        // Start this lane's worker now (importing torch takes a few
+                        // seconds), so a loaded track is analysed straight away.
+                        match Worker::spawn(threads, priority) {
+                            Ok(w) => worker = Some(w),
+                            Err(e) => eprintln!("analysis worker: {e}"),
+                        }
+                    }
                     loop {
                         let job = q.pop(urgent);
                         if !urgent {
@@ -180,7 +189,12 @@ impl Analyser {
                         if !urgent {
                             running.fetch_sub(1, Ordering::SeqCst);
                         }
-                        p.lock().unwrap().remove(&job.id);
+                        // Leave it pending if the other lane has taken it over.
+                        let mut pending = p.lock().unwrap();
+                        if pending.get(&job.id) == Some(&urgent) {
+                            pending.remove(&job.id);
+                        }
+                        drop(pending);
                         (a.sink)(Event::Analysis(ev));
                     }
                 })
@@ -200,8 +214,8 @@ impl Analyser {
     }
 
     /// Queue a track unless it is already waiting. A track just loaded onto a deck
-    /// (`audio` given) goes on the loaded-track lane, ahead of any folder being
-    /// analysed, and is moved there if it was already waiting in the background.
+    /// (`audio` given) goes to the front of the loaded-track lane, ahead of everything,
+    /// and is taken over from the background if it was waiting or running there.
     pub fn queue(&self, id: i64, audio: Option<Arc<TrackAudio>>, force: bool, mode: Mode) {
         let urgent = audio.is_some();
         let job = Job {
@@ -211,17 +225,23 @@ impl Analyser {
             mode,
         };
         let mut jobs = self.queue.jobs.lock().unwrap();
-        if !self.pending.lock().unwrap().insert(id) {
-            if urgent && let Some(i) = jobs.1.iter().position(|j| j.id == id) {
-                jobs.1.remove(i);
-                jobs.0.push_back(job);
-                self.queue.ready.notify_all();
+        let mut pending = self.pending.lock().unwrap();
+        match pending.get(&id) {
+            // Already on the loaded-track lane, or waiting in the background.
+            Some(true) => return,
+            Some(false) if !urgent => return,
+            // In the background (waiting or already running) but now loaded: take it
+            // out of the background queue and analyse it on the loaded-track lane. A
+            // background run already under way finishes too; the grid is the same.
+            Some(false) => {
+                jobs.1.retain(|j| j.id != id);
             }
-            return;
+            None => (self.sink)(Event::Analysis(AnalysisEvent::new(id, "queued"))),
         }
-        (self.sink)(Event::Analysis(AnalysisEvent::new(id, "queued")));
+        pending.insert(id, urgent);
         if urgent {
-            jobs.0.push_back(job);
+            // The newest load first.
+            jobs.0.push_front(job);
         } else {
             jobs.1.push_back(job);
         }
@@ -516,7 +536,8 @@ impl Worker {
                 dir.canonicalize().unwrap_or(dir.clone()).display()
             ));
         }
-        let mut child = std::process::Command::new(&python)
+        let mut command = std::process::Command::new(&python);
+        command
             .args(["-m", "earshot_worker"])
             .current_dir(&dir)
             .env("OMP_NUM_THREADS", threads.to_string())
@@ -531,7 +552,19 @@ impl Worker {
             )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        // End the worker when the app does, even mid-analysis (the analysis threads
+        // aren't joined on exit, so `Drop` never runs for them).
+        #[cfg(target_os = "linux")]
+        // SAFETY: prctl is async-signal-safe; it runs in the child before exec.
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                Ok(())
+            });
+        }
+        let mut child = command
             .spawn()
             .map_err(|e| format!("starting the analysis worker: {e}"))?;
         let stdin = child.stdin.take().unwrap();

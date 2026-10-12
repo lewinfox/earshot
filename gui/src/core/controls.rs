@@ -16,7 +16,8 @@ pub enum Outcome {
     Ui,
 }
 
-pub const CHANNELS: [&str; 2] = ["[Channel1]", "[Channel2]"];
+/// Mixxx's groups for deck A, deck B and Prepare's player (Mixxx's preview deck).
+pub const CHANNELS: [&str; 3] = ["[Channel1]", "[Channel2]", "[PreviewDeck1]"];
 /// Mixxx's groups for each channel's EQ (`parameter1..3` = low, mid, high) and its
 /// quick effect, the filter knob (`super1`).
 pub const EQ_GROUPS: [&str; 2] = [
@@ -111,6 +112,9 @@ pub fn apply(inner: &mut Inner, group: &str, key: &str, value: f64) -> Result<Ou
         "cue_default" => Command::Cue { deck, press },
         "sync_enabled" => Command::Sync { deck, on: pressed },
         "quantize" => Command::Quantize { deck, on: pressed },
+        // Put the cue point at the playhead (snapped when quantising).
+        "cue_set" if pressed => Command::SetCue { deck, at: None },
+        "cue_set" => return Ok(Outcome::Done),
         "keylock" => Command::Keylock { deck, on: pressed },
         "pfl" => Command::Pfl { deck, on: pressed },
         "volume" => Command::Volume { deck, value },
@@ -160,10 +164,21 @@ pub fn apply(inner: &mut Inner, group: &str, key: &str, value: f64) -> Result<Ou
             deck,
             beats: -inner.jump_size[deck],
         },
-        "beatloop_activate" if pressed => Command::BeatLoop {
-            deck,
-            beats: inner.loop_size[deck],
-        },
+        // The loop button: starts a loop of the chosen size, or ends the current one
+        // (whatever its size by now).
+        "beatloop_activate" if pressed => {
+            let looping = inner
+                .shared()
+                .is_some_and(|s| s.decks[deck].loop_active.load(Relaxed));
+            if looping {
+                Command::ReloopToggle { deck }
+            } else {
+                Command::BeatLoop {
+                    deck,
+                    beats: inner.loop_size[deck],
+                }
+            }
+        }
         "loop_in" if pressed => Command::LoopIn { deck },
         "loop_out" if pressed => Command::LoopOut { deck },
         "reloop_toggle" if pressed => Command::ReloopToggle { deck },

@@ -6,6 +6,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use earshot_engine::HOTCUES;
 use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::loudness::Loudness;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -22,6 +23,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/004_analysis_mode.sql"),
     include_str!("../../migrations/005_flows.sql"),
     include_str!("../../migrations/006_loudness.sql"),
+    include_str!("../../migrations/007_cues.sql"),
 ];
 
 pub fn open(path: &Path) -> Result<Db, String> {
@@ -260,6 +262,100 @@ pub fn set_mode(conn: &Connection, id: i64, dynamic: bool, drifts: bool) -> Resu
         params![id, if dynamic { "dynamic" } else { "static" }, drifts],
     )
     .map_err(err)?;
+    Ok(())
+}
+
+// ---- cues --------------------------------------------------------------------------
+
+/// A memory cue (a point) or memory loop (with an end), as Rekordbox has them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Memory {
+    pub id: i64,
+    pub start: f64,
+    pub end: Option<f64>,
+}
+
+pub fn hotcues(conn: &Connection, track: i64) -> Result<[Option<f64>; HOTCUES], String> {
+    let mut out = [None; HOTCUES];
+    let mut st = conn
+        .prepare_cached("SELECT slot, start_s FROM cues WHERE track_id = ?1 AND kind = 'hot'")
+        .map_err(err)?;
+    let rows = st
+        .query_map([track], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)))
+        .map_err(err)?;
+    for row in rows {
+        let (slot, t) = row.map_err(err)?;
+        if let Some(h) = out.get_mut(slot as usize) {
+            *h = Some(t);
+        }
+    }
+    Ok(out)
+}
+
+/// Replace a track's hot cues.
+pub fn save_hotcues(
+    conn: &mut Connection,
+    track: i64,
+    cues: &[Option<f64>; HOTCUES],
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(err)?;
+    tx.execute("DELETE FROM cues WHERE track_id = ?1 AND kind = 'hot'", [track])
+        .map_err(err)?;
+    for (slot, t) in cues.iter().enumerate() {
+        if let Some(t) = t {
+            tx.execute(
+                "INSERT INTO cues(track_id, kind, slot, start_s) VALUES (?1, 'hot', ?2, ?3)",
+                params![track, slot as i64, t],
+            )
+            .map_err(err)?;
+        }
+    }
+    tx.commit().map_err(err)
+}
+
+/// A track's memory cues and loops, in order through the track.
+pub fn memories(conn: &Connection, track: i64) -> Result<Vec<Memory>, String> {
+    let mut st = conn
+        .prepare_cached(
+            "SELECT id, start_s, end_s FROM cues WHERE track_id = ?1 AND kind = 'memory'
+             ORDER BY start_s",
+        )
+        .map_err(err)?;
+    st.query_map([track], |r| {
+        Ok(Memory {
+            id: r.get(0)?,
+            start: r.get(1)?,
+            end: r.get(2)?,
+        })
+    })
+    .map_err(err)?
+    .collect::<Result<_, _>>()
+    .map_err(err)
+}
+
+/// Save a memory cue (or loop, with `end`), unless the same one is already saved.
+pub fn add_memory(conn: &Connection, track: i64, start: f64, end: Option<f64>) -> Result<(), String> {
+    let same = memories(conn, track)?.iter().any(|m| {
+        (m.start - start).abs() < 0.005
+            && match (m.end, end) {
+                (None, None) => true,
+                (Some(a), Some(b)) => (a - b).abs() < 0.005,
+                _ => false,
+            }
+    });
+    if !same {
+        conn.execute(
+            "INSERT INTO cues(track_id, kind, start_s, end_s) VALUES (?1, 'memory', ?2, ?3)",
+            params![track, start, end],
+        )
+        .map_err(err)?;
+    }
+    Ok(())
+}
+
+pub fn delete_memory(conn: &Connection, id: i64) -> Result<(), String> {
+    conn.execute("DELETE FROM cues WHERE id = ?1 AND kind = 'memory'", [id])
+        .map_err(err)?;
     Ok(())
 }
 

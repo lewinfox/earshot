@@ -15,6 +15,11 @@ use crate::keylock::{self, Keylock};
 use crate::tempo::TempoRange;
 
 pub const DECKS: usize = 2;
+/// The decks plus Prepare mode's player, which plays straight to the main output
+/// (no channel fader, crossfader or sync).
+pub const PLAYERS: usize = 3;
+/// Prepare mode's player.
+pub const PREP: usize = 2;
 pub const HOTCUES: usize = 8;
 /// Largest block rendered in one go; bigger device buffers are rendered in chunks.
 pub const MAX_BLOCK: usize = 4096;
@@ -95,7 +100,7 @@ pub struct DeckShared {
 
 #[derive(Default)]
 pub struct Shared {
-    pub decks: [DeckShared; DECKS],
+    pub decks: [DeckShared; PLAYERS],
     pub crossfader: AtomicF64,
     /// Main output level, linear.
     pub main_gain: AtomicF64,
@@ -209,6 +214,20 @@ pub enum Command {
         audio: Arc<TrackAudio>,
         grid: Option<Arc<Beatgrid>>,
         generation: u64,
+        /// The track's saved hot cues (seconds).
+        hotcues: [Option<f64>; HOTCUES],
+    },
+    /// Put the cue point at `at` (seconds), or at the playhead (snapped to the beat
+    /// when quantising) with `None`.
+    SetCue {
+        deck: usize,
+        at: Option<f64>,
+    },
+    /// Loop `start..end` (seconds) and jump to its start.
+    SetLoop {
+        deck: usize,
+        start: f64,
+        end: f64,
     },
     SetGrid {
         deck: usize,
@@ -512,12 +531,12 @@ pub struct Renderer {
     commands: rtrb::Consumer<Command>,
     garbage: rtrb::Producer<Garbage>,
     shared: Arc<Shared>,
-    decks: [Deck; DECKS],
+    decks: [Deck; PLAYERS],
     crossfader: f64,
     sample_rate: f64,
     /// Per-deck stereo scratch, master and headphone buses (interleaved stereo).
-    deck_buf: [Vec<f32>; DECKS],
-    keylocks: [Keylock; DECKS],
+    deck_buf: [Vec<f32>; PLAYERS],
+    keylocks: [Keylock; PLAYERS],
     master: Vec<f32>,
     phones: Vec<f32>,
     routing: Routing,
@@ -527,7 +546,7 @@ pub struct Renderer {
     preview_gain: f32,
     limiters: [Limiter; 2],
     limiting: f64,
-    strips: [Strip; DECKS],
+    strips: [Strip; PLAYERS],
     main_gain: f64,
     balance: f64,
     head_gain: f64,
@@ -606,14 +625,11 @@ impl Renderer {
             commands,
             garbage,
             shared,
-            decks: [Deck::new(), Deck::new()],
+            decks: std::array::from_fn(|_| Deck::new()),
             crossfader: 0.0,
             sample_rate: sample_rate as f64,
-            deck_buf: [vec![0.0; MAX_BLOCK * 2], vec![0.0; MAX_BLOCK * 2]],
-            keylocks: [
-                Keylock::new(sample_rate, MAX_BLOCK),
-                Keylock::new(sample_rate, MAX_BLOCK),
-            ],
+            deck_buf: std::array::from_fn(|_| vec![0.0; MAX_BLOCK * 2]),
+            keylocks: std::array::from_fn(|_| Keylock::new(sample_rate, MAX_BLOCK)),
             master: vec![0.0; MAX_BLOCK * 2],
             phones: vec![0.0; MAX_BLOCK * 2],
             routing: Routing::default(),
@@ -626,10 +642,7 @@ impl Renderer {
                 Limiter::new(sample_rate as f64),
             ],
             limiting: 0.0,
-            strips: [
-                Strip::new(sample_rate as f64),
-                Strip::new(sample_rate as f64),
-            ],
+            strips: std::array::from_fn(|_| Strip::new(sample_rate as f64)),
             main_gain: 1.0,
             balance: 0.0,
             head_gain: 1.0,
@@ -683,7 +696,7 @@ impl Renderer {
         self.update_speeds(n);
 
         let sr = self.sample_rate;
-        for d in 0..DECKS {
+        for d in 0..PLAYERS {
             let buf = &mut self.deck_buf[d][..n * 2];
             buf.fill(0.0);
             let deck = &mut self.decks[d];
@@ -749,7 +762,7 @@ impl Renderer {
 
         // Channel strips: gain, EQ, filter. Meters read here, before the faders.
         let secs = n as f64 / sr;
-        for d in 0..DECKS {
+        for d in 0..PLAYERS {
             let strip = &mut self.strips[d];
             let peak = strip.process(&mut self.deck_buf[d][..n * 2], self.knob_ease);
             strip.vu = meter(strip.vu, peak, secs);
@@ -777,7 +790,8 @@ impl Renderer {
                     p += s;
                 }
             }
-            let m = 0.8 * m;
+            // Prepare's player goes straight to the main mix.
+            let m = 0.8 * (m + self.deck_buf[PREP][f]);
             let out = m * main * side[f % 2];
             // Metered before the limiter, so over 0 dB shows when it's working.
             peaks[f % 2] = peaks[f % 2].max(out.abs());
@@ -908,6 +922,7 @@ impl Renderer {
                 audio,
                 grid,
                 generation,
+                hotcues,
             } => {
                 let dk = &mut self.decks[deck];
                 let old_audio = dk.audio.replace(audio);
@@ -928,6 +943,7 @@ impl Renderer {
                     volume: dk.volume,
                     pfl: dk.pfl,
                     generation,
+                    hotcues,
                     ..Deck::new()
                 };
                 if let Some(a) = old_audio {
@@ -995,10 +1011,35 @@ impl Renderer {
                 }
                 dk.seek(dk.pos + shift);
             }
+            Command::SetCue { deck, at } => {
+                let dk = &mut self.decks[deck];
+                dk.cue_point = at.unwrap_or_else(|| dk.snap(dk.pos)).max(-LEAD_IN);
+            }
+            Command::SetLoop { deck, start, end } => {
+                let dk = &mut self.decks[deck];
+                if end > start {
+                    dk.loop_in = Some(start);
+                    dk.loop_out = Some(end);
+                    dk.loop_active = true;
+                    dk.seek(start);
+                }
+            }
             Command::BeatLoop { deck, beats } => {
                 let dk = &mut self.decks[deck];
-                if dk.loop_active {
-                    dk.loop_active = false;
+                // The same size again ends the loop; another size resizes it from
+                // the same start.
+                if dk.loop_active
+                    && let (Some(lin), Some(lout)) = (dk.loop_in, dk.loop_out)
+                {
+                    let size = dk.beat_at(lout) - dk.beat_at(lin);
+                    if (size - beats).abs() < 1e-6 {
+                        dk.loop_active = false;
+                    } else {
+                        dk.loop_out = Some(dk.time_at(dk.beat_at(lin) + beats));
+                        if dk.pos >= dk.loop_out.unwrap_or(f64::MAX) {
+                            dk.seek(lin);
+                        }
+                    }
                     return;
                 }
                 let start = if dk.quantize {
@@ -1103,6 +1144,9 @@ impl Renderer {
             }
             Command::Nudge { deck, amount } => self.decks[deck].nudge = amount,
             Command::Sync { deck, on } => {
+                if deck >= DECKS {
+                    return; // Prepare's player doesn't sync
+                }
                 self.decks[deck].sync = on;
                 // Line the beats up now if both are playing; the tempo follows below
                 // (only a loaded track is needed for that).
@@ -1321,6 +1365,7 @@ mod tests {
                 audio: Arc::new(audio),
                 grid: Some(grid.clone()),
                 generation: 1,
+                hotcues: [None; HOTCUES],
             });
             grid
         }
@@ -1352,6 +1397,7 @@ mod tests {
             }),
             grid: None,
             generation: 1,
+            hotcues: [None; HOTCUES],
         });
     }
 
@@ -1562,6 +1608,42 @@ mod tests {
     }
 
     #[test]
+    fn loops_set_resize_and_end_while_playing() {
+        let mut rig = Rig::new();
+        let grid = rig.load(0, 120.0, 120.0);
+        rig.send(Command::Seek { deck: 0, seconds: 10.2 });
+        rig.send(Command::Play { deck: 0, on: true });
+        rig.run(0.3);
+        // A 4-beat (2 s) loop while playing: the playhead stays inside it.
+        rig.send(Command::BeatLoop { deck: 0, beats: 4.0 });
+        rig.run(0.05);
+        let lin = rig.shared.decks[0].loop_in.get();
+        assert!(rig.shared.decks[0].loop_active.load(Relaxed));
+        rig.run(5.0);
+        let pos = rig.pos(0);
+        assert!(pos >= lin - 0.01 && pos < lin + 2.0 + 0.01, "pos {pos} loop from {lin}");
+        // Another size resizes it from the same start.
+        rig.send(Command::BeatLoop { deck: 0, beats: 2.0 });
+        rig.run(3.0);
+        assert!((rig.shared.decks[0].loop_out.get() - grid.time_at(grid.beat_at(lin) + 2.0)).abs() < 1e-6);
+        assert!(rig.pos(0) < lin + 1.0 + 0.01);
+        // The same size again ends it, and play carries on past the end.
+        rig.send(Command::BeatLoop { deck: 0, beats: 2.0 });
+        rig.run(2.0);
+        assert!(!rig.shared.decks[0].loop_active.load(Relaxed));
+        assert!(rig.pos(0) > lin + 1.0);
+        // IN then OUT while playing makes a loop; reloop/exit ends it.
+        rig.send(Command::LoopIn { deck: 0 });
+        rig.run(1.0);
+        rig.send(Command::LoopOut { deck: 0 });
+        rig.run(0.05);
+        assert!(rig.shared.decks[0].loop_active.load(Relaxed));
+        rig.send(Command::ReloopToggle { deck: 0 });
+        rig.run(0.05);
+        assert!(!rig.shared.decks[0].loop_active.load(Relaxed));
+    }
+
+    #[test]
     fn plays_and_advances_in_real_time() {
         let mut rig = Rig::new();
         rig.load(0, 124.0, 124.0);
@@ -1732,6 +1814,7 @@ mod tests {
             audio: Arc::new(audio),
             grid: Some(leader.clone()),
             generation: 2,
+            hotcues: [None; HOTCUES],
         });
         rig.send(Command::Play { deck: 0, on: true });
         rig.run(2.0);

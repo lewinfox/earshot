@@ -60,8 +60,13 @@ log = logging.getLogger("earshot_worker")
 
 
 def send(msg: dict) -> None:
-    _proto.write(json.dumps(msg, allow_nan=False) + "\n")
-    _proto.flush()
+    try:
+        _proto.write(json.dumps(msg, allow_nan=False) + "\n")
+        _proto.flush()
+    except BrokenPipeError:
+        # The app has gone (it quit mid-analysis): nothing to report to, so leave
+        # quietly, without flushing the dead pipe again on the way out.
+        os._exit(0)
 
 
 def _finite(name: str, values: list[float]) -> None:

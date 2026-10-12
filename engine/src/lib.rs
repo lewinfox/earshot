@@ -20,7 +20,9 @@ use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::thread;
 use std::time::Duration;
 
-pub use engine::{Command, DECKS, EQ_HIGH, EQ_LOW, EQ_MID, HOTCUES, Out, Press, Routing, Shared};
+pub use engine::{
+    Command, DECKS, EQ_HIGH, EQ_LOW, EQ_MID, HOTCUES, Out, PLAYERS, PREP, Press, Routing, Shared,
+};
 pub use tempo::TempoRange;
 pub use output::{OutputInfo, OutputOptions};
 

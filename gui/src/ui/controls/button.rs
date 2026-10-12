@@ -15,6 +15,8 @@ use crate::ui::util;
 pub enum Icon {
     /// ▶ ❚❚, like the play button on Mixxx and most controllers.
     PlayPause,
+    /// A bar line, red over white, as Rekordbox marks "put the 1 here".
+    Downbeat,
 }
 
 pub struct HwButton<'a> {
@@ -122,6 +124,20 @@ impl Widget for HwButton<'_> {
         }
         match self.icon {
             Some(Icon::PlayPause) => play_pause(p, rect, self.font, text),
+            Some(Icon::Downbeat) => {
+                let (c, half) = (rect.center(), rect.height() * 0.32);
+                let w = 3.0;
+                p.rect_filled(
+                    Rect::from_min_max(egui::pos2(c.x - w / 2.0, c.y - half), egui::pos2(c.x + w / 2.0, c.y)),
+                    0,
+                    Color32::from_rgb(0xff, 0x46, 0x46),
+                );
+                p.rect_filled(
+                    Rect::from_min_max(egui::pos2(c.x - w / 2.0, c.y), egui::pos2(c.x + w / 2.0, c.y + half)),
+                    0,
+                    Color32::WHITE,
+                );
+            }
             None => {
                 p.text(
                     rect.center(),

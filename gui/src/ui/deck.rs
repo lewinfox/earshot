@@ -10,12 +10,12 @@ use std::f32::consts::TAU;
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
-use earshot_engine::TempoRange;
+use earshot_engine::{DECKS, TempoRange};
 use earshot_engine::engine::LEAD_IN;
 use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::engine::DeckShared;
 use egui::{
-    Align, Button, Color32, CornerRadius, FontId, Layout, Rect, RichText, Sense, Stroke,
+    Align, Color32, CornerRadius, FontId, Layout, Rect, RichText, Sense, Stroke,
     StrokeKind, Ui, pos2, vec2,
 };
 
@@ -23,6 +23,8 @@ use super::controls::{Fader, HwButton, Icon, Range, held};
 use super::library_ui::Track;
 use super::util::{self, Camelot};
 use super::wave::{self, DeckWave, Marks};
+use crate::core::controls::CHANNELS;
+use crate::core::db::Memory;
 use crate::core::player::GridOp;
 
 pub enum Action {
@@ -42,6 +44,17 @@ pub enum Action {
     TempoRange {
         deck: usize,
         range: TempoRange,
+    },
+    /// Save the deck's cue point (or its loop, while looping) as a memory cue.
+    SaveMemory {
+        deck: usize,
+    },
+    RecallMemory {
+        deck: usize,
+        memory: Memory,
+    },
+    DeleteMemory {
+        id: i64,
     },
 }
 
@@ -201,6 +214,8 @@ const TRANSPORT: f32 = BTN_H;
 const CONTROLS_H: f32 = 2.0 * BTN_H + 4.0;
 /// The jog ring (with the BPM in it) fills the height of the controls.
 const JOG: f32 = CONTROLS_H;
+/// Beat jump steps to pick from.
+const JUMP_STEPS: [f64; 6] = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
 const SIZES: [f64; 9] = [0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
 
 const CUE_COLOUR: Color32 = Color32::from_rgb(0xf0, 0xa0, 0x30);
@@ -248,7 +263,7 @@ impl DeckUi {
     pub fn new(index: usize) -> DeckUi {
         DeckUi {
             index,
-            group: ["[Channel1]", "[Channel2]"][index],
+            group: CHANNELS[index],
             shown: 0.0,
             seen_generation: u64::MAX,
             scrub: None,
@@ -532,6 +547,133 @@ impl DeckUi {
         }
     }
 
+    /// Prepare mode's player: the title and overview, then CUE / play and the BPM
+    /// ring, hot cues, loops, beat jumps, the grid editor and the track's memory cues,
+    /// all in one row, `width` × `height`.
+    pub fn show_prepare(
+        &mut self,
+        ui: &mut Ui,
+        width: f32,
+        height: f32,
+        info: &DeckInfo,
+        memories: &[Memory],
+        actions: &mut Vec<Action>,
+    ) {
+        let loading = self.pending.as_ref().map(PendingLoad::info);
+        let info = loading.as_ref().unwrap_or(info);
+        egui::Frame::new()
+            .fill(util::PANEL)
+            .stroke(Stroke::new(1.0_f32, util::LINE))
+            .corner_radius(8)
+            .inner_margin(egui::Margin::symmetric(8, 6))
+            .show(ui, |ui| {
+                ui.set_width(width - 18.0);
+                let inner_h = height - 12.0;
+                ui.set_min_height(inner_h);
+                ui.spacing_mut().item_spacing = vec2(4.0, 5.0);
+                let top = ui.cursor().min.y;
+                self.header(ui, info);
+                let used = ui.cursor().min.y - top;
+                let overview_h =
+                    (inner_h - used - CONTROLS_H - ui.spacing().item_spacing.y).max(24.0);
+                self.overview(ui, info, actions, overview_h);
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(3.0, 4.0);
+                    self.transport(ui, actions);
+                    ui.add_space(6.0);
+                    self.pads(ui, actions);
+                    ui.add_space(6.0);
+                    self.loops(ui, actions);
+                    ui.add_space(6.0);
+                    self.jumps(ui, actions);
+                    ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        ui.set_height(CONTROLS_H);
+                        ui.set_width(330.0);
+                        let s = self.state;
+                        let r = ui
+                            .add(
+                                HwButton::new("Q", util::ACCENT, vec2(24.0, 18.0))
+                                    .font(10.0)
+                                    .lit(s.quantize),
+                            )
+                            .on_hover_text("Quantise: snap cues, loops and hot cues to the beat");
+                        if r.clicked() {
+                            self.control(actions, "quantize", if s.quantize { 0.0 } else { 1.0 });
+                        }
+                        self.grid_editor(ui, info, actions);
+                    });
+                    ui.add_space(10.0);
+                    self.memory_list(ui, memories, actions);
+                });
+            });
+    }
+
+    /// The track's memory cues and loops: click one to go there, × to forget it.
+    fn memory_list(&mut self, ui: &mut Ui, memories: &[Memory], actions: &mut Vec<Action>) {
+        let deck = self.index;
+        ui.vertical(|ui| {
+            ui.set_height(CONTROLS_H);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("MEMORY").size(10.0).color(util::MUTED));
+                if ui
+                    .small_button("+ M")
+                    .on_hover_text("Save the cue point, or the loop while looping (M)")
+                    .clicked()
+                {
+                    actions.push(Action::SaveMemory { deck });
+                }
+            });
+            egui::ScrollArea::vertical()
+                .id_salt(("memories", deck))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if memories.is_empty() {
+                        ui.label(
+                            RichText::new("C sets a cue, M saves it here")
+                                .size(11.0)
+                                .color(util::MUTED),
+                        );
+                    }
+                    for m in memories {
+                        ui.horizontal(|ui| {
+                            let text = match m.end {
+                                Some(e) => format!(
+                                    "⟲ {} – {}",
+                                    util::fmt_tenths(m.start),
+                                    util::fmt_tenths(e)
+                                ),
+                                None => format!("● {}", util::fmt_tenths(m.start)),
+                            };
+                            let colour = if m.end.is_some() { LOOP_COLOUR } else { util::WARN };
+                            if ui
+                                .add(
+                                    egui::Label::new(
+                                        RichText::new(text).monospace().size(11.0).color(colour),
+                                    )
+                                    .sense(Sense::click()),
+                                )
+                                .on_hover_text("Go here")
+                                .clicked()
+                            {
+                                actions.push(Action::RecallMemory { deck, memory: *m });
+                            }
+                            if ui
+                                .add(
+                                    egui::Label::new(RichText::new("×").color(util::MUTED))
+                                        .sense(Sense::click()),
+                                )
+                                .on_hover_text("Forget this one")
+                                .clicked()
+                            {
+                                actions.push(Action::DeleteMemory { id: m.id });
+                            }
+                        });
+                    }
+                });
+        });
+    }
+
     fn header(&mut self, ui: &mut Ui, info: &DeckInfo) {
         let s = self.state;
         // While loading: the new track's length, from the top.
@@ -540,12 +682,15 @@ impl DeckUi {
             None => (s.position, s.duration),
         };
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new((self.index + 1).to_string())
-                    .strong()
-                    .size(16.0)
-                    .color(self.colour()),
-            );
+            // Deck number (Prepare's single player has none).
+            if self.index < DECKS {
+                ui.label(
+                    RichText::new((self.index + 1).to_string())
+                        .strong()
+                        .size(16.0)
+                        .color(self.colour()),
+                );
+            }
             // Title and details on the left, as wide as the times allow.
             let right = 90.0;
             let left = (ui.available_width() - right).max(60.0);
@@ -944,7 +1089,7 @@ impl DeckUi {
         });
     }
 
-    /// Beat jump: ◀ n / n ▶ over size ½ / ×2.
+    /// Beat jump: ◀ n / n ▶ over the step picker.
     fn jumps(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let n = size_label(self.jump_size);
         ui.vertical(|ui| {
@@ -961,14 +1106,24 @@ impl DeckUi {
                     }
                 }
             });
-            ui.horizontal(|ui| {
-                for (label, dir) in [("½", -1), ("×2", 1)] {
-                    let r = ui
-                        .add(HwButton::new(label, util::TEXT, vec2(BTN_W + 6.0, BTN_H)).font(11.0))
-                        .on_hover_text("Beat jump size");
-                    if held(ui, &r) == Some(true) {
-                        self.jump_size = step_size(self.jump_size, dir);
-                        self.control(actions, "beatjump_size", self.jump_size);
+            // The step: click to pick 1-32 beats.
+            let r = ui
+                .add(
+                    HwButton::new(
+                        &format!("STEP {n}"),
+                        util::TEXT,
+                        vec2(2.0 * (BTN_W + 6.0) + 3.0, BTN_H),
+                    )
+                    .font(10.0),
+                )
+                .on_hover_text("How many beats a jump (← / →) moves");
+            egui::Popup::menu(&r).show(|ui| {
+                for beats in JUMP_STEPS {
+                    let label = format!("{beats} beat{}", if beats == 1.0 { "" } else { "s" });
+                    if ui.radio(self.jump_size == beats, label).clicked() {
+                        self.jump_size = beats;
+                        self.control(actions, "beatjump_size", beats);
+                        ui.close();
                     }
                 }
             });
@@ -982,24 +1137,17 @@ impl DeckUi {
         ui.horizontal(|ui| {
             if ui
                 .add(
-                    Button::new(RichText::new("Anchor 1 here").strong())
-                        .stroke(Stroke::new(1.0_f32, self.colour())),
+                    HwButton::new("Anchor 1 here", self.colour(), vec2(30.0, 22.0))
+                        .icon(Icon::Downbeat)
+                        .tinted(true),
                 )
                 .on_hover_text(
-                    "Move the grid so a beat lands exactly on the playhead, and make it the 1",
+                    "Put the 1 here: move the grid so a beat lands exactly on the playhead, \
+                     and make it the 1",
                 )
                 .clicked()
             {
                 grid(GridOp::AnchorHere);
-            }
-            if ui
-                .button("Nearest beat = 1")
-                .on_hover_text(
-                    "Keep the grid where it is; make the beat nearest the playhead the 1",
-                )
-                .clicked()
-            {
-                grid(GridOp::SetDownbeat);
             }
         });
         let cur = info.grid.as_ref().map(|g| g.mean_bpm());

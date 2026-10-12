@@ -13,9 +13,11 @@ pub const OK: Color32 = Color32::from_rgb(0x45, 0xd4, 0x83);
 pub const WARN: Color32 = Color32::from_rgb(0xff, 0xcc, 0x4d);
 pub const BAD: Color32 = Color32::from_rgb(0xff, 0x5b, 0x5b);
 pub const WAVE_BG: Color32 = Color32::from_rgb(0x08, 0x09, 0x0b);
-pub const DECK: [Color32; 2] = [
+/// Deck A, deck B, Prepare's player.
+pub const DECK: [Color32; 3] = [
     Color32::from_rgb(0x3f, 0xa7, 0xff),
     Color32::from_rgb(0xff, 0x5d, 0x8f),
+    ACCENT,
 ];
 pub const HOTCUE: [Color32; 8] = [
     Color32::from_rgb(0x3c, 0xd3, 0x6b),
