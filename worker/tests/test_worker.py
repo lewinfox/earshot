@@ -208,22 +208,18 @@ def test_preview_jumps_the_queue_but_waits_its_turn(worker, click_wav):
     assert started(worker, (10, 11, 12)) == [10, 12, 11]  # 12 doesn't stop 10
 
 
-def test_deck_job_preempts_background_work(worker, click_wav):
-    worker.analyse(13, click_wav, "dynamic")
+def test_deck_job_goes_first_without_stopping_running_work(worker, click_wav):
+    # The app gives deck loads their own worker, so a deck job never has to stop
+    # background work: it just goes ahead of what's waiting.
+    worker.analyse(13, click_wav, "static")
     worker.wait_started(13)
     worker.analyse(14, click_wav, "static")
     worker.analyse(15, click_wav, "static", priority="deck")
-    assert worker.job(15)[-1]["type"] == "done"
-    for i in (13, 14):
+    for i in (13, 14, 15):
         assert worker.job(i)[-1]["type"] == "done"
-    # 13 stops for 15, then runs again before 14 (it came first). Not failed or
-    # cancelled: the app sees it requeued, then started again.
-    assert started(worker, (13, 14, 15)) == [13, 15, 13, 14]
+    assert started(worker, (13, 14, 15)) == [13, 15, 14]
     kinds = [m["type"] for m in worker.seen if m.get("id") == 13]
-    i = kinds.index("requeued")
-    assert kinds[:i] == ["started"] + ["progress"] * (i - 1)
-    assert kinds[i + 1] == "started" and kinds[-2:] == ["result", "done"]
-    assert not {"cancelled", "error", "failed"} & set(kinds)
+    assert kinds.count("started") == 1 and kinds[-2:] == ["result", "done"]
 
 
 def test_cancel_queued_and_running(worker, click_wav):

@@ -1,8 +1,8 @@
 """The worker process: protocol v2 (see ../README.md) over stdin/stdout.
 
-One long-lived process serves every job, so each model is loaded once. The main
-thread reads requests; jobs wait in a priority queue (a track just loaded onto a deck
-goes ahead of background work) and one runner thread works through them. A third
+A long-lived process loads each model once. The main thread reads requests; jobs
+wait in a priority queue (a track just loaded onto a deck goes ahead of background
+work) and one runner thread works through them, one at a time. A third
 thread sends a heartbeat, so the app can tell a hung process from a slow job.
 
 stdout carries protocol lines only. Everything else (print, logging, warnings, tqdm,
@@ -32,10 +32,10 @@ def _lowest_priority():
     class only runs us when nothing else wants the CPU; elsewhere, nice 19. Done
     before torch starts its threads, so they inherit it.
 
-    One process serves urgent and background jobs alike, and an unprivileged process
-    can't leave the idle class again, so urgent jobs differ only in going first.
-    EARSHOT_WORKER_PRIORITY=inherit keeps the priority the process was started with
-    (tests, or a future second process just for urgent jobs)."""
+    EARSHOT_WORKER_PRIORITY=inherit keeps the priority the process was started with:
+    the app's deck worker (tracks just loaded onto a deck, at normal priority) and
+    tests. An unprivileged process can't leave the idle class again, so that's
+    decided once, at startup."""
     if os.environ.get("EARSHOT_WORKER_PRIORITY") == "inherit":
         return
     try:
@@ -99,10 +99,6 @@ class DeadlineExceeded(Exception):
     pass
 
 
-class Preempted(Exception):
-    pass
-
-
 @dataclass
 class Job:
     id: int
@@ -111,8 +107,6 @@ class Job:
     analysers: dict  # name -> its parameters
     deadline_s: float
     cancel: threading.Event = field(default_factory=threading.Event)
-    # A deck job arrived while this one ran: stop and wait to run again.
-    preempt: threading.Event = field(default_factory=threading.Event)
     order: int = 0  # place in the queue among jobs of its priority
 
 
@@ -134,24 +128,6 @@ class Queue:
             job.order = next(self.order)
             self.queued[job.id] = job
             heapq.heappush(self.heap, (job.priority, job.order, job.id))
-            # A track just loaded onto a deck doesn't wait for background work: the
-            # running job stops at its next progress report and runs again later.
-            if job.priority == PRIORITIES["deck"] and self.running and self.running.priority > job.priority:
-                self.running.preempt.set()
-            self.cond.notify()
-
-    def requeue(self, job: Job) -> None:
-        """Put a preempted job back, ahead of others of its priority that came after
-        it. The app sees `requeued`, then `started` again when it runs."""
-        with self.cond:
-            self.running = None
-            if job.cancel.is_set() or self.closed:
-                send({"id": job.id, "type": "cancelled"})
-                return
-            job.preempt.clear()
-            self.queued[job.id] = job
-            heapq.heappush(self.heap, (job.priority, job.order, job.id))
-            send({"id": job.id, "type": "requeued"})
             self.cond.notify()
 
     def cancel(self, job_id: int) -> None:
@@ -269,11 +245,10 @@ def parse_job(req: dict) -> Job:
     return Job(job_id, PRIORITIES[priority], wav, analysers, float(deadline))
 
 
-def run_job(job: Job) -> bool:
+def run_job(job: Job) -> None:
     """Run every analyser the job asks for, one result message each, then `done`.
     Ends with `cancelled` or `error` instead if the job is cancelled, runs past its
-    deadline or can't read its audio. Returns False, having sent nothing more, if a
-    deck job preempted it: the caller puts it back in the queue."""
+    deadline or can't read its audio."""
     t0 = time.perf_counter()
     send({"id": job.id, "type": "started"})
 
@@ -281,8 +256,6 @@ def run_job(job: Job) -> bool:
         def progress(f: float) -> None:
             if job.cancel.is_set():
                 raise Cancelled
-            if job.preempt.is_set():
-                raise Preempted
             if time.perf_counter() - t0 > job.deadline_s:
                 raise DeadlineExceeded
             send({"id": job.id, "type": "progress", "analyser": name, "fraction": round(float(f), 3)})
@@ -296,7 +269,7 @@ def run_job(job: Job) -> bool:
         for name, params in job.analysers.items():
             try:
                 data = RUN[name](y, int(sr), params, progress_for(name))
-            except (Cancelled, DeadlineExceeded, Preempted):
+            except (Cancelled, DeadlineExceeded):
                 raise
             except Exception as e:
                 traceback.print_exc(file=sys.stderr)
@@ -304,8 +277,6 @@ def run_job(job: Job) -> bool:
                 continue
             send({"id": job.id, "type": "result", "analyser": name, "version": ANALYSERS[name], "data": data})
         send({"id": job.id, "type": "done", "seconds": float(time.perf_counter() - t0)})
-    except Preempted:
-        return False
     except Cancelled:
         send({"id": job.id, "type": "cancelled"})
     except DeadlineExceeded:
@@ -313,15 +284,12 @@ def run_job(job: Job) -> bool:
     except Exception as e:
         traceback.print_exc(file=sys.stderr)
         send({"id": job.id, "type": "error", "error": str(e) or type(e).__name__})
-    return True
 
 
 def runner(queue: Queue) -> None:
     while (job := queue.take()) is not None:
-        if run_job(job):
-            queue.finished()
-        else:
-            queue.requeue(job)
+        run_job(job)
+        queue.finished()
 
 
 def heartbeat() -> None:
