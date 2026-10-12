@@ -65,7 +65,9 @@ def onset_envelope(y: np.ndarray, sr: int) -> tuple[np.ndarray, np.ndarray, np.n
     frequencies, and below 150 Hz only (kicks, not hats)."""
     import soxr
 
-    x = soxr.resample(y, sr, SR).astype(np.float32)
+    # Silence before the start, so a kick in the first frame still rises from
+    # something: without it a track that opens on the beat loses its first one.
+    x = np.concatenate([np.zeros(NFFT, np.float32), soxr.resample(y, sr, SR).astype(np.float32)])
     n = 1 + (len(x) - NFFT) // HOP
     if n < 64:
         raise ValueError("track too short to analyse")
@@ -87,7 +89,7 @@ def onset_envelope(y: np.ndarray, sr: int) -> tuple[np.ndarray, np.ndarray, np.n
         prev = L[-1:]
     k = int(0.5 * SR / HOP)
     detrend = lambda f: np.maximum(f - np.convolve(f, np.ones(k) / k, mode="same"), 0)  # noqa: E731
-    t = (np.arange(n) * HOP + NFFT / 2) / SR
+    t = (np.arange(n) * HOP - NFFT / 2) / SR
     return t, detrend(flux), detrend(low)
 
 

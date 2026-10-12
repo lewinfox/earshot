@@ -54,6 +54,7 @@ import itertools  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
 import math  # noqa: E402
+import signal  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 import traceback  # noqa: E402
@@ -363,6 +364,9 @@ def handle(req: dict, queue: Queue) -> None:
 
 
 def main() -> int:
+    # Ctrl+C in the app's terminal reaches its workers too. The app stops them (it
+    # closes stdin), so ignore it rather than dying with a traceback.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="worker: %(levelname)s %(name)s: %(message)s")
     detector_name()  # import torch / beat_this now so hello and the first job are quick
     queue = Queue()

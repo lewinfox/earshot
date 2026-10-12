@@ -207,6 +207,23 @@ def intro_wav(tmp_path_factory):
 INTRO = 12.3
 
 
+@pytest.fixture(scope="module")
+def on_the_beat_wav(tmp_path_factory):
+    """Kicks from ON_THE_BEAT s: the track opens on the beat."""
+    wav = tmp_path_factory.mktemp("audio") / "on_the_beat.wav"
+    sf.write(wav, click_track(seconds=60.0, lead_in=ON_THE_BEAT, hats=False), SR, subtype="FLOAT")
+    return wav
+
+
+ON_THE_BEAT = 0.03
+
+
+def test_first_beat_can_be_at_the_very_start(worker, on_the_beat_wav):
+    worker.analyse(6, on_the_beat_wav, "static")
+    data = result(worker.job(6))
+    assert abs(data["first_beat"] - ON_THE_BEAT) < 0.005, data["first_beat"]
+
+
 @pytest.mark.parametrize("job_id, mode", [(4, "static"), (5, "dynamic")])
 def test_first_beat_is_where_the_beats_start(worker, intro_wav, job_id, mode):
     # A straight grid runs back to the start of the file, over the silence; the first
