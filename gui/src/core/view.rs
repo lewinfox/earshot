@@ -34,6 +34,9 @@ pub enum Tool {
     /// The player's cues, loops, beat jumps and the grid editor.
     #[default]
     CuesGrid,
+    /// Analyse a track's tempo, straighten it and save the result (to come: a
+    /// placeholder for now).
+    TempoLock,
 }
 
 /// The windows over the app. They stack: the last one opened is on top.

@@ -79,6 +79,8 @@ impl EarshotApp {
                     let _ = port;
                 }
                 Event::Command(cmd) => self.dispatch(cmd),
+                // Nothing shows the tool yet (Phase B's tab will).
+                Event::TempoLock(_) => {}
             }
         }
     }

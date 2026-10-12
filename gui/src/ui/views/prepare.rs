@@ -15,11 +15,18 @@ use crate::ui::panels::deck::{CUE_PANE_W, CuePane, PreparePlayer, WavePanel};
 use crate::ui::panels::{Cx, Panel, mixer, resized};
 use crate::ui::widgets::{Tab, tool_tabs};
 
-const TOOLS: [Tab<Tool>; 1] = [Tab {
-    id: Tool::CuesGrid,
-    name: "Cues & Grid",
-    tip: "Cues, loops, beat jumps and the beat grid",
-}];
+const TOOLS: [Tab<Tool>; 2] = [
+    Tab {
+        id: Tool::CuesGrid,
+        name: "Cues & Grid",
+        tip: "Cues, loops, beat jumps and the beat grid",
+    },
+    Tab {
+        id: Tool::TempoLock,
+        name: "Tempo lock",
+        tip: "Straighten a track's tempo (coming soon)",
+    },
+];
 
 /// The tab bar's height, and a little room under the player (it runs a few points
 /// taller than Perform's decks).
@@ -82,6 +89,15 @@ fn tool(ui: &mut Ui, tool: Tool, height: f32, panels: &mut Panels, cx: &mut Cx) 
                 height,
             }
             .ui(ui, cx);
+        }
+        Tool::TempoLock => {
+            ui.label(
+                egui::RichText::new(
+                    "Tempo lock is on its way: analyse a track's tempo, \
+                     straighten it and save the result.",
+                )
+                .color(cx.theme.muted),
+            );
         }
     }
 }

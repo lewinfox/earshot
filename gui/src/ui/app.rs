@@ -40,8 +40,10 @@ use crate::core::services::Services;
 use crate::core::session;
 use crate::core::settings::{self, Settings};
 use crate::core::store::{self, EventSink, Store, StoreCmd, StoreEvent};
+use crate::core::tempo_lock::TempoLock;
 use crate::core::track::AnalysisState;
 use crate::core::view::{Mode, Pane, Region};
+use crate::core::worker_client::Role;
 use crate::core::{Event, Sink};
 
 /// After the last thing moved, keep drawing this long (meters fall, playheads settle).
@@ -65,6 +67,8 @@ pub struct EarshotApp {
     art_loader: std::sync::mpsc::Sender<i64>,
     /// Nudge after a scan: works out audio hashes the files' tags didn't have.
     hasher: std::sync::mpsc::Sender<()>,
+    /// The tempo lock tool (its tab is still to come).
+    tempo_lock: TempoLock,
 
     // ---- core state the UI holds ---------------------------------------------------------
     /// The library, collections and play history: the domain state the panes read.
@@ -162,6 +166,18 @@ impl EarshotApp {
         let analyser =
             Analyser::start(sink.clone(), player.clone(), store.clone(), services.worker);
         let hasher = library::start_hasher(store.clone());
+        let tempo_lock = {
+            let sink = sink.clone();
+            let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+            let data_dir = services.db.parent().unwrap_or(std::path::Path::new("."));
+            TempoLock::with_worker(
+                (services.worker)(Role::Background, cores),
+                store.clone(),
+                Arc::new(move |e| sink(Event::TempoLock(e))),
+                data_dir,
+                Some(hasher.clone()),
+            )
+        };
         let art_loader = library::start_art_loader(store.reader.clone(), sink.clone());
         let lib = Arc::new(Library { store, analyser });
         let prefs: UiPrefs = cc
@@ -184,6 +200,7 @@ impl EarshotApp {
             midi_log: VecDeque::new(),
             art_loader,
             hasher,
+            tempo_lock,
             index: LibraryIndex::default(),
             collections: Collections::default(),
             history: History::default(),
@@ -276,6 +293,7 @@ impl EarshotApp {
             }
             Command::Deck(deck, DeckCmd::Load(id)) => self.load(Some(deck), id),
             Command::Library(c) => self.library_cmd(c),
+            Command::TempoLock(c) => self.tempo_lock.run(c),
             Command::Collection(c) => self.collection_cmd(c),
             Command::Flow(c) => self.flow_cmd(c),
             Command::Preview(PreviewCmd::Toggle(id)) => self.toggle_preview(id),

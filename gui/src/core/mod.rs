@@ -54,6 +54,9 @@ pub enum Event {
     Store(store::StoreEvent),
     /// A track's cover art (RGBA, `library::ART_SIZE` square), or `None` if it has none.
     Art(i64, Option<Vec<u8>>),
+    /// News from the tempo lock tool.
+    #[allow(dead_code)] // read by the tempo lock tab (step 7, B4)
+    TempoLock(tempo_lock::TempoLockEvent),
 }
 
 /// Where background threads send [`Event`]s (the UI's channel, plus a repaint).
