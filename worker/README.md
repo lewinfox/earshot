@@ -48,6 +48,10 @@ run one at a time.
 - Every job ends with exactly one of `done`, `cancelled` or `error`
   (`{"id": 7, "type": "error", "error": "..."}`: bad request, unreadable audio, or past
   its deadline). One analyser failing is a `failed` message, and the job goes on.
+- A `deck` job doesn't wait for a lower-priority job that is running: that job stops
+  at its next progress report, sends `{"id": 7, "type": "requeued"}`, goes back in the
+  queue (ahead of later jobs of its priority) and later sends `started` again and runs
+  from the beginning. It is neither failed nor cancelled; its deadline restarts.
 - `cancel` drops a waiting job at once and stops a running one at its next progress
   report. Unknown ids are ignored.
 - The worker gives up on a job past `deadline_s` (counted from `started`) at its next
@@ -86,7 +90,9 @@ kicks start (`snap.kick_shifts`): Beat This! puts its beats 20-40 ms late.
   earlier).
 
 **Priority.** The process puts itself in the idle CPU class (nice 19 off Linux) unless
-`EARSHOT_WORKER_PRIORITY=inherit`. An unprivileged process can't leave the idle class,
-so urgent jobs only go first; they don't get more CPU. If that proves too slow, a
+`EARSHOT_WORKER_PRIORITY=inherit`, and an unprivileged process can't leave the idle
+class. So deck jobs run in the idle CPU class too, like background ones (before v2
+they ran at nice 5): they go first and preempt background work, but get no more CPU
+than it would. If that proves too slow, a
 second process just for deck loads, started with `inherit`, needs no protocol change:
 job ids and priorities are per process.

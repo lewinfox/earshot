@@ -118,6 +118,11 @@ enum Reply {
     Started {
         id: u64,
     },
+    /// A deck job arrived while this one ran: it stopped and waits to run again (it
+    /// will be `started` again; its deadline restarts then).
+    Requeued {
+        id: u64,
+    },
     Progress {
         id: u64,
         analyser: String,
@@ -204,6 +209,8 @@ pub struct Outcome {
 pub enum Update {
     /// It left the worker's queue (until then it waits behind other jobs).
     Started,
+    /// A deck job took over the worker: it's back in the queue, and starts again later.
+    Requeued,
     Progress { analyser: String, fraction: f64 },
 }
 
@@ -638,6 +645,12 @@ impl Supervisor {
                     let _ = s.tx.send(JobMsg::Update(Update::Started));
                 }
             }
+            Reply::Requeued { id } => {
+                if let Some(s) = self.jobs.get_mut(&id) {
+                    s.started = None;
+                    let _ = s.tx.send(JobMsg::Update(Update::Requeued));
+                }
+            }
             Reply::Progress {
                 id,
                 analyser,
@@ -791,7 +804,7 @@ mod tests {
 
     /// A stand-in worker: answers hello (with protocol argv[1]), then runs jobs one at
     /// a time. A job whose wav is "hang" starts and never finishes; "fail" fails its
-    /// grid analyser. With argv[2] = "beat", it sends heartbeats every 0.1 s.
+    /// grid analyser; "requeue" is preempted once, as by a deck job. With argv[2] = "beat", it sends heartbeats every 0.1 s.
     const FAKE: &str = r#"
 import json, sys, threading, time
 lock = threading.Lock()
@@ -811,6 +824,10 @@ for line in sys.stdin:
     elif r["type"] == "analyse":
         i = r["id"]
         send({"id": i, "type": "started"})
+        if r["wav"] == "requeue":
+            send({"id": i, "type": "progress", "analyser": "grid", "fraction": 0.2})
+            send({"id": i, "type": "requeued"})
+            send({"id": i, "type": "started"})
         if r["wav"] == "hang":
             time.sleep(1000)
         send({"id": i, "type": "progress", "analyser": "grid", "fraction": 0.5})
@@ -878,6 +895,28 @@ for line in sys.stdin:
         // One analyser failing is in the outcome, not a failed job.
         let out = client.analyse(&req("fail", 5000), &mut |_| {}).unwrap();
         assert_eq!(out.grid.unwrap().unwrap_err(), "no beats");
+    }
+
+    #[test]
+    fn a_preempted_job_starts_again() {
+        let client = WorkerClient::start(fake(PROTOCOL, false));
+        let mut updates = vec![];
+        let out = client
+            .analyse(&req("requeue", 5000), &mut |u| updates.push(u))
+            .unwrap();
+        assert!(out.grid.unwrap().is_ok());
+        let kinds: Vec<&str> = updates
+            .iter()
+            .map(|u| match u {
+                Update::Started => "started",
+                Update::Requeued => "requeued",
+                Update::Progress { .. } => "progress",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            ["started", "progress", "requeued", "started", "progress"]
+        );
     }
 
     #[test]

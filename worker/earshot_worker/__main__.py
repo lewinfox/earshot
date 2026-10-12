@@ -99,6 +99,10 @@ class DeadlineExceeded(Exception):
     pass
 
 
+class Preempted(Exception):
+    pass
+
+
 @dataclass
 class Job:
     id: int
@@ -107,6 +111,9 @@ class Job:
     analysers: dict  # name -> its parameters
     deadline_s: float
     cancel: threading.Event = field(default_factory=threading.Event)
+    # A deck job arrived while this one ran: stop and wait to run again.
+    preempt: threading.Event = field(default_factory=threading.Event)
+    order: int = 0  # place in the queue among jobs of its priority
 
 
 class Queue:
@@ -124,8 +131,27 @@ class Queue:
         with self.cond:
             if job.id in self.queued or (self.running and self.running.id == job.id):
                 raise ValueError(f"job {job.id} is already queued")
+            job.order = next(self.order)
             self.queued[job.id] = job
-            heapq.heappush(self.heap, (job.priority, next(self.order), job.id))
+            heapq.heappush(self.heap, (job.priority, job.order, job.id))
+            # A track just loaded onto a deck doesn't wait for background work: the
+            # running job stops at its next progress report and runs again later.
+            if job.priority == PRIORITIES["deck"] and self.running and self.running.priority > job.priority:
+                self.running.preempt.set()
+            self.cond.notify()
+
+    def requeue(self, job: Job) -> None:
+        """Put a preempted job back, ahead of others of its priority that came after
+        it. The app sees `requeued`, then `started` again when it runs."""
+        with self.cond:
+            self.running = None
+            if job.cancel.is_set() or self.closed:
+                send({"id": job.id, "type": "cancelled"})
+                return
+            job.preempt.clear()
+            self.queued[job.id] = job
+            heapq.heappush(self.heap, (job.priority, job.order, job.id))
+            send({"id": job.id, "type": "requeued"})
             self.cond.notify()
 
     def cancel(self, job_id: int) -> None:
@@ -243,10 +269,11 @@ def parse_job(req: dict) -> Job:
     return Job(job_id, PRIORITIES[priority], wav, analysers, float(deadline))
 
 
-def run_job(job: Job) -> None:
+def run_job(job: Job) -> bool:
     """Run every analyser the job asks for, one result message each, then `done`.
     Ends with `cancelled` or `error` instead if the job is cancelled, runs past its
-    deadline or can't read its audio."""
+    deadline or can't read its audio. Returns False, having sent nothing more, if a
+    deck job preempted it: the caller puts it back in the queue."""
     t0 = time.perf_counter()
     send({"id": job.id, "type": "started"})
 
@@ -254,6 +281,8 @@ def run_job(job: Job) -> None:
         def progress(f: float) -> None:
             if job.cancel.is_set():
                 raise Cancelled
+            if job.preempt.is_set():
+                raise Preempted
             if time.perf_counter() - t0 > job.deadline_s:
                 raise DeadlineExceeded
             send({"id": job.id, "type": "progress", "analyser": name, "fraction": round(float(f), 3)})
@@ -267,7 +296,7 @@ def run_job(job: Job) -> None:
         for name, params in job.analysers.items():
             try:
                 data = RUN[name](y, int(sr), params, progress_for(name))
-            except (Cancelled, DeadlineExceeded):
+            except (Cancelled, DeadlineExceeded, Preempted):
                 raise
             except Exception as e:
                 traceback.print_exc(file=sys.stderr)
@@ -275,6 +304,8 @@ def run_job(job: Job) -> None:
                 continue
             send({"id": job.id, "type": "result", "analyser": name, "version": ANALYSERS[name], "data": data})
         send({"id": job.id, "type": "done", "seconds": float(time.perf_counter() - t0)})
+    except Preempted:
+        return False
     except Cancelled:
         send({"id": job.id, "type": "cancelled"})
     except DeadlineExceeded:
@@ -282,14 +313,15 @@ def run_job(job: Job) -> None:
     except Exception as e:
         traceback.print_exc(file=sys.stderr)
         send({"id": job.id, "type": "error", "error": str(e) or type(e).__name__})
+    return True
 
 
 def runner(queue: Queue) -> None:
     while (job := queue.take()) is not None:
-        try:
-            run_job(job)
-        finally:
+        if run_job(job):
             queue.finished()
+        else:
+            queue.requeue(job)
 
 
 def heartbeat() -> None:

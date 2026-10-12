@@ -360,6 +360,8 @@ fn run(
     };
     let outcome = worker.analyse(&request, &mut |u| {
         let f = match u {
+            // A deck's track took the worker over; this one runs again later.
+            Update::Requeued => return progress(WORKER_START, "waiting for the analyser"),
             Update::Started => 0.0,
             Update::Progress { fraction, .. } => fraction,
         };

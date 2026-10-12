@@ -81,6 +81,12 @@ class Worker:
                 self.waiting.setdefault(msg["id"], []).append(msg)
         return out
 
+    def wait_started(self, job_id):
+        while not any(m["type"] == "started" and m.get("id") == job_id for m in self.seen):
+            msg = self.read()
+            if msg.get("id") is not None:
+                self.waiting.setdefault(msg["id"], []).append(msg)
+
     def analyse(self, job_id, wav, mode, priority="background", deadline_s=300):
         self.send(
             {
@@ -188,18 +194,36 @@ def test_static_grid_is_on_the_kicks(worker, click_wav):
     assert kick_error([g["downbeat"]])[0] < 0.005, g
 
 
-def test_urgent_jobs_go_first(worker, click_wav):
+def started(worker, ids):
+    return [m["id"] for m in worker.seen if m["type"] == "started" and m["id"] in ids]
+
+
+def test_preview_jumps_the_queue_but_waits_its_turn(worker, click_wav):
     worker.analyse(10, click_wav, "static")
-    while not any(m["type"] == "started" and m.get("id") == 10 for m in worker.seen):
-        msg = worker.read()
-        if "id" in msg:
-            worker.waiting.setdefault(msg["id"], []).append(msg)
+    worker.wait_started(10)
     worker.analyse(11, click_wav, "static")
-    worker.analyse(12, click_wav, "static", priority="deck")
+    worker.analyse(12, click_wav, "static", priority="preview")
     for i in (10, 11, 12):
         assert worker.job(i)[-1]["type"] == "done"
-    started = [m["id"] for m in worker.seen if m["type"] == "started" and m["id"] in (10, 11, 12)]
-    assert started == [10, 12, 11]  # 12 jumps the queue, but doesn't stop 10
+    assert started(worker, (10, 11, 12)) == [10, 12, 11]  # 12 doesn't stop 10
+
+
+def test_deck_job_preempts_background_work(worker, click_wav):
+    worker.analyse(13, click_wav, "dynamic")
+    worker.wait_started(13)
+    worker.analyse(14, click_wav, "static")
+    worker.analyse(15, click_wav, "static", priority="deck")
+    assert worker.job(15)[-1]["type"] == "done"
+    for i in (13, 14):
+        assert worker.job(i)[-1]["type"] == "done"
+    # 13 stops for 15, then runs again before 14 (it came first). Not failed or
+    # cancelled: the app sees it requeued, then started again.
+    assert started(worker, (13, 14, 15)) == [13, 15, 13, 14]
+    kinds = [m["type"] for m in worker.seen if m.get("id") == 13]
+    i = kinds.index("requeued")
+    assert kinds[:i] == ["started"] + ["progress"] * (i - 1)
+    assert kinds[i + 1] == "started" and kinds[-2:] == ["result", "done"]
+    assert not {"cancelled", "error", "failed"} & set(kinds)
 
 
 def test_cancel_queued_and_running(worker, click_wav):
