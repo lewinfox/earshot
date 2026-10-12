@@ -27,7 +27,8 @@ use crate::core::midi::{self, Midi};
 use crate::core::controls::CHANNELS;
 use crate::core::player::{self, AudioSettings, GridOp, Player};
 use crate::core::suggest::{self, Reference};
-use crate::core::{Event, Sink, controls, db, flows};
+use crate::core::store::{self, EventSink, Store, StoreCmd, StoreEvent};
+use crate::core::{Event, Sink, controls};
 
 pub struct EarshotApp {
     player: Player,
@@ -43,7 +44,7 @@ pub struct EarshotApp {
     /// Prepare (one player, grid and cue editing) or Perform (two decks and a mixer).
     mode: UiMode,
     /// Memory cues and loops of the track in Prepare's player.
-    memories: Vec<db::Memory>,
+    memories: Vec<store::Memory>,
     /// Each player's hot cues as last saved, with the load they belong to.
     hotcues_saved: [Option<(u64, [Option<f64>; HOTCUES])>; PLAYERS],
     /// Real seconds of waveform either side of the playhead, shared by both decks.
@@ -54,6 +55,10 @@ pub struct EarshotApp {
     flows: FlowsUi,
     /// Send track ids here to load their cover art.
     art_loader: std::sync::mpsc::Sender<i64>,
+    /// Nudge after a scan: works out audio hashes the files' tags didn't have.
+    hasher: std::sync::mpsc::Sender<()>,
+    /// A Flow or folder just made, to rename once the Store's list has it.
+    pending_rename: Option<Item>,
     /// Which list the keyboard and the controller's browse knob move through.
     pane: Pane,
     /// The deck that most recently started playing (the live reference).
@@ -186,10 +191,12 @@ impl EarshotApp {
         let audio = start_audio(&player, &audio_settings);
         let shared = player.lock().unwrap().shared();
 
-        let db = db::open(&data_dir().join("earshot.db"))?;
-        let analyser = Analyser::start(sink.clone(), player.clone(), db.clone());
-        let lib = Arc::new(Library { db, analyser });
-        let art_loader = library::start_art_loader(lib.db.clone(), sink.clone());
+        let store = Store::open(&data_dir().join(store::FILE_NAME), store_sink(&sink))
+            .map_err(|e| e.to_string())?;
+        let analyser = Analyser::start(sink.clone(), player.clone(), store.clone());
+        let hasher = library::start_hasher(store.clone());
+        let art_loader = library::start_art_loader(store.reader.clone(), sink.clone());
+        let lib = Arc::new(Library { store, analyser });
         let mut app = EarshotApp {
             player,
             lib,
@@ -220,6 +227,8 @@ impl EarshotApp {
             ),
             flows: FlowsUi::default(),
             art_loader,
+            hasher,
+            pending_rename: None,
             pane: Pane::Library,
             last_started: None,
             play_started: [None; 2],
@@ -232,7 +241,7 @@ impl EarshotApp {
             held_keys: HashSet::new(),
             picked: Arc::new(Mutex::new(None)),
         };
-        app.library.folders = db::folders(&app.lib.db.lock().unwrap())?;
+        app.lib.store.send(StoreCmd::ListRoots);
         let ranges: [TempoRange; 2] = cc
             .storage
             .and_then(|s| eframe::get_value(s, TEMPO_RANGE_KEY))
@@ -285,7 +294,7 @@ impl EarshotApp {
             (Key::Enter, _) => self.control(g, "LoadSelectedTrack", 1.0),
             (Key::ArrowLeft | Key::ArrowRight, true) => {
                 let ms = if key == Key::ArrowLeft { -10.0 } else { 10.0 };
-                if let Err(e) = player::edit_grid(&self.player, &self.lib.db, PREP, GridOp::Nudge(ms)) {
+                if let Err(e) = player::edit_grid(&self.player, &self.lib.store, PREP, GridOp::Nudge(ms)) {
                     eprintln!("grid edit: {e}");
                 }
             }
@@ -310,13 +319,16 @@ impl EarshotApp {
         }
     }
 
-    /// The memory cues of the track in Prepare's player, from the library.
+    /// Ask for the memory cues of the track in Prepare's player (they arrive as
+    /// `StoreEvent::Memories`).
     fn refresh_memories(&mut self) {
-        let track = self.player.lock().unwrap().decks[PREP].track_id;
-        self.memories = match track {
-            Some(id) => db::memories(&self.lib.db.lock().unwrap(), id).unwrap_or_default(),
-            None => vec![],
-        };
+        match self.player.lock().unwrap().decks[PREP].track_id {
+            Some(id) => self
+                .lib
+                .store
+                .request_memories(id, store_sink(&self.sink)),
+            None => self.memories.clear(),
+        }
     }
 
     /// Save the deck's loop (while looping) or cue point to the track's memory.
@@ -336,16 +348,14 @@ impl EarshotApp {
         if !start.is_finite() || end.is_some_and(|e| !e.is_finite()) {
             return;
         }
-        if let Err(e) = db::add_memory(&self.lib.db.lock().unwrap(), track, start, end) {
-            eprintln!("memory cue: {e}");
-        }
-        if deck == PREP {
-            self.refresh_memories();
-        }
+        // Prepare's list is updated from the `Memories` event that comes back.
+        self.lib
+            .store
+            .send(StoreCmd::AddMemory { track, start, end });
     }
 
     /// Go to a memory cue (it becomes the cue point) or start a memory loop.
-    fn recall_memory(&mut self, deck: usize, m: db::Memory) {
+    fn recall_memory(&mut self, deck: usize, m: store::Memory) {
         let mut inner = self.player.lock().unwrap();
         let sent = match m.end {
             Some(end) => inner.send(Command::SetLoop {
@@ -385,10 +395,9 @@ impl EarshotApp {
             match self.hotcues_saved[d] {
                 Some((g, saved)) if g == generation && saved == now => {}
                 Some((g, _)) if g == generation => {
-                    let mut conn = self.lib.db.lock().unwrap();
-                    if let Err(e) = db::save_hotcues(&mut conn, track, &now) {
-                        eprintln!("hot cues: {e}");
-                    }
+                    self.lib
+                        .store
+                        .send(StoreCmd::SaveHotcues { track, cues: now });
                     self.hotcues_saved[d] = Some((generation, now));
                 }
                 // A new load: what the engine has is what was saved.
@@ -399,38 +408,13 @@ impl EarshotApp {
 
     // ---- saved Flows ------------------------------------------------------------------
 
-    /// Show the Flow that was open last time. Cards kept from before Flows were saved
-    /// in the database become an "Untitled Flow".
+    /// Ask for the Flow list and the Flow that was open last time. Cards kept from
+    /// before Flows were saved in the database are still on the canvas with no Flow,
+    /// so the first save makes them an "Untitled Flow".
     fn restore_flow(&mut self) {
-        let legacy = self.flow.cards();
-        let result = (|| {
-            let mut conn = self.lib.db.lock().unwrap();
-            let open = match self.flow.flow {
-                Some(id) => flows::list(&conn)?.1.into_iter().find(|f| f.id == id),
-                None => None,
-            };
-            let open = match open {
-                Some(f) => Some((f.id, f.name, flows::load(&conn, f.id)?)),
-                None if !legacy.is_empty() => {
-                    let id = flows::create(&conn, None, UNTITLED)?;
-                    flows::save(&mut conn, id, &legacy)?;
-                    Some((id, UNTITLED.to_string(), legacy))
-                }
-                None => None,
-            };
-            Ok::<_, String>(open)
-        })();
-        match result {
-            Ok(open) => self.flow.load(open),
-            Err(e) => eprintln!("flows: {e}"),
-        }
-        self.refresh_flows();
-    }
-
-    fn refresh_flows(&mut self) {
-        match flows::list(&self.lib.db.lock().unwrap()) {
-            Ok(list) => self.flows.set(list),
-            Err(e) => eprintln!("flows: {e}"),
+        self.lib.store.send(StoreCmd::ListFlows);
+        if let Some(id) = self.flow.flow {
+            self.lib.store.send(StoreCmd::LoadFlow(id));
         }
     }
 
@@ -439,92 +423,91 @@ impl EarshotApp {
         let Some(cards) = self.flow.changed_cards() else {
             return;
         };
-        let result = (|| {
-            let mut conn = self.lib.db.lock().unwrap();
-            let id = match self.flow.flow {
-                Some(id) => id,
-                None if cards.is_empty() => return Ok(false),
-                None => {
-                    self.flow.name = UNTITLED.to_string();
-                    *self.flow.flow.insert(flows::create(&conn, None, UNTITLED)?)
-                }
-            };
-            flows::save(&mut conn, id, &cards)?;
-            Ok::<_, String>(true)
-        })();
-        match result {
-            Ok(true) => self.refresh_flows(),
-            Ok(false) => {}
-            Err(e) => eprintln!("saving the Flow: {e}"),
-        }
+        let store = &self.lib.store;
+        let id = match self.flow.flow {
+            Some(id) => id,
+            None if cards.is_empty() => return,
+            None => {
+                let id = store.new_collection_id();
+                store.send(StoreCmd::CreateFlow {
+                    id,
+                    folder: None,
+                    name: UNTITLED.into(),
+                });
+                self.flow.name = UNTITLED.to_string();
+                self.flow.flow = Some(id);
+                id
+            }
+        };
+        store.send(StoreCmd::SaveFlow { id, cards });
     }
 
-    fn flows_action(&mut self, a: FlowsAction) -> Result<(), String> {
-        let db = self.lib.db.clone();
-        let mut conn = db.lock().unwrap();
-        let open = |app: &mut Self, conn: &rusqlite::Connection, id: i64, name: String| {
-            let cards = flows::load(conn, id)?;
-            app.flow.load(Some((id, name, cards)));
-            app.flow.open = true;
-            Ok::<_, String>(())
-        };
-        let mut rename = None;
+    /// The tree's actions become Store commands; the new list comes back as an event.
+    fn flows_action(&mut self, a: FlowsAction) {
+        let store = &self.lib.store;
         match a {
             FlowsAction::Open(id) => {
-                if let Some(f) = self.flows.flows.iter().find(|f| f.id == id) {
-                    let name = f.name.clone();
-                    open(self, &conn, id, name)?;
-                }
+                store.send(StoreCmd::LoadFlow(id));
+                self.flow.open = true;
             }
             FlowsAction::New(folder) => {
-                let id = flows::create(&conn, folder, UNTITLED)?;
-                open(self, &conn, id, UNTITLED.to_string())?;
-                rename = Some(Item::Flow(id));
+                let id = store.new_collection_id();
+                store.send(StoreCmd::CreateFlow {
+                    id,
+                    folder,
+                    name: UNTITLED.into(),
+                });
+                self.flow.load(Some((id, UNTITLED.to_string(), vec![])));
+                self.flow.open = true;
+                self.pending_rename = Some(Item::Flow(id));
             }
             FlowsAction::NewFolder(parent) => {
-                rename = Some(Item::Folder(flows::create_folder(
-                    &conn,
+                let id = store.new_collection_id();
+                store.send(StoreCmd::CreateFolder {
+                    id,
                     parent,
-                    "New folder",
-                )?));
+                    name: "New folder".into(),
+                });
+                self.pending_rename = Some(Item::Folder(id));
             }
-            FlowsAction::Rename(Item::Flow(id), name) => {
-                flows::rename(&conn, id, &name)?;
-                if self.flow.flow == Some(id) {
-                    self.flow.name = name;
-                }
+            FlowsAction::Rename(item, name) => {
+                let id = match item {
+                    Item::Flow(id) => {
+                        if self.flow.flow == Some(id) {
+                            self.flow.name = name.clone();
+                        }
+                        id
+                    }
+                    Item::Folder(id) => id,
+                };
+                store.send(StoreCmd::Rename { id, name });
             }
-            FlowsAction::Rename(Item::Folder(id), name) => flows::rename_folder(&conn, id, &name)?,
-            FlowsAction::Move(Item::Flow(id), to) => flows::move_to(&conn, id, to)?,
-            FlowsAction::Move(Item::Folder(id), to) => flows::move_folder(&conn, id, to)?,
-            FlowsAction::Duplicate(id) => {
-                rename = Some(Item::Flow(flows::duplicate(&mut conn, id)?));
+            FlowsAction::Move(Item::Flow(id) | Item::Folder(id), parent) => {
+                store.send(StoreCmd::Move { id, parent })
             }
-            FlowsAction::Delete(item) => {
-                match item {
-                    Item::Flow(id) => flows::delete(&conn, id)?,
-                    Item::Folder(id) => flows::delete_folder(&conn, id)?,
-                }
-                // The open Flow may have gone with it.
-                if let Some(open) = self.flow.flow
-                    && !flows::list(&conn)?.1.iter().any(|f| f.id == open)
-                {
-                    self.flow.load(None);
-                }
+            FlowsAction::Duplicate(from) => {
+                let to = store.new_collection_id();
+                store.send(StoreCmd::DuplicateFlow { from, to });
+                self.pending_rename = Some(Item::Flow(to));
+            }
+            // The open Flow may go with it: see `StoreEvent::Deleted`.
+            FlowsAction::Delete(Item::Flow(id) | Item::Folder(id)) => {
+                store.send(StoreCmd::Delete(id))
             }
         }
-        drop(conn);
-        self.refresh_flows();
-        if let Some(item) = rename {
-            self.flows.start_rename(item);
-        }
-        Ok(())
     }
 
     fn rescan(&mut self) {
         self.library.scanning = true;
-        let (db, sink) = (self.lib.db.clone(), self.sink.clone());
-        std::thread::spawn(move || sink(Event::Scanned(library::scan_library(&db))));
+        let (store, sink, hasher) = (
+            self.lib.store.clone(),
+            self.sink.clone(),
+            self.hasher.clone(),
+        );
+        std::thread::spawn(move || {
+            sink(Event::Scanned(library::scan_library(&store)));
+            let _ = hasher.send(());
+        });
     }
 
     fn load(&mut self, deck: Option<usize>, track_id: i64) {
@@ -716,9 +699,9 @@ impl EarshotApp {
             decoding: decoding.clone(),
             start,
         });
-        let (player, db) = (self.player.clone(), self.lib.db.clone());
+        let (player, store) = (self.player.clone(), self.lib.store.clone());
         std::thread::spawn(move || {
-            if let Err(e) = player::preview(&player, &db, id, start as f64) {
+            if let Err(e) = player::preview(&player, &store, id, start as f64) {
                 eprintln!("preview: {e}");
             }
             decoding.store(false, Relaxed);
@@ -823,12 +806,50 @@ impl EarshotApp {
         }
     }
 
-    fn refresh_previews(&mut self, ids: Option<&[i64]>) {
-        if let Ok(p) = db::previews(&self.lib.db.lock().unwrap(), ids) {
-            for (id, bytes) in p {
-                self.library.invalidate_thumb(id);
-                self.library.previews.insert(id, bytes);
+    /// Load waveform thumbnails (on a reader thread; they arrive as an event).
+    fn refresh_previews(&mut self, ids: Option<Vec<i64>>) {
+        self.lib
+            .store
+            .request_previews(ids, store_sink(&self.sink));
+    }
+
+    fn store_event(&mut self, e: StoreEvent) {
+        match e {
+            StoreEvent::Roots(roots) => self.library.folders = roots,
+            StoreEvent::Library(tracks) => {
+                self.library.set_tracks(tracks);
+                self.refresh_previews(None);
             }
+            StoreEvent::TracksChanged(tracks) => self.library.update_tracks(tracks),
+            StoreEvent::Previews(p) => {
+                for (id, bytes) in p {
+                    self.library.invalidate_thumb(id);
+                    self.library.previews.insert(id, bytes);
+                }
+            }
+            StoreEvent::Flows(folders, flows) => {
+                self.flows.set((folders, flows));
+                let listed = |item: &Item| match *item {
+                    Item::Flow(id) => self.flows.flows.iter().any(|f| f.id == id),
+                    Item::Folder(id) => self.flows.folders.iter().any(|f| f.id == id),
+                };
+                if let Some(item) = self.pending_rename.take_if(|i| listed(i)) {
+                    self.flows.start_rename(item);
+                }
+            }
+            StoreEvent::Memories { track, memories } => {
+                // Only the track still in Prepare's player.
+                if self.player.lock().unwrap().decks[PREP].track_id == Some(track) {
+                    self.memories = memories;
+                }
+            }
+            StoreEvent::FlowLoaded(flow) => self.flow.load(flow),
+            StoreEvent::Deleted(ids) => {
+                if self.flow.flow.is_some_and(|id| ids.contains(&id)) {
+                    self.flow.load(None);
+                }
+            }
+            StoreEvent::Error(e) => eprintln!("library: {e}"),
         }
     }
 
@@ -845,11 +866,8 @@ impl EarshotApp {
                     });
                     self.library.art.insert(id, tex);
                 }
-                Event::Scanned(Ok(tracks)) => {
-                    self.library.scanning = false;
-                    self.library.set_tracks(tracks);
-                    self.refresh_previews(None);
-                }
+                Event::Scanned(Ok(())) => self.library.scanning = false,
+                Event::Store(e) => self.store_event(e),
                 Event::Scanned(Err(e)) => {
                     self.library.scanning = false;
                     eprintln!("scan: {e}");
@@ -863,14 +881,8 @@ impl EarshotApp {
                     // it had). A stale result, for an older request, changes nothing.
                     self.decks[deck].finish_load(track_id);
                     match result {
-                        Ok(()) => {
-                            if !self.library.previews.contains_key(&track_id) {
-                                self.refresh_previews(Some(&[track_id]));
-                            }
-                            if deck == PREP {
-                                self.refresh_memories();
-                            }
-                        }
+                        Ok(()) if deck == PREP => self.refresh_memories(),
+                        Ok(()) => {}
                         Err(e) => eprintln!("load to deck {}: {e}", deck + 1),
                     }
                 }
@@ -906,18 +918,9 @@ impl EarshotApp {
                                 ev.stage.unwrap_or("analysing").to_string(),
                             )
                         });
+                        // The results themselves (BPM, grid, thumbnail) come from the
+                        // Store as `TracksChanged` and `Previews`.
                         t.error = ev.error.clone();
-                        if ev.state == "done" {
-                            t.analysed = true;
-                            t.lib.bpm = ev.bpm.or(t.lib.bpm);
-                            t.drifts = ev.drifts.unwrap_or(false);
-                            t.dynamic = ev.grid_source.as_deref()
-                                == Some(crate::core::analysis::DYNAMIC_SOURCE);
-                        }
-                    }
-                    if ev.state == "done" {
-                        self.library.version += 1;
-                        self.refresh_previews(Some(&[ev.track_id]));
                     }
                 }
                 Event::Midi {
@@ -939,12 +942,7 @@ impl EarshotApp {
         }
         let picked = self.picked.lock().unwrap().take();
         if let Some(folders) = picked {
-            for f in folders {
-                match library::add_folder(&self.lib.db, &f.to_string_lossy()) {
-                    Ok(list) => self.library.folders = list,
-                    Err(e) => eprintln!("import: {e}"),
-                }
-            }
+            self.lib.store.send(StoreCmd::AddRoots(folders));
             self.rescan();
         }
     }
@@ -1153,8 +1151,9 @@ impl EarshotApp {
         let r = pill(
             ui,
             &text,
-            if a.failed > 0 && a.running.is_empty() {
-                util::WARN
+            // Only failures, nothing running: red. Still working: amber.
+            if a.failed > 0 && n == 0 {
+                util::BAD
             } else {
                 util::WARN
             },
@@ -1411,7 +1410,7 @@ impl eframe::App for EarshotApp {
             match a {
                 Action::Control { group, key, value } => self.control(group, &key, value),
                 Action::Grid { deck, op } => {
-                    if let Err(e) = player::edit_grid(&self.player, &self.lib.db, deck, op) {
+                    if let Err(e) = player::edit_grid(&self.player, &self.lib.store, deck, op) {
                         eprintln!("grid edit: {e}");
                     }
                 }
@@ -1420,10 +1419,9 @@ impl eframe::App for EarshotApp {
                 Action::SaveMemory { deck } => self.save_memory(deck),
                 Action::RecallMemory { deck, memory } => self.recall_memory(deck, memory),
                 Action::DeleteMemory { id } => {
-                    if let Err(e) = db::delete_memory(&self.lib.db.lock().unwrap(), id) {
-                        eprintln!("memory cue: {e}");
+                    if let Some(track) = self.player.lock().unwrap().decks[PREP].track_id {
+                        self.lib.store.send(StoreCmd::DeleteMemory { track, id });
                     }
-                    self.refresh_memories();
                 }
             }
         }
@@ -1440,12 +1438,7 @@ impl eframe::App for EarshotApp {
                         self.flow.add_root(id);
                     }
                 }
-                LibAction::RemoveFolder(path) => {
-                    if let Ok(list) = library::remove_folder(&self.lib.db, &path) {
-                        self.library.folders = list;
-                        self.rescan();
-                    }
-                }
+                LibAction::RemoveFolder(path) => self.lib.store.send(StoreCmd::RemoveRoot(path)),
             }
         }
         // Save first, so opening another Flow doesn't lose the last change.
@@ -1458,14 +1451,18 @@ impl eframe::App for EarshotApp {
             }
         }
         for a in flows_actions {
-            if let Err(e) = self.flows_action(a) {
-                eprintln!("flows: {e}");
-            }
+            self.flows_action(a);
         }
         self.save_flow();
         // Waveforms move every frame.
         ctx.request_repaint();
     }
+}
+
+/// Store events, delivered through the app's channel like everything else.
+fn store_sink(sink: &Sink) -> EventSink {
+    let sink = sink.clone();
+    Arc::new(move |e| sink(Event::Store(e)))
 }
 
 fn bar_frame() -> egui::Frame {

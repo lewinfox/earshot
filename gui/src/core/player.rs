@@ -13,9 +13,9 @@ use earshot_engine::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::analysis::{self, Mode};
-use super::db;
+use super::analysis::Mode;
 use super::library::Library;
+use super::store::{GridSource, Store, StoreCmd};
 
 #[derive(Default, Clone)]
 pub struct DeckSlot {
@@ -118,7 +118,7 @@ pub fn routing(player: &Player, channels: u16) -> Routing {
 /// Play a library track on the headphones only, from `start` (0..1 of the way in).
 /// Blocking (decoding takes about a second, unless the track is on a deck): call it
 /// from a background thread.
-pub fn preview(player: &Player, db: &db::Db, id: i64, start: f64) -> Result<(), String> {
+pub fn preview(player: &Player, store: &Store, id: i64, start: f64) -> Result<(), String> {
     let (seq, on_deck) = {
         let mut inner = player.lock().unwrap();
         inner.preview_seq += 1;
@@ -132,12 +132,12 @@ pub fn preview(player: &Player, db: &db::Db, id: i64, start: f64) -> Result<(), 
     let audio = match on_deck {
         Some(a) => a,
         None => {
-            let path = PathBuf::from(db::track_path(&db.lock().unwrap(), id)?);
+            let path = store.reader.track_path(id).map_err(|e| e.to_string())?;
             Arc::new(decode::decode_file(&path)?.0)
         }
     };
     // At the same auto-gain as on a deck.
-    let gain = match db::loudness(&db.lock().unwrap(), id)? {
+    let gain = match store.reader.loudness(id).map_err(|e| e.to_string())? {
         Some(l) => l.auto_gain(),
         None => loudness::measure(&audio).auto_gain(),
     };
@@ -206,45 +206,38 @@ pub fn load_track(player: &Player, lib: &Library, deck: usize, id: i64) -> Resul
     if deck >= PLAYERS {
         return Err("no such deck".into());
     }
-    let db = &lib.db;
-    let path = PathBuf::from(db::track_path(&db.lock().unwrap(), id)?);
+    let reader = &lib.store.reader;
+    let track = reader.track(id).map_err(|e| e.to_string())?;
+    let path = reader.track_path(id).map_err(|e| e.to_string())?;
     let (audio, tags) = decode::decode_file(&path)?;
-    // Measured every load (it's quick), so tracks analysed before auto-gain get it.
-    let level = loudness::measure(&audio);
-    let (stored, cached_wave) = {
-        let conn = db.lock().unwrap();
-        db::set_energy(&conn, id, energy::energy(&audio))?;
-        db::set_loudness(&conn, id, &level)?;
-        (
-            db::grid(&conn, id)?,
-            db::waveform(&conn, id, waveform::BINS_PER_SECOND)?,
-        )
-    };
-    let (grid, source) = match stored {
-        // Analysed before grids were straightened to one tempo: straighten and save.
-        Some((g, src)) if src == "analysis" && !is_straight(&g) => {
-            match g.straightened(audio.duration()) {
-                Ok((s, bpm)) => {
-                    let conn = db.lock().unwrap();
-                    db::save_grid(&conn, id, &s, "analysis")?;
-                    db::set_bpm(&conn, id, bpm)?;
-                    (Some(s), src)
-                }
-                Err(_) => (Some(g), src),
-            }
+    let stored_level = reader.loudness(id).map_err(|e| e.to_string())?;
+    let stored = reader.grid(id).map_err(|e| e.to_string())?;
+    let cached_wave = reader
+        .waveform(id, waveform::BINS_PER_SECOND)
+        .map_err(|e| e.to_string())?;
+    // Measured once (it's quick) if analysis hasn't yet: auto-gain needs it.
+    let level = match stored_level {
+        Some(l) => l,
+        None => {
+            let l = loudness::measure(&audio);
+            lib.store.send(StoreCmd::SaveFeatures {
+                track: id,
+                features: vec![
+                    ("energy", energy::energy(&audio)),
+                    ("lufs", l.lufs),
+                    ("peak", l.peak),
+                ],
+            });
+            l
         }
-        Some((g, src)) => (Some(g), src),
+    };
+    let analysed = stored.is_some();
+    let (grid, source) = match stored {
+        Some((g, src)) => (Some(g), src.label().to_string()),
         None => grid_for_file(&path, &tags, audio.duration()),
     };
-    let title = tags
-        .title
-        .clone()
-        .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| {
-            path.file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        });
+    // The library's title and artist, so the deck agrees with the track list.
+    let (title, artist) = (track.title, track.artist);
 
     let audio = Arc::new(audio);
     let wave = match cached_wave {
@@ -252,22 +245,22 @@ pub fn load_track(player: &Player, lib: &Library, deck: usize, id: i64) -> Resul
         None => {
             // Saved, so the track list can show its thumbnail from now on.
             let w = waveform::summarise(&audio);
-            db::save_waveform(&db.lock().unwrap(), id, &w, waveform::BINS_PER_SECOND)?;
+            lib.store.send(StoreCmd::SaveWaveform {
+                track: id,
+                data: w.clone(),
+            });
             w
         }
     };
     let detail = waveform::detail(&audio);
     // No analysed or hand-fixed grid yet: analyse in the background. The deck plays
     // with the placeholder grid meanwhile and is updated when the result arrives.
-    if !matches!(
-        source.as_str(),
-        "analysis" | analysis::DYNAMIC_SOURCE | "user" | "tempo-lock sidecar"
-    ) {
+    if !analysed && source != GridSource::Sidecar.label() {
         lib.analyser
             .queue(id, Some(audio.clone()), false, Mode::Static);
     }
     let grid = grid.map(Arc::new);
-    let hotcues = db::hotcues(&db.lock().unwrap(), id)?;
+    let hotcues = reader.hotcues(id).map_err(|e| e.to_string())?;
 
     let mut inner = player.lock().unwrap();
     inner.generation += 1;
@@ -286,7 +279,7 @@ pub fn load_track(player: &Player, lib: &Library, deck: usize, id: i64) -> Resul
     inner.decks[deck] = DeckSlot {
         track_id: Some(id),
         title,
-        artist: tags.artist.clone().unwrap_or_default(),
+        artist,
         audio: Some(audio),
         grid,
         grid_source: source,
@@ -309,7 +302,9 @@ pub enum GridOp {
     Double,
 }
 
-pub fn edit_grid(player: &Player, db: &db::Db, deck: usize, op: GridOp) -> Result<(), String> {
+/// Edit a deck's grid. The deck gets it at once; the Store saves it afterwards (as a
+/// new grid row, with the track's BPM), outside the player lock.
+pub fn edit_grid(player: &Player, store: &Store, deck: usize, op: GridOp) -> Result<(), String> {
     let mut inner = player.lock().unwrap();
     let playhead = inner.shared().map_or(0.0, |s| s.decks[deck].position.get());
     let slot = inner.decks.get(deck).ok_or("no such deck")?;
@@ -344,10 +339,12 @@ pub fn edit_grid(player: &Player, db: &db::Db, deck: usize, op: GridOp) -> Resul
         grid: edited.clone(),
     })?;
     inner.decks[deck].grid = edited.clone();
-    inner.decks[deck].grid_source = "user".into();
+    inner.decks[deck].grid_source = GridSource::User.label().into();
+    let track = inner.decks[deck].track_id;
+    drop(inner);
     // Saved, so the fix survives a restart and re-analysis on load doesn't undo it.
-    if let (Some(id), Some(g)) = (inner.decks[deck].track_id, &edited) {
-        db::save_grid(&db.lock().unwrap(), id, g, "user")?;
+    if let (Some(track), Some(grid)) = (track, edited) {
+        store.send(StoreCmd::SaveUserGrid { track, grid });
     }
     Ok(())
 }
@@ -358,13 +355,6 @@ struct TempoLockAnalysis {
     beats: Vec<f64>,
     beat_index: Vec<i64>,
     is_downbeat: Vec<bool>,
-}
-
-/// Every beat the same distance apart (to within a microsecond).
-fn is_straight(g: &Beatgrid) -> bool {
-    let t = g.times();
-    let p = (t[t.len() - 1] - t[0]) / (t.len() - 1) as f64;
-    t.windows(2).all(|w| ((w[1] - w[0]) - p).abs() < 1e-6)
 }
 
 fn sidecar_path(path: &Path) -> PathBuf {
@@ -385,7 +375,7 @@ fn grid_for_file(
                 Beatgrid::from_indexed(&a.beats, &a.beat_index, &a.is_downbeat)
                     .map_err(|e| e.to_string())
             }) {
-            Ok(g) => return (Some(g), "tempo-lock sidecar".into()),
+            Ok(g) => return (Some(g), GridSource::Sidecar.label().into()),
             Err(e) => eprintln!("{}: bad beats sidecar: {e}", path.display()),
         }
     }

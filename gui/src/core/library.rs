@@ -1,17 +1,17 @@
 //! Library folders and the audio files in them.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use earshot_engine::decode;
 
 use super::analysis::Analyser;
-use super::db::{self, Db, LibTrack, TrackRow};
+use super::hash;
+use super::store::{Reader, ScannedFile, Store, StoreCmd, StoreError, path_bytes};
 use super::{Event, Sink};
 
 pub struct Library {
-    pub db: Db,
+    pub store: Store,
     pub analyser: Analyser,
 }
 
@@ -47,21 +47,6 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-pub fn add_folder(db: &Db, path: &str) -> Result<Vec<String>, String> {
-    if !Path::new(path).is_dir() {
-        return Err(format!("{path} is not a folder"));
-    }
-    let conn = db.lock().unwrap();
-    db::add_folder(&conn, path.trim_end_matches('/'))?;
-    db::folders(&conn)
-}
-
-pub fn remove_folder(db: &Db, path: &str) -> Result<Vec<String>, String> {
-    let conn = db.lock().unwrap();
-    db::remove_folder(&conn, path)?;
-    db::folders(&conn)
-}
-
 #[derive(Clone)]
 pub struct Subdir {
     pub name: String,
@@ -93,85 +78,109 @@ pub fn list_subdirs(path: &str) -> Result<Vec<Subdir>, String> {
     Ok(out)
 }
 
-/// Find every audio file under the library folders. Tags are only re-read for files
-/// that are new or whose size or modified time changed, so a rescan is quick.
-/// Blocking: call from a background thread.
-pub fn scan_library(db: &Db) -> Result<Vec<LibTrack>, String> {
-    {
-        let (folders, known) = {
-            let conn = db.lock().unwrap();
-            (db::folders(&conn)?, db::known_tracks(&conn)?)
+/// Find every audio file under the library folders and record them in the Store,
+/// which then sends the library as a `StoreEvent::Library`. Tags (and a stamped
+/// audio hash) are only read for files that are new or whose size or modified time
+/// changed, so a rescan is quick; files without a stamped hash are hashed later by
+/// [`start_hasher`]. Blocking: call from a background thread.
+pub fn scan_library(store: &Store) -> Result<(), StoreError> {
+    // Through the writer, so a folder added just before is included.
+    let roots = store.call(|w| w.roots())?;
+    let known = store.reader.known_files()?;
+    let mut files = Vec::new();
+    for r in &roots {
+        walk(r, &mut files);
+    }
+    files.sort();
+    files.dedup();
+
+    let mut changed = Vec::new();
+    for p in &files {
+        let Ok(meta) = std::fs::metadata(p) else {
+            continue;
         };
-        let known: HashMap<String, db::Known> = known.into_iter().collect();
-        let mut files = Vec::new();
-        for f in &folders {
-            walk(Path::new(f), &mut files);
+        let size = meta.len() as i64;
+        let mtime_ns = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos() as i64);
+        if known.get(&path_bytes(p)) != Some(&(size, mtime_ns)) {
+            changed.push((p.clone(), size, mtime_ns));
         }
-        files.sort();
-        files.dedup();
+    }
 
-        let mut found = std::collections::HashSet::new();
-        let mut changed = Vec::new();
-        for p in files {
-            let Ok(meta) = std::fs::metadata(&p) else {
-                continue;
-            };
-            let size = meta.len() as i64;
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_secs() as i64);
-            let path = p.to_string_lossy().into_owned();
-            found.insert(path.clone());
-            if !known
-                .get(&path)
-                .is_some_and(|k| k.size == size && k.mtime == mtime)
-            {
-                changed.push((p, size, mtime));
-            }
-        }
-
-        // Reading tags is mostly file I/O; spread it over a few threads.
-        let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-        let chunk = changed.len().div_ceil(threads).max(1);
-        let rows: Vec<TrackRow> = std::thread::scope(|s| {
-            let handles: Vec<_> = changed
-                .chunks(chunk)
-                .map(|c| {
-                    s.spawn(move || {
-                        c.iter()
-                            .map(|(p, size, mtime)| {
-                                let tags = decode::read_tags(p).unwrap_or_default();
-                                TrackRow {
-                                    path: p.to_string_lossy().into_owned(),
-                                    size: *size,
-                                    mtime: *mtime,
-                                    duration: tags.duration,
-                                    title: tags.title,
-                                    artist: tags.artist,
-                                    bpm: tags.bpm,
-                                    key: tags.key,
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                    })
+    // Reading tags is mostly file I/O; spread it over a few threads.
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let chunk = changed.len().div_ceil(threads).max(1);
+    let rows: Vec<ScannedFile> = std::thread::scope(|s| {
+        let handles: Vec<_> = changed
+            .chunks(chunk)
+            .map(|c| {
+                s.spawn(move || {
+                    c.iter()
+                        .map(|(p, size, mtime_ns)| ScannedFile {
+                            tags: decode::read_tags(p).unwrap_or_default(),
+                            tag_hash: hash::tag_hash(p),
+                            path: p.clone(),
+                            size: *size,
+                            mtime_ns: *mtime_ns,
+                        })
+                        .collect::<Vec<_>>()
                 })
-                .collect();
-            handles
-                .into_iter()
-                .flat_map(|h| h.join().unwrap())
-                .collect()
-        });
-
-        let mut conn = db.lock().unwrap();
-        db::upsert_tracks(&mut conn, &rows)?;
-        // Tracks stay in the database when their folder is removed (keeping their
-        // analysis), but only files under a current library folder are listed.
-        Ok(db::all_tracks(&conn)?
+            })
+            .collect();
+        handles
             .into_iter()
-            .filter(|t| found.contains(&t.path))
-            .collect())
+            .flat_map(|h| h.join().unwrap())
+            .collect()
+    });
+    store.call(move |w| w.apply_scan(&roots, &files, &rows))
+}
+
+/// A background thread that works out the audio hash of files that don't have one
+/// stamped in their tags, one at a time at idle priority, and gives each to the
+/// Store (which matches moved files up with their tracks). Nudge it after a scan.
+/// Its queue is just "files with no hash", so it picks up where it left off.
+pub fn start_hasher(store: Store) -> std::sync::mpsc::Sender<()> {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    std::thread::Builder::new()
+        .name("earshot-hash".into())
+        .spawn(move || {
+            idle_priority();
+            while rx.recv().is_ok() {
+                while rx.try_recv().is_ok() {} // one pass covers every nudge so far
+                let files = match store.reader.files_without_hash() {
+                    Ok(f) => f,
+                    Err(e) => {
+                        eprintln!("hashing: {e}");
+                        continue;
+                    }
+                };
+                for (file, path) in files {
+                    match hash::content_hash(&path) {
+                        Ok(hash) => store.send(StoreCmd::SetContentHash { file, hash }),
+                        Err(e) => eprintln!("hashing {}: {e}", path.display()),
+                    }
+                }
+            }
+        })
+        .expect("hash thread");
+    tx
+}
+
+/// Linux's idle CPU and disk classes for the calling thread: hashing reads whole
+/// files, and mustn't get in the way of playback.
+fn idle_priority() {
+    #[cfg(target_os = "linux")]
+    // SAFETY: plain syscalls on the calling thread (pid/who 0) with valid args.
+    unsafe {
+        let param = libc::sched_param { sched_priority: 0 };
+        if libc::sched_setscheduler(0, libc::SCHED_IDLE, &param) != 0 {
+            libc::setpriority(libc::PRIO_PROCESS, 0, 19);
+        }
+        // ioprio_set(IOPRIO_WHO_PROCESS, 0, IOPRIO_CLASS_IDLE << 13)
+        libc::syscall(libc::SYS_ioprio_set, 1, 0, 3 << 13);
     }
 }
 
@@ -180,15 +189,13 @@ pub const ART_SIZE: u32 = 96;
 
 /// A background thread that reads tracks' embedded covers, one at a time, and sends
 /// each as an `Event::Art` (`None` when the file has none). Send it track ids.
-pub fn start_art_loader(db: Db, sink: Sink) -> std::sync::mpsc::Sender<i64> {
+pub fn start_art_loader(reader: Reader, sink: Sink) -> std::sync::mpsc::Sender<i64> {
     let (tx, rx) = std::sync::mpsc::channel::<i64>();
     std::thread::Builder::new()
         .name("art".into())
         .spawn(move || {
             for id in rx {
-                let art = db::track_path(&db.lock().unwrap(), id)
-                    .ok()
-                    .and_then(|p| cover(Path::new(&p)));
+                let art = reader.track_path(id).ok().and_then(|p| cover(&p));
                 sink(Event::Art(id, art));
             }
         })

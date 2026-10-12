@@ -1,7 +1,7 @@
 # earshot (egui)
 
 earshot's UI, in Rust with egui. It uses the engine (`../engine`) and the analysis
-worker (`../worker`); the library lives in `earshot.db`. How to install and use it is in
+worker (`../worker`); the library lives in `library.db`. How to install and use it is in
 the [top-level README](../README.md).
 
 ```bash

@@ -1,15 +1,17 @@
-//! Everything that isn't drawing: the database, saved Flows, library scanning, the
-//! analysis queue, the decks (player), the control bus and MIDI. The UI talks to it by
-//! calling functions and hears back through [`Event`]s.
+//! Everything that isn't drawing: the database (the Store), Flows, library scanning,
+//! the analysis queue, the decks (player), the control bus and MIDI. The UI talks to
+//! it by calling functions and sending Store commands, and hears back through
+//! [`Event`]s.
 
 pub mod analysis;
 pub mod controls;
-pub mod db;
 pub mod flows;
+pub mod hash;
 pub mod keys;
 pub mod library;
 pub mod midi;
 pub mod player;
+pub mod store;
 pub mod suggest;
 
 use std::sync::Arc;
@@ -36,7 +38,10 @@ pub enum Event {
         track_id: i64,
         result: Result<(), String>,
     },
-    Scanned(Result<Vec<db::LibTrack>, String>),
+    /// A library scan finished (the tracks themselves arrive as a
+    /// [`store::StoreEvent::Library`] just before).
+    Scanned(Result<(), store::StoreError>),
+    Store(store::StoreEvent),
     /// A track's cover art (RGBA, `library::ART_SIZE` square), or `None` if it has none.
     Art(i64, Option<Vec<u8>>),
 }

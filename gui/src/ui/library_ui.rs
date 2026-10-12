@@ -10,12 +10,9 @@ use egui_extras::{Column, TableBuilder};
 use super::deck::key_chip;
 use super::util::{self, Camelot, Query};
 use super::wave;
-use crate::core::analysis::DYNAMIC_SOURCE;
-use crate::core::db::LibTrack;
 use crate::core::library::{self, Subdir};
+use crate::core::store::{GridSource, LibTrack};
 use crate::core::suggest::Candidate;
-
-const ANALYSED_SOURCES: [&str; 4] = ["analysis", DYNAMIC_SOURCE, "user", "tempo-lock sidecar"];
 
 pub struct Track {
     pub lib: LibTrack,
@@ -33,12 +30,12 @@ pub struct Track {
 
 impl Track {
     fn new(lib: LibTrack) -> Track {
-        let source = lib.grid_source.as_deref().unwrap_or("");
         Track {
             key: lib.key.as_deref().and_then(util::parse_key),
             energy: 0.5,
-            analysed: ANALYSED_SOURCES.contains(&source),
-            dynamic: source == DYNAMIC_SOURCE,
+            // Every grid the Store keeps is an analysed, hand-fixed or imported one.
+            analysed: lib.grid_source.is_some(),
+            dynamic: lib.grid_source == Some(GridSource::AnalysisDynamic),
             drifts: lib.drifts,
             queued: false,
             running: None,
@@ -143,7 +140,30 @@ impl LibraryUi {
             .enumerate()
             .map(|(i, t)| (t.lib.id, i))
             .collect();
-        // Rank stand-in energy across the library.
+        self.rank_energy();
+        self.dirty = true;
+        self.version += 1;
+    }
+
+    /// Some tracks changed (analysis, a grid edit): replace their rows, keeping the
+    /// analysis progress shown. Tracks not in the list (e.g. outside the library
+    /// folders) are ignored.
+    pub fn update_tracks(&mut self, tracks: Vec<LibTrack>) {
+        for l in tracks {
+            let Some(&i) = self.by_id.get(&l.id) else {
+                continue;
+            };
+            let old = &self.tracks[i];
+            let mut t = Track::new(l);
+            (t.queued, t.running, t.error) = (old.queued, old.running.clone(), old.error.clone());
+            self.tracks[i] = t;
+        }
+        self.rank_energy();
+        self.dirty = true;
+        self.version += 1;
+    }
+
+    fn rank_energy(&mut self) {
         let mut known: Vec<(f64, usize)> = self
             .tracks
             .iter()
@@ -159,8 +179,6 @@ impl LibraryUi {
                 0.5
             };
         }
-        self.dirty = true;
-        self.version += 1;
     }
 
     /// Every track, as the suggestion scorer sees it.

@@ -20,8 +20,8 @@ use earshot_engine::decode::{self, TrackAudio};
 use earshot_engine::{energy, loudness, waveform};
 use serde::Deserialize;
 
-use super::db::{self, Db};
 use super::player::Player;
+use super::store::{AnalysisSave, GridSave, GridSource, Store};
 use super::{Event, Sink};
 
 struct Job {
@@ -43,9 +43,6 @@ pub enum Mode {
     Dynamic,
 }
 
-/// Grid source for a dynamic grid. Static grids are plain "analysis".
-pub const DYNAMIC_SOURCE: &str = "analysis (dynamic)";
-
 #[derive(Clone, Debug)]
 pub struct AnalysisEvent {
     pub track_id: i64,
@@ -55,12 +52,11 @@ pub struct AnalysisEvent {
     pub progress: Option<f64>,
     /// What it's doing now, while running.
     pub stage: Option<&'static str>,
-    pub bpm: Option<f64>,
-    pub grid_source: Option<String>,
     pub error: Option<String>,
-    /// After a static analysis: the tempo seems to drift, so dynamic might suit it.
-    pub drifts: Option<bool>,
 }
+
+/// The results themselves (BPM, grid, drift) reach the UI from the Store, as
+/// `StoreEvent::TracksChanged`.
 
 impl AnalysisEvent {
     fn new(track_id: i64, state: &'static str) -> Self {
@@ -69,10 +65,7 @@ impl AnalysisEvent {
             state,
             progress: None,
             stage: None,
-            bpm: None,
-            grid_source: None,
             error: None,
-            drifts: None,
         }
     }
 }
@@ -129,7 +122,7 @@ struct Ctx {
 }
 
 impl Analyser {
-    pub fn start(sink: Sink, player: Player, db: Db) -> Analyser {
+    pub fn start(sink: Sink, player: Player, store: Store) -> Analyser {
         let ctx = Ctx {
             sink: sink.clone(),
             player,
@@ -151,7 +144,7 @@ impl Analyser {
         let lanes = std::iter::once((true, (cores / 2).max(1)))
             .chain(std::iter::repeat_n((false, threads), jobs));
         for (n, (urgent, threads)) in lanes.enumerate() {
-            let (q, p, a, db) = (queue.clone(), pending.clone(), ctx.clone(), db.clone());
+            let (q, p, a, store) = (queue.clone(), pending.clone(), ctx.clone(), store.clone());
             let (playing, running) = (playing.clone(), background_running.clone());
             std::thread::Builder::new()
                 .name(format!("earshot-analysis-{n}"))
@@ -176,7 +169,7 @@ impl Analyser {
                         if !urgent {
                             take_background_slot(&playing, &running);
                         }
-                        let ev = match run(&a, &db, &mut worker, threads, priority, &job) {
+                        let ev = match run(&a, &store, &mut worker, threads, priority, &job) {
                             Ok(ev) => ev,
                             Err(e) => {
                                 eprintln!("analysis of track {}: {e}", job.id);
@@ -269,7 +262,7 @@ fn take_background_slot(playing: &AtomicBool, running: &AtomicUsize) {
 
 fn run(
     app: &Ctx,
-    db: &Db,
+    store: &Store,
     worker: &mut Option<Worker>,
     threads: usize,
     priority: Priority,
@@ -282,43 +275,69 @@ fn run(
             ..AnalysisEvent::new(job.id, "running")
         }));
     };
-    let existing = db::grid(&db.lock().unwrap(), job.id)?;
-    if !job.force
-        && let Some((_, source)) = &existing
-    {
+    let started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    // The grid now; the result only replaces it if it's still this one when saved.
+    let existing = store.reader.active_grid(job.id).map_err(|e| e.to_string())?;
+    if !job.force && existing.is_some() {
         // Analysed (or hand-fixed) since this job was queued.
-        return Ok(AnalysisEvent {
-            grid_source: Some(source.clone()),
-            ..AnalysisEvent::new(job.id, "done")
-        });
+        return Ok(AnalysisEvent::new(job.id, "done"));
     }
 
     let audio = match &job.audio {
         Some(a) => a.clone(),
         None => {
             progress(0.0, "decoding");
-            let path = db::track_path(&db.lock().unwrap(), job.id)?;
-            Arc::new(decode::decode_file(Path::new(&path))?.0)
+            let path = store.reader.track_path(job.id).map_err(|e| e.to_string())?;
+            Arc::new(decode::decode_file(&path)?.0)
         }
     };
 
     progress(DECODED, "waveform");
-    {
-        let conn = db.lock().unwrap();
-        db::set_energy(&conn, job.id, energy::energy(&audio))?;
-        db::set_loudness(&conn, job.id, &loudness::measure(&audio))?;
-    }
+    let level = loudness::measure(&audio);
+    let mut features = vec![
+        ("energy", energy::energy(&audio)),
+        ("lufs", level.lufs),
+        ("peak", level.peak),
+    ];
     // Waveform: cheap, done here, cached so later loads skip it.
-    let cached = db::waveform(&db.lock().unwrap(), job.id, waveform::BINS_PER_SECOND)?.is_some();
-    if job.force || !cached {
-        let wave = waveform::summarise(&audio);
-        db::save_waveform(
-            &db.lock().unwrap(),
-            job.id,
-            &wave,
-            waveform::BINS_PER_SECOND,
-        )?;
-    }
+    let cached = store
+        .reader
+        .waveform(job.id, waveform::BINS_PER_SECOND)
+        .map_err(|e| e.to_string())?
+        .is_some();
+    let wave = (job.force || !cached).then(|| waveform::summarise(&audio));
+    // Everything the job found goes to the Store in one transaction, at the end
+    // (also when the worker fails, so the waveform and loudness aren't lost).
+    let mode = match job.mode {
+        Mode::Static => "static",
+        Mode::Dynamic => "dynamic",
+    };
+    let save = |analyser: String,
+                error: Option<String>,
+                features: Vec<(&'static str, f64)>,
+                grid: Option<GridSave>| {
+        let s = AnalysisSave {
+            track: job.id,
+            analyser,
+            mode,
+            started_at,
+            error,
+            features,
+            waveform: wave.clone(),
+            grid,
+        };
+        store
+            .call(move |w| w.save_analysis(s))
+            .map_err(|e| e.to_string())
+    };
+    let fail = |e: String| {
+        if let Err(se) = save("worker".into(), Some(e.clone()), features.clone(), None) {
+            eprintln!("saving track {}'s analysis: {se}", job.id);
+        }
+        e
+    };
 
     // Beatgrid: in the worker.
     let wav = std::env::temp_dir().join(format!(
@@ -326,10 +345,11 @@ fn run(
         std::process::id(),
         job.id
     ));
-    write_mono_wav(&wav, &audio).map_err(|e| format!("writing {}: {e}", wav.display()))?;
+    write_mono_wav(&wav, &audio)
+        .map_err(|e| fail(format!("writing {}: {e}", wav.display())))?;
     if worker.is_none() {
         progress(WORKER_START, "starting the analyser");
-        *worker = Some(Worker::spawn(threads, priority)?);
+        *worker = Some(Worker::spawn(threads, priority).map_err(fail)?);
     }
     progress(WORKER_START, "finding the tempo");
     let reply = worker.as_mut().unwrap().analyse(&wav, job.mode, &mut |f| {
@@ -346,7 +366,7 @@ fn run(
         Ok(r) => r,
         Err(e) => {
             *worker = None; // start a fresh one for the next job
-            return Err(e);
+            return Err(fail(e));
         }
     };
     let duration = audio.duration();
@@ -354,43 +374,47 @@ fn run(
         // One tempo: a straight grid with a 1 at the worker's downbeat.
         Mode::Static => {
             let g = Beatgrid::constant(reply.bpm, reply.downbeat, duration)
-                .map_err(|e| format!("worker returned an unusable tempo: {e}"))?;
-            (g, reply.bpm, "analysis", reply.bpm, reply.bpm)
+                .map_err(|e| fail(format!("worker returned an unusable tempo: {e}")))?;
+            (g, reply.bpm, GridSource::Analysis, reply.bpm, reply.bpm)
         }
         // Every detected beat, so the grid follows the drift. Its BPM is the average.
         Mode::Dynamic => {
             let g = Beatgrid::from_indexed(&reply.beats, &reply.beat_index, &reply.is_downbeat)
                 .and_then(|g| g.refit(duration))
-                .map_err(|e| format!("worker returned an unusable grid: {e}"))?;
+                .map_err(|e| fail(format!("worker returned an unusable grid: {e}")))?;
             let bpm = (g.mean_bpm() * 100.0).round() / 100.0;
-            (g, bpm, DYNAMIC_SOURCE, reply.min_bpm, reply.max_bpm)
+            (g, bpm, GridSource::AnalysisDynamic, reply.min_bpm, reply.max_bpm)
         }
     };
     let drifts = job.mode == Mode::Static && !reply.steady;
 
-    // A grid fixed by hand while this job waited wins over an automatic analysis.
-    let keep_user = !job.force && existing.as_ref().is_some_and(|(_, s)| s == "user");
-    {
-        let conn = db.lock().unwrap();
-        db::save_analysis(&conn, job.id, bpm, min, max, &reply.detector)?;
-        db::set_mode(&conn, job.id, job.mode == Mode::Dynamic, drifts)?;
-        if !keep_user {
-            db::save_grid(&conn, job.id, &grid, source)?;
-        }
-    }
-    if !keep_user {
+    features.extend([
+        ("bpm_min", min),
+        ("bpm_max", max),
+        ("drifts", drifts as u8 as f64),
+    ]);
+    // The Store makes it the active grid only if the grid hasn't changed since the
+    // job started (a grid fixed by hand meanwhile wins), and sets the BPM with it.
+    let out = save(
+        reply.detector.clone(),
+        None,
+        features,
+        Some(GridSave {
+            grid: grid.clone(),
+            source,
+            bpm,
+            expected_active: existing.map(|e| e.0),
+            force: job.force,
+        }),
+    )?;
+    if out.switched {
         update_decks(app, job.id, grid, source);
     }
     eprintln!(
         "analysed track {} ({:?}): {bpm} BPM (dynamic median {:.2}), phase spread {:.0} ms, {:.1} s in the worker",
         job.id, job.mode, reply.median_bpm, reply.spread_ms, reply.seconds
     );
-    Ok(AnalysisEvent {
-        bpm: Some(bpm),
-        grid_source: Some(if keep_user { "user" } else { source }.into()),
-        drifts: Some(drifts),
-        ..AnalysisEvent::new(job.id, "done")
-    })
+    Ok(AnalysisEvent::new(job.id, "done"))
 }
 
 /// How hard an analysis thread and its worker process may compete for the machine.
@@ -427,7 +451,7 @@ impl Priority {
 }
 
 /// Give the new grid to any deck that has this track loaded.
-fn update_decks(app: &Ctx, track_id: i64, grid: Beatgrid, source: &str) {
+fn update_decks(app: &Ctx, track_id: i64, grid: Beatgrid, source: GridSource) {
     let grid = Some(Arc::new(grid));
     let mut inner = app.player.lock().unwrap();
     for deck in 0..inner.decks.len() {
@@ -444,7 +468,7 @@ fn update_decks(app: &Ctx, track_id: i64, grid: Beatgrid, source: &str) {
             continue;
         }
         inner.decks[deck].grid = grid.clone();
-        inner.decks[deck].grid_source = source.into();
+        inner.decks[deck].grid_source = source.label().into();
     }
 }
 

@@ -47,7 +47,7 @@ Environment variables:
 | `EARSHOT_NULL_AUDIO` | unset | `1` runs the engine on a timer with no sound card |
 | `EARSHOT_ANALYSIS_JOBS` | `4` | Tracks analysed in parallel (one worker process each) |
 | `EARSHOT_WORKER_DIR` | `earshot/worker` | Where the analysis worker and its `.venv` live |
-| `EARSHOT_DATA_DIR` | `~/.local/share/io.github.lewinfox.earshot` | Where `earshot.db` lives (e.g. to try things on a copy) |
+| `EARSHOT_DATA_DIR` | `~/.local/share/io.github.lewinfox.earshot` | Where `library.db` lives (e.g. to try things on a copy) |
 
 If no audio device can be opened, earshot falls back to the null output and shows a
 ⚠ in the top bar. *Menu → Audio…* (or the audio pill) picks the device, buffer size
@@ -64,7 +64,7 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   B (`J` `K` `L`, `U`/`I`, `O`, `7`–`0`). `↑`/`↓` browse, `Tab` switches between the
   library and suggestions, `Shift+←`/`Shift+→` load to deck A/B, and `/` jumps to search.
   Deck keys are live unless a text field has focus; `Esc` gives them back.
-- **Add music**: *Menu → Import → Folder…*. Folders are remembered in `earshot.db`.
+- **Add music**: *Menu → Import → Folder…*. Folders are remembered in `library.db`.
   The left-hand tree shows *All tracks* and each folder; pick a folder to list the
   tracks in it and its subfolders. Right-click a top-level folder to remove it.
 - **Load** a track: double-click it (goes to a deck that isn't playing), right-click →

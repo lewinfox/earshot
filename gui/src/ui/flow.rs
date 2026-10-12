@@ -19,7 +19,7 @@ use super::deck::key_chip;
 use super::library_ui::{LibAction, LibraryUi, PreviewState, Track, want_art};
 use super::util::{self, Query};
 use super::wave;
-use crate::core::flows::Card;
+use crate::core::flows::{self, Card};
 use crate::core::suggest::{self, Direction, Reference, Scored};
 
 const NODE_W: f32 = 236.0;
@@ -293,16 +293,15 @@ impl FlowUi {
 
     /// Make `child` follow `parent`. Refused if it would make a loop.
     fn link(&mut self, parent: u64, child: u64) -> bool {
-        let mut at = Some(parent);
-        while let Some(id) = at {
-            if id == child {
-                return false;
-            }
-            at = self
-                .nodes
-                .iter()
-                .find(|n| n.id == id)
-                .and_then(|n| n.parent);
+        // The link replaces the child's current one.
+        let edges: Vec<(u64, u64)> = self
+            .nodes
+            .iter()
+            .filter(|n| n.id != child)
+            .filter_map(|n| n.parent.map(|p| (p, n.id)))
+            .collect();
+        if flows::creates_cycle(&edges, parent, child) {
+            return false;
         }
         match self.nodes.iter_mut().find(|n| n.id == child) {
             Some(n) => {

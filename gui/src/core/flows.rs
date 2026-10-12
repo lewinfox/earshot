@@ -1,16 +1,12 @@
-//! Saved Flows, in folders, in `earshot.db`.
+//! Flows: the model, without the storage (that's in `store`).
 //!
-//! A Flow is a set of cards (one track each) where a card can follow another. A
-//! playlist is just a Flow whose cards form one chain: [`playlist_order`] gives its
-//! tracks in order, and is `None` when the Flow branches.
+//! A Flow is a DAG of cards (nodes), one track each; the same track can be on several
+//! cards. A card can follow others along edges, and there are never loops
+//! ([`creates_cycle`] is the one check). A playlist is a separate thing: one ordered
+//! path through a Flow, saved as its own list. [`playlist_order`] gives the tracks in
+//! order when the whole Flow is a single chain.
 
 use std::collections::HashMap;
-
-use rusqlite::{Connection, params};
-
-fn err(e: rusqlite::Error) -> String {
-    e.to_string()
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Folder {
@@ -28,7 +24,7 @@ pub struct FlowEntry {
     pub folder: Option<i64>,
     pub name: String,
     pub cards: usize,
-    /// One chain of cards, i.e. a playlist.
+    /// One chain of cards (no branches), so it reads as one playlist.
     pub linear: bool,
 }
 
@@ -72,195 +68,70 @@ pub fn playlist_order(cards: &[Card]) -> Option<Vec<i64>> {
     (order.len() == cards.len()).then_some(order)
 }
 
-// ---- folders and Flows ------------------------------------------------------------
+/// The edges (from, to) the cards' `parent` links make.
+pub fn edges(cards: &[Card]) -> Vec<(u64, u64)> {
+    cards
+        .iter()
+        .filter_map(|c| c.parent.map(|p| (p, c.id)))
+        .collect()
+}
 
-/// Every folder and Flow, sorted by name.
-pub fn list(conn: &Connection) -> Result<(Vec<Folder>, Vec<FlowEntry>), String> {
-    let mut st = conn
-        .prepare("SELECT id, parent_id, name FROM flow_folders ORDER BY name COLLATE NOCASE")
-        .map_err(err)?;
-    let folders = st
-        .query_map([], |r| {
-            Ok(Folder {
-                id: r.get(0)?,
-                parent: r.get(1)?,
-                name: r.get(2)?,
-            })
-        })
-        .map_err(err)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(err)?;
-    let mut st = conn
-        .prepare("SELECT id, folder_id, name FROM flows ORDER BY name COLLATE NOCASE")
-        .map_err(err)?;
-    let rows = st
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .map_err(err)?
-        .collect::<Result<Vec<(i64, Option<i64>, String)>, _>>()
-        .map_err(err)?;
-    let mut flows = vec![];
-    for (id, folder, name) in rows {
-        let cards = load(conn, id)?;
-        flows.push(FlowEntry {
+/// Would adding the edge `from` → `to` make a loop? The one place a Flow's "no
+/// cycles" rule is checked: the canvas asks before linking, and the Store refuses
+/// to save a Flow that has one ([`check_acyclic`]).
+pub fn creates_cycle(edges: &[(u64, u64)], from: u64, to: u64) -> bool {
+    if from == to {
+        return true;
+    }
+    // Is `from` reachable from `to` already?
+    let mut next: HashMap<u64, Vec<u64>> = HashMap::new();
+    for &(a, b) in edges {
+        next.entry(a).or_default().push(b);
+    }
+    let mut stack = vec![to];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(n) = stack.pop() {
+        if n == from {
+            return true;
+        }
+        if seen.insert(n) {
+            stack.extend(next.get(&n).into_iter().flatten());
+        }
+    }
+    false
+}
+
+/// `Err` naming an edge that closes a loop, if the edges have one.
+pub fn check_acyclic(edges: &[(u64, u64)]) -> Result<(), (u64, u64)> {
+    let mut so_far = Vec::with_capacity(edges.len());
+    for &(a, b) in edges {
+        if creates_cycle(&so_far, a, b) {
+            return Err((a, b));
+        }
+        so_far.push((a, b));
+    }
+    Ok(())
+}
+
+/// Whether `nodes` is a path through the graph: each node follows the one before
+/// along an edge. A path is what gets exported from a Flow as a playlist.
+pub fn is_path(edges: &[(u64, u64)], nodes: &[u64]) -> bool {
+    !nodes.is_empty() && nodes.windows(2).all(|w| edges.contains(&(w[0], w[1])))
+}
+
+/// Cards from stored nodes and edges. The canvas gives each card one parent for
+/// now, so a node with several incoming edges keeps the first.
+pub fn cards_from(nodes: Vec<(u64, i64, f32, f32)>, edges: &[(u64, u64)]) -> Vec<Card> {
+    nodes
+        .into_iter()
+        .map(|(id, track_id, x, y)| Card {
             id,
-            folder,
-            name,
-            cards: cards.len(),
-            linear: playlist_order(&cards).is_some(),
-        });
-    }
-    Ok((folders, flows))
-}
-
-pub fn create_folder(conn: &Connection, parent: Option<i64>, name: &str) -> Result<i64, String> {
-    conn.execute(
-        "INSERT INTO flow_folders(parent_id, name) VALUES (?1, ?2)",
-        params![parent, name],
-    )
-    .map_err(err)?;
-    Ok(conn.last_insert_rowid())
-}
-
-pub fn rename_folder(conn: &Connection, id: i64, name: &str) -> Result<(), String> {
-    conn.execute(
-        "UPDATE flow_folders SET name = ?2 WHERE id = ?1",
-        params![id, name],
-    )
-    .map_err(err)?;
-    Ok(())
-}
-
-/// Move a folder into another (or to the top level). Refused if `parent` is inside it.
-pub fn move_folder(conn: &Connection, id: i64, parent: Option<i64>) -> Result<(), String> {
-    let mut at = parent;
-    while let Some(p) = at {
-        if p == id {
-            return Err("can't move a folder into itself".into());
-        }
-        at = conn
-            .query_row(
-                "SELECT parent_id FROM flow_folders WHERE id = ?1",
-                [p],
-                |r| r.get(0),
-            )
-            .map_err(err)?;
-    }
-    conn.execute(
-        "UPDATE flow_folders SET parent_id = ?2 WHERE id = ?1",
-        params![id, parent],
-    )
-    .map_err(err)?;
-    Ok(())
-}
-
-/// Delete a folder with everything in it.
-pub fn delete_folder(conn: &Connection, id: i64) -> Result<(), String> {
-    conn.execute("DELETE FROM flow_folders WHERE id = ?1", [id])
-        .map_err(err)?;
-    Ok(())
-}
-
-pub fn create(conn: &Connection, folder: Option<i64>, name: &str) -> Result<i64, String> {
-    conn.execute(
-        "INSERT INTO flows(folder_id, name) VALUES (?1, ?2)",
-        params![folder, name],
-    )
-    .map_err(err)?;
-    Ok(conn.last_insert_rowid())
-}
-
-pub fn rename(conn: &Connection, id: i64, name: &str) -> Result<(), String> {
-    conn.execute(
-        "UPDATE flows SET name = ?2 WHERE id = ?1",
-        params![id, name],
-    )
-    .map_err(err)?;
-    Ok(())
-}
-
-pub fn move_to(conn: &Connection, id: i64, folder: Option<i64>) -> Result<(), String> {
-    conn.execute(
-        "UPDATE flows SET folder_id = ?2 WHERE id = ?1",
-        params![id, folder],
-    )
-    .map_err(err)?;
-    Ok(())
-}
-
-pub fn delete(conn: &Connection, id: i64) -> Result<(), String> {
-    conn.execute("DELETE FROM flows WHERE id = ?1", [id])
-        .map_err(err)?;
-    Ok(())
-}
-
-/// A copy of a Flow beside it, named "<name> copy". Returns the new id.
-pub fn duplicate(conn: &mut Connection, id: i64) -> Result<i64, String> {
-    let (folder, name): (Option<i64>, String) = conn
-        .query_row(
-            "SELECT folder_id, name FROM flows WHERE id = ?1",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .map_err(err)?;
-    let cards = load(conn, id)?;
-    let copy = create(conn, folder, &format!("{name} copy"))?;
-    save(conn, copy, &cards)?;
-    Ok(copy)
-}
-
-// ---- cards ------------------------------------------------------------------------
-
-pub fn load(conn: &Connection, flow: i64) -> Result<Vec<Card>, String> {
-    let mut st = conn
-        .prepare_cached(
-            "SELECT card_id, track_id, parent_card, x, y FROM flow_cards
-             WHERE flow_id = ?1 ORDER BY card_id",
-        )
-        .map_err(err)?;
-    st.query_map([flow], |r| {
-        Ok(Card {
-            id: r.get::<_, i64>(0)? as u64,
-            track_id: r.get(1)?,
-            parent: r.get::<_, Option<i64>>(2)?.map(|p| p as u64),
-            x: r.get::<_, f64>(3)? as f32,
-            y: r.get::<_, f64>(4)? as f32,
+            track_id,
+            parent: edges.iter().find(|e| e.1 == id).map(|e| e.0),
+            x,
+            y,
         })
-    })
-    .map_err(err)?
-    .collect::<Result<_, _>>()
-    .map_err(err)
-}
-
-/// Replace a Flow's cards.
-pub fn save(conn: &mut Connection, flow: i64, cards: &[Card]) -> Result<(), String> {
-    let tx = conn.transaction().map_err(err)?;
-    tx.execute("DELETE FROM flow_cards WHERE flow_id = ?1", [flow])
-        .map_err(err)?;
-    {
-        let mut st = tx
-            .prepare(
-                "INSERT INTO flow_cards(flow_id, card_id, track_id, parent_card, x, y)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )
-            .map_err(err)?;
-        for c in cards {
-            st.execute(params![
-                flow,
-                c.id as i64,
-                c.track_id,
-                c.parent.map(|p| p as i64),
-                c.x as f64,
-                c.y as f64
-            ])
-            .map_err(err)?;
-        }
-    }
-    tx.execute(
-        "UPDATE flows SET updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
-        [flow],
-    )
-    .map_err(err)?;
-    tx.commit().map_err(err)
+        .collect()
 }
 
 #[cfg(test)]
@@ -295,54 +166,15 @@ mod tests {
         assert_eq!(playlist_order(&two_starts), None);
     }
 
-    fn test_db() -> Connection {
-        let dir = std::env::temp_dir().join(format!("earshot-flows-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let db = crate::core::db::open(&dir.join("earshot.db")).unwrap();
-        let conn = std::sync::Arc::try_unwrap(db)
-            .ok()
-            .unwrap()
-            .into_inner()
-            .unwrap();
-        for id in [10, 20, 30] {
-            conn.execute(
-                "INSERT INTO tracks(id, path, size, mtime) VALUES (?1, ?2, 0, 0)",
-                params![id, format!("/t/{id}.mp3")],
-            )
-            .unwrap();
-        }
-        conn
-    }
-
     #[test]
-    fn save_load_move_and_delete() {
-        let mut conn = test_db();
-        let sets = create_folder(&conn, None, "Sets").unwrap();
-        let summer = create_folder(&conn, Some(sets), "Summer").unwrap();
-        assert!(move_folder(&conn, sets, Some(summer)).is_err(), "no loops");
-
-        let f = create(&conn, Some(summer), "Warm-up").unwrap();
-        let cards = vec![card(1, None), card(2, Some(1))];
-        save(&mut conn, f, &cards).unwrap();
-        assert_eq!(load(&conn, f).unwrap(), cards);
-
-        let copy = duplicate(&mut conn, f).unwrap();
-        rename(&conn, copy, "Peak").unwrap();
-        move_to(&conn, copy, None).unwrap();
-        let (folders, flows) = list(&conn).unwrap();
-        assert_eq!(folders.len(), 2);
-        let peak = flows.iter().find(|e| e.id == copy).unwrap();
-        assert_eq!(
-            (peak.name.as_str(), peak.folder, peak.cards),
-            ("Peak", None, 2)
-        );
-        assert!(peak.linear);
-
-        // Deleting a folder takes its subfolders and Flows with it; others stay.
-        delete_folder(&conn, sets).unwrap();
-        let (folders, flows) = list(&conn).unwrap();
-        assert!(folders.is_empty());
-        assert_eq!(flows.iter().map(|e| e.id).collect::<Vec<_>>(), vec![copy]);
-        assert!(load(&conn, f).unwrap().is_empty());
+    fn cycles_are_found() {
+        let e = [(1, 2), (2, 3)];
+        assert!(creates_cycle(&e, 3, 1));
+        assert!(creates_cycle(&e, 2, 2));
+        assert!(!creates_cycle(&e, 1, 3), "a second route isn't a loop");
+        assert!(check_acyclic(&[(1, 2), (2, 3), (1, 3)]).is_ok());
+        assert_eq!(check_acyclic(&[(1, 2), (2, 3), (3, 1)]), Err((3, 1)));
+        assert!(is_path(&e, &[1, 2, 3]));
+        assert!(!is_path(&e, &[1, 3]));
     }
 }
