@@ -1069,6 +1069,30 @@ fn smart_playlists_run_their_query_in_sql_like_in_memory() {
     ));
 }
 
+/// A Flow's camera is kept with it and comes back with it; only Flows have one.
+#[test]
+fn a_flows_camera_round_trips_with_the_flow() {
+    let (_dir, mut w) = setup("flow-camera");
+    w.create_collection(4, None, Flow, "F", None).unwrap();
+    w.create_collection(5, None, Crate, "C", None).unwrap();
+    let loaded = |w: &mut Writer| {
+        w.take_events();
+        w.apply(StoreCmd::LoadFlow(4)).unwrap();
+        w.take_events().into_iter().find_map(|e| match e {
+            StoreEvent::FlowLoaded(f, camera) => Some((f.map(|f| f.0), camera)),
+            _ => None,
+        })
+    };
+    assert_eq!(loaded(&mut w), Some((Some(4), None)));
+    let camera = [-100.5, -50.0, 900.0, 450.25];
+    w.apply(StoreCmd::SaveFlowCamera { id: 4, camera }).unwrap();
+    assert_eq!(loaded(&mut w), Some((Some(4), Some(camera))));
+    assert!(matches!(
+        w.save_flow_camera(5, camera),
+        Err(StoreError::NoCollection(5))
+    ));
+}
+
 /// The actor end to end: commands from "the UI", answers on the read pool and
 /// events through the sink.
 #[test]
@@ -1124,7 +1148,7 @@ fn the_store_thread_writes_and_reports() {
             .any(|e| matches!(e, StoreEvent::Library(l) if l.len() == 1))
     );
     assert!(events.iter().any(
-        |e| matches!(e, StoreEvent::FlowLoaded(Some((f, _, g))) if *f == flow && g.nodes.len() == 1)
+        |e| matches!(e, StoreEvent::FlowLoaded(Some((f, _, g)), _) if *f == flow && g.nodes.len() == 1)
     ));
     assert!(
         events

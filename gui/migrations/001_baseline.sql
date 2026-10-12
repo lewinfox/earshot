@@ -205,7 +205,7 @@ CREATE TABLE collections (
   name            TEXT NOT NULL,
   query           TEXT,
   sort_order      INTEGER,
-  view_state      TEXT,
+  view_state      TEXT,     -- a Flow: where its canvas looks, JSON [left, top, right, bottom]
   source_flow_id  INTEGER REFERENCES collections(id) ON DELETE SET NULL,
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
@@ -306,8 +306,9 @@ CREATE TABLE library_roots (
 
 -- Settings, as text (JSON for structured ones): 'analysis.background_workers' (how
 -- many background worker processes may run at once), 'audio.output' (device, buffer
--- size, routing) and 'decks.tempo_ranges' (each deck's tempo fader range). The UI's
--- own preferences (layout, zoom) are kept by eframe, not here.
+-- size, routing), 'decks.tempo_ranges' (each deck's tempo fader range) and 'flow.open'
+-- (the Flow on the canvas last; JSON, null for none). The UI's own preferences
+-- (layout, zoom) are kept by eframe, not here.
 CREATE TABLE settings (
   key    TEXT PRIMARY KEY,
   value  TEXT NOT NULL

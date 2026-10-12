@@ -146,6 +146,10 @@ impl CueKind {
     }
 }
 
+/// Where a Flow's canvas looks: `[left, top, right, bottom]` in canvas points. Kept
+/// in the Flow's `collections.view_state` (as JSON), so it goes when the Flow does.
+pub type FlowCamera = [f32; 4];
+
 /// What the UI (or anything that doesn't need an answer) asks the Store to do.
 /// Results and failures come back as [`StoreEvent`]s.
 #[derive(Debug)]
@@ -293,6 +297,11 @@ pub enum StoreCmd {
         id: i64,
         graph: FlowGraph,
     },
+    /// Where a Flow's canvas is looking (its `view_state`), so it opens there again.
+    SaveFlowCamera {
+        id: i64,
+        camera: FlowCamera,
+    },
     /// Add tracks to a crate (each once), the end of a playlist, or a Flow (as
     /// new starting cards). The UI sends the undoable form, `EditCmd::AddTracks`.
     #[allow(dead_code)]
@@ -343,8 +352,9 @@ pub enum StoreEvent {
     },
     /// Every collection (after any of them changes).
     Collections(Vec<Collection>),
-    /// (id, name, graph), or `None` if there's no such Flow.
-    FlowLoaded(Option<(i64, String, FlowGraph)>),
+    /// (id, name, graph), or `None` if there's no such Flow; and where its canvas was
+    /// looking, if that was saved.
+    FlowLoaded(Option<(i64, String, FlowGraph)>, Option<FlowCamera>),
     /// Collections that no longer exist.
     Deleted(Vec<i64>),
     /// An edit was made (from [`StoreCmd::Edit`], or a hand-fixed grid): one step
@@ -590,6 +600,13 @@ impl Reader {
 
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
         self.with(|c| read::setting(c, key))
+    }
+
+    /// Where a Flow's canvas was looking, as saved. (The app gets it with the Flow:
+    /// `StoreEvent::FlowLoaded`.)
+    #[cfg(test)]
+    pub fn flow_camera(&self, id: i64) -> Result<Option<FlowCamera>> {
+        self.with(|c| read::flow_camera(c, id))
     }
 
     /// Every saved play, oldest first.

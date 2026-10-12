@@ -8,7 +8,7 @@ use earshot_engine::beatgrid::{Beatgrid, Constant, GridModel};
 use earshot_engine::loudness::Loudness;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::{CueKind, GridSource, Result, StoreError, WAVEFORM_VERSION, bytes_path};
+use super::{CueKind, FlowCamera, GridSource, Result, StoreError, WAVEFORM_VERSION, bytes_path};
 use crate::core::collections::{Collection, CollectionKind, FlowGraph, FlowNode, NodeId, Section};
 use crate::core::query;
 
@@ -612,6 +612,23 @@ pub fn flow(c: &Connection, id: i64) -> Result<Option<(i64, String, FlowGraph)>>
         .optional()?;
     let Some(name) = name else { return Ok(None) };
     Ok(Some((id, name, flow_graph(c, id)?)))
+}
+
+/// Where a Flow's canvas was looking, if that was saved (and reads as a camera).
+pub fn flow_camera(c: &Connection, id: i64) -> Result<Option<FlowCamera>> {
+    let json: Option<String> = c
+        .query_row(
+            "SELECT view_state FROM collections WHERE id = ?1 AND kind = 'flow'",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(json.and_then(|j| {
+        serde_json::from_str(&j)
+            .inspect_err(|e| eprintln!("Flow {id}'s camera: {e}"))
+            .ok()
+    }))
 }
 
 /// The tracks of any collection: a crate's, a playlist's in order, a Flow's cards'

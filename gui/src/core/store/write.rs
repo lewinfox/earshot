@@ -11,8 +11,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use super::read::{self, JOB_PREFIX, JobRow, source_rank, waveform_params};
 use super::{
-    CueKind, GridSource, Result, StoreCmd, StoreError, StoreEvent, WAVEFORM_VERSION, bytes_path,
-    now, path_bytes,
+    CueKind, FlowCamera, GridSource, Result, StoreCmd, StoreError, StoreEvent, WAVEFORM_VERSION,
+    bytes_path, now, path_bytes,
 };
 use crate::core::analysis::registry::{self, AnalyserId};
 use crate::core::collections::{
@@ -159,9 +159,14 @@ impl Writer {
             StoreCmd::ListCollections => self.emit_collections(),
             StoreCmd::LoadFlow(id) => {
                 let f = read::flow(&self.conn, id)?;
-                self.emit(StoreEvent::FlowLoaded(f));
+                let camera = match f {
+                    Some(_) => read::flow_camera(&self.conn, id)?,
+                    None => None,
+                };
+                self.emit(StoreEvent::FlowLoaded(f, camera));
                 Ok(())
             }
+            StoreCmd::SaveFlowCamera { id, camera } => self.save_flow_camera(id, camera),
             StoreCmd::Create {
                 id,
                 parent,
@@ -1003,6 +1008,19 @@ impl Writer {
         }
         tx.commit()?;
         self.emit_collections()
+    }
+
+    /// Where a Flow's canvas is looking. Not an edit: the Flow's `updated_at` stays.
+    pub fn save_flow_camera(&mut self, id: i64, camera: FlowCamera) -> Result<()> {
+        let json = serde_json::to_string(&camera).expect("four numbers serialise");
+        let n = self.conn.execute(
+            "UPDATE collections SET view_state = ?2 WHERE id = ?1 AND kind = 'flow'",
+            params![id, json],
+        )?;
+        if n == 0 {
+            return Err(StoreError::NoCollection(id));
+        }
+        Ok(())
     }
 
     /// A smart playlist's query. Refused if it doesn't parse.

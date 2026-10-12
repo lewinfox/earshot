@@ -13,13 +13,9 @@ use super::store::{Reader, StoreCmd};
 pub const AUDIO: &str = "audio.output";
 /// Each deck's tempo fader range, deck 1 first.
 pub const TEMPO_RANGES: &str = "decks.tempo_ranges";
-/// The Flow that was on the canvas last.
+/// The Flow that was on the canvas last. (Where its canvas was looking is kept with
+/// the Flow: `StoreCmd::SaveFlowCamera`.)
 pub const FLOW_OPEN: &str = "flow.open";
-
-/// Where a Flow's canvas was looking: `[left, top, right, bottom]` in canvas points.
-pub fn flow_camera(flow: CollectionId) -> String {
-    format!("flow.camera.{flow}")
-}
 
 /// What was saved, read once at startup.
 #[derive(Clone, Debug, Default, PartialEq)]
