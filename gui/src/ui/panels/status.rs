@@ -204,9 +204,27 @@ impl TopBar<'_> {
         } else {
             format!("Last error: {}\nClick to dismiss.", a.last_error)
         };
-        let r = r.on_hover_text([running.join("\n"), failures].join("\n").trim().to_string());
+        let stop = if n > 0 {
+            "Right-click to stop analysing"
+        } else {
+            ""
+        };
+        let r = r.on_hover_text(
+            [running.join("\n"), failures, stop.into()]
+                .join("\n")
+                .trim()
+                .to_string(),
+        );
         if r.clicked() {
             cx.send(AppCmd::DismissFailures);
+        }
+        if n > 0 {
+            r.context_menu(|ui| {
+                if ui.button("Stop analysis jobs").clicked() {
+                    cx.send(AppCmd::StopAnalysis);
+                    ui.close();
+                }
+            });
         }
     }
 }

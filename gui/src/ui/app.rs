@@ -310,6 +310,9 @@ impl EarshotApp {
         match cmd {
             Command::View(v) => self.view_cmd(v),
             Command::App(AppCmd::ReconnectMidi) => self.connect_midi(),
+            Command::App(AppCmd::StopAnalysis) => {
+                self.lib.analyser.stop_background();
+            }
             Command::App(AppCmd::DismissFailures) => {
                 self.analysis.failed = 0;
                 self.analysis.last_error.clear();

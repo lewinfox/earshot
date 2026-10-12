@@ -119,6 +119,8 @@ pub enum AppCmd {
     ReconnectMidi,
     /// Forget the analysis failures counted so far.
     DismissFailures,
+    /// Stop all background analysis (a deck's track carries on).
+    StopAnalysis,
     /// Let this many background analysis workers run at once (and save it).
     BackgroundWorkers(usize),
     /// Read the user's keymap file again (the built-in one if there's none).

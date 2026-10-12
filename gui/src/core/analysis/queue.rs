@@ -359,6 +359,34 @@ impl JobQueue {
         }
     }
 
+    /// Drop all background work: what's waiting, and what's running (told to drop its
+    /// results). A deck's track is kept. Returns the tracks dropped, and the running
+    /// worker jobs to cancel.
+    pub fn stop_background(&mut self) -> (Vec<i64>, Vec<(Lane, u64)>) {
+        let mut cancel = vec![];
+        for (&lane, job) in &self.lanes {
+            if lane != Lane::Deck {
+                job.superseded.store(true, Ordering::Relaxed);
+                cancel.extend(job.worker_job.map(|j| (lane, j)));
+            }
+        }
+        let mut dropped: Vec<i64> = vec![];
+        self.entries.retain(|k, e| {
+            let keep = match e.state {
+                State::Waiting => e.req.priority == JobPriority::Deck,
+                State::Running(lane) => lane == Lane::Deck,
+            };
+            if !keep {
+                dropped.push(k.0);
+            }
+            keep
+        });
+        dropped.dedup(); // entries are sorted by track
+        let entries = &self.entries;
+        self.audio.retain(|t, _| entries.keys().any(|k| k.0 == *t));
+        (dropped, cancel)
+    }
+
     /// The lane is done with its track (finished, failed, or superseded). Returns the
     /// track, and whether nothing more is queued for it.
     pub fn finish(&mut self, lane: Lane) -> Option<(i64, bool)> {
@@ -425,6 +453,25 @@ mod tests {
         assert_eq!(ids, [Waveform, Loudness, Grid]);
         assert_eq!(q.finish(Lane::Background(0)), Some((1, true)));
         assert_eq!(q.take(Lane::Background(0)).unwrap().track, 2);
+    }
+
+    #[test]
+    fn stopping_drops_background_work_but_keeps_the_decks() {
+        let mut q = JobQueue::new(4);
+        for t in [1, 2, 3] {
+            q.request(t, &grid(Background, Want::Missing, Mode::Static), None);
+        }
+        q.request(9, &grid(Deck, Want::Missing, Mode::Static), None);
+        let running = q.take(Lane::Background(0)).unwrap();
+        assert!(q.worker_job(Lane::Background(0), 5));
+        let (dropped, cancel) = q.stop_background();
+        assert_eq!(dropped, [1, 2, 3]);
+        assert_eq!(cancel, [(Lane::Background(0), 5)]);
+        assert!(running.superseded.load(Ordering::Relaxed));
+        // The stopped lane finishes with nothing left for its track.
+        assert_eq!(q.finish(Lane::Background(0)), Some((1, true)));
+        assert!(q.take(Lane::Background(0)).is_none());
+        assert_eq!(q.take(Lane::Deck).unwrap().track, 9);
     }
 
     #[test]

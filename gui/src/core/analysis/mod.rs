@@ -207,6 +207,26 @@ impl Analyser {
         n
     }
 
+    /// Stop all background analysis: queued tracks are dropped and running ones
+    /// cancelled. A track loaded onto a deck carries on. Returns how many tracks.
+    pub fn stop_background(&self) -> usize {
+        let s = &self.shared;
+        let mut q = s.queue.lock().unwrap();
+        let (tracks, cancel) = q.stop_background();
+        for &t in &tracks {
+            s.save_queue(&q, t);
+        }
+        drop(q);
+        for (lane, job) in cancel {
+            s.worker(lane).cancel(job);
+        }
+        for &t in &tracks {
+            s.emit(AnalysisEvent::new(t, None));
+        }
+        s.ready.notify_all();
+        tracks.len()
+    }
+
     /// Tell the queue whether a deck is playing, which holds background jobs back.
     pub fn set_playing(&self, on: bool) {
         let mut q = self.shared.queue.lock().unwrap();
@@ -392,6 +412,8 @@ impl Shared {
             self.emit(match result {
                 // More was asked for meanwhile (or this was taken over): still waiting.
                 _ if !idle => AnalysisEvent::new(track, Some(AnalysisState::Queued)),
+                // Stopped (`stop_background`): not a failure.
+                Err(_) if superseded => AnalysisEvent::new(track, None),
                 Ok(()) => AnalysisEvent::new(track, None),
                 Err(e) => AnalysisEvent::new(track, Some(AnalysisState::Failed(e))),
             });
