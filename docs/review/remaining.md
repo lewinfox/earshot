@@ -43,6 +43,9 @@ after.
   there. Registry fields `AudioNeeds` and `depends_on` are ready for it.
 
 ## Performance and control
+- [ ] Once (2026-10-13, not reproduced): Prepare's player seemed to ignore input while
+  background analysis was running. If it comes back, suspect a lock the UI thread
+  shares with analysis (player mutex, job queue mutex).
 - [ ] Resync `DeckSession` if the engine event ring overflows (a hot cue change
   could be missed).
 - [ ] Load a user keymap from disk (built in for now).
