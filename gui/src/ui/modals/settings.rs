@@ -22,11 +22,26 @@ const TABS: [(SettingsTab, &str); 3] = [
 ];
 
 /// The analysis tab's facts, gathered by the shell.
-pub struct AnalysisEnv {
+pub struct AnalysisEnv<'a> {
     /// Background workers allowed at once now.
     pub workers: usize,
     /// The most there can be (the CPU cores).
     pub cores: usize,
+    pub stale: &'a Stale,
+}
+
+/// What's known of the tracks with stale analysis (an older analyser, other audio,
+/// failed or missing).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Stale {
+    /// Not counted since the window opened: the analysis tab asks.
+    #[default]
+    Unknown,
+    Counting,
+    Count(usize),
+    /// Queued again, this many.
+    Queued(usize),
+    Failed(String),
 }
 
 /// The keymap tab's facts.
@@ -83,7 +98,8 @@ fn note(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).size(11.0).color(THEME.muted));
 }
 
-fn analysis(ui: &mut Ui, env: &AnalysisEnv) -> Option<Command> {
+fn analysis(ui: &mut Ui, env: &AnalysisEnv) -> Vec<Command> {
+    let mut out = vec![];
     let mut n = env.workers;
     ui.horizontal(|ui| {
         ui.label("Background workers");
@@ -95,7 +111,41 @@ fn analysis(ui: &mut Ui, env: &AnalysisEnv) -> Option<Command> {
          of the analysis models, so more use more memory. While a deck plays in \
          Perform, only one runs. Applies at once.",
     );
-    (n != env.workers).then_some(Command::App(AppCmd::BackgroundWorkers(n)))
+    if n != env.workers {
+        out.push(Command::App(AppCmd::BackgroundWorkers(n)));
+    }
+    ui.separator();
+    let (count, n) = match env.stale {
+        Stale::Unknown => {
+            out.push(Command::App(AppCmd::CountStale));
+            ("Counting…".to_string(), 0)
+        }
+        Stale::Counting => ("Counting…".to_string(), 0),
+        Stale::Count(0) => ("Every track's analysis is up to date.".to_string(), 0),
+        Stale::Count(n) => (format!("{n} track{} out of date.", plural(*n)), *n),
+        Stale::Queued(n) => (format!("{n} track{} queued again.", plural(*n)), 0),
+        Stale::Failed(e) => (format!("Couldn't count them: {e}"), 0),
+    };
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(n > 0, egui::Button::new("Re-analyse stale tracks"))
+            .on_hover_text("Analyse them again in the background, grids in the mode they have")
+            .clicked()
+        {
+            out.push(Command::App(AppCmd::QueueStale));
+        }
+        ui.label(count);
+    });
+    note(
+        ui,
+        "Stale: analysed by an older version of earshot, the file's audio has changed \
+         since, or the analysis failed or never ran.",
+    );
+    out
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 fn keymap(ui: &mut Ui, env: &KeymapEnv) -> Option<Command> {

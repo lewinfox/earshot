@@ -123,6 +123,10 @@ pub enum AppCmd {
     BackgroundWorkers(usize),
     /// Read the user's keymap file again (the built-in one if there's none).
     ReloadKeymap,
+    /// Count the tracks with stale analysis (answered with `Event::Stale`).
+    CountStale,
+    /// Re-analyse every track with stale analysis (`Analyser::queue_stale`).
+    QueueStale,
     /// Write the built-in keymap to the user's keymap file, to edit (not over one
     /// that's there).
     CopyKeymap,

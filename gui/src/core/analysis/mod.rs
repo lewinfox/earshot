@@ -232,17 +232,33 @@ impl Analyser {
         self.shared.request(id, &wants, audio);
     }
 
-    /// Queue everything whose results are stale: an older analyser version, other
-    /// audio, failed, or missing. A grid is redone in the mode it has.
-    #[allow(dead_code)] // not in the UI yet (step 7)
+    /// The tracks with a stale result: an older analyser version, other audio,
+    /// failed, or missing. Sorted, each once.
+    pub fn stale_tracks(&self) -> Result<Vec<i64>, String> {
+        let mut all: Vec<i64> = vec![];
+        for spec in REGISTRY {
+            all.extend(self.stale(spec)?);
+        }
+        all.sort_unstable();
+        all.dedup();
+        Ok(all)
+    }
+
+    fn stale(&self, spec: &registry::AnalyserSpec) -> Result<Vec<i64>, String> {
+        self.shared
+            .store
+            .reader
+            .stale_tracks(spec.id.as_str(), spec.version)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Queue everything whose results are stale (see [`Analyser::stale_tracks`]), as
+    /// background work. A grid is redone in the mode it has. Returns how many tracks.
     pub fn queue_stale(&self) -> Result<usize, String> {
         let reader = &self.shared.store.reader;
-        let mut n = 0;
+        let mut tracks = vec![];
         for spec in REGISTRY {
-            let ids = reader
-                .stale_tracks(spec.id.as_str(), spec.version)
-                .map_err(|e| e.to_string())?;
-            for id in ids {
+            for id in self.stale(spec)? {
                 let mode = match reader.active_grid(id) {
                     Ok(Some((_, GridSource::AnalysisDynamic))) => Mode::Dynamic,
                     _ => Mode::Static,
@@ -253,10 +269,12 @@ impl Analyser {
                     mode,
                 };
                 self.shared.request(id, &[(spec.id, req)], None);
-                n += 1;
+                tracks.push(id);
             }
         }
-        Ok(n)
+        tracks.sort_unstable();
+        tracks.dedup();
+        Ok(tracks.len())
     }
 
     /// Put back what was queued when the app last closed (as background work).

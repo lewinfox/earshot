@@ -29,7 +29,7 @@ pub struct ModalEnv<'a> {
     pub routing: Routing,
     pub keymap: &'a Keymap,
     pub mode: Mode,
-    pub analysis: AnalysisEnv,
+    pub analysis: AnalysisEnv<'a>,
     pub keymap_file: KeymapEnv<'a>,
 }
 

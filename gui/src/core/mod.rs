@@ -56,6 +56,11 @@ pub enum Event {
     Store(store::StoreEvent),
     /// A track's cover art (RGBA, `library::ART_SIZE` square), or `None` if it has none.
     Art(i64, Option<Vec<u8>>),
+    /// Tracks with stale analysis: counted, or queued again (`queued`).
+    Stale {
+        queued: bool,
+        result: Result<usize, String>,
+    },
     /// News from the tempo lock tool.
     #[allow(dead_code)] // read by the tempo lock tab (step 7, B4)
     TempoLock(tempo_lock::TempoLockEvent),

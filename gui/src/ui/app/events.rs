@@ -16,6 +16,13 @@ impl EarshotApp {
                 }
                 Event::Scanned(Ok(())) => self.panels.library.browser.scanning = false,
                 Event::Store(e) => self.store_event(e),
+                Event::Stale { queued, result } => {
+                    self.stale = match result {
+                        Ok(n) if queued => Stale::Queued(n),
+                        Ok(n) => Stale::Count(n),
+                        Err(e) => Stale::Failed(e),
+                    };
+                }
                 Event::Scanned(Err(e)) => {
                     self.panels.library.browser.scanning = false;
                     eprintln!("scan: {e}");

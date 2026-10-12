@@ -619,6 +619,44 @@ fn settings() {
     render(&mut h, "settings-audio");
 }
 
+/// The settings' analysis tab counts the tracks with stale analysis, and re-analyses
+/// them.
+#[test]
+fn stale_tracks_are_counted_and_analysed_again() {
+    use crate::ui::modals::settings::Stale;
+    let mut h = start("stale");
+    h.state_mut()
+        .dispatch(ViewCmd::Settings(crate::core::view::SettingsTab::Analysis).into());
+    // The tab asks for the count when it's drawn.
+    settle_until(&mut h, |a| a.stale == Stale::Count(0));
+    // A grid from an older analyser.
+    let id = ids(&h)[2];
+    let db = rusqlite::Connection::open(scratch_dir("stale").join(store::FILE_NAME)).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.execute(
+        "UPDATE analysis_results SET version = 0 WHERE track_id = ?1 AND analyser = 'grid'",
+        [id],
+    )
+    .unwrap();
+    h.state_mut().dispatch(AppCmd::CountStale.into());
+    settle_until(&mut h, |a| a.stale == Stale::Count(1));
+    steps(&mut h, 2);
+    render(&mut h, "settings-stale");
+    h.state_mut().dispatch(AppCmd::QueueStale.into());
+    settle_until(&mut h, |a| a.stale == Stale::Queued(1));
+    // Up to date once its new result is saved.
+    for _ in 0..600 {
+        if h.state().stale == Stale::Count(0) {
+            return;
+        }
+        if h.state().stale != Stale::Counting {
+            h.state_mut().dispatch(AppCmd::CountStale.into());
+        }
+        steps(&mut h, 5);
+    }
+    panic!("still stale: {:?}", h.state().stale);
+}
+
 /// Edits from the shell: metadata, the Flow canvas and a grid, each undone and
 /// redone with `Command::Undo` / `Redo` (what Ctrl+Z, MIDI and the Edit menu send).
 #[test]

@@ -16,7 +16,7 @@ use earshot_engine::{
 };
 use egui::Key;
 
-use super::modals::settings::{AnalysisEnv, KeymapEnv};
+use super::modals::settings::{AnalysisEnv, KeymapEnv, Stale};
 use super::modals::{ModalEnv, Modals};
 use super::panels::deck::{DeckInfo, PendingLoad};
 use super::panels::flow::FlowUi;
@@ -46,7 +46,7 @@ use crate::core::settings::{self, Settings};
 use crate::core::store::{self, EventSink, Store, StoreCmd, StoreEvent};
 use crate::core::tempo_lock::{TempoLock, TempoLockCmd};
 use crate::core::track::AnalysisState;
-use crate::core::view::{Mode, Pane, Region, Tool};
+use crate::core::view::{Modal, Mode, Pane, Region, Tool};
 use crate::core::worker_client::Role;
 use crate::core::{Event, Sink};
 
@@ -97,6 +97,8 @@ pub struct EarshotApp {
     keymap_origin: keymap::Origin,
     /// Background analysis workers allowed at once (as the analyser has it).
     background_workers: usize,
+    /// Tracks with stale analysis, for the settings' analysis tab.
+    stale: Stale,
     /// Keys held down for buttons that act while held, and what letting go sends.
     held_keys: HashMap<Key, Command>,
     hud: Hud,
@@ -230,6 +232,7 @@ impl EarshotApp {
             keymap_path,
             keymap_origin,
             background_workers,
+            stale: Stale::Unknown,
             held_keys: HashMap::new(),
             hud: Hud::default(),
             prefs,
@@ -318,6 +321,22 @@ impl EarshotApp {
                 ));
             }
             Command::App(AppCmd::ReloadKeymap) => self.reload_keymap(),
+            Command::App(c @ (AppCmd::CountStale | AppCmd::QueueStale)) => {
+                if self.stale == Stale::Counting {
+                    return;
+                }
+                self.stale = Stale::Counting;
+                let (lib, sink) = (self.lib.clone(), self.sink.clone());
+                let queued = matches!(c, AppCmd::QueueStale);
+                std::thread::spawn(move || {
+                    let result = if queued {
+                        lib.analyser.queue_stale()
+                    } else {
+                        lib.analyser.stale_tracks().map(|t| t.len())
+                    };
+                    sink(Event::Stale { queued, result });
+                });
+            }
             Command::App(AppCmd::CopyKeymap) => {
                 // Never over the user's own file.
                 let made = std::fs::OpenOptions::new()
@@ -386,8 +405,19 @@ impl EarshotApp {
             ViewCmd::Source(s) => self.prefs.layout_mut().source = s,
             ViewCmd::Aside(a) => self.prefs.layout_mut().aside = a,
             ViewCmd::Tool(t) => self.prefs.layout_mut().tool = t,
-            ViewCmd::ToggleModal(m) => self.modals.toggle(m),
-            ViewCmd::Settings(tab) => self.modals.settings(tab),
+            ViewCmd::ToggleModal(m) => {
+                // Counted again each time the settings open.
+                if m == Modal::Settings {
+                    self.stale = Stale::Unknown;
+                }
+                self.modals.toggle(m);
+            }
+            ViewCmd::Settings(tab) => {
+                if !self.modals.is_open(Modal::Settings) {
+                    self.stale = Stale::Unknown;
+                }
+                self.modals.settings(tab);
+            }
             ViewCmd::CloseModal(m) => self.modals.close(m),
             ViewCmd::WaveZoom(z) => self.prefs.wave_zoom = z,
             ViewCmd::UiScale(z) => {
@@ -515,6 +545,7 @@ impl EarshotApp {
             analysis: AnalysisEnv {
                 workers: self.background_workers,
                 cores: analysis::cores(),
+                stale: &self.stale,
             },
             keymap_file: KeymapEnv {
                 path: &self.keymap_path,
