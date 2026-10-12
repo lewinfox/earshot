@@ -5,19 +5,11 @@ This list collects what the agents left undone, for the UI rebuild (step 7) and
 after.
 
 ## Step 7: UI rebuild
-- [ ] Recreate everything in [post-review-ui-changes.md](post-review-ui-changes.md).
-- [ ] Theme module: one place for colours (no raw RGB in widgets).
-- [ ] `Shell` with modes (Prepare, Perform, later Library), panels and modals.
-  Layout saved per mode in `UiPrefs`.
-- [ ] One `TrackTable` with configurable, sortable columns (`ColumnDef`).
-- [ ] One `focused_pane`: keyboard, MIDI browse and *Selected* suggestions follow
-  it, including the Flow.
-- [ ] Multi-track drag payload (`DragPayload::Tracks { ids, origin }`). Drags carry
-  one id today.
-- [ ] On-demand repaint.
-- [ ] Inject `Services` so the app-level kittest tests run in CI.
-- [ ] UI for up to 4 decks, crossfader side per deck.
-- [ ] Reordering playlist rows.
+Done (see the README). One open idea, from the user's feature notes:
+- [ ] Prepare layout: the left icon stacks pick what we're browsing (sources and
+  collections) and the tabs pick the tool, so browsing is the same in both modes.
+  Tempo lock and Flow sit right of the library now; whether Cues & Grid (the
+  player's controls, one wide row) should too is undecided.
 
 ## Library and curation
 - [x] Save play history to the `plays` table (and `sessions`: one per run of the
@@ -48,9 +40,9 @@ after.
   there. Registry fields `AudioNeeds` and `depends_on` are ready for it.
 
 ## Performance and control
-- [ ] Once (2026-10-13, not reproduced): Prepare's player seemed to ignore input while
-  background analysis was running. If it comes back, suspect a lock the UI thread
-  shares with analysis (player mutex, job queue mutex).
+- [x] Once (2026-10-13): Prepare's player ignored input while analysis ran. Most
+  likely a load that never finished, which leaves a player on "loading" (it ignores
+  its controls then); a crashed load now fails instead (`53164ac`).
 - [x] Resync `DeckSession` if the engine event ring overflows (a hot cue change
   could be missed): from a snapshot, when `Stats::dropped_events` grows.
 - [x] Load a user keymap from disk: `keymap.txt` in the data folder, shown in
