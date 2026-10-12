@@ -45,14 +45,16 @@ Environment variables:
 | `EARSHOT_AUDIO_DEVICE` | system default | Case-insensitive part of the output device name, e.g. `DDJ` |
 | `EARSHOT_BUFFER` | `256` | Buffer size in frames (ignored if the device doesn't support it) |
 | `EARSHOT_NULL_AUDIO` | unset | `1` runs the engine on a timer with no sound card |
-| `EARSHOT_ANALYSIS_JOBS` | `4` | Tracks analysed in parallel (one worker process each) |
 | `EARSHOT_WORKER_DIR` | `earshot/worker` | Where the analysis worker and its `.venv` live |
 | `EARSHOT_DATA_DIR` | `~/.local/share/io.github.lewinfox.earshot` | Where `library.db` lives (e.g. to try things on a copy) |
 
 If no audio device can be opened, earshot falls back to the null output and shows a
-⚠ in the top bar. *Menu → Audio…* (or the audio pill) picks the device, buffer size
-and which channels master and headphones go to. With no deck cued, the headphones get
-the master mix.
+⚠ in the top bar. *Menu → Settings…* (or the audio pill) picks the device, buffer
+size and which channels master and headphones go to. With no deck cued, the headphones
+get the master mix. The same window sets how many tracks analyse at once, re-analyses
+tracks whose analysis is out of date, and shows the keymap file: a `keymap.txt` in the
+data folder replaces the built-in keys (*Make a copy to edit* writes one to start
+from).
 
 The top bar shows live numbers: UI fps and the audio callback's worst time against
 its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
