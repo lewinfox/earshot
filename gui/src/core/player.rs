@@ -9,29 +9,40 @@ use std::sync::{Arc, Mutex};
 use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::decode::{self, TrackAudio};
 use earshot_engine::{
-    Command, CueSet, DeckCmd, DeckId, Engine, EngineSnapshot, LoadedTrack, Monitor, OutputInfo,
+    Command, CueSet, DeckId, DeckSnap, Engine, EngineSnapshot, LoadedTrack, Monitor, OutputInfo,
     OutputOptions, PreviewCmd, Routing, Set, energy, loudness, waveform,
 };
 use serde::{Deserialize, Serialize};
 
 use super::analysis::Mode;
 use super::library::Library;
+use super::store::{GridSource, Store, StoreCmd};
 
 /// Decks A and B (the engine can run up to `earshot_engine::MAX_DECKS`).
 pub const DECKS: usize = 2;
 /// The decks plus Prepare mode's player, which plays straight to the main output (no
-/// channel fader, crossfader or sync: see `DeckCmd::Direct`).
+/// channel fader, crossfader or sync: see `DeckId::PREPARE`).
 pub const PLAYERS: usize = 3;
 /// Prepare mode's player.
 pub const PREP: usize = 2;
 
-/// Player `d`, if the app has it.
+/// The engine's id for player `d` (a deck, or [`PREP`]).
 pub fn deck_id(d: usize) -> Result<DeckId, String> {
-    DeckId::new(d)
-        .filter(|_| d < PLAYERS)
-        .ok_or_else(|| format!("no deck {d}"))
+    match d {
+        PREP => Ok(DeckId::PREPARE),
+        _ => DeckId::new(d)
+            .filter(|_| d < DECKS)
+            .ok_or_else(|| format!("no deck {d}")),
+    }
 }
-use super::store::{GridSource, Store, StoreCmd};
+
+/// Player `d`'s state in a snapshot (`d` < [`PLAYERS`]).
+pub fn deck_snap(s: &EngineSnapshot, d: usize) -> &DeckSnap {
+    match deck_id(d) {
+        Ok(id) => s.deck(id),
+        Err(_) => &s.prepare,
+    }
+}
 
 #[derive(Default, Clone)]
 pub struct DeckSlot {
@@ -213,13 +224,12 @@ pub fn start_engine(player: &Player, opts: &OutputOptions) -> Result<OutputInfo,
     let mut inner = player.lock().unwrap();
     // Stop the old stream first so the device is free, keeping its last state.
     let last = inner.engine.take().map(|e| e.snapshot());
-    let mut engine = Engine::start(opts, PLAYERS)?;
-    engine.send(Command::Deck(deck_id(PREP)?, DeckCmd::Direct(Set::On)))?;
+    let mut engine = Engine::start(opts, DECKS)?;
     match last {
         Some(snap) => {
             let mut state = snap.state();
-            for (st, slot) in state.decks.iter_mut().zip(&inner.decks) {
-                st.track = slot.loaded();
+            for (d, slot) in inner.decks.iter().enumerate() {
+                state.deck_mut(deck_id(d)?).track = slot.loaded();
             }
             engine.send(Command::Restore(Box::new(state)))?;
         }

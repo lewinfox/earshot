@@ -345,7 +345,7 @@ impl EarshotApp {
         ) else {
             return;
         };
-        let d = &sh.decks[deck];
+        let d = player::deck_snap(&sh, deck);
         let (start, end) = match (d.loop_active, d.loop_in, d.loop_out) {
             (true, Some(start), Some(end)) => (start, Some(end)),
             (true, _, _) => return,
@@ -388,10 +388,11 @@ impl EarshotApp {
             };
             // Only once the engine shows this load (its hot cues came with it).
             let Some(track) = track else { continue };
-            if sh.decks[d].generation != generation {
+            let snap = player::deck_snap(&sh, d);
+            if snap.generation != generation {
                 continue;
             }
-            let now: [Option<f64>; HOTCUES] = sh.decks[d].hotcues;
+            let now: [Option<f64>; HOTCUES] = snap.hotcues;
             match self.hotcues_saved[d] {
                 Some((g, saved)) if g == generation && saved == now => {}
                 Some((g, _)) if g == generation => {
@@ -1257,7 +1258,7 @@ impl eframe::App for EarshotApp {
         let playing = self
             .snap
             .as_ref()
-            .is_some_and(|sh| sh.live().iter().any(|d| d.playing));
+            .is_some_and(|sh| sh.prepare.playing || sh.live().iter().any(|d| d.playing));
         self.lib.analyser.set_playing(playing);
         self.keyboard(ctx);
         self.tick_hud(ctx);
@@ -1265,7 +1266,7 @@ impl eframe::App for EarshotApp {
         self.refresh_suggestions();
         let infos: [DeckInfo; PLAYERS] = std::array::from_fn(|d| self.deck_info(d));
         for (d, info) in infos.iter().enumerate() {
-            let sh = self.snap.as_ref().map(|s| &s.decks[d]);
+            let sh = self.snap.as_ref().map(|s| player::deck_snap(s, d));
             self.decks[d].tick(ctx, sh, info);
         }
         let mut actions: Vec<Action> = vec![];

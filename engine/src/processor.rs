@@ -313,7 +313,8 @@ pub struct Channel {
     pub fader: Smoothed,
     pub pfl: bool,
     pub crossfader: XfSide,
-    /// Straight to the main mix: no fader, crossfader or headphone cue.
+    /// Straight to the main mix: no fader, crossfader or headphone cue (Prepare
+    /// mode's player).
     pub direct: bool,
     /// Level meter (peak after the chain, before the fader), linear.
     pub vu: f32,
@@ -384,7 +385,6 @@ impl Channel {
             filter: self.get(ChannelParam::Filter),
             pfl: self.pfl,
             crossfader: self.crossfader,
-            direct: self.direct,
         }
     }
 
@@ -397,7 +397,6 @@ impl Channel {
         self.set(ChannelParam::Filter, s.filter);
         self.pfl = s.pfl;
         self.crossfader = s.crossfader;
-        self.direct = s.direct;
     }
 
     /// Run the chain on one block of interleaved stereo, in place. Returns its peak.

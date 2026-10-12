@@ -19,12 +19,24 @@ pub const EQ_LOW: usize = 0;
 pub const EQ_MID: usize = 1;
 pub const EQ_HIGH: usize = 2;
 
-/// A deck, checked against [`MAX_DECKS`] when it's made, so indexing with it can never
-/// go out of bounds on the audio thread.
+/// Deck slots inside the engine: the decks, then Prepare mode's player.
+pub(crate) const SLOTS: usize = MAX_DECKS + 1;
+
+/// A deck, or Prepare mode's player ([`DeckId::PREPARE`]). Checked when it's made, so
+/// indexing with it can never go out of bounds on the audio thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DeckId(u8);
 
 impl DeckId {
+    /// Prepare mode's player: a full deck (cues, loops, grid, keylock) that isn't one
+    /// of the [`MAX_DECKS`]. It plays straight to the main mix, past the fader,
+    /// crossfader and headphone cue, and never syncs or leads.
+    pub const PREPARE: DeckId = DeckId(MAX_DECKS as u8);
+
+    pub const fn is_prepare(self) -> bool {
+        self.0 as usize == MAX_DECKS
+    }
+
     pub const fn new(index: usize) -> Option<DeckId> {
         if index < MAX_DECKS {
             Some(DeckId(index as u8))
@@ -33,6 +45,7 @@ impl DeckId {
         }
     }
 
+    /// 0.. for decks; [`MAX_DECKS`] for [`DeckId::PREPARE`].
     pub const fn index(self) -> usize {
         self.0 as usize
     }
@@ -130,9 +143,6 @@ pub enum DeckCmd {
     /// Headphone cue for this deck's channel.
     Pfl(Set),
     Crossfader(XfSide),
-    /// Send this deck straight to the main mix, past the fader, crossfader and cue
-    /// bus, and keep it out of sync (Prepare mode's player).
-    Direct(Set),
     /// Put the cue point here (seconds), or at the playhead (snapped to the beat when
     /// quantising) with `None`.
     SetCue(Option<f64>),
@@ -226,8 +236,6 @@ pub struct ChannelState {
     pub filter: f64,
     pub pfl: bool,
     pub crossfader: XfSide,
-    /// See [`DeckCmd::Direct`].
-    pub direct: bool,
 }
 
 impl Default for ChannelState {
@@ -239,7 +247,6 @@ impl Default for ChannelState {
             filter: 0.0,
             pfl: false,
             crossfader: XfSide::Thru,
-            direct: false,
         }
     }
 }
@@ -311,6 +318,8 @@ impl Default for MixerState {
 #[derive(Clone, Default)]
 pub struct EngineState {
     pub decks: [DeckState; MAX_DECKS],
+    /// Prepare mode's player.
+    pub prepare: DeckState,
     pub mixer: MixerState,
     pub sync_leader: Option<DeckId>,
 }
@@ -350,4 +359,13 @@ pub enum Command {
     Preview(PreviewCmd),
     /// Put every deck and the mixer back as they were (after an audio restart).
     Restore(Box<EngineState>),
+}
+
+impl EngineState {
+    pub fn deck_mut(&mut self, id: DeckId) -> &mut DeckState {
+        match self.decks.get_mut(id.index()) {
+            Some(d) => d,
+            None => &mut self.prepare,
+        }
+    }
 }

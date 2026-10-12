@@ -12,7 +12,7 @@ use std::time::Instant;
 use crate::beatgrid::Beatgrid;
 use crate::command::{
     ChannelParam, Command, DeckCmd, DeckId, DeckState, EngineState, HOTCUES, LoadedTrack,
-    LoopState, MAX_DECKS, MasterParam, ParamId, PreviewCmd, Press, XfSide,
+    LoopState, MAX_DECKS, MasterParam, ParamId, PreviewCmd, Press, SLOTS, XfSide,
 };
 use crate::decode::TrackAudio;
 use crate::dsp::{self, Limiter, Smoothed};
@@ -598,8 +598,7 @@ impl Deck {
             DeckCmd::Play(_)
             | DeckCmd::Sync(_)
             | DeckCmd::Pfl(_)
-            | DeckCmd::Crossfader(_)
-            | DeckCmd::Direct(_) => {}
+            | DeckCmd::Crossfader(_) => {}
         }
     }
 
@@ -644,7 +643,6 @@ impl Deck {
             eq: [0, 1, 2].map(|b| ch.get(ChannelParam::Eq(b))),
             filter: ch.get(ChannelParam::Filter),
             crossfader: ch.crossfader,
-            direct: ch.direct,
             vu: ch.vu as f64,
         }
     }
@@ -660,16 +658,17 @@ pub struct Renderer {
     stats: Arc<Stats>,
     callbacks: u64,
     last_block_frames: u32,
-    /// All [`MAX_DECKS`] exist so a [`DeckId`] can always index them; only the first
-    /// `live` are rendered and take commands.
-    decks: [Deck; MAX_DECKS],
-    channels: [Channel; MAX_DECKS],
+    /// All [`MAX_DECKS`] exist, then Prepare's player ([`DeckId::PREPARE`]), so a
+    /// [`DeckId`] can always index them. Only the first `live` decks and Prepare's
+    /// player are rendered and take commands.
+    decks: [Deck; SLOTS],
+    channels: [Channel; SLOTS],
     live: usize,
     /// The deck synced decks follow, if the app picked one.
     sync_leader: Option<DeckId>,
     sample_rate: f64,
     /// Per-deck stereo scratch, master and headphone buses (interleaved stereo).
-    deck_buf: [Vec<f32>; MAX_DECKS],
+    deck_buf: [Vec<f32>; SLOTS],
     master: Vec<f32>,
     phones: Vec<f32>,
     preview_buf: Vec<f32>,
@@ -690,6 +689,14 @@ pub struct Renderer {
     knob_ease: f64,
 }
 
+/// Prepare mode's slot, after the decks.
+const PREP: usize = MAX_DECKS;
+
+/// The slots in use: the first `live` decks, then Prepare's player.
+fn slots(live: usize) -> impl Iterator<Item = usize> {
+    (0..live).chain(std::iter::once(PREP))
+}
+
 /// A meter that jumps up to a block's peak and falls back slowly.
 fn meter(level: f32, peak: f32, secs: f64) -> f32 {
     peak.max(level * (-secs / VU_FALL_SECS).exp() as f32)
@@ -700,7 +707,7 @@ impl Renderer {
     pub(crate) fn new(ends: RendererEnds, sample_rate: u32, decks: usize) -> Self {
         let live = decks.min(MAX_DECKS);
         let sr = sample_rate as f64;
-        let id = |i: usize| DeckId::new(i).expect("i < MAX_DECKS");
+        let id = |i: usize| DeckId::new(i).unwrap_or(DeckId::PREPARE);
         let mut r = Renderer {
             commands: ends.commands,
             garbage: ends.garbage,
@@ -713,9 +720,14 @@ impl Renderer {
             callbacks: 0,
             last_block_frames: 0,
             decks: std::array::from_fn(|i| {
-                Deck::new(id(i), (i < live).then_some((sample_rate, MAX_BLOCK)))
+                let used = i < live || i == PREP;
+                Deck::new(id(i), used.then_some((sample_rate, MAX_BLOCK)))
             }),
-            channels: std::array::from_fn(|i| Channel::new(sr, XfSide::default_for(id(i)))),
+            channels: std::array::from_fn(|i| {
+                let mut ch = Channel::new(sr, XfSide::default_for(id(i)));
+                ch.direct = i == PREP;
+                ch
+            }),
             live,
             sync_leader: None,
             sample_rate: sr,
@@ -789,8 +801,9 @@ impl Renderer {
 
         let sr = self.sample_rate;
         let live = self.live;
-        for (deck, buf) in self.decks[..live].iter_mut().zip(&mut self.deck_buf) {
-            let buf = &mut buf[..n * 2];
+        for d in slots(live) {
+            let deck = &mut self.decks[d];
+            let buf = &mut self.deck_buf[d][..n * 2];
             buf.fill(0.0);
             let Some(track) = &deck.track else {
                 deck.player.idle();
@@ -807,14 +820,15 @@ impl Renderer {
 
         // Channel chains: gain, EQ, filter. Meters read here, before the faders.
         let secs = n as f64 / sr;
-        for (ch, buf) in self.channels[..live].iter_mut().zip(&mut self.deck_buf) {
-            let peak = ch.process(&mut buf[..n * 2]);
+        for d in slots(live) {
+            let ch = &mut self.channels[d];
+            let peak = ch.process(&mut self.deck_buf[d][..n * 2]);
             ch.vu = meter(ch.vu, peak, secs);
         }
 
-        // Faders, crossfader and the cue bus. Direct channels skip all three.
+        // Faders, crossfader and the cue bus. Prepare's player skips all three.
         let k = self.knob_ease;
-        let any_pfl = self.channels[..live].iter().any(|c| c.pfl && !c.direct);
+        let any_pfl = self.channels[..live].iter().any(|c| c.pfl);
         for f in 0..n {
             let xf = [self.xf_gain[0].next(k) as f32, self.xf_gain[1].next(k) as f32];
             let head = self.head_gain.next(k) as f32;
@@ -822,7 +836,8 @@ impl Renderer {
             let mix = ((self.head_mix.next(k).clamp(-1.0, 1.0) + 1.0) / 2.0) as f32;
             let mut m = [0f32; 2];
             let mut p = [0f32; 2];
-            for (ch, buf) in self.channels[..live].iter_mut().zip(&self.deck_buf) {
+            for d in slots(live) {
+                let (ch, buf) = (&mut self.channels[d], &self.deck_buf[d]);
                 if ch.direct {
                     m[0] += buf[2 * f];
                     m[1] += buf[2 * f + 1];
@@ -918,7 +933,8 @@ impl Renderer {
     /// are right when it starts) but doesn't correct phase: it isn't moving, so the
     /// error would just sweep round with every one of the leader's beats.
     fn update_speeds(&mut self, n: usize) {
-        for dk in &mut self.decks[..self.live] {
+        for d in slots(self.live) {
+            let dk = &mut self.decks[d];
             dk.player.speed = dk.base_speed();
             dk.tempo = 1.0 + dk.rate;
         }
@@ -1012,9 +1028,9 @@ impl Renderer {
         }
     }
 
-    /// The deck behind `id`, if it's live.
+    /// The slot behind `id`, if it's in use.
     fn live(&self, id: DeckId) -> Option<usize> {
-        (id.index() < self.live).then_some(id.index())
+        (id.index() < self.live || id.is_prepare()).then_some(id.index())
     }
 
     fn load(&mut self, d: usize, track: Arc<LoadedTrack>) {
@@ -1078,7 +1094,7 @@ impl Renderer {
                 }
             }
             DeckCmd::Sync(set) => {
-                // A deck straight to the main mix doesn't sync.
+                // Prepare's player doesn't sync.
                 let on = set.apply(self.decks[d].sync) && !self.channels[d].direct;
                 self.decks[d].sync = on;
                 // Line the beats up now if both are playing; the tempo follows in
@@ -1095,14 +1111,6 @@ impl Renderer {
                 ch.pfl = set.apply(ch.pfl);
             }
             DeckCmd::Crossfader(side) => self.channels[d].crossfader = side,
-            DeckCmd::Direct(set) => {
-                let ch = &mut self.channels[d];
-                ch.direct = set.apply(ch.direct);
-                if ch.direct {
-                    ch.pfl = false;
-                    self.decks[d].sync = false;
-                }
-            }
             other => self.decks[d].apply(other, &mut self.outbox),
         }
     }
@@ -1173,19 +1181,19 @@ impl Renderer {
     }
 
     fn restore(&mut self, mut st: Box<EngineState>) {
-        for d in 0..MAX_DECKS {
-            let Some(track) = st.decks[d].track.take() else {
+        for id in DeckId::first(MAX_DECKS).chain([DeckId::PREPARE]) {
+            let Some(track) = st.deck_mut(id).track.take() else {
                 continue;
             };
-            if d < self.live {
-                self.load(d, track);
-            } else {
-                self.trash(Garbage::Track(track));
+            match self.live(id) {
+                Some(d) => self.load(d, track),
+                None => self.trash(Garbage::Track(track)),
             }
         }
-        for d in 0..self.live {
-            self.decks[d].restore(&st.decks[d]);
-            self.channels[d].restore(&st.decks[d].channel);
+        for id in DeckId::first(self.live).chain([DeckId::PREPARE]) {
+            let (d, ds) = (id.index(), st.deck_mut(id));
+            self.decks[d].restore(ds);
+            self.channels[d].restore(&ds.channel);
         }
         let m = st.mixer;
         self.set_crossfader(m.crossfader);
@@ -1200,9 +1208,10 @@ impl Renderer {
 
     fn publish(&mut self) {
         let mut decks = [DeckSnap::default(); MAX_DECKS];
-        for d in 0..self.live {
+        let mut prepare = DeckSnap::default();
+        for d in slots(self.live) {
             let dk = &mut self.decks[d];
-            decks[d] = dk.snapshot(&self.channels[d]);
+            *decks.get_mut(d).unwrap_or(&mut prepare) = dk.snapshot(&self.channels[d]);
             let playing = dk.playing();
             if playing != dk.was_playing {
                 dk.was_playing = playing;
@@ -1218,6 +1227,7 @@ impl Renderer {
         let snap = EngineSnapshot {
             decks,
             decks_live: self.live,
+            prepare,
             mixer: MixerSnap {
                 crossfader: self.crossfader,
                 main_gain: self.master_chain.get(MasterParam::Gain),
@@ -1588,28 +1598,50 @@ mod tests {
         assert_eq!(s.cue_point, 3.0);
     }
 
-    /// Prepare mode's player: straight to the main mix whatever the fader, crossfader
-    /// and headphone cue say, and never synced.
+    /// Prepare mode's player sits beside all four decks: straight to the main mix
+    /// whatever the fader, crossfader and headphone cue say, and never synced.
     #[test]
-    fn a_direct_deck_skips_the_mixer() {
-        let mut rig = Rig::with_decks(3);
-        load_fn(&mut rig, 2, 5.0, sine(440.0));
-        rig.deck(2, DeckCmd::Direct(Set::On));
-        rig.channel(2, ChannelParam::Volume, 0.0);
+    fn prepare_plays_beside_four_decks_and_skips_the_mixer() {
+        let mut rig = Rig::with_decks(MAX_DECKS);
+        let p = DeckId::PREPARE;
+        assert!(p.is_prepare() && DeckId::first(MAX_DECKS).all(|d| d != p));
+        let (audio, _) = demo(120.0, 120.0, 5.0, 2);
+        rig.send(Command::Load {
+            deck: p,
+            track: track(audio, None, 3),
+        });
+        rig.send(Command::Param(ParamId::Channel(p, ChannelParam::Volume), 0.0));
+        rig.send(Command::Deck(p, DeckCmd::Pfl(Set::On)));
+        rig.send(Command::Deck(p, DeckCmd::Sync(Set::On)));
         rig.deck(1, DeckCmd::Pfl(Set::On)); // headphones on the (silent) cue bus
         rig.master(MasterParam::Crossfader, 1.0);
-        rig.deck(2, DeckCmd::Play(Set::On));
-        rig.deck(2, DeckCmd::Sync(Set::On));
+        rig.send(Command::Deck(p, DeckCmd::Play(Set::On)));
         let level = level(&mut rig);
-        assert!(level > 0.1, "{level}");
+        assert!(level > 0.01, "{level}");
         assert_eq!(peaks(&rig.out, 4)[2], 0.0, "not on the cue bus");
-        let s = rig.snap().decks[2];
-        assert!(s.direct && !s.sync);
-        // Nor is it a deck others follow.
-        rig.load(0, 120.0, 120.0);
-        rig.deck(0, DeckCmd::Sync(Set::On));
+        let s = rig.snap();
+        assert!(s.prepare.playing && !s.prepare.sync);
+        assert_eq!(s.prepare.generation, 3);
+        assert_eq!(s.deck(p), &s.prepare);
+        assert!(s.decks.iter().all(|d| d.track_id.is_none()), "no deck slot used");
+        // All four decks still play alongside it, and none follows it.
+        for d in 0..MAX_DECKS {
+            rig.load(d, 120.0, 120.0);
+            rig.deck(d, DeckCmd::Play(Set::On));
+        }
+        rig.deck(3, DeckCmd::Sync(Set::On));
+        rig.send(Command::SetSyncLeader(Some(p)));
         rig.run(0.05);
-        assert_eq!(rig.snap().decks[0].following, None);
+        let s = rig.snap();
+        assert!(s.live().iter().all(|d| d.playing));
+        assert_eq!(s.mixer.sync_leader, None);
+        assert_ne!(s.decks[3].following, Some(p));
+        // Its events carry its own id.
+        assert!(rig.events().iter().any(|e| *e
+            == EngineEvent::Started {
+                deck: p,
+                generation: 3
+            }));
     }
 
     #[test]
@@ -2191,6 +2223,9 @@ mod tests {
         state.decks[1].track = Some(loaded);
         let (audio, grid) = demo(126.0, 126.0, 60.0, 3);
         state.decks[2].track = Some(track(audio, Some(Arc::new(grid)), 1));
+        let (audio, _) = demo(124.0, 124.0, 30.0, 6);
+        state.prepare.track = Some(track(audio, None, 4));
+        state.prepare.position = 7.0;
         let mut fresh = Rig::with_decks(3);
         fresh.send(Command::Restore(Box::new(state)));
         fresh.run(0.1);
@@ -2201,6 +2236,8 @@ mod tests {
         }
         assert_eq!(after.decks[1].auto_gain, 0.5);
         assert_eq!(after.decks[0].track_id, None);
+        assert_eq!(after.prepare.generation, 4);
+        assert!((after.prepare.position - 7.0).abs() < 1e-9);
         let mixer = |m: MixerSnap| MixerSnap {
             vu_main: [0.0; 2],
             limiting: 0.0,

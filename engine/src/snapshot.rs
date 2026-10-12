@@ -60,8 +60,6 @@ pub struct DeckSnap {
     /// Filter knob: -1 low-pass .. 0 off .. 1 high-pass.
     pub filter: f64,
     pub crossfader: XfSide,
-    /// Straight to the main mix ([`crate::DeckCmd::Direct`]).
-    pub direct: bool,
     /// Channel level meter (peak, after gain, EQ and filter, before the fader).
     pub vu: f64,
 }
@@ -94,6 +92,8 @@ pub struct EngineSnapshot {
     /// Only the first [`EngineSnapshot::decks_live`] are in use.
     pub decks: [DeckSnap; MAX_DECKS],
     pub decks_live: usize,
+    /// Prepare mode's player ([`DeckId::PREPARE`]).
+    pub prepare: DeckSnap,
     pub mixer: MixerSnap,
     pub preview: PreviewSnap,
     pub sample_rate: u32,
@@ -104,7 +104,7 @@ pub struct EngineSnapshot {
 
 impl EngineSnapshot {
     pub fn deck(&self, deck: DeckId) -> &DeckSnap {
-        &self.decks[deck.index()]
+        self.decks.get(deck.index()).unwrap_or(&self.prepare)
     }
 
     /// The live decks.
@@ -154,7 +154,6 @@ impl EngineSnapshot {
                     filter: d.filter,
                     pfl: d.pfl,
                     crossfader: d.crossfader,
-                    direct: d.direct,
                 },
             };
         }
