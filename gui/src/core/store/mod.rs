@@ -256,7 +256,9 @@ pub enum StoreCmd {
         /// A smart playlist's query.
         query: Option<String>,
     },
-    /// A folder in one section's tree.
+    /// A folder in one section's tree. The UI sends the undoable form,
+    /// `EditCmd::Create`.
+    #[allow(dead_code)]
     CreateFolder {
         id: i64,
         parent: Option<i64>,
@@ -276,9 +278,13 @@ pub enum StoreCmd {
         id: i64,
         parent: Option<i64>,
     },
-    /// A collection, with everything in it.
+    /// A collection, with everything in it. The UI sends the undoable form,
+    /// `EditCmd::Delete`.
+    #[allow(dead_code)]
     Delete(i64),
-    /// A copy beside it, named "<name> copy".
+    /// A copy beside it, named "<name> copy". The UI sends the undoable form,
+    /// `EditCmd::Duplicate`.
+    #[allow(dead_code)]
     Duplicate {
         from: i64,
         to: i64,
@@ -288,7 +294,8 @@ pub enum StoreCmd {
         graph: FlowGraph,
     },
     /// Add tracks to a crate (each once), the end of a playlist, or a Flow (as
-    /// new starting cards).
+    /// new starting cards). The UI sends the undoable form, `EditCmd::AddTracks`.
+    #[allow(dead_code)]
     AddTracks {
         id: i64,
         tracks: Vec<i64>,

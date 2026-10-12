@@ -838,6 +838,39 @@ fn edits_undo_and_redo() {
     h.state_mut().dispatch(Command::Undo);
     settle_until(&mut h, |a| bpm(a) == analysed && on_deck(a) != Some(140.0));
     assert_eq!(on_deck(h.state()), analysed.map(f64::round));
+
+    // A playlist made from the track menu (with its tracks), then deleted: each undone.
+    h.state_mut().dispatch(
+        CollectionCmd::Create {
+            kind: CollectionKind::Playlist,
+            parent: None,
+            tracks: ids[..2].to_vec(),
+            query: None,
+        }
+        .into(),
+    );
+    let made = |a: &EarshotApp| {
+        a.collections
+            .children_in(Section::Playlists, None)
+            .into_iter()
+            .find(|c| c.kind == CollectionKind::Playlist)
+            .map(|c| (c.id, c.tracks.clone()))
+    };
+    settle_until(&mut h, |a| made(a).is_some_and(|m| m.1 == ids[..2]));
+    let (playlist, _) = made(h.state()).unwrap();
+    h.state_mut().dispatch(Command::Undo);
+    settle_until(&mut h, |a| made(a).is_none());
+    h.state_mut().dispatch(Command::Redo);
+    settle_until(&mut h, |a| made(a).is_some_and(|m| m.1 == ids[..2]));
+    h.state_mut()
+        .dispatch(CollectionCmd::Delete(playlist).into());
+    settle_until(&mut h, |a| made(a).is_none());
+    assert_eq!(
+        h.state().edits.next_undo().map(|e| e.label()).as_deref(),
+        Some("delete playlist")
+    );
+    h.state_mut().dispatch(Command::Undo);
+    settle_until(&mut h, |a| made(a) == Some((playlist, ids[..2].to_vec())));
 }
 
 // ---- the library --------------------------------------------------------------------------

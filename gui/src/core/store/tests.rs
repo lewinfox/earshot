@@ -1485,6 +1485,101 @@ fn collection_edits_undo_and_redo() {
     assert!(w.edit(set).is_err());
 }
 
+/// Making, duplicating and deleting collections undo and redo, a folder with
+/// everything in it.
+#[test]
+fn creating_and_deleting_collections_undo_and_redo() {
+    let (_dir, mut w, a, b) = two_tracks("edit-create");
+    let all = |w: &Writer| {
+        let mut v: Vec<(i64, Option<i64>, String, Vec<i64>)> = read::collections(w.conn())
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.id, c.parent, c.name, c.tracks))
+            .collect();
+        v.sort();
+        v
+    };
+    let create = |id, parent, kind, section, tracks: Vec<i64>| EditCmd::Create {
+        id,
+        parent,
+        kind,
+        section,
+        name: format!("N{id}"),
+        query: None,
+        tracks,
+    };
+    // A crate made with its tracks is one step.
+    w.edit(create(1, None, Crate, None, vec![a, b, a])).unwrap();
+    let made = edited(&mut w);
+    assert_eq!(made.label(), "new crate");
+    assert_eq!(all(&w), vec![(1, None, "N1".into(), vec![a, b])]);
+    w.apply_edit(&made.inverse()).unwrap();
+    assert!(all(&w).is_empty());
+    w.apply_edit(&made).unwrap();
+    assert_eq!(all(&w), vec![(1, None, "N1".into(), vec![a, b])]);
+
+    // A folder in Crates with a folder and a crate inside; a Flow and a playlist.
+    w.edit(create(2, None, Folder, Some(Section::Crates), vec![])).unwrap();
+    edited(&mut w);
+    w.edit(create(3, Some(2), Folder, None, vec![])).unwrap();
+    edited(&mut w);
+    w.edit(create(4, Some(3), Crate, None, vec![b])).unwrap();
+    edited(&mut w);
+    w.edit(create(5, None, Flow, None, vec![a, b])).unwrap();
+    edited(&mut w);
+    w.edit(create(6, None, Playlist, None, vec![b, a, b])).unwrap();
+    edited(&mut w);
+    let before = all(&w);
+    let graph = read::flow_graph(w.conn(), 5).unwrap();
+    assert_eq!(graph.nodes.len(), 2);
+
+    // Duplicating a playlist, undone.
+    w.edit(EditCmd::Duplicate { from: 6, to: 7 }).unwrap();
+    let dup = edited(&mut w);
+    assert!(all(&w).contains(&(7, None, "N6 copy".into(), vec![b, a, b])));
+    w.apply_edit(&dup.inverse()).unwrap();
+    assert_eq!(all(&w), before);
+    assert!(w.edit(EditCmd::Duplicate { from: 2, to: 8 }).is_err(), "not folders");
+    w.take_events();
+
+    // Deleting the folder takes what's in it; undo puts it all back.
+    w.edit(EditCmd::Delete(2)).unwrap();
+    let events = w.take_events();
+    let deleted = events
+        .iter()
+        .find_map(|e| match e {
+            StoreEvent::Deleted(ids) => Some(ids.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(deleted, vec![2, 3, 4]);
+    let gone = events
+        .into_iter()
+        .find_map(|e| match e {
+            StoreEvent::Edited(e) => Some(e),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(gone.label(), "delete folder");
+    assert!(all(&w).iter().all(|c| ![2, 3, 4].contains(&c.0)));
+    w.apply_edit(&gone.inverse()).unwrap();
+    assert_eq!(all(&w), before);
+    w.apply_edit(&gone).unwrap();
+
+    // A Flow, with its cards and links.
+    w.save_flow(5, &{
+        let mut g = graph.clone();
+        g.edges.push((g.nodes[0].id, g.nodes[1].id));
+        g
+    })
+    .unwrap();
+    let linked = read::flow_graph(w.conn(), 5).unwrap();
+    w.edit(EditCmd::Delete(5)).unwrap();
+    let gone = edited(&mut w);
+    w.apply_edit(&gone.inverse()).unwrap();
+    assert_eq!(read::flow_graph(w.conn(), 5).unwrap(), linked);
+}
+
 #[test]
 fn flow_edits_from_the_library_undo_exactly() {
     let (_dir, mut w, a, b) = two_tracks("edit-flow");

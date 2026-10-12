@@ -82,12 +82,15 @@ impl EarshotApp {
             }
             CollectionCmd::CreateFolder { section, parent } => {
                 let id = store.new_collection_id();
-                store.send(StoreCmd::CreateFolder {
+                store.send(StoreCmd::Edit(EditCmd::Create {
                     id,
                     parent,
-                    section,
+                    kind: CollectionKind::Folder,
+                    section: Some(section),
                     name: CollectionKind::Folder.untitled().to_string(),
-                });
+                    query: None,
+                    tracks: vec![],
+                }));
                 self.pending_rename = Some(id);
             }
             CollectionCmd::Create {
@@ -98,24 +101,24 @@ impl EarshotApp {
             } => {
                 let id = store.new_collection_id();
                 let name = kind.untitled().to_string();
-                store.send(StoreCmd::Create {
+                let flow = kind == CollectionKind::Flow;
+                // One undo step, with its tracks. A Flow's go on the canvas instead
+                // (as starting cards), which holds it from now on, or its first save
+                // would drop them.
+                store.send(StoreCmd::Edit(EditCmd::Create {
                     id,
                     parent,
                     kind,
+                    section: None,
                     name: name.clone(),
                     query,
-                });
-                if kind == CollectionKind::Flow {
-                    // Onto the canvas, in the Flow editor. The canvas holds it from
-                    // now on: its tracks go there (as starting cards), or its first
-                    // save would drop them.
+                    tracks: if flow { vec![] } else { tracks.clone() },
+                }));
+                if flow {
                     self.load_flow(Some((id, name, Default::default())));
                     self.panels.flow.add_tracks(&tracks);
                     self.show_flow_tab();
                 } else {
-                    if !tracks.is_empty() {
-                        store.send(StoreCmd::AddTracks { id, tracks });
-                    }
                     lib.browser.set_scope(Scope::Collection(id));
                 }
                 self.pending_rename = Some(id);
@@ -162,11 +165,11 @@ impl EarshotApp {
             })),
             CollectionCmd::Duplicate(from) => {
                 let to = store.new_collection_id();
-                store.send(StoreCmd::Duplicate { from, to });
+                store.send(StoreCmd::Edit(EditCmd::Duplicate { from, to }));
                 self.pending_rename = Some(to);
             }
             // The open Flow may go with it: see `StoreEvent::Deleted`.
-            CollectionCmd::Delete(id) => store.send(StoreCmd::Delete(id)),
+            CollectionCmd::Delete(id) => store.send(StoreCmd::Edit(EditCmd::Delete(id))),
             CollectionCmd::AddTracks { to, tracks } => {
                 if flow.flow == Some(to) {
                     // The canvas has it: add there, or its next save would undo this.

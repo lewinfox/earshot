@@ -686,14 +686,14 @@ impl Writer {
 
     // ---- collections ----------------------------------------------------------------------
 
-    fn emit_collections(&mut self) -> Result<()> {
+    pub(super) fn emit_collections(&mut self) -> Result<()> {
         let c = read::collections(&self.conn)?;
         self.emit(StoreEvent::Collections(c));
         Ok(())
     }
 
     /// `parent` is a folder that holds `section`'s things (or the top level).
-    fn check_folder(&self, parent: Option<i64>, section: Section) -> Result<()> {
+    pub(super) fn check_folder(&self, parent: Option<i64>, section: Section) -> Result<()> {
         if let Some(p) = parent {
             match read::kind_and_section(&self.conn, p)? {
                 Some((CollectionKind::Folder, s)) if s == section => {}

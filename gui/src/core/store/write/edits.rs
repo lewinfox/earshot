@@ -7,8 +7,8 @@ use std::collections::HashSet;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::{FLOW_SPACING, Writer, activate_grid, put_meta, reindex, write_graph};
-use crate::core::collections::CollectionKind;
-use crate::core::edit::{self, Edit, EditCmd, Field, FieldChange, Value};
+use crate::core::collections::{CollectionKind, FlowGraph, Section};
+use crate::core::edit::{self, Edit, EditCmd, Field, FieldChange, SavedCollection, Value};
 use crate::core::store::{Result, StoreError, StoreEvent, now, read};
 
 impl Writer {
@@ -169,6 +169,91 @@ impl Writer {
                 old: collection_row(c, collection)?.1,
                 new: name,
             },
+            EditCmd::Create {
+                id,
+                parent,
+                kind,
+                section,
+                name,
+                query,
+                tracks,
+            } => {
+                let section = match (kind.section(), section, parent) {
+                    (Some(s), _, _) | (None, Some(s), _) => s,
+                    (None, None, Some(p)) => {
+                        read::kind_and_section(c, p)?
+                            .ok_or(StoreError::NoCollection(p))?
+                            .1
+                    }
+                    (None, None, None) => Section::Playlists,
+                };
+                let (tracks, graph) = match kind {
+                    CollectionKind::Crate => {
+                        let mut once = vec![];
+                        for t in tracks {
+                            if !once.contains(&t) {
+                                once.push(t);
+                            }
+                        }
+                        (once, None)
+                    }
+                    CollectionKind::Playlist => (tracks, None),
+                    CollectionKind::Flow => {
+                        let mut g = FlowGraph::default();
+                        for t in tracks {
+                            g.add_root(t, FLOW_SPACING);
+                        }
+                        (vec![], Some(g))
+                    }
+                    _ => (vec![], None),
+                };
+                Edit::Collections {
+                    saved: vec![SavedCollection {
+                        id,
+                        parent,
+                        kind,
+                        section,
+                        name,
+                        query,
+                        source_flow: None,
+                        tracks,
+                        graph,
+                    }],
+                    exists: true,
+                }
+            }
+            EditCmd::Duplicate { from, to } => {
+                let mut copy = saved(c, from)?;
+                if copy.kind == CollectionKind::Folder {
+                    return Err(StoreError::Refused("folders can't be duplicated"));
+                }
+                copy.id = to;
+                copy.name.push_str(" copy");
+                Edit::Collections {
+                    saved: vec![copy],
+                    exists: true,
+                }
+            }
+            EditCmd::Delete(id) => {
+                // The collection, then (for a folder) what's in it, each after its
+                // folder, so undo can make them in this order.
+                let mut all = vec![saved(c, id)?];
+                let mut i = 0;
+                while i < all.len() {
+                    let kids: Vec<i64> = c
+                        .prepare_cached("SELECT id FROM collections WHERE parent_id = ?1 ORDER BY id")?
+                        .query_map([all[i].id], |r| r.get(0))?
+                        .collect::<rusqlite::Result<_>>()?;
+                    for k in kids {
+                        all.push(saved(c, k)?);
+                    }
+                    i += 1;
+                }
+                Edit::Collections {
+                    saved: all,
+                    exists: false,
+                }
+            }
             EditCmd::RemoveFromLibrary(tracks) => {
                 // Only those in it now, so undo puts back just those.
                 let mut st = c.prepare_cached(
@@ -289,6 +374,73 @@ impl Writer {
             Edit::Name {
                 collection, new, ..
             } => self.rename(*collection, new),
+            Edit::Collections {
+                saved,
+                exists: true,
+            } => {
+                // Each after its folder.
+                for s in saved {
+                    self.check_folder(s.parent, s.section)
+                        .or_else(|e| match e {
+                            // The folder is in this edit, made just before.
+                            StoreError::NoCollection(p) if saved.iter().any(|o| o.id == p) => {
+                                Ok(())
+                            }
+                            e => Err(e),
+                        })?;
+                }
+                let tx = self.conn.transaction()?;
+                let t = now();
+                for s in saved {
+                    tx.execute(
+                        "INSERT INTO collections(id, parent_id, kind, section, name, query,
+                           source_flow_id, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+                        params![
+                            s.id,
+                            s.parent,
+                            s.kind.as_str(),
+                            s.section.as_str(),
+                            s.name,
+                            s.query,
+                            s.source_flow,
+                            t
+                        ],
+                    )?;
+                    for (i, track) in s.tracks.iter().enumerate() {
+                        match s.kind {
+                            CollectionKind::Crate => tx.execute(
+                                "INSERT OR IGNORE INTO crate_tracks(collection_id, track_id, added_at)
+                                 VALUES (?1, ?2, ?3)",
+                                params![s.id, track, t],
+                            )?,
+                            _ => tx.execute(
+                                "INSERT INTO playlist_entries(collection_id, position, track_id)
+                                 VALUES (?1, ?2, ?3)",
+                                params![s.id, i as i64, track],
+                            )?,
+                        };
+                    }
+                    if let Some(g) = &s.graph {
+                        write_graph(&tx, s.id, g)?;
+                    }
+                }
+                tx.commit()?;
+                self.emit_collections()
+            }
+            Edit::Collections {
+                saved,
+                exists: false,
+            } => {
+                let tx = self.conn.transaction()?;
+                // What's inside first; deleting a folder takes the rest with it anyway.
+                for s in saved.iter().rev() {
+                    tx.execute("DELETE FROM collections WHERE id = ?1", [s.id])?;
+                }
+                tx.commit()?;
+                self.emit(StoreEvent::Deleted(saved.iter().map(|s| s.id).collect()));
+                self.emit_collections()
+            }
             Edit::Removal { tracks, removed } => {
                 let tx = self.conn.transaction()?;
                 let at = removed.then(now);
@@ -318,6 +470,47 @@ impl Writer {
             }
         }
     }
+}
+
+/// A collection as it is now, with what's in it.
+fn saved(c: &Connection, id: i64) -> Result<SavedCollection> {
+    let (parent, kind, section, name, query, source_flow): (
+        Option<i64>,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<i64>,
+    ) = c
+        .query_row(
+            "SELECT parent_id, kind, section, name, query, source_flow_id
+             FROM collections WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        )
+        .optional()?
+        .ok_or(StoreError::NoCollection(id))?;
+    let kind = CollectionKind::parse(&kind).ok_or(StoreError::NoCollection(id))?;
+    let section = Section::parse(&section).ok_or(StoreError::NoCollection(id))?;
+    let tracks = match kind {
+        CollectionKind::Crate | CollectionKind::Playlist => read::collection_tracks(c, id)?,
+        _ => vec![],
+    };
+    let graph = match kind {
+        CollectionKind::Flow => Some(read::flow_graph(c, id)?),
+        _ => None,
+    };
+    Ok(SavedCollection {
+        id,
+        parent,
+        kind,
+        section,
+        name,
+        query,
+        source_flow,
+        tracks,
+        graph,
+    })
 }
 
 /// (parent, name) of a collection.

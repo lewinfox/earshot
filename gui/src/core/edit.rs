@@ -11,10 +11,12 @@
 //! - A grid edit adds a `beatgrids` row; its undo switches `active_grid_id` back.
 //! - The Flow canvas keeps its graph itself: its edits are recorded by the shell when
 //!   it saves them ([`graph_diff`]), and undone on the canvas while that Flow is open.
+//! - Creating, duplicating and deleting collections keep the whole collection
+//!   ([`SavedCollection`], a folder with everything in it), so undo can put it back.
 
 use std::time::{Duration, Instant};
 
-use super::collections::{CollectionId, FlowGraph, GraphOp, NodeId};
+use super::collections::{CollectionId, CollectionKind, FlowGraph, GraphOp, NodeId, Section};
 use super::keys::key_name;
 use super::track::{Track, TrackId};
 
@@ -127,6 +129,25 @@ pub struct FieldChange {
     pub new: Option<Value>,
 }
 
+/// A collection as saved, with what's in it: what creating one makes and deleting one
+/// takes away.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SavedCollection {
+    pub id: CollectionId,
+    pub parent: Option<CollectionId>,
+    pub kind: CollectionKind,
+    pub section: Section,
+    pub name: String,
+    /// A smart playlist's query.
+    pub query: Option<String>,
+    /// The Flow a playlist was baked from.
+    pub source_flow: Option<CollectionId>,
+    /// A crate's or playlist's tracks (a playlist's in order).
+    pub tracks: Vec<TrackId>,
+    /// A Flow's cards and links.
+    pub graph: Option<FlowGraph>,
+}
+
 /// A change as made, with what it replaced: one undo step.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Edit {
@@ -167,6 +188,12 @@ pub enum Edit {
     Removal {
         tracks: Vec<TrackId>,
         removed: bool,
+    },
+    /// Collections made (`exists`) or deleted, with everything in them: a folder
+    /// first, then what's inside it.
+    Collections {
+        saved: Vec<SavedCollection>,
+        exists: bool,
     },
 }
 
@@ -226,6 +253,10 @@ impl Edit {
                 tracks: tracks.clone(),
                 removed: !removed,
             },
+            Edit::Collections { saved, exists } => Edit::Collections {
+                saved: saved.clone(),
+                exists: !exists,
+            },
         }
     }
 
@@ -239,6 +270,7 @@ impl Edit {
             Edit::Name { old, new, .. } => old == new,
             Edit::FlowGraph { ops, .. } => ops.is_empty(),
             Edit::Removal { tracks, .. } => tracks.is_empty(),
+            Edit::Collections { saved, .. } => saved.is_empty(),
         }
     }
 
@@ -276,6 +308,14 @@ impl Edit {
                     format!("remove {what} from the library")
                 } else {
                     format!("put {what} back in the library")
+                }
+            }
+            Edit::Collections { saved, exists } => {
+                let what = saved.first().map_or("", |c| c.kind.label());
+                if *exists {
+                    format!("new {what}")
+                } else {
+                    format!("delete {what}")
                 }
             }
         }
@@ -328,6 +368,25 @@ pub enum EditCmd {
     /// Take tracks out of the library (they stay on disk, and a rescan doesn't bring
     /// them back; undo does).
     RemoveFromLibrary(Vec<TrackId>),
+    /// A new collection: `id` from `Store::new_collection_id`. A crate's or
+    /// playlist's `tracks` go in it (a Flow's become starting cards). `section` is a
+    /// folder's tree (others go in their kind's; `None`: the parent's, or Playlists').
+    Create {
+        id: CollectionId,
+        parent: Option<CollectionId>,
+        kind: CollectionKind,
+        section: Option<Section>,
+        name: String,
+        query: Option<String>,
+        tracks: Vec<TrackId>,
+    },
+    /// A copy of a crate, playlist, smart playlist or Flow beside it, "<name> copy".
+    Duplicate {
+        from: CollectionId,
+        to: CollectionId,
+    },
+    /// A collection and, for a folder, everything in it.
+    Delete(CollectionId),
 }
 
 /// The ops that turn Flow `from` into `to`: unlink, remove, put back or move
