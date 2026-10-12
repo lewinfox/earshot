@@ -317,6 +317,14 @@ fn copies_of_the_same_audio_are_duplicates() {
     // Removing one from the library (an undoable edit) leaves no duplicate; the file
     // stays, a rescan doesn't bring it back, and undo does.
     let copy = dupes[0][1];
+    let job = |t: i64| JobRow {
+        track: t,
+        analyser: "grid".into(),
+        want: "missing".into(),
+        params: None,
+    };
+    w.save_jobs(copy, &[job(copy)]).unwrap();
+    w.save_jobs(dupes[0][0], &[job(dupes[0][0])]).unwrap();
     let e = w
         .edit(crate::core::edit::EditCmd::RemoveFromLibrary(vec![
             copy, copy,
@@ -336,6 +344,13 @@ fn copies_of_the_same_audio_are_duplicates() {
             .any(|e| matches!(e, StoreEvent::Library(l) if l.len() == 2))
     );
     assert!(read::duplicates(w.conn()).unwrap().is_empty());
+    // Its saved analysis queue went with it; the other track's stays.
+    let queued: Vec<i64> = read::queued_jobs(w.conn())
+        .unwrap()
+        .iter()
+        .map(|j| j.track)
+        .collect();
+    assert_eq!(queued, [dupes[0][0]]);
     // (Every file found, the copy changed.)
     let music = dir.join("music");
     let found: Vec<PathBuf> = ["a.mp3", "copy of a.mp3", "b.mp3"]

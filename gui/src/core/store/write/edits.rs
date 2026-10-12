@@ -450,6 +450,14 @@ impl Writer {
                         "UPDATE tracks SET deleted_at = ?2 WHERE id = ?1",
                         params![t, at],
                     )?;
+                    // Its queued analysis goes with it (`Analyser::forget` drops it
+                    // from the running queue); putting it back doesn't queue it again.
+                    if *removed {
+                        tx.execute(
+                            "DELETE FROM jobs WHERE track_id = ?1 AND kind LIKE ?2 || '%'",
+                            params![t, read::JOB_PREFIX],
+                        )?;
+                    }
                 }
                 tx.commit()?;
                 self.emit_library()
