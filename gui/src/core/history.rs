@@ -3,7 +3,6 @@
 //! app; the plays themselves are saved (the `plays` table) as [`History::tick`]
 //! reports them, but "played" means played in this run.
 
-
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -328,7 +327,10 @@ mod tests {
         let mut s = History::default();
         let t0 = Instant::now();
         s.tick(t0, &[deck(1, true)]);
-        assert_eq!(counted(s.tick(t0 + PLAYED_AFTER, &[deck(1, true)])), vec![1]);
+        assert_eq!(
+            counted(s.tick(t0 + PLAYED_AFTER, &[deck(1, true)])),
+            vec![1]
+        );
         let t1 = t0 + PLAYED_AFTER * 2;
         assert_eq!(
             s.tick(t1, &[deck(2, true)]),

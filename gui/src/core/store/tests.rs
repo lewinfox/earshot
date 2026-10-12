@@ -318,7 +318,9 @@ fn copies_of_the_same_audio_are_duplicates() {
     // stays, a rescan doesn't bring it back, and undo does.
     let copy = dupes[0][1];
     let e = w
-        .edit(crate::core::edit::EditCmd::RemoveFromLibrary(vec![copy, copy]))
+        .edit(crate::core::edit::EditCmd::RemoveFromLibrary(vec![
+            copy, copy,
+        ]))
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -328,7 +330,11 @@ fn copies_of_the_same_audio_are_duplicates() {
             removed: true
         }
     );
-    assert!(w.take_events().iter().any(|e| matches!(e, StoreEvent::Library(l) if l.len() == 2)));
+    assert!(
+        w.take_events()
+            .iter()
+            .any(|e| matches!(e, StoreEvent::Library(l) if l.len() == 2))
+    );
     assert!(read::duplicates(w.conn()).unwrap().is_empty());
     // (Every file found, the copy changed.)
     let music = dir.join("music");
@@ -336,12 +342,8 @@ fn copies_of_the_same_audio_are_duplicates() {
         .iter()
         .map(|f| music.join(f))
         .collect();
-    w.apply_scan(
-        &[music.clone()],
-        &found,
-        &[file(&found[1], "A", Some(1))],
-    )
-    .unwrap();
+    w.apply_scan(&[music.clone()], &found, &[file(&found[1], "A", Some(1))])
+        .unwrap();
     assert_eq!(library(&mut w).len(), 2);
     // Removing it again changes nothing.
     assert_eq!(
@@ -410,7 +412,8 @@ fn stale_analyser_results_are_one_query() {
     );
     let ids: Vec<i64> = library(&mut w).iter().map(|t| t.id).collect();
     let (a, b) = (ids[0], ids[1]);
-    let stale = |w: &Writer, analyser: &str, v: u32| read::stale_tracks(w.conn(), analyser, v).unwrap();
+    let stale =
+        |w: &Writer, analyser: &str, v: u32| read::stale_tracks(w.conn(), analyser, v).unwrap();
     w.save_analysis(analysis(a, 125.0, None, false)).unwrap();
     // Only the track never analysed…
     assert_eq!(stale(&w, "grid", 2), [b]);
@@ -420,13 +423,18 @@ fn stale_analyser_results_are_one_query() {
     // Its file's hash, worked out later, is taken to be the audio it analysed.
     let file: i64 = w
         .conn()
-        .query_row("SELECT id FROM files WHERE track_id = ?1", [a], |r| r.get(0))
+        .query_row("SELECT id FROM files WHERE track_id = ?1", [a], |r| {
+            r.get(0)
+        })
         .unwrap();
     w.set_content_hash(file, &[7; 32]).unwrap();
     assert_eq!(stale(&w, "grid", 2), [b]);
     // Different audio under the same name (re-encoded, say): stale again.
     w.conn()
-        .execute("UPDATE files SET content_hash = ?1 WHERE id = ?2", rusqlite::params![vec![8u8; 32], file])
+        .execute(
+            "UPDATE files SET content_hash = ?1 WHERE id = ?2",
+            rusqlite::params![vec![8u8; 32], file],
+        )
         .unwrap();
     assert_eq!(stale(&w, "grid", 2), [a, b]);
     let r = read::analysis_results(w.conn(), a).unwrap();
@@ -435,7 +443,10 @@ fn stale_analyser_results_are_one_query() {
     // Loudness measured on a deck load counts; a failed run doesn't.
     w.save_measured(b, &[("lufs", -9.0), ("peak", 0.9), ("energy", 0.4)])
         .unwrap();
-    assert_eq!((stale(&w, "loudness", 1), stale(&w, "energy", 1)), (vec![a], vec![a]));
+    assert_eq!(
+        (stale(&w, "loudness", 1), stale(&w, "energy", 1)),
+        (vec![a], vec![a])
+    );
     let mut failed = analysis(b, 125.0, None, false);
     (failed.grid, failed.results) = (None, vec![("grid", 2, Some("no beats".into()))]);
     w.save_analysis(failed).unwrap();
@@ -463,18 +474,29 @@ fn the_analysis_queue_and_settings_are_saved() {
     w.save_jobs(id, &[]).unwrap();
     assert!(read::queued_jobs(w.conn()).unwrap().is_empty());
     // A track deleted meanwhile is skipped, not an error.
-    w.save_jobs(9999, &[JobRow { track: 9999, ..job("grid", "stale") }])
-        .unwrap();
+    w.save_jobs(
+        9999,
+        &[JobRow {
+            track: 9999,
+            ..job("grid", "stale")
+        }],
+    )
+    .unwrap();
     assert!(read::queued_jobs(w.conn()).unwrap().is_empty());
 
-    assert_eq!(read::setting(w.conn(), "analysis.background_workers").unwrap(), None);
+    assert_eq!(
+        read::setting(w.conn(), "analysis.background_workers").unwrap(),
+        None
+    );
     w.apply(StoreCmd::SetSetting {
         key: "analysis.background_workers".into(),
         value: "2".into(),
     })
     .unwrap();
     assert_eq!(
-        read::setting(w.conn(), "analysis.background_workers").unwrap().as_deref(),
+        read::setting(w.conn(), "analysis.background_workers")
+            .unwrap()
+            .as_deref(),
         Some("2")
     );
 }
@@ -495,7 +517,12 @@ fn plays_are_saved_per_session() {
     let first = read::plays(w.conn()).unwrap();
     assert_eq!(first.len(), 1);
     assert_eq!(
-        (first[0].track, first[0].deck, first[0].started_at, first[0].ended_at),
+        (
+            first[0].track,
+            first[0].deck,
+            first[0].started_at,
+            first[0].ended_at
+        ),
         (id, 1, 100, Some(300))
     );
     // Ending again changes nothing: that play is over.
@@ -1519,7 +1546,8 @@ fn creating_and_deleting_collections_undo_and_redo() {
     assert_eq!(all(&w), vec![(1, None, "N1".into(), vec![a, b])]);
 
     // A folder in Crates with a folder and a crate inside; a Flow and a playlist.
-    w.edit(create(2, None, Folder, Some(Section::Crates), vec![])).unwrap();
+    w.edit(create(2, None, Folder, Some(Section::Crates), vec![]))
+        .unwrap();
     edited(&mut w);
     w.edit(create(3, Some(2), Folder, None, vec![])).unwrap();
     edited(&mut w);
@@ -1527,7 +1555,8 @@ fn creating_and_deleting_collections_undo_and_redo() {
     edited(&mut w);
     w.edit(create(5, None, Flow, None, vec![a, b])).unwrap();
     edited(&mut w);
-    w.edit(create(6, None, Playlist, None, vec![b, a, b])).unwrap();
+    w.edit(create(6, None, Playlist, None, vec![b, a, b]))
+        .unwrap();
     edited(&mut w);
     let before = all(&w);
     let graph = read::flow_graph(w.conn(), 5).unwrap();
@@ -1539,7 +1568,10 @@ fn creating_and_deleting_collections_undo_and_redo() {
     assert!(all(&w).contains(&(7, None, "N6 copy".into(), vec![b, a, b])));
     w.apply_edit(&dup.inverse()).unwrap();
     assert_eq!(all(&w), before);
-    assert!(w.edit(EditCmd::Duplicate { from: 2, to: 8 }).is_err(), "not folders");
+    assert!(
+        w.edit(EditCmd::Duplicate { from: 2, to: 8 }).is_err(),
+        "not folders"
+    );
     w.take_events();
 
     // Deleting the folder takes what's in it; undo puts it all back.

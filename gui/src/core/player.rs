@@ -688,7 +688,10 @@ mod tests {
             // Each sends an event; the ring holds 256.
             for i in 0..400 {
                 inner
-                    .send(Command::Deck(a, DeckCmd::SetCue(Some(1.0 + i as f64 * 0.01))))
+                    .send(Command::Deck(
+                        a,
+                        DeckCmd::SetCue(Some(1.0 + i as f64 * 0.01)),
+                    ))
                     .unwrap();
             }
             inner.send(Command::Deck(a, DeckCmd::Seek(12.0))).unwrap();
@@ -721,7 +724,16 @@ mod tests {
         }
         let (snap, changed) = p.lock().unwrap().catch_up();
         let d = snap.unwrap().decks[0];
-        assert!(p.lock().unwrap().monitor().unwrap().stats().dropped_events.load(Relaxed) > 0);
+        assert!(
+            p.lock()
+                .unwrap()
+                .monitor()
+                .unwrap()
+                .stats()
+                .dropped_events
+                .load(Relaxed)
+                > 0
+        );
         assert_eq!(changed, vec![a], "the hot cue is saved");
         let inner = p.lock().unwrap();
         let st = &inner.session(a).state;

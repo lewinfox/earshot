@@ -99,7 +99,11 @@ fn percentile(x: &[f64], q: f64) -> f64 {
     let pos = q / 100.0 * (v.len() - 1) as f64;
     let i = pos.floor() as usize;
     let f = pos - i as f64;
-    if i + 1 < v.len() { v[i] * (1.0 - f) + v[i + 1] * f } else { v[i] }
+    if i + 1 < v.len() {
+        v[i] * (1.0 - f) + v[i + 1] * f
+    } else {
+        v[i]
+    }
 }
 
 fn median(x: &[f64]) -> f64 {
@@ -166,7 +170,13 @@ fn coarse_tempo(env: &[f64]) -> f64 {
     let (lag_lo, lag_hi) = ((fps * 60.0 / 200.0) as usize, (fps * 60.0 / 60.0) as usize);
     let maxlag = (4 * lag_hi + 2).min(e.len().saturating_sub(1));
     let ac: Vec<f64> = (0..=maxlag)
-        .map(|l| e[..e.len() - l].iter().zip(&e[l..]).map(|(a, b)| a * b).sum())
+        .map(|l| {
+            e[..e.len() - l]
+                .iter()
+                .zip(&e[l..])
+                .map(|(a, b)| a * b)
+                .sum()
+        })
         .collect();
     let mut best = (f64::MIN, 125.0);
     let mut lag = lag_lo as f64;
@@ -190,7 +200,9 @@ fn fine_tempo(env: &[f64], bpm0: f64, span: f64, step: f64) -> f64 {
     let mean = e.iter().sum::<f64>() / e.len() as f64;
     let e: Vec<f64> = e.iter().map(|v| v - mean).collect();
     let nb = ((2.0 * span * bpm0) / step).ceil() as usize;
-    let bpms: Vec<f64> = (0..nb).map(|i| bpm0 * (1.0 - span) + i as f64 * step).collect();
+    let bpms: Vec<f64> = (0..nb)
+        .map(|i| bpm0 * (1.0 - span) + i as f64 * step)
+        .collect();
     let mag: Vec<f64> = bpms
         .iter()
         .map(|&bpm| {
@@ -218,7 +230,9 @@ fn fine_tempo(env: &[f64], bpm0: f64, span: f64, step: f64) -> f64 {
             total
         })
         .collect();
-    let j = (0..mag.len()).max_by(|&a, &b| mag[a].partial_cmp(&mag[b]).unwrap()).unwrap_or(0);
+    let j = (0..mag.len())
+        .max_by(|&a, &b| mag[a].partial_cmp(&mag[b]).unwrap())
+        .unwrap_or(0);
     let mut bpm = bpms[j];
     if j > 0 && j + 1 < mag.len() {
         let (a, b, c) = (mag[j - 1], mag[j], mag[j + 1]);
@@ -250,7 +264,9 @@ fn fold(env: &[f64], t0: usize, t1: usize, period: f64) -> Vec<f64> {
 /// Circular argmax with parabolic refinement.
 fn peak(x: &[f64]) -> f64 {
     let n = x.len();
-    let j = (0..n).max_by(|&a, &b| x[a].partial_cmp(&x[b]).unwrap()).unwrap_or(0);
+    let j = (0..n)
+        .max_by(|&a, &b| x[a].partial_cmp(&x[b]).unwrap())
+        .unwrap_or(0);
     let (a, b, c) = (x[(j + n - 1) % n], x[j], x[(j + 1) % n]);
     let den = a - 2.0 * b + c;
     j as f64 + if den < 0.0 { 0.5 * (a - c) / den } else { 0.0 }
@@ -260,7 +276,12 @@ fn smooth_circ(x: &[f64], k: usize) -> Vec<f64> {
     let n = x.len() as i64;
     let h = (k / 2) as i64;
     (0..n)
-        .map(|i| (-h..=h).map(|d| x[((i + d).rem_euclid(n)) as usize]).sum::<f64>() / k as f64)
+        .map(|i| {
+            (-h..=h)
+                .map(|d| x[((i + d).rem_euclid(n)) as usize])
+                .sum::<f64>()
+                / k as f64
+        })
         .collect()
 }
 
@@ -314,18 +335,28 @@ fn weighted_line(x: &[f64], y: &[f64], w: &[f64]) -> (f64, f64, Vec<f64>) {
         let sw: f64 = ww.iter().sum();
         let mx = x.iter().zip(&ww).map(|(x, w)| x * w).sum::<f64>() / sw;
         let my = y.iter().zip(&ww).map(|(y, w)| y * w).sum::<f64>() / sw;
-        let sxy: f64 = (0..x.len()).map(|i| ww[i] * (x[i] - mx) * (y[i] - my)).sum();
+        let sxy: f64 = (0..x.len())
+            .map(|i| ww[i] * (x[i] - mx) * (y[i] - my))
+            .sum();
         let sxx: f64 = (0..x.len()).map(|i| ww[i] * (x[i] - mx).powi(2)).sum();
         b = if sxx > 0.0 { sxy / sxx } else { 0.0 };
         a = my - b * mx;
         for i in 0..x.len() {
             r[i] = y[i] - (a + b * x[i]);
         }
-        let active: Vec<f64> = (0..x.len()).filter(|&i| ww[i] > 0.0).map(|i| r[i].abs()).collect();
+        let active: Vec<f64> = (0..x.len())
+            .filter(|&i| ww[i] > 0.0)
+            .map(|i| r[i].abs())
+            .collect();
         let s = 1.4826 * median(&active) + 0.5;
         let c = 1.345 * s;
         for i in 0..x.len() {
-            ww[i] = w[i] * if r[i].abs() <= c { 1.0 } else { c / r[i].abs().max(1e-9) };
+            ww[i] = w[i]
+                * if r[i].abs() <= c {
+                    1.0
+                } else {
+                    c / r[i].abs().max(1e-9)
+                };
         }
     }
     (a, b, r)
@@ -354,7 +385,13 @@ fn window_fit(ws: &[Window], period: f64) -> Option<(f64, Vec<f64>, f64)> {
     let msum = median(&sums);
     let conf: Vec<f64> = ws
         .iter()
-        .map(|w| if w.sum > 0.2 * msum { w.corr.clamp(0.0, 1.0).powi(2) } else { 0.0 })
+        .map(|w| {
+            if w.sum > 0.2 * msum {
+                w.corr.clamp(0.0, 1.0).powi(2)
+            } else {
+                0.0
+            }
+        })
         .collect();
     let good: Vec<usize> = (0..ws.len()).filter(|&i| conf[i] > 0.1).collect();
     let good_frac = good.len() as f64 / ws.len().max(1) as f64;
@@ -362,7 +399,10 @@ fn window_fit(ws: &[Window], period: f64) -> Option<(f64, Vec<f64>, f64)> {
         return None;
     }
     let x: Vec<f64> = good.iter().map(|&i| ws[i].centre).collect();
-    let off = unwrap(&good.iter().map(|&i| ws[i].offset).collect::<Vec<_>>(), period);
+    let off = unwrap(
+        &good.iter().map(|&i| ws[i].offset).collect::<Vec<_>>(),
+        period,
+    );
     let w: Vec<f64> = good.iter().map(|&i| conf[i]).collect();
     let (_, b, r) = weighted_line(&x, &off, &w);
     Some((b, r, good_frac))
@@ -416,6 +456,9 @@ pub fn analyse(y: &[f32], sr: u32) -> Grid {
 pub fn read_wav(path: &std::path::Path) -> std::io::Result<(Vec<f32>, u32)> {
     let b = std::fs::read(path)?;
     let sr = u32::from_le_bytes(b[24..28].try_into().unwrap());
-    let y = b[44..].chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+    let y = b[44..]
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
     Ok((y, sr))
 }

@@ -784,9 +784,10 @@ pub fn plays(c: &Connection) -> Result<Vec<Play>> {
 }
 
 pub fn setting(c: &Connection, key: &str) -> Result<Option<String>> {
-    Ok(c
-        .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+    Ok(
+        c.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
             r.get(0)
         })
-        .optional()?)
+        .optional()?,
+    )
 }

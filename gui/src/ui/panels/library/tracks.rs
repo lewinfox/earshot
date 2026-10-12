@@ -213,7 +213,9 @@ pub fn track_menu(ui: &mut Ui, sel: &[TrackId], v: &CoreView, at: MenuAt, out: &
     }
     if ui
         .button(format!("{} from the library", count("Remove", n)))
-        .on_hover_text("The file stays on disk, and a rescan doesn't add it back. Undo puts it back.")
+        .on_hover_text(
+            "The file stays on disk, and a rescan doesn't add it back. Undo puts it back.",
+        )
         .clicked()
     {
         out.push(EditCmd::RemoveFromLibrary(sel.to_vec()).into());

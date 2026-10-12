@@ -241,7 +241,9 @@ impl Writer {
                 let mut i = 0;
                 while i < all.len() {
                     let kids: Vec<i64> = c
-                        .prepare_cached("SELECT id FROM collections WHERE parent_id = ?1 ORDER BY id")?
+                        .prepare_cached(
+                            "SELECT id FROM collections WHERE parent_id = ?1 ORDER BY id",
+                        )?
                         .query_map([all[i].id], |r| r.get(0))?
                         .collect::<rusqlite::Result<_>>()?;
                     for k in kids {
@@ -256,9 +258,8 @@ impl Writer {
             }
             EditCmd::RemoveFromLibrary(tracks) => {
                 // Only those in it now, so undo puts back just those.
-                let mut st = c.prepare_cached(
-                    "SELECT 1 FROM tracks WHERE id = ?1 AND deleted_at IS NULL",
-                )?;
+                let mut st =
+                    c.prepare_cached("SELECT 1 FROM tracks WHERE id = ?1 AND deleted_at IS NULL")?;
                 let mut kept = vec![];
                 for t in tracks {
                     if st.exists([t])? && !kept.contains(&t) {
@@ -486,7 +487,16 @@ fn saved(c: &Connection, id: i64) -> Result<SavedCollection> {
             "SELECT parent_id, kind, section, name, query, source_flow_id
              FROM collections WHERE id = ?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
         )
         .optional()?
         .ok_or(StoreError::NoCollection(id))?;

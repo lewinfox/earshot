@@ -13,7 +13,7 @@ use std::time::Instant;
 use crate::beatgrid::Beatgrid;
 use crate::command::{
     ChannelParam, Command, DeckCmd, DeckId, DeckState, EngineState, HOTCUES, LoadedTrack,
-    LoopState, MAX_DECKS, MasterParam, ParamId, PreviewCmd, Press, SLOTS, XfSide,
+    LoopState, MAX_DECKS, MasterParam, ParamId, Press, PreviewCmd, SLOTS, XfSide,
 };
 use crate::decode::TrackAudio;
 use crate::dsp::{self, Limiter, Smoothed};
@@ -341,7 +341,10 @@ impl Deck {
     /// Put `track` on the deck, stopped at its cue point (the grid's first beat if it
     /// has none). Tempo, sync, quantize and keylock stay as they were. Returns what it
     /// replaced, for the garbage ring.
-    fn load(&mut self, track: Arc<LoadedTrack>) -> (Option<Arc<LoadedTrack>>, Option<Arc<Beatgrid>>) {
+    fn load(
+        &mut self,
+        track: Arc<LoadedTrack>,
+    ) -> (Option<Arc<LoadedTrack>>, Option<Arc<Beatgrid>>) {
         let old_grid = std::mem::replace(&mut self.grid, track.grid.clone());
         let first_beat = self.grid.as_ref().map_or(0.0, |g| g.time_at(0.0).max(0.0));
         let cue = track.cues.main.unwrap_or(first_beat);
@@ -636,10 +639,7 @@ impl Deck {
             DeckCmd::Quantize(set) => self.quantize = set.apply(self.quantize),
             DeckCmd::Keylock(set) => self.player.keylock = set.apply(self.player.keylock),
             // Handled by the renderer.
-            DeckCmd::Play(_)
-            | DeckCmd::Sync(_)
-            | DeckCmd::Pfl(_)
-            | DeckCmd::Crossfader(_) => {}
+            DeckCmd::Play(_) | DeckCmd::Sync(_) | DeckCmd::Pfl(_) | DeckCmd::Crossfader(_) => {}
         }
     }
 
@@ -873,7 +873,10 @@ impl Renderer {
         let k = self.knob_ease;
         let any_pfl = self.channels[..live].iter().any(|c| c.pfl);
         for f in 0..n {
-            let xf = [self.xf_gain[0].next(k) as f32, self.xf_gain[1].next(k) as f32];
+            let xf = [
+                self.xf_gain[0].next(k) as f32,
+                self.xf_gain[1].next(k) as f32,
+            ];
             let head = self.head_gain.next(k) as f32;
             // Head mix: how much of the main mix the headphones hear, against the cue bus.
             let mix = ((self.head_mix.next(k).clamp(-1.0, 1.0) + 1.0) / 2.0) as f32;
@@ -1156,9 +1159,7 @@ impl Renderer {
                 self.decks[d].sync = on;
                 // Line the beats up now if both are playing; the tempo follows in
                 // `update_speeds` (only a loaded track is needed for that).
-                let leader_playing = self
-                    .leader_for(d)
-                    .is_some_and(|l| self.decks[l].playing());
+                let leader_playing = self.leader_for(d).is_some_and(|l| self.decks[l].playing());
                 if on && self.decks[d].playing() && leader_playing {
                     self.snap_phase(d);
                 }
@@ -1646,10 +1647,13 @@ mod tests {
         rig.run(0.05);
         assert!(!rig.snap().decks[0].loop_active);
         // A loop set outright jumps to its start; a cue set outright stays put.
-        rig.deck(0, DeckCmd::SetLoop {
-            start: 20.0,
-            end: 22.0,
-        });
+        rig.deck(
+            0,
+            DeckCmd::SetLoop {
+                start: 20.0,
+                end: 22.0,
+            },
+        );
         rig.deck(0, DeckCmd::SetCue(Some(3.0)));
         rig.run(0.05);
         let s = rig.snap().decks[0];
@@ -1669,7 +1673,10 @@ mod tests {
             deck: p,
             track: track(audio, None, 3),
         });
-        rig.send(Command::Param(ParamId::Channel(p, ChannelParam::Volume), 0.0));
+        rig.send(Command::Param(
+            ParamId::Channel(p, ChannelParam::Volume),
+            0.0,
+        ));
         rig.send(Command::Deck(p, DeckCmd::Pfl(Set::On)));
         rig.send(Command::Deck(p, DeckCmd::Sync(Set::On)));
         rig.deck(1, DeckCmd::Pfl(Set::On)); // headphones on the (silent) cue bus
@@ -1682,7 +1689,10 @@ mod tests {
         assert!(s.prepare.playing && !s.prepare.sync);
         assert_eq!(s.prepare.generation, 3);
         assert_eq!(s.deck(p), &s.prepare);
-        assert!(s.decks.iter().all(|d| d.track_id.is_none()), "no deck slot used");
+        assert!(
+            s.decks.iter().all(|d| d.track_id.is_none()),
+            "no deck slot used"
+        );
         // All four decks still play alongside it, and none follows it.
         for d in 0..MAX_DECKS {
             rig.load(d, 120.0, 120.0);
@@ -2393,8 +2403,7 @@ mod tests {
         assert_eq!(mixer(after.mixer), mixer(before.mixer));
         // The state box went to the garbage ring.
         assert!(
-            std::iter::from_fn(|| fresh.garbage.pop().ok())
-                .any(|g| matches!(g, Garbage::State(_)))
+            std::iter::from_fn(|| fresh.garbage.pop().ok()).any(|g| matches!(g, Garbage::State(_)))
         );
     }
 }

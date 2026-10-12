@@ -75,7 +75,9 @@ impl Panel for TopBar<'_> {
                 }
                 if ui
                     .button("Re-analyse stale tracks…")
-                    .on_hover_text("Settings > Analysis: how many are out of date, and re-analyse them")
+                    .on_hover_text(
+                        "Settings > Analysis: how many are out of date, and re-analyse them",
+                    )
                     .clicked()
                 {
                     cx.send(ViewCmd::Settings(SettingsTab::Analysis));

@@ -8,8 +8,8 @@ use egui_kittest::kittest::Queryable;
 use super::tests::{H, ids, render, settle_until, start, steps};
 use super::*;
 use crate::core::view::Tool;
-use crate::ui::panels::library::drag::{self, DragPayload, Origin};
 use crate::core::worker_client::testing::stand_in;
+use crate::ui::panels::library::drag::{self, DragPayload, Origin};
 
 /// The app in Prepare's Flow tab.
 fn flow_tab(test: &str) -> H {
@@ -102,7 +102,10 @@ fn a_card_dragged_off_the_canvas_has_a_ghost_and_stays_put() {
     press(&h, to, false);
     steps(&mut h, 2);
     let moved = h.state().panels.flow.graph().nodes[0].clone();
-    assert!(moved.x > node.x + 20.0 && moved.y > node.y + 10.0, "{moved:?}");
+    assert!(
+        moved.x > node.x + 20.0 && moved.y > node.y + 10.0,
+        "{moved:?}"
+    );
 
     // Dragged over the library: a ghost follows the pointer and the card stays put.
     let at = h.state().panels.flow.card_on_screen(node.id).unwrap();

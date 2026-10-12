@@ -38,7 +38,9 @@ impl EarshotApp {
             LibraryCmd::FindDuplicates => {
                 let (reader, sink) = (self.lib.store.reader.clone(), self.sink.clone());
                 std::thread::spawn(move || {
-                    sink(Event::Duplicates(reader.duplicates().map_err(|e| e.to_string())));
+                    sink(Event::Duplicates(
+                        reader.duplicates().map_err(|e| e.to_string()),
+                    ));
                 });
             }
         }
@@ -235,7 +237,9 @@ impl EarshotApp {
     pub(super) fn save_flow_view(&mut self, ctx: &egui::Context) {
         let open = self.panels.flow.flow;
         if open != self.settings.flow_open {
-            self.lib.store.send(settings::save(settings::FLOW_OPEN, &open));
+            self.lib
+                .store
+                .send(settings::save(settings::FLOW_OPEN, &open));
             self.settings.flow_open = open;
         }
         let Some(id) = open else {

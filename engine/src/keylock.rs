@@ -75,7 +75,8 @@ impl Keylock {
     /// Shift `buf` (interleaved stereo, read at `speed`) back to its original key, in
     /// place. Remembers where the playhead ended up (`pos`) to spot jumps.
     pub fn process(&mut self, buf: &mut [f32], speed: f64, pos: f64) {
-        self.stretch.set_transpose_factor((1.0 / speed) as f32, None);
+        self.stretch
+            .set_transpose_factor((1.0 / speed) as f32, None);
         let out = &mut self.out[..buf.len()];
         self.stretch.process(&*buf, &mut *out);
         buf.copy_from_slice(out);

@@ -27,10 +27,8 @@ impl FlowUi {
                         .collect();
                     if !ts.is_empty() {
                         let s = summary(&ts);
-                        ui.add(
-                            egui::Label::new(RichText::new(&s).color(THEME.muted)).truncate(),
-                        )
-                        .on_hover_text(s);
+                        ui.add(egui::Label::new(RichText::new(&s).color(THEME.muted)).truncate())
+                            .on_hover_text(s);
                     }
                 });
             });

@@ -1257,7 +1257,10 @@ mod tests {
         config.expect = vec![("grid".into(), 4)];
         let client = WorkerClient::start(config);
         let e = client.analyse(&req("x", 5000), &mut |_| {}).unwrap_err();
-        assert!(e.contains("grid analyser is version 3, this app's is 4"), "{e}");
+        assert!(
+            e.contains("grid analyser is version 3, this app's is 4"),
+            "{e}"
+        );
         assert_eq!(client.refused(), Some(e.clone()));
         // Not started again for the next job.
         assert!(!client.is_running());

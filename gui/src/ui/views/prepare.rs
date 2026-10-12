@@ -13,8 +13,8 @@ use super::{Panels, library, row_frame};
 use crate::core::command::ViewCmd;
 use crate::core::view::{Region, Tool};
 use crate::ui::panels::deck::{CUE_PANE_W, CuePane, PreparePlayer, WavePanel};
-use crate::ui::panels::tempo_lock::TempoLockPanel;
 use crate::ui::panels::flow::FlowTab;
+use crate::ui::panels::tempo_lock::TempoLockPanel;
 use crate::ui::panels::{Cx, Panel, mixer, resized};
 use crate::ui::widgets::{Tab, tool_tabs};
 

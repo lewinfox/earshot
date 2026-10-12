@@ -152,7 +152,14 @@ impl LibraryUi {
         let within: Option<Vec<TrackId>> = match &self.scope {
             Scope::All => None,
             // A group at a time, in the order found (unless sorted).
-            Scope::Duplicates => Some(self.duplicates.iter().flatten().flatten().copied().collect()),
+            Scope::Duplicates => Some(
+                self.duplicates
+                    .iter()
+                    .flatten()
+                    .flatten()
+                    .copied()
+                    .collect(),
+            ),
             Scope::Folder(f) => {
                 let dir = format!("{f}/");
                 Some(

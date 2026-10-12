@@ -185,10 +185,7 @@ pub enum Edit {
     },
     /// Tracks taken out of the library (`removed`), or put back (its undo). Their
     /// files stay on disk; everything about them stays in the database.
-    Removal {
-        tracks: Vec<TrackId>,
-        removed: bool,
-    },
+    Removal { tracks: Vec<TrackId>, removed: bool },
     /// Collections made (`exists`) or deleted, with everything in them: a folder
     /// first, then what's inside it.
     Collections {
@@ -451,7 +448,9 @@ impl History {
     /// collection (within [`RENAME_RUN`]) joins it, so a name typed a letter at a time
     /// is undone in one go.
     pub fn record_at(&mut self, e: Edit, now: Instant) {
-        let recent = self.last.is_some_and(|t| now.duration_since(t) < RENAME_RUN);
+        let recent = self
+            .last
+            .is_some_and(|t| now.duration_since(t) < RENAME_RUN);
         self.last = Some(now);
         if let (
             true,

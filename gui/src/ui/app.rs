@@ -344,7 +344,9 @@ impl EarshotApp {
                     .write(true)
                     .create_new(true)
                     .open(&self.keymap_path)
-                    .and_then(|mut f| std::io::Write::write_all(&mut f, keymap::BUILT_IN.as_bytes()));
+                    .and_then(|mut f| {
+                        std::io::Write::write_all(&mut f, keymap::BUILT_IN.as_bytes())
+                    });
                 if let Err(e) = made {
                     eprintln!("{}: {e}", self.keymap_path.display());
                 }
@@ -637,12 +639,12 @@ fn store_sink(sink: &Sink) -> EventSink {
 
 mod edits;
 mod events;
+#[cfg(test)]
+mod flow_tests;
 mod frame;
 mod input;
 mod library_ops;
 mod preview;
 mod tempo_lock;
-#[cfg(test)]
-mod flow_tests;
 #[cfg(test)]
 mod tests;

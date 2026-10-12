@@ -156,7 +156,10 @@ mod tests {
                 [x, x]
             })
             .collect();
-        let d = detail(&TrackAudio { samples, sample_rate: sr });
+        let d = detail(&TrackAudio {
+            samples,
+            sample_rate: sr,
+        });
         assert_eq!(d.len(), 2 * 2000);
         // Bin 10 is at 5 ms = a quarter cycle: the top of the wave, scaled to ±1.
         assert!(d[20] > 250 && d[21] >= d[20], "{:?}", &d[18..24]);

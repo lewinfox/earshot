@@ -42,7 +42,12 @@ fn main() {
                 let tmp = dst.with_extension("part");
                 write_mono_wav(&tmp, &audio).expect("write");
                 std::fs::rename(&tmp, dst).expect("rename");
-                println!("{}\t{}\t{:.3}", dst.display(), audio.sample_rate, audio.duration());
+                println!(
+                    "{}\t{}\t{:.3}",
+                    dst.display(),
+                    audio.sample_rate,
+                    audio.duration()
+                );
             }
             Err(e) => eprintln!("{}: {e}", src.display()),
         }

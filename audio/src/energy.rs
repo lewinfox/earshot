@@ -48,7 +48,10 @@ mod tests {
                 [x, x]
             })
             .collect();
-        TrackAudio { samples, sample_rate: sr }
+        TrackAudio {
+            samples,
+            sample_rate: sr,
+        }
     }
 
     #[test]

@@ -5,8 +5,8 @@ use std::path::Path;
 
 use egui::{RichText, Ui};
 
-use super::audio::AudioUi;
 use super::ModalEnv;
+use super::audio::AudioUi;
 use crate::core::command::{AppCmd, Command};
 use crate::core::keymap::Origin;
 use crate::core::view::SettingsTab;
@@ -80,12 +80,12 @@ impl SettingsUi {
                 });
                 ui.separator();
                 match self.tab {
-                    SettingsTab::Audio => out.extend(self.audio.ui(
-                        ui,
-                        env.audio_settings,
-                        env.audio,
-                        env.routing,
-                    )),
+                    SettingsTab::Audio => {
+                        out.extend(
+                            self.audio
+                                .ui(ui, env.audio_settings, env.audio, env.routing),
+                        )
+                    }
                     SettingsTab::Analysis => out.extend(analysis(ui, &env.analysis)),
                     SettingsTab::Keymap => out.extend(keymap(ui, &env.keymap_file)),
                 }
@@ -162,7 +162,10 @@ fn keymap(ui: &mut Ui, env: &KeymapEnv) -> Option<Command> {
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label("File");
-        ui.add(egui::Label::new(RichText::new(env.path.display().to_string()).monospace()).selectable(true));
+        ui.add(
+            egui::Label::new(RichText::new(env.path.display().to_string()).monospace())
+                .selectable(true),
+        );
     });
     ui.horizontal(|ui| {
         if ui

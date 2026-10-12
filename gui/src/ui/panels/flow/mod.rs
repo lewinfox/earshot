@@ -148,7 +148,11 @@ impl Default for FlowUi {
 impl FlowUi {
     /// Show a saved Flow (or an empty canvas with `None`), looking where it was
     /// looking last (`camera`), or at all of it.
-    pub fn load(&mut self, flow: Option<(CollectionId, String, FlowGraph)>, camera: Option<[f32; 4]>) {
+    pub fn load(
+        &mut self,
+        flow: Option<(CollectionId, String, FlowGraph)>,
+        camera: Option<[f32; 4]>,
+    ) {
         let (id, name, graph) = match flow {
             Some((id, name, graph)) => (Some(id), name, graph),
             None => (None, String::new(), FlowGraph::default()),
@@ -161,7 +165,8 @@ impl FlowUi {
         self.linking = None;
         self.moving = None;
         self.selected = None;
-        self.camera.load(camera::from_array(camera), !self.graph.is_empty());
+        self.camera
+            .load(camera::from_array(camera), !self.graph.is_empty());
     }
 
     /// (as last saved, now), if the graph changed since it was last saved and nothing

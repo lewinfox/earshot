@@ -228,10 +228,14 @@ fn duplicates() {
     let gone = group[1];
     h.state_mut()
         .dispatch(crate::core::edit::EditCmd::RemoveFromLibrary(vec![gone]).into());
-    settle_until(&mut h, |a| a.index.get(gone).is_none() && groups(a) == Some(0));
+    settle_until(&mut h, |a| {
+        a.index.get(gone).is_none() && groups(a) == Some(0)
+    });
     assert!(copy.exists() && music.join("Night Bus.wav").exists());
     h.state_mut().dispatch(Command::Undo);
-    settle_until(&mut h, |a| a.index.get(gone).is_some() && groups(a) == Some(1));
+    settle_until(&mut h, |a| {
+        a.index.get(gone).is_some() && groups(a) == Some(1)
+    });
 }
 
 /// A track played for 30 s is saved in the play history, in the session the app
@@ -387,7 +391,11 @@ fn shift_arrows_nudge_the_grid() {
     press(&mut h, egui::Modifiers::SHIFT, Key::ArrowRight);
     settle_until(&mut h, |a| (first_beat(a) - (before + 0.010)).abs() < 1e-6);
     // Shift doesn't also beat jump (4 beats would be about 2 s).
-    assert!((pos(h.state()) - at).abs() < 0.1, "{} vs {at}", pos(h.state()));
+    assert!(
+        (pos(h.state()) - at).abs() < 0.1,
+        "{} vs {at}",
+        pos(h.state())
+    );
     // What's drawn has it, it stays, and it's saved: loading the track again keeps it.
     steps(&mut h, 60);
     let drawn = |a: &EarshotApp| a.frame.deck(DeckId::PREPARE).grid.as_ref().unwrap().times()[0];
@@ -670,14 +678,18 @@ fn settings() {
     assert_eq!(h.state().lib.analyser.background_workers(), 1);
     assert_eq!(h.state().background_workers, 1);
     settle_until(&mut h, |a| {
-        a.lib.store.reader.setting(analysis::SETTING_BACKGROUND_WORKERS)
+        a.lib
+            .store
+            .reader
+            .setting(analysis::SETTING_BACKGROUND_WORKERS)
             .ok()
             .flatten()
             .as_deref()
             == Some("1")
     });
     // Kept to the cores.
-    h.state_mut().dispatch(AppCmd::BackgroundWorkers(10_000).into());
+    h.state_mut()
+        .dispatch(AppCmd::BackgroundWorkers(10_000).into());
     assert_eq!(h.state().background_workers, analysis::cores());
 
     // The keymap: built in, then a copy to edit, then a broken file.
@@ -690,9 +702,16 @@ fn settings() {
     std::fs::write(&path, "perform  P  deck1  play\nperform  P  deck2  play\n").unwrap();
     // Not over the user's file.
     h.state_mut().dispatch(AppCmd::CopyKeymap.into());
-    assert!(std::fs::read_to_string(&path).unwrap().starts_with("perform  P"));
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .starts_with("perform  P")
+    );
     assert!(matches!(h.state().keymap_origin, keymap::Origin::Broken(_)));
-    assert!(h.state().keymap.find(Mode::Perform, "S", false).is_some(), "built in");
+    assert!(
+        h.state().keymap.find(Mode::Perform, "S", false).is_some(),
+        "built in"
+    );
     std::fs::write(&path, "perform  P  deck1  play\n").unwrap();
     h.state_mut().dispatch(AppCmd::ReloadKeymap.into());
     assert_eq!(h.state().keymap_origin, keymap::Origin::File);
@@ -724,7 +743,10 @@ fn a_worker_with_another_grid_version_is_refused() {
     );
     settle_until(&mut h, |a| a.analysis.worker_problem.is_some());
     let why = h.state().analysis.worker_problem.clone().unwrap();
-    assert!(why.contains("grid analyser is version 2, this app's is 3"), "{why}");
+    assert!(
+        why.contains("grid analyser is version 2, this app's is 3"),
+        "{why}"
+    );
     assert!(!h.state().index.get(id).unwrap().analysed());
     steps(&mut h, 3);
     h.get_by_label("analysis worker out of date");
