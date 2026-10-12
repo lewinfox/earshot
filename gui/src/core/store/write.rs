@@ -15,9 +15,12 @@ use super::{
     now, path_bytes,
 };
 use crate::core::analysis::registry::{self, AnalyserId};
+use crate::core::edit::Edit;
 use crate::core::collections::{self, CollectionKind, FlowGraph, FlowNode, NodeId, Spacing};
 use crate::core::hash::Hash;
 use crate::core::query;
+
+mod edits;
 
 /// A file the scan found that is new, or whose size or modified time changed.
 #[derive(Debug, Clone)]
@@ -161,6 +164,8 @@ impl Writer {
             StoreCmd::AddTracks { id, tracks } => self.add_tracks(id, &tracks),
             StoreCmd::RemoveTracks { id, tracks } => self.remove_tracks(id, &tracks),
             StoreCmd::SetQuery { id, query } => self.set_query(id, &query),
+            StoreCmd::Edit(cmd) => self.edit(cmd).map(|_| ()),
+            StoreCmd::ApplyEdit(e) => self.apply_edit(&e),
             StoreCmd::ExportPath {
                 flow,
                 nodes,
@@ -437,12 +442,19 @@ impl Writer {
 
     /// A grid fixed by hand: a new row, made active, with the track's BPM from it.
     /// The grid it replaces stays, so it can be gone back to.
+    /// Reported as an undoable edit (`Edit::Grid`).
     pub fn save_user_grid(&mut self, track: i64, grid: &Beatgrid) -> Result<i64> {
         let tx = self.conn.transaction()?;
+        let old = read::active_grid(&tx, track)?.map(|g| g.0);
         let id = insert_grid(&tx, track, grid, GridSource::User, None)?;
         activate_grid(&tx, track, id, grid_bpm(grid))?;
         tx.commit()?;
         self.tracks_changed(&[track])?;
+        self.emit(StoreEvent::Edited(Edit::Grid {
+            track,
+            old,
+            new: Some(id),
+        }));
         Ok(id)
     }
 

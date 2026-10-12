@@ -14,6 +14,7 @@ use earshot_engine::{
 
 use super::bus::step_size;
 use super::collections::{CollectionCmd, FlowCmd};
+use super::edit::EditCmd;
 use super::index::LibraryCmd;
 use super::player::{self, AudioSettings, GridOp, Player};
 use super::store::{Memory, Store, StoreCmd};
@@ -39,10 +40,11 @@ pub enum Command {
     /// The tempo lock tool (`TempoLock::run`). Run by the UI, like `Library`.
     #[allow(dead_code)] // the Tempo lock tab isn't built yet (step 7, B4)
     TempoLock(TempoLockCmd),
-    /// Placeholders until there is an edit history.
-    #[allow(dead_code)]
+    /// Metadata, ratings, tags and collection edits, which can be undone. Run by the
+    /// UI (it keeps the undo history), like `Library`.
+    Edit(EditCmd),
+    /// Take back the last edit (`core::edit::History`).
     Undo,
-    #[allow(dead_code)]
     Redo,
 }
 
@@ -167,7 +169,6 @@ pub fn dispatch(player: &Player, store: &Store, cmd: Command) -> Result<Option<C
                 .map(|_| None);
         }
         Command::Audio(AudioCmd::Route(r)) => return player::set_routing(player, r).map(|_| None),
-        Command::Undo | Command::Redo => return Ok(None),
         other => return Ok(Some(other)),
     };
     let engine = |c| EngineCommand::Deck(deck, c);
@@ -315,7 +316,7 @@ mod tests {
         ] {
             assert!(dispatch(&p, &store, c).unwrap().is_some());
         }
-        assert!(dispatch(&p, &store, Command::Undo).unwrap().is_none());
+        assert!(dispatch(&p, &store, Command::Undo).unwrap().is_some());
         let toggle = Command::from((a, EngineCmd::Keylock(Set::Toggle)));
         assert!(dispatch(&p, &store, toggle).unwrap().is_none());
         wait(&p, |s| s.decks[1].keylock);
@@ -337,6 +338,12 @@ impl From<CollectionCmd> for Command {
 impl From<FlowCmd> for Command {
     fn from(c: FlowCmd) -> Command {
         Command::Flow(c)
+    }
+}
+
+impl From<EditCmd> for Command {
+    fn from(c: EditCmd) -> Command {
+        Command::Edit(c)
     }
 }
 

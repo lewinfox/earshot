@@ -2,6 +2,7 @@
 //! tracks onto the players.
 
 use super::*;
+use crate::core::edit::EditCmd;
 
 impl EarshotApp {
     pub(super) fn library_cmd(&mut self, c: LibraryCmd) {
@@ -82,9 +83,15 @@ impl EarshotApp {
                 if lib.flow.flow == Some(id) {
                     lib.flow.name = name.clone();
                 }
-                store.send(StoreCmd::Rename { id, name });
+                store.send(StoreCmd::Edit(EditCmd::Rename {
+                    collection: id,
+                    name,
+                }));
             }
-            CollectionCmd::Move(id, parent) => store.send(StoreCmd::Move { id, parent }),
+            CollectionCmd::Move(id, parent) => store.send(StoreCmd::Edit(EditCmd::Move {
+                collection: id,
+                parent,
+            })),
             CollectionCmd::Duplicate(from) => {
                 let to = store.new_collection_id();
                 store.send(StoreCmd::Duplicate { from, to });
@@ -97,11 +104,11 @@ impl EarshotApp {
                     // The canvas has it: add there, or its next save would undo this.
                     lib.flow.add_tracks(&tracks);
                 } else {
-                    store.send(StoreCmd::AddTracks { id: to, tracks });
+                    store.send(StoreCmd::Edit(EditCmd::AddTracks { to, tracks }));
                 }
             }
             CollectionCmd::RemoveTracks { from, tracks } => {
-                store.send(StoreCmd::RemoveTracks { id: from, tracks })
+                store.send(StoreCmd::Edit(EditCmd::RemoveTracks { from, tracks }))
             }
             CollectionCmd::SetQuery(id, query) => store.send(StoreCmd::SetQuery { id, query }),
         }
@@ -142,8 +149,9 @@ impl EarshotApp {
     }
 
     /// Save the canvas if it changed, making a new Flow for the first card.
+    /// Each save is one undo step: the canvas only has a change once a gesture ends.
     pub(super) fn save_flow(&mut self) {
-        let Some(graph) = self.flow().changed_graph() else {
+        let Some((before, graph)) = self.flow().take_change() else {
             return;
         };
         let store = self.lib.store.clone();
@@ -166,6 +174,7 @@ impl EarshotApp {
                 id
             }
         };
+        self.edits.record(edit::flow_edit(id, &before, &graph));
         store.send(StoreCmd::SaveFlow { id, graph });
     }
 

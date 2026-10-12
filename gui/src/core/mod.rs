@@ -8,6 +8,7 @@ pub mod analysis;
 pub mod bus;
 pub mod collections;
 pub mod command;
+pub mod edit;
 pub mod hash;
 pub mod history;
 pub mod index;

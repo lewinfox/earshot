@@ -1035,3 +1035,367 @@ fn a_grid_edit_doesnt_wait_for_the_database() {
     };
     assert_eq!((c.bpm, c.anchor_pos), (127.0, 1));
 }
+
+// ---- edits and undo (core::edit) ------------------------------------------------------
+
+use crate::core::edit::{Edit, EditCmd, Field, Value};
+
+/// The edit the last command reported (and forget the other events).
+fn edited(w: &mut Writer) -> Edit {
+    let mut found = None;
+    for e in w.take_events() {
+        if let StoreEvent::Edited(e) = e {
+            found = Some(e);
+        }
+    }
+    found.expect("an Edited event")
+}
+
+fn text(s: &str) -> Option<Value> {
+    Some(Value::Text(s.into()))
+}
+
+/// Two tracks, scanned with tag titles "A" and "B".
+fn two_tracks(name: &str) -> (PathBuf, Writer, i64, i64) {
+    let (dir, mut w) = setup(name);
+    w.add_roots(&[dir.join("music")]).unwrap();
+    let (fa, fb) = (dir.join("music/a.mp3"), dir.join("music/b.mp3"));
+    scan(&mut w, &dir, &[file(&fa, "A", None), file(&fb, "B", None)]);
+    let lib = library(&mut w);
+    let id = |title: &str| lib.iter().find(|t| t.title == title).unwrap().id;
+    let (a, b) = (id("A"), id("B"));
+    (dir, w, a, b)
+}
+
+fn get(w: &mut Writer, id: i64) -> LibTrack {
+    library(w).into_iter().find(|t| t.id == id).unwrap()
+}
+
+#[test]
+fn a_metadata_edit_undoes_back_to_the_tag_and_redoes() {
+    let (_dir, mut w, a) = one_track("edit-meta");
+    w.edit(EditCmd::Set {
+        tracks: vec![a],
+        values: vec![(Field::Title, text("Mine")), (Field::Key, text("5A"))],
+    })
+    .unwrap();
+    let e = edited(&mut w);
+    let t = get(&mut w, a);
+    assert_eq!((t.title.as_str(), t.key.as_deref()), ("Mine", Some("5A")));
+    assert_eq!(e.label(), "edit metadata");
+
+    w.apply_edit(&e.inverse()).unwrap();
+    let t = get(&mut w, a);
+    assert_eq!(
+        (t.title.as_str(), t.key.as_deref()),
+        ("A", Some("8A")),
+        "the tags again"
+    );
+    assert!(read::search(w.conn(), "mine").unwrap().is_empty());
+    w.apply_edit(&e).unwrap();
+    assert_eq!(get(&mut w, a).title, "Mine");
+    assert_eq!(read::search(w.conn(), "mine").unwrap(), vec![a]);
+
+    // Typing what's already there changes nothing, and isn't an undo step.
+    w.take_events();
+    let same = EditCmd::Set {
+        tracks: vec![a],
+        values: vec![(Field::Title, text("Mine"))],
+    };
+    assert_eq!(w.edit(same).unwrap(), None);
+    assert!(
+        !w.take_events()
+            .iter()
+            .any(|e| matches!(e, StoreEvent::Edited(_)))
+    );
+}
+
+/// A bulk edit only changes the fields it lists: tracks keep their own (mixed)
+/// values of the others, and undo puts back each track's own.
+#[test]
+fn a_bulk_edit_changes_only_the_touched_fields() {
+    let (_dir, mut w, a, b) = two_tracks("edit-bulk");
+    w.edit(EditCmd::Set {
+        tracks: vec![a],
+        values: vec![
+            (Field::Artist, text("Artist A")),
+            (Field::Genre, text("Disco")),
+        ],
+    })
+    .unwrap();
+    w.take_events();
+    w.edit(EditCmd::Set {
+        tracks: vec![a, b],
+        values: vec![
+            (Field::Genre, text("House")),
+            (Field::Rating, Some(Value::Rating(4))),
+        ],
+    })
+    .unwrap();
+    let bulk = edited(&mut w);
+    let (ta, tb) = (get(&mut w, a), get(&mut w, b));
+    assert_eq!(
+        (ta.artist.as_str(), tb.artist.as_str()),
+        ("Artist A", "Someone")
+    );
+    assert_eq!((ta.title.as_str(), tb.title.as_str()), ("A", "B"));
+    assert_eq!((ta.genre.as_str(), tb.genre.as_str()), ("House", "House"));
+    assert_eq!((ta.rating, tb.rating), (Some(4), Some(4)));
+    assert_eq!(bulk.label(), "edit metadata of 2 tracks");
+
+    w.apply_edit(&bulk.inverse()).unwrap();
+    let (ta, tb) = (get(&mut w, a), get(&mut w, b));
+    assert_eq!((ta.genre.as_str(), tb.genre.as_str()), ("Disco", ""));
+    assert_eq!((ta.rating, tb.rating), (None, None));
+    assert_eq!(ta.artist, "Artist A");
+}
+
+#[test]
+fn ratings_colours_and_tags_undo_and_redo() {
+    let (_dir, mut w, a, b) = two_tracks("edit-tags");
+    w.edit(EditCmd::Set {
+        tracks: vec![a],
+        values: vec![
+            (Field::Rating, Some(Value::Rating(3))),
+            (Field::Colour, Some(Value::Colour(0xFF8800))),
+            (Field::Tags, Some(Value::tags(["warm", " vocal ", "warm"]))),
+        ],
+    })
+    .unwrap();
+    let set = edited(&mut w);
+    let t = get(&mut w, a);
+    assert_eq!((t.rating, t.colour), (Some(3), Some(0xFF8800)));
+    assert_eq!(t.tags, ["vocal", "warm"]);
+
+    // Add a tag to both: a keeps its others.
+    w.edit(EditCmd::AddTag {
+        tracks: vec![a, b],
+        tag: "peak".into(),
+    })
+    .unwrap();
+    let add = edited(&mut w);
+    assert_eq!(get(&mut w, a).tags, ["peak", "vocal", "warm"]);
+    assert_eq!(get(&mut w, b).tags, ["peak"]);
+    w.edit(EditCmd::RemoveTag {
+        tracks: vec![a],
+        tag: "warm".into(),
+    })
+    .unwrap();
+    let remove = edited(&mut w);
+    assert_eq!(get(&mut w, a).tags, ["peak", "vocal"]);
+
+    for e in [&remove, &add, &set] {
+        w.apply_edit(&e.inverse()).unwrap();
+    }
+    let t = get(&mut w, a);
+    assert_eq!((t.rating, t.colour, t.tags.len()), (None, None, 0));
+    assert!(get(&mut w, b).tags.is_empty());
+    for e in [&set, &add, &remove] {
+        w.apply_edit(e).unwrap();
+    }
+    let t = get(&mut w, a);
+    assert_eq!((t.rating, t.colour), (Some(3), Some(0xFF8800)));
+    assert_eq!(t.tags, ["peak", "vocal"]);
+}
+
+#[test]
+fn a_rescan_keeps_what_the_editor_set() {
+    let (dir, mut w, a) = one_track("edit-rescan");
+    w.edit(EditCmd::Set {
+        tracks: vec![a],
+        values: vec![
+            (Field::Title, text("Mine")),
+            (Field::Album, text("LP")),
+            (Field::Rating, Some(Value::Rating(5))),
+            (Field::Tags, Some(Value::tags(["dub"]))),
+        ],
+    })
+    .unwrap();
+    // The file is retagged and scanned again.
+    scan(
+        &mut w,
+        &dir,
+        &[file(&dir.join("music/a.mp3"), "Retagged", None)],
+    );
+    let t = get(&mut w, a);
+    assert_eq!((t.title.as_str(), t.album.as_str()), ("Mine", "LP"));
+    assert_eq!((t.rating, t.tags), (Some(5), vec!["dub".to_string()]));
+}
+
+#[test]
+fn grid_edits_undo_to_the_grid_before() {
+    let (_dir, mut w, a) = one_track("edit-grid");
+    w.save_analysis(analysis(a, 120.0, None, false)).unwrap();
+    let analysed = read::active_grid(w.conn(), a).unwrap().unwrap().0;
+    w.take_events();
+    w.save_user_grid(a, &grid(124.0)).unwrap();
+    let first = edited(&mut w);
+    w.save_user_grid(a, &grid(126.0)).unwrap();
+    let second = edited(&mut w);
+    assert_eq!(get(&mut w, a).bpm, Some(126.0));
+
+    w.apply_edit(&second.inverse()).unwrap();
+    assert_eq!(get(&mut w, a).bpm, Some(124.0));
+    w.apply_edit(&first.inverse()).unwrap();
+    let t = get(&mut w, a);
+    assert_eq!(
+        (t.bpm, t.grid_source),
+        (Some(120.0), Some(GridSource::Analysis))
+    );
+    assert_eq!(read::active_grid(w.conn(), a).unwrap().unwrap().0, analysed);
+    w.apply_edit(&first).unwrap();
+    w.apply_edit(&second).unwrap();
+    let t = get(&mut w, a);
+    assert_eq!(
+        (t.bpm, t.grid_source),
+        (Some(126.0), Some(GridSource::User))
+    );
+
+    // A track with no grid before: undo leaves it with none.
+    let (_dir, mut w, b) = one_track("edit-grid-none");
+    w.save_user_grid(b, &grid(124.0)).unwrap();
+    let e = edited(&mut w);
+    w.apply_edit(&e.inverse()).unwrap();
+    let t = get(&mut w, b);
+    assert_eq!((t.bpm, t.grid_source), (None, None));
+}
+
+#[test]
+fn collection_edits_undo_and_redo() {
+    let (_dir, mut w, a, b) = two_tracks("edit-coll");
+    w.create_collection(1, None, Crate, "C", None).unwrap();
+    w.create_collection(2, None, Playlist, "P", None).unwrap();
+    w.create_collection(3, None, Folder, "F", None).unwrap();
+    let tracks = |w: &Writer, id| read::collection_tracks(w.conn(), id).unwrap();
+
+    // Crate: a track already in it stays when the add is undone.
+    w.add_tracks(1, &[a]).unwrap();
+    w.edit(EditCmd::AddTracks {
+        to: 1,
+        tracks: vec![a, b],
+    })
+    .unwrap();
+    let add = edited(&mut w);
+    assert_eq!(tracks(&w, 1).len(), 2);
+    w.apply_edit(&add.inverse()).unwrap();
+    assert_eq!(tracks(&w, 1), vec![a]);
+    w.apply_edit(&add).unwrap();
+    w.edit(EditCmd::RemoveTracks {
+        from: 1,
+        tracks: vec![a],
+    })
+    .unwrap();
+    let remove = edited(&mut w);
+    assert_eq!(tracks(&w, 1), vec![b]);
+    w.apply_edit(&remove.inverse()).unwrap();
+    assert_eq!(tracks(&w, 1).len(), 2);
+
+    // Playlist: add, reorder, remove (every place), each undone in turn.
+    w.edit(EditCmd::AddTracks {
+        to: 2,
+        tracks: vec![a, b, a],
+    })
+    .unwrap();
+    let add = edited(&mut w);
+    w.edit(EditCmd::SetTracks {
+        collection: 2,
+        tracks: vec![b, a, a],
+    })
+    .unwrap();
+    let reorder = edited(&mut w);
+    assert_eq!(reorder.label(), "reorder");
+    w.edit(EditCmd::RemoveTracks {
+        from: 2,
+        tracks: vec![a],
+    })
+    .unwrap();
+    let remove = edited(&mut w);
+    assert_eq!(tracks(&w, 2), vec![b]);
+    w.apply_edit(&remove.inverse()).unwrap();
+    assert_eq!(tracks(&w, 2), vec![b, a, a]);
+    w.apply_edit(&reorder.inverse()).unwrap();
+    assert_eq!(tracks(&w, 2), vec![a, b, a]);
+    w.apply_edit(&add.inverse()).unwrap();
+    assert!(tracks(&w, 2).is_empty());
+    w.apply_edit(&add).unwrap();
+    w.apply_edit(&reorder).unwrap();
+    assert_eq!(tracks(&w, 2), vec![b, a, a]);
+
+    // Into a folder and back out; a rename.
+    w.edit(EditCmd::Move {
+        collection: 2,
+        parent: Some(3),
+    })
+    .unwrap();
+    let moved = edited(&mut w);
+    w.edit(EditCmd::Rename {
+        collection: 2,
+        name: "Warm-up".into(),
+    })
+    .unwrap();
+    let renamed = edited(&mut w);
+    let row = |w: &Writer| {
+        read::collections(w.conn())
+            .unwrap()
+            .into_iter()
+            .find(|c| c.id == 2)
+            .map(|c| (c.parent, c.name))
+            .unwrap()
+    };
+    assert_eq!(row(&w), (Some(3), "Warm-up".to_string()));
+    w.apply_edit(&renamed.inverse()).unwrap();
+    w.apply_edit(&moved.inverse()).unwrap();
+    assert_eq!(row(&w), (None, "P".to_string()));
+
+    // A smart playlist has no track list to set.
+    w.create_collection(4, None, Smart, "S", Some("bpm:>100"))
+        .unwrap();
+    let set = EditCmd::SetTracks {
+        collection: 4,
+        tracks: vec![a],
+    };
+    assert!(w.edit(set).is_err());
+}
+
+#[test]
+fn flow_edits_from_the_library_undo_exactly() {
+    let (_dir, mut w, a, b) = two_tracks("edit-flow");
+    w.create_collection(1, None, Flow, "F", None).unwrap();
+    // a → b → a
+    let start = graph(&[(1, a), (2, b), (3, a)], &[(1, 2), (2, 3)]);
+    w.save_flow(1, &start).unwrap();
+    let flow = |w: &Writer| {
+        let mut g = read::flow_graph(w.conn(), 1).unwrap();
+        g.edges.sort();
+        g
+    };
+
+    w.edit(EditCmd::AddTracks {
+        to: 1,
+        tracks: vec![b],
+    })
+    .unwrap();
+    let add = edited(&mut w);
+    assert_eq!(flow(&w).nodes.len(), 4);
+    w.edit(EditCmd::RemoveTracks {
+        from: 1,
+        tracks: vec![b],
+    })
+    .unwrap();
+    let remove = edited(&mut w);
+    assert_eq!(flow(&w).edges, vec![(1, 3)], "a → a joined up");
+
+    w.apply_edit(&remove.inverse()).unwrap();
+    assert_eq!(flow(&w).nodes.len(), 4);
+    assert_eq!(
+        flow(&w).edges,
+        vec![(1, 2), (2, 3)],
+        "the join is taken away"
+    );
+    w.apply_edit(&add.inverse()).unwrap();
+    assert_eq!(flow(&w), start);
+    w.apply_edit(&add).unwrap();
+    w.apply_edit(&remove).unwrap();
+    let ids: Vec<_> = flow(&w).nodes.iter().map(|n| n.id).collect();
+    assert_eq!(ids, vec![1, 3]);
+}

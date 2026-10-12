@@ -127,6 +127,7 @@ impl EarshotApp {
                     lib.browser.set_scope(Scope::All);
                 }
             }
+            StoreEvent::Edited(e) => self.edits.record(e),
             StoreEvent::Error(e) => eprintln!("library: {e}"),
         }
     }

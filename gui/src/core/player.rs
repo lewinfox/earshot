@@ -20,7 +20,7 @@ use super::analysis::Mode;
 use super::command::Lane;
 use super::library::Library;
 use super::session::{self, Change, DeckSession, PreviewSession, SLOTS};
-use super::store::{GridSource, Store, StoreCmd};
+use super::store::{GridSource, Reader, Store, StoreCmd};
 
 /// How many decks the engine runs (it can run up to `earshot_engine::MAX_DECKS`).
 pub const DECKS: usize = 2;
@@ -433,6 +433,40 @@ pub fn edit_grid(player: &Player, store: &Store, deck: DeckId, op: GridOp) -> Re
     // Saved, so the fix survives a restart and re-analysis on load doesn't undo it.
     if let (Some(track), Some(grid)) = (track, edited) {
         store.send(StoreCmd::SaveUserGrid { track, grid });
+    }
+    Ok(())
+}
+
+/// Give every player with this track loaded the grid the Store has active for it now
+/// (after undo or redo switched it). With no grid, the players keep none.
+pub fn reload_grid(player: &Player, reader: &Reader, track: i64) -> Result<(), String> {
+    let stored = reader.grid(track).map_err(|e| e.to_string())?;
+    let mut inner = player.lock().unwrap();
+    for i in 0..inner.decks.len() {
+        let slot = &inner.decks[i];
+        if slot.track_id != Some(track) {
+            continue;
+        }
+        let Some(duration) = slot.audio.as_ref().map(|a| a.duration()) else {
+            continue;
+        };
+        let (grid, source) = match &stored {
+            Some((model, src)) => (
+                Some(Arc::new(
+                    Beatgrid::from_model(model.clone(), duration).map_err(|e| e.to_string())?,
+                )),
+                src.label(),
+            ),
+            None => (None, ""),
+        };
+        let (deck, generation) = (deck_id(i)?, slot.generation);
+        inner.send(Command::SetGrid {
+            deck,
+            generation,
+            grid: grid.clone(),
+        })?;
+        inner.decks[i].grid = grid;
+        inner.decks[i].grid_source = source.into();
     }
     Ok(())
 }

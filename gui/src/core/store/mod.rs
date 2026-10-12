@@ -24,6 +24,7 @@ pub use read::{JobRow, LibTrack, Memory, Preview, ResultState, TrackCues};
 pub use write::{AnalysisSave, GridSave, ScannedFile, Writer, grid_bpm};
 
 use super::collections::{Collection, CollectionKind, FlowGraph, NodeId};
+use super::edit::{Edit, EditCmd};
 
 /// Bump when `engine/src/waveform.rs` changes its output, so cached waveforms are redone.
 pub const WAVEFORM_VERSION: i64 = 1;
@@ -239,11 +240,15 @@ pub enum StoreCmd {
         /// A smart playlist's query.
         query: Option<String>,
     },
+    /// The UI sends the undoable form, `EditCmd::Rename`.
+    #[allow(dead_code)]
     Rename {
         id: i64,
         name: String,
     },
-    /// Move a collection into a folder (`None`: top level).
+    /// Move a collection into a folder (`None`: top level). The UI sends the
+    /// undoable form, `EditCmd::Move`.
+    #[allow(dead_code)]
     Move {
         id: i64,
         parent: Option<i64>,
@@ -266,6 +271,8 @@ pub enum StoreCmd {
         tracks: Vec<i64>,
     },
     /// Take these tracks out of a crate, playlist or Flow, wherever they are in it.
+    /// The UI sends the undoable form, `EditCmd::RemoveTracks`.
+    #[allow(dead_code)]
     RemoveTracks {
         id: i64,
         tracks: Vec<i64>,
@@ -275,6 +282,11 @@ pub enum StoreCmd {
         id: i64,
         query: String,
     },
+    /// An edit the user asked for: made, and reported (with what it replaced) as
+    /// [`StoreEvent::Edited`] for the undo history.
+    Edit(EditCmd),
+    /// Undo or redo: make an edit exactly as it is. Not reported as `Edited`.
+    ApplyEdit(Edit),
     /// Save one path through a Flow (card ids in order) as a new playlist.
     ExportPath {
         flow: i64,
@@ -305,6 +317,9 @@ pub enum StoreEvent {
     FlowLoaded(Option<(i64, String, FlowGraph)>),
     /// Collections that no longer exist.
     Deleted(Vec<i64>),
+    /// An edit was made (from [`StoreCmd::Edit`], or a hand-fixed grid): one step
+    /// for the undo history.
+    Edited(Edit),
     Error(StoreError),
 }
 

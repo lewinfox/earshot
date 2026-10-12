@@ -29,6 +29,7 @@ use super::theme::THEME;
 use super::views::{self, Panels};
 use crate::core::analysis::{Analyser, Mode as AnalysisMode};
 use crate::core::collections::{CollectionCmd, CollectionId, CollectionKind, Collections, FlowCmd};
+use crate::core::edit;
 use crate::core::command::{self, AppCmd, AudioCmd, Command, DeckCmd, PreviewCmd, ViewCmd};
 use crate::core::history::{DeckNow, History};
 use crate::core::index::{LibraryCmd, LibraryIndex};
@@ -75,6 +76,8 @@ pub struct EarshotApp {
     index: LibraryIndex,
     collections: Collections,
     history: History,
+    /// Edits that can be undone and redone.
+    edits: edit::History,
     /// Hot cue labels and memory cues of the tracks on the players, by track id.
     cues: HashMap<i64, Arc<store::TrackCues>>,
     analysis: AnalysisSummary,
@@ -204,6 +207,7 @@ impl EarshotApp {
             index: LibraryIndex::default(),
             collections: Collections::default(),
             history: History::default(),
+            edits: edit::History::default(),
             cues: HashMap::new(),
             analysis: AnalysisSummary::default(),
             preview: None,
@@ -296,6 +300,9 @@ impl EarshotApp {
             Command::TempoLock(c) => self.tempo_lock.run(c),
             Command::Collection(c) => self.collection_cmd(c),
             Command::Flow(c) => self.flow_cmd(c),
+            Command::Edit(c) => self.edit_cmd(c),
+            Command::Undo => self.undo(),
+            Command::Redo => self.redo(),
             Command::Preview(PreviewCmd::Toggle(id)) => self.toggle_preview(id),
             Command::Preview(PreviewCmd::Seek(id, at)) => self.seek_preview(id, at),
             Command::Preview(PreviewCmd::Stop(id)) => self.stop_preview(id),
@@ -507,6 +514,7 @@ fn store_sink(sink: &Sink) -> EventSink {
     Arc::new(move |e| sink(Event::Store(e)))
 }
 
+mod edits;
 mod events;
 mod frame;
 mod input;

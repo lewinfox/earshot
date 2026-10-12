@@ -199,12 +199,40 @@ impl FlowUi {
 
     /// The graph, if it changed since it was last saved and nothing is being
     /// dragged. Counts it as saved.
+    #[cfg(test)]
     pub fn changed_graph(&mut self) -> Option<FlowGraph> {
+        self.take_change().map(|(_, now)| now)
+    }
+
+    /// (as last saved, now), if the graph changed since it was last saved and nothing
+    /// is being dragged. Counts it as saved. One finished gesture is one change: the
+    /// shell saves it and records it for undo (`core::edit::flow_edit`).
+    pub fn take_change(&mut self) -> Option<(FlowGraph, FlowGraph)> {
         if self.moving.is_some() || self.linking.is_some() || self.graph == self.stored {
             return None;
         }
-        self.stored = self.graph.clone();
-        Some(self.graph.clone())
+        let before = std::mem::replace(&mut self.stored, self.graph.clone());
+        Some((before, self.graph.clone()))
+    }
+
+    /// Undo or redo on the open Flow (`Edit::FlowGraph`'s ops). Not recorded again:
+    /// the shell saves it straight away.
+    pub fn apply_ops(&mut self, ops: &[GraphOp]) {
+        for op in ops {
+            let _ = self.graph.apply(op, SPACING);
+        }
+        let gone = |id: Option<NodeId>| id.is_some_and(|id| self.graph.node(id).is_none());
+        if gone(self.selected) {
+            self.selected = None;
+        }
+        if gone(match self.pop {
+            Some(Pop::Suggest(id)) => Some(id),
+            _ => None,
+        }) {
+            self.pop = None;
+        }
+        self.linking = None;
+        self.moving = None;
     }
 
     /// The track on the selected card (for suggestions after "Selected").

@@ -302,6 +302,8 @@ pub enum GraphOp {
     },
     Clear,
     Reflow,
+    /// Put back this exact card (its id, track and place): how undo restores one.
+    Put(FlowNode),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -457,6 +459,10 @@ impl FlowGraph {
             }
             GraphOp::Clear => *self = FlowGraph::default(),
             GraphOp::Reflow => self.reflow(sp),
+            GraphOp::Put(ref n) => match self.nodes.iter_mut().find(|o| o.id == n.id) {
+                Some(o) => *o = n.clone(),
+                None => self.nodes.push(n.clone()),
+            },
         }
         Ok(None)
     }
