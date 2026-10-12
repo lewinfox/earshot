@@ -541,3 +541,5 @@ fn master_in_prepare_is_the_player() {
         Some(pick)
     );
 }
+
+mod tempo_lock;

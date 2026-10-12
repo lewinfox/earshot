@@ -9,6 +9,7 @@ pub mod flow;
 pub mod library;
 pub mod mixer;
 pub mod status;
+pub mod tempo_lock;
 
 use earshot_engine::{DeckId, EngineSnapshot};
 use egui::Ui;

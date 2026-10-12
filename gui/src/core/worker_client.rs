@@ -937,9 +937,12 @@ pub(crate) mod testing {
     /// A stand-in worker: answers hello (with protocol argv[1]), then runs jobs one at
     /// a time. A job whose wav is "hang" starts and never finishes; "fail" fails its
     /// grid analyser; "die" makes the process exit. With argv[2] = "beat", it sends
-    /// heartbeats every 0.1 s.
+    /// heartbeats every 0.1 s. The tempo lock's jobs get a made-up chart (a drifting
+    /// tempo that steps up two thirds of the way in) and a "straightened" copy of the
+    /// wav, named as the real worker names its MP3 but with the wav's extension.
     const FAKE: &str = r#"
-import json, sys, threading, time
+import json, math, os, shutil, sys, threading, time
+from array import array
 lock = threading.Lock()
 def send(m):
     with lock:
@@ -949,11 +952,95 @@ if len(sys.argv) > 2 and sys.argv[2] == "beat":
         while True:
             time.sleep(0.1); send({"type": "heartbeat"})
     threading.Thread(target=beat, daemon=True).start()
+def read_wav(path):
+    with open(path, "rb") as f:
+        data = f.read()
+    pos, fmt, rate, pcm = 12, 1, 44100, None
+    while pos + 8 <= len(data):
+        cid, size = data[pos:pos + 4], int.from_bytes(data[pos + 4:pos + 8], "little")
+        body = data[pos + 8:pos + 8 + size]
+        if cid == b"fmt ":
+            fmt, rate = int.from_bytes(body[0:2], "little"), int.from_bytes(body[4:8], "little")
+        elif cid == b"data":
+            pcm = array("f", body) if fmt == 3 else array("f", [v / 32768 for v in array("h", body)])
+        pos += 8 + size + (size & 1)
+    return pcm, rate
+def peaks(path, n=4000):
+    pcm, _ = read_wav(path)
+    step = max(1, len(pcm) // n)
+    lo, hi = [], []
+    for b in range(0, len(pcm) - step + 1, step):
+        part = pcm[b:b + step]
+        lo.append(max(-127, int(min(part) * 127)))
+        hi.append(min(127, int(max(part) * 127)))
+    return {"min": lo, "max": hi}
+def chart_of(beats, down, duration, dropped):
+    times = [(a + b) / 2 for a, b in zip(beats, beats[1:])]
+    curve = [60.0 / (b - a) for a, b in zip(beats, beats[1:])]
+    s = sorted(curve)
+    pct = lambda q: s[min(len(s) - 1, int(q * len(s)))]
+    med = pct(0.5)
+    return {"sr": 44100, "duration": duration, "detector": "fake", "beats": beats,
+        "beat_index": list(range(len(beats))), "is_downbeat": down[:len(beats)],
+        "dropped_beats": dropped, "bpm_times": times, "bpm_curve": curve, "median_bpm": med,
+        "min_bpm": pct(0.02), "max_bpm": pct(0.98), "suggested_bpm": float(round(med)),
+        "sections": [{"start_beat": 0, "end_beat": len(curve), "start": beats[0], "end": beats[-1], "bpm": med}],
+        "tempo_changes": [], "kick_shift": -0.012}
+def tempo_chart(path):
+    pcm, rate = read_wav(path)
+    duration = len(pcm) / 2 / rate
+    beats, t, k = [], 0.25, 0
+    while t < duration - 0.3:
+        beats.append(t)
+        step_up = 1.06 if t > duration * 2 / 3 else 1.0
+        bpm = (122 + 2.5 * math.sin(t / 3.0) + 0.6 * math.sin(k * 2.3)) * step_up
+        t += 60.0 / bpm
+        k += 1
+    down = [j % 4 == 0 for j in range(len(beats))]
+    c = chart_of(beats, down, duration, [beats[5] + 0.11, beats[17] + 0.2])
+    cut = next(j for j, b in enumerate(beats) if b > duration * 2 / 3) - 1
+    first, second = sorted(c["bpm_curve"][:cut]), sorted(c["bpm_curve"][cut:])
+    m1, m2 = first[len(first) // 2], second[len(second) // 2]
+    c["sections"] = [
+        {"start_beat": 0, "end_beat": cut, "start": beats[0], "end": beats[cut], "bpm": m1},
+        {"start_beat": cut, "end_beat": len(beats) - 1, "start": beats[cut], "end": beats[-1], "bpm": m2}]
+    c["tempo_changes"] = [{"beat": cut, "time": beats[cut], "from_bpm": m1, "to_bpm": m2,
+        "ratio": m2 / m1, "kind": "tempo change"}]
+    return c
 for line in sys.stdin:
     r = json.loads(line)
     if r["type"] == "hello":
         send({"type": "hello", "protocol": int(sys.argv[1]), "analysers": {"grid": 3},
+              "steps": {"tempo_lock": 1, "straighten": 1, "measure": 1},
               "detector": "fake", "models_loaded": []})
+    elif r["type"] == "tempo_lock":
+        i = r["id"]
+        send({"id": i, "type": "started"})
+        send({"id": i, "type": "progress", "analyser": "tempo_lock", "fraction": 0.5})
+        send({"id": i, "type": "result", "analyser": "tempo_lock", "version": 1,
+              "data": {"analysis": tempo_chart(r["wav"]), "peaks": peaks(r["wav"])}})
+        send({"id": i, "type": "done", "seconds": 0.1})
+    elif r["type"] == "straighten":
+        i = r["id"]
+        send({"id": i, "type": "started"})
+        send({"id": i, "type": "progress", "analyser": "straighten", "fraction": 0.5})
+        stem = os.path.splitext(r["name"] or "track")[0]
+        out = os.path.join(r["out_dir"], "%s (straightened %g bpm).wav" % (stem, r["target_bpm"]))
+        shutil.copyfile(r["wav"], out)
+        p = 60.0 / r["target_bpm"] * r["level"]
+        beats = r["beats"]
+        target = [beats[0] + k * p for k in r["beat_index"]]
+        src = tempo_chart(r["wav"])
+        duration = src["duration"] - beats[-1] + target[-1]
+        send({"id": i, "type": "result", "analyser": "straighten", "version": 1, "data": {
+            "output": out, "bpm": r["target_bpm"], "level": r["level"], "engine": r["engine"],
+            "grid": {"target_bpm": r["target_bpm"], "source_beats": beats, "target_beats": target},
+            "peaks": peaks(r["wav"]), "duration": duration, "bitrate_kbps": 320}})
+        send({"id": i, "type": "progress", "analyser": "measure", "fraction": 0.5})
+        jitter = [t + 0.003 * math.sin(k * 1.7) for k, t in enumerate(target)]
+        send({"id": i, "type": "result", "analyser": "measure", "version": 1,
+              "data": {"analysis": chart_of(jitter, src["is_downbeat"], duration, [])}})
+        send({"id": i, "type": "done", "seconds": 0.1})
     elif r["type"] == "analyse":
         i = r["id"]
         send({"id": i, "type": "started"})

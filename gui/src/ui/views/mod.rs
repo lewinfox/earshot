@@ -9,6 +9,7 @@ use egui::Margin;
 use super::panels::Cx;
 use super::panels::deck::DeckUi;
 use super::panels::library::LibraryPane;
+use super::panels::tempo_lock::TempoLockUi;
 use crate::core::session::{self, SLOTS};
 use crate::core::view::Mode;
 
@@ -17,6 +18,8 @@ pub struct Panels {
     /// Each player's view, indexed by `DeckId::index()`.
     pub decks: [DeckUi; SLOTS],
     pub library: LibraryPane,
+    /// Prepare's Tempo lock tab.
+    pub tempo_lock: TempoLockUi,
 }
 
 impl Panels {
@@ -24,6 +27,7 @@ impl Panels {
         Panels {
             decks: std::array::from_fn(|i| DeckUi::new(session::slot(i))),
             library,
+            tempo_lock: TempoLockUi::default(),
         }
     }
 }

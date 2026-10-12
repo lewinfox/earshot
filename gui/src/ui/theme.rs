@@ -126,6 +126,12 @@ pub struct Theme {
     /// The score bars: key, tempo, energy.
     pub score: [Color32; 3],
 
+    // ---- the tempo lock tab -----------------------------------------------------------
+    /// The original's and the straightened version's waveforms, curves and histograms.
+    pub versions: [Color32; 2],
+    /// Sections at one tempo, in turn (they repeat).
+    pub sections: [Color32; 5],
+
     pub spacing: Spacing,
 }
 
@@ -204,6 +210,9 @@ pub const THEME: Theme = Theme {
     thumb_played: Color32::from_black_alpha(130),
 
     score: [HOTCUES[4], DECKS[0], WARN],
+
+    versions: [DECKS[0], DECKS[2]],
+    sections: [DECKS[0], DECKS[2], DECKS[1], WARN, DECKS[3]],
 
     spacing: Spacing {
         item: vec2(6.0, 4.0),

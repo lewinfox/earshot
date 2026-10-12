@@ -43,7 +43,7 @@ use crate::core::services::Services;
 use crate::core::session;
 use crate::core::settings::{self, Settings};
 use crate::core::store::{self, EventSink, Store, StoreCmd, StoreEvent};
-use crate::core::tempo_lock::TempoLock;
+use crate::core::tempo_lock::{TempoLock, TempoLockCmd};
 use crate::core::track::AnalysisState;
 use crate::core::view::{Mode, Pane, Region};
 use crate::core::worker_client::Role;
@@ -70,8 +70,9 @@ pub struct EarshotApp {
     art_loader: std::sync::mpsc::Sender<i64>,
     /// Nudge after a scan: works out audio hashes the files' tags didn't have.
     hasher: std::sync::mpsc::Sender<()>,
-    /// The tempo lock tool (its tab is still to come).
+    /// The tempo lock tool, and its tab's A/B player.
     tempo_lock: TempoLock,
+    listener: tempo_lock::Listener,
 
     // ---- core state the UI holds ---------------------------------------------------------
     /// The library, collections and play history: the domain state the panes read.
@@ -207,6 +208,7 @@ impl EarshotApp {
             art_loader,
             hasher,
             tempo_lock,
+            listener: Default::default(),
             index: LibraryIndex::default(),
             collections: Collections::default(),
             history: History::default(),
@@ -300,6 +302,7 @@ impl EarshotApp {
             }
             Command::Deck(deck, DeckCmd::Load(id)) => self.load(Some(deck), id),
             Command::Library(c) => self.library_cmd(c),
+            Command::TempoLock(TempoLockCmd::Listen(c)) => self.listen(c),
             Command::TempoLock(c) => self.tempo_lock.run(c),
             Command::Collection(c) => self.collection_cmd(c),
             Command::Flow(c) => self.flow_cmd(c),
@@ -476,6 +479,7 @@ impl eframe::App for EarshotApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events(ctx);
         self.read_engine(ctx);
+        self.sync_tempo_lock();
         // Background analysis holds back while a deck plays in Perform mode. In Prepare,
         // listening while an import analyses is normal, so it runs at full width.
         let playing = self.prefs.mode == Mode::Perform
@@ -524,5 +528,6 @@ mod frame;
 mod input;
 mod library_ops;
 mod preview;
+mod tempo_lock;
 #[cfg(test)]
 mod tests;

@@ -8,11 +8,13 @@ use egui::{Color32, RichText, Sense, TextureHandle, TextureId, Ui, vec2};
 
 use crate::core::bus::deck_letter;
 use crate::core::collections::{CollectionCmd, CollectionId, CollectionKind, FlowCmd, Section};
-use crate::core::command::{Command, DeckCmd, PreviewCmd};
+use crate::core::command::{Command, DeckCmd, PreviewCmd, ViewCmd};
 use crate::core::edit::EditCmd;
 use crate::core::index::LibraryCmd;
 use crate::core::player::DECKS;
+use crate::core::tempo_lock::TempoLockCmd;
 use crate::core::track::{AnalysisState, Track, TrackId};
+use crate::core::view::{Mode, Tool};
 use crate::ui::panels::CoreView;
 use crate::ui::panels::deck::wave;
 use crate::ui::theme::THEME;
@@ -203,6 +205,19 @@ pub fn track_menu(ui: &mut Ui, sel: &[TrackId], v: &CoreView, at: MenuAt, out: &
     }
     ui.separator();
     analyse_items(ui, sel, v, out);
+    if let [first] = *sel
+        && ui
+            .button("Normalise tempo")
+            .on_hover_text("Open it in Prepare's Tempo lock tab, to straighten its tempo")
+            .clicked()
+    {
+        out.extend([
+            ViewCmd::SetMode(Mode::Prepare).into(),
+            ViewCmd::Tool(Tool::TempoLock).into(),
+            TempoLockCmd::Analyse(first).into(),
+        ]);
+        ui.close();
+    }
 }
 
 /// "Add" or "Add 3".

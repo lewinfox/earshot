@@ -12,6 +12,7 @@ use super::{Panels, library, row_frame};
 use crate::core::command::ViewCmd;
 use crate::core::view::{Region, Tool};
 use crate::ui::panels::deck::{CUE_PANE_W, CuePane, PreparePlayer, WavePanel};
+use crate::ui::panels::tempo_lock::TempoLockPanel;
 use crate::ui::panels::{Cx, Panel, mixer, resized};
 use crate::ui::widgets::{Tab, tool_tabs};
 
@@ -24,7 +25,7 @@ const TOOLS: [Tab<Tool>; 2] = [
     Tab {
         id: Tool::TempoLock,
         name: "Tempo lock",
-        tip: "Straighten a track's tempo (coming soon)",
+        tip: "Chart a track's tempo, straighten it to one BPM and save the result",
     },
 ];
 
@@ -60,13 +61,17 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
     if let Some(r) = r {
         resized(ctx, r.response.rect.height(), Region::Waves, waves_h, cx);
     }
-    // The player row is as tall as Perform's decks, plus the tabs.
-    let height = mixer::HEIGHT + 12.0;
+    // The player row is as tall as Perform's decks, plus the tabs. Tempo lock's
+    // charts take most of what's left.
+    let current = cx.prefs.prepare.tool;
+    let height = match current {
+        Tool::TempoLock => (ctx.available_rect().height() * 0.62).max(mixer::HEIGHT + 12.0),
+        _ => mixer::HEIGHT + 12.0,
+    };
     egui::TopBottomPanel::top("tools-prepare")
         .exact_height(height + 8.0 + TABS_H)
         .frame(row_frame(cx, Margin::symmetric(6, 4)))
         .show_animated(ctx, !planning, |ui| {
-            let current = cx.prefs.prepare.tool;
             ui.allocate_ui(vec2(ui.available_width(), 22.0), |ui| {
                 if let Some(t) = tool_tabs(ui, &TOOLS, current) {
                     cx.send(ViewCmd::Tool(t));
@@ -91,13 +96,14 @@ fn tool(ui: &mut Ui, tool: Tool, height: f32, panels: &mut Panels, cx: &mut Cx) 
             .ui(ui, cx);
         }
         Tool::TempoLock => {
-            ui.label(
-                egui::RichText::new(
-                    "Tempo lock is on its way: analyse a track's tempo, \
-                     straighten it and save the result.",
-                )
-                .color(cx.theme.muted),
-            );
+            let size = vec2(ui.available_width(), height);
+            ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
+                TempoLockPanel {
+                    tab: &mut panels.tempo_lock,
+                    roots: &panels.library.browser.folders,
+                }
+                .ui(ui, cx);
+            });
         }
     }
 }

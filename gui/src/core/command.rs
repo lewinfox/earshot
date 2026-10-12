@@ -38,7 +38,6 @@ pub enum Command {
     /// The Flow on the canvas.
     Flow(FlowCmd),
     /// The tempo lock tool (`TempoLock::run`). Run by the UI, like `Library`.
-    #[allow(dead_code)] // the Tempo lock tab isn't built yet (step 7, B4)
     TempoLock(TempoLockCmd),
     /// Metadata, ratings, tags and collection edits, which can be undone. Run by the
     /// UI (it keeps the undo history), like `Library`.
