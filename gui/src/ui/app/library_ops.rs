@@ -329,7 +329,12 @@ impl EarshotApp {
         ));
         let (player, lib, sink) = (self.player.clone(), self.lib.clone(), self.sink.clone());
         std::thread::spawn(move || {
-            let result = player::load_track(&player, &lib, deck, track_id, ticket);
+            // A panic still finishes the load (as a failure), so the player doesn't sit
+            // on "loading" ignoring its controls.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                player::load_track(&player, &lib, deck, track_id, ticket)
+            }))
+            .unwrap_or_else(|_| Err("the load crashed (see the panic above)".into()));
             sink(Event::Loaded {
                 deck,
                 ticket,
