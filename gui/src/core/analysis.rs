@@ -1,16 +1,16 @@
 //! Analysis queue: up to [`JOBS`] background threads work through tracks in
 //! parallel, plus one lane for tracks just loaded onto a deck; each computes the
-//! waveform here and the beatgrid in its own Python worker process
-//! (`earshot/worker`, Beat This!). See [`LOADED_NICE`] for how they share the CPU
-//! with playback.
+//! waveform here and asks the one Python worker process (`earshot/worker`, Beat This!,
+//! see [`worker_client`]) for the beatgrid. The worker queues those by priority, so a
+//! deck's track goes first. See [`LOADED_NICE`] for how they share the CPU with
+//! playback.
 //!
 //! The worker never decodes files itself. We send it a mono WAV from our own decoder,
 //! so its beat times line up exactly with what the decks play.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Stdio};
+use std::io::{BufWriter, Write};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -22,6 +22,9 @@ use serde::Deserialize;
 
 use super::player::Player;
 use super::store::{AnalysisSave, GridSave, GridSource, Store};
+use super::worker_client::{
+    self, GridData, GridMode, JobPriority, Update, WorkerClient, WorkerConfig,
+};
 use super::{Event, Sink};
 
 struct Job {
@@ -37,7 +40,7 @@ struct Job {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
-    /// One steady tempo: a fast tempo pass plus the small model on three excerpts.
+    /// One steady tempo: a fast tempo pass plus the small model on five excerpts.
     Static,
     /// Beat This! over the whole track; the grid follows any drift.
     Dynamic,
@@ -75,14 +78,15 @@ impl AnalysisEvent {
 const DECODED: f64 = 0.1;
 const WORKER_START: f64 = 0.15;
 
-/// Parallel background analysis jobs (override with `EARSHOT_ANALYSIS_JOBS`). Each
-/// runs its own worker process with its own copy of the model (a few hundred MB each).
+/// Parallel background analysis jobs (override with `EARSHOT_ANALYSIS_JOBS`). They
+/// decode and measure in parallel; their grids wait their turn in the one worker.
 const JOBS: usize = 4;
 
 /// Playback comes first. Background jobs (folders, previews) run in Linux's idle CPU
 /// and disk classes, and only one at a time while a deck is playing. A track just
-/// loaded onto a deck is analysed straight away on its own lane: normal scheduling,
-/// but at this nice value, below the audio engine and the UI.
+/// loaded onto a deck is decoded straight away on its own lane: normal scheduling,
+/// but at this nice value, below the audio engine and the UI. The worker process runs
+/// in the idle CPU class for every job; a deck's track just goes first in its queue.
 const LOADED_NICE: i32 = 5;
 
 #[derive(Default)]
@@ -132,19 +136,22 @@ impl Analyser {
             .and_then(|v| v.parse().ok())
             .unwrap_or(JOBS)
             .max(1);
-        // Split the cores between the workers: torch would otherwise give each one
-        // every core, and the processes would fight over them.
+        // One worker for every lane, with every core: it runs one job at a time, in
+        // the idle CPU class.
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
-        let threads = (cores / jobs).max(1);
+        let worker = WorkerClient::start(WorkerConfig::python(cores));
+        // Start it now (importing torch takes a few seconds), so a track loaded onto a
+        // deck is analysed straight away.
+        worker.warm_up();
         let queue = Arc::new(Queue::default());
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let playing = Arc::new(AtomicBool::new(false));
         let background_running = Arc::new(AtomicUsize::new(0));
         // The loaded-track lane, then the background ones.
-        let lanes = std::iter::once((true, (cores / 2).max(1)))
-            .chain(std::iter::repeat_n((false, threads), jobs));
-        for (n, (urgent, threads)) in lanes.enumerate() {
+        let lanes = std::iter::once(true).chain(std::iter::repeat_n(false, jobs));
+        for (n, urgent) in lanes.enumerate() {
             let (q, p, a, store) = (queue.clone(), pending.clone(), ctx.clone(), store.clone());
+            let worker = worker.clone();
             let (playing, running) = (playing.clone(), background_running.clone());
             std::thread::Builder::new()
                 .name(format!("earshot-analysis-{n}"))
@@ -155,21 +162,12 @@ impl Analyser {
                         Priority::Idle
                     };
                     priority.apply();
-                    let mut worker: Option<Worker> = None;
-                    if urgent {
-                        // Start this lane's worker now (importing torch takes a few
-                        // seconds), so a loaded track is analysed straight away.
-                        match Worker::spawn(threads, priority) {
-                            Ok(w) => worker = Some(w),
-                            Err(e) => eprintln!("analysis worker: {e}"),
-                        }
-                    }
                     loop {
                         let job = q.pop(urgent);
                         if !urgent {
                             take_background_slot(&playing, &running);
                         }
-                        let ev = match run(&a, &store, &mut worker, threads, priority, &job) {
+                        let ev = match run(&a, &store, &worker, urgent, &job) {
                             Ok(ev) => ev,
                             Err(e) => {
                                 eprintln!("analysis of track {}: {e}", job.id);
@@ -263,9 +261,8 @@ fn take_background_slot(playing: &AtomicBool, running: &AtomicUsize) {
 fn run(
     app: &Ctx,
     store: &Store,
-    worker: &mut Option<Worker>,
-    threads: usize,
-    priority: Priority,
+    worker: &WorkerClient,
+    urgent: bool,
     job: &Job,
 ) -> Result<AnalysisEvent, String> {
     let progress = |fraction: f64, stage: &'static str| {
@@ -347,12 +344,25 @@ fn run(
     ));
     write_mono_wav(&wav, &audio)
         .map_err(|e| fail(format!("writing {}: {e}", wav.display())))?;
-    if worker.is_none() {
-        progress(WORKER_START, "starting the analyser");
-        *worker = Some(Worker::spawn(threads, priority).map_err(fail)?);
-    }
-    progress(WORKER_START, "finding the tempo");
-    let reply = worker.as_mut().unwrap().analyse(&wav, job.mode, &mut |f| {
+    progress(WORKER_START, "waiting for the analyser");
+    let request = worker_client::Request {
+        wav: wav.clone(),
+        priority: if urgent {
+            JobPriority::Deck
+        } else {
+            JobPriority::Background
+        },
+        grid: Some(match job.mode {
+            Mode::Static => GridMode::Static,
+            Mode::Dynamic => GridMode::Dynamic,
+        }),
+        deadline: worker_client::deadline_for(audio.duration()),
+    };
+    let outcome = worker.analyse(&request, &mut |u| {
+        let f = match u {
+            Update::Started => 0.0,
+            Update::Progress { fraction, .. } => fraction,
+        };
         let stage = match job.mode {
             Mode::Static if f < 0.25 => "finding the tempo",
             Mode::Static => "placing the grid",
@@ -362,31 +372,42 @@ fn run(
         progress(WORKER_START + (1.0 - WORKER_START) * f, stage)
     });
     let _ = std::fs::remove_file(&wav);
-    let reply = match reply {
-        Ok(r) => r,
-        Err(e) => {
-            *worker = None; // start a fresh one for the next job
-            return Err(fail(e));
-        }
+    let outcome = outcome.map_err(fail)?;
+    let reply = match outcome.grid {
+        Some(Ok(g)) => g,
+        Some(Err(e)) => return Err(fail(e)),
+        None => return Err(fail("the worker sent no grid".into())),
     };
     let duration = audio.duration();
-    let (grid, bpm, source, min, max) = match job.mode {
+    let (grid, bpm, source, min, max, steady) = match &reply.grid {
         // One tempo: a straight grid with a 1 at the worker's downbeat.
-        Mode::Static => {
-            let g = Beatgrid::constant(reply.bpm, reply.downbeat, duration)
+        GridData::Constant {
+            bpm,
+            downbeat,
+            steady,
+            ..
+        } => {
+            let g = Beatgrid::constant(*bpm, *downbeat, duration)
                 .map_err(|e| fail(format!("worker returned an unusable tempo: {e}")))?;
-            (g, reply.bpm, GridSource::Analysis, reply.bpm, reply.bpm)
+            (g, *bpm, GridSource::Analysis, *bpm, *bpm, *steady)
         }
         // Every detected beat, so the grid follows the drift. Its BPM is the average.
-        Mode::Dynamic => {
-            let g = Beatgrid::from_indexed(&reply.beats, &reply.beat_index, &reply.is_downbeat)
+        GridData::Markers {
+            beats,
+            beat_index,
+            is_downbeat,
+            min_bpm,
+            max_bpm,
+            ..
+        } => {
+            let g = Beatgrid::from_indexed(beats, beat_index, is_downbeat)
                 .and_then(|g| g.refit(duration))
                 .map_err(|e| fail(format!("worker returned an unusable grid: {e}")))?;
             let bpm = (g.mean_bpm() * 100.0).round() / 100.0;
-            (g, bpm, GridSource::AnalysisDynamic, reply.min_bpm, reply.max_bpm)
+            (g, bpm, GridSource::AnalysisDynamic, *min_bpm, *max_bpm, true)
         }
     };
-    let drifts = job.mode == Mode::Static && !reply.steady;
+    let drifts = job.mode == Mode::Static && !steady;
 
     features.extend([
         ("bpm_min", min),
@@ -410,14 +431,18 @@ fn run(
     if out.switched {
         update_decks(app, job.id, grid, source);
     }
+    let detail = match &reply.grid {
+        GridData::Constant { spread_ms, .. } => format!("phase spread {spread_ms:.0} ms"),
+        GridData::Markers { median_bpm, .. } => format!("median {median_bpm:.2} BPM"),
+    };
     eprintln!(
-        "analysed track {} ({:?}): {bpm} BPM (dynamic median {:.2}), phase spread {:.0} ms, {:.1} s in the worker",
-        job.id, job.mode, reply.median_bpm, reply.spread_ms, reply.seconds
+        "analysed track {} ({:?}): {bpm} BPM, {detail}, moved {:.0} ms onto the kicks, {:.1} s in the worker",
+        job.id, job.mode, reply.kick_shift_ms, outcome.seconds
     );
     Ok(AnalysisEvent::new(job.id, "done"))
 }
 
-/// How hard an analysis thread and its worker process may compete for the machine.
+/// How hard an analysis thread may compete for the machine.
 #[derive(Clone, Copy, Debug)]
 enum Priority {
     /// Linux's idle CPU and disk classes: only what nothing else wants.
@@ -478,7 +503,7 @@ fn update_decks(app: &Ctx, track_id: i64, grid: Beatgrid, source: GridSource) {
 }
 
 /// 32-bit float mono WAV, the average of both channels.
-fn write_mono_wav(path: &Path, audio: &TrackAudio) -> std::io::Result<()> {
+pub(super) fn write_mono_wav(path: &Path, audio: &TrackAudio) -> std::io::Result<()> {
     let mut w = BufWriter::new(std::fs::File::create(path)?);
     let n = audio.frames() as u32;
     let sr = audio.sample_rate;
@@ -498,220 +523,4 @@ fn write_mono_wav(path: &Path, audio: &TrackAudio) -> std::io::Result<()> {
         w.write_all(&(0.5 * (f[0] + f[1])).to_le_bytes())?;
     }
     w.flush()
-}
-
-// ---- the worker process ----------------------------------------------------------------
-
-fn worker_dir() -> PathBuf {
-    std::env::var_os("EARSHOT_WORKER_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../worker"))
-}
-
-#[derive(Deserialize)]
-struct Reply {
-    id: Option<u64>,
-    ok: bool,
-    error: Option<String>,
-    #[serde(default)]
-    detector: String,
-    #[serde(default)]
-    beats: Vec<f64>,
-    #[serde(default)]
-    beat_index: Vec<i64>,
-    #[serde(default)]
-    is_downbeat: Vec<bool>,
-    #[serde(default)]
-    median_bpm: f64,
-    #[serde(default)]
-    min_bpm: f64,
-    #[serde(default)]
-    max_bpm: f64,
-    #[serde(default)]
-    seconds: f64,
-    // Static analysis.
-    #[serde(default)]
-    bpm: f64,
-    #[serde(default)]
-    downbeat: f64,
-    #[serde(default)]
-    spread_ms: f64,
-    #[serde(default = "yes")]
-    steady: bool,
-}
-
-fn yes() -> bool {
-    true
-}
-
-/// `python -m earshot_worker` speaking JSON lines on stdin/stdout.
-struct Worker {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-    next_id: u64,
-}
-
-impl Worker {
-    /// `threads`: CPU threads the worker's torch may use.
-    /// `priority`: the worker inherits it from this (analysis) thread; the env var
-    /// stops it putting itself in the idle class when it shouldn't.
-    fn spawn(threads: usize, priority: Priority) -> Result<Worker, String> {
-        let dir = worker_dir();
-        let python = dir.join(".venv/bin/python");
-        if !python.exists() {
-            return Err(format!(
-                "the analysis worker isn't set up: run {}/setup.sh",
-                dir.canonicalize().unwrap_or(dir.clone()).display()
-            ));
-        }
-        let mut command = std::process::Command::new(&python);
-        command
-            .args(["-m", "earshot_worker"])
-            .current_dir(&dir)
-            .env("OMP_NUM_THREADS", threads.to_string())
-            .env("MKL_NUM_THREADS", threads.to_string())
-            .env("OPENBLAS_NUM_THREADS", threads.to_string())
-            .env(
-                "EARSHOT_WORKER_PRIORITY",
-                match priority {
-                    Priority::Idle => "idle",
-                    Priority::Nice(_) => "inherit",
-                },
-            )
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        // End the worker when the app does, even mid-analysis (the analysis threads
-        // aren't joined on exit, so `Drop` never runs for them).
-        #[cfg(target_os = "linux")]
-        // SAFETY: prctl is async-signal-safe; it runs in the child before exec.
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            command.pre_exec(|| {
-                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-                Ok(())
-            });
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("starting the analysis worker: {e}"))?;
-        let stdin = child.stdin.take().unwrap();
-        let mut stdout = BufReader::new(child.stdout.take().unwrap());
-        // Wait for {"type": "ready"}: importing torch takes a few seconds.
-        let mut line = String::new();
-        loop {
-            line.clear();
-            if stdout.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
-                return Err(
-                    "the analysis worker exited while starting (see the terminal for its error)"
-                        .into(),
-                );
-            }
-            if line.contains("\"ready\"") {
-                break;
-            }
-        }
-        Ok(Worker {
-            child,
-            stdin,
-            stdout,
-            next_id: 1,
-        })
-    }
-
-    /// `on_progress` gets the worker's 0..1 progress as it arrives.
-    fn analyse(
-        &mut self,
-        wav: &Path,
-        mode: Mode,
-        on_progress: &mut dyn FnMut(f64),
-    ) -> Result<Reply, String> {
-        let id = self.next_id;
-        self.next_id += 1;
-        let kind = match mode {
-            Mode::Static => "analyse_static",
-            Mode::Dynamic => "analyse",
-        };
-        let req = serde_json::json!({ "id": id, "type": kind, "wav": wav });
-        writeln!(self.stdin, "{req}")
-            .and_then(|_| self.stdin.flush())
-            .map_err(|e| format!("the analysis worker has stopped: {e}"))?;
-        let mut line = String::new();
-        loop {
-            line.clear();
-            if self
-                .stdout
-                .read_line(&mut line)
-                .map_err(|e| e.to_string())?
-                == 0
-            {
-                return Err("the analysis worker exited (see the terminal for its error)".into());
-            }
-            let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
-            if msg["type"] == "progress" {
-                if msg["id"] == id
-                    && let Some(f) = msg["fraction"].as_f64()
-                {
-                    on_progress(f);
-                }
-                continue;
-            }
-            let Ok(reply) = serde_json::from_value::<Reply>(msg) else {
-                continue;
-            };
-            if reply.id.is_some_and(|r| r != id) {
-                continue;
-            }
-            if !reply.ok {
-                return Err(reply.error.unwrap_or_else(|| "analysis failed".into()));
-            }
-            return Ok(reply);
-        }
-    }
-}
-
-impl Drop for Worker {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// End to end against the real worker, both modes:
-    /// `EARSHOT_TEST_TRACK=/path/song.mp3 cargo test -p earshot-gui -- --include-ignored analyses_a_real_track`.
-    #[test]
-    #[ignore]
-    fn analyses_a_real_track() {
-        let path = std::env::var("EARSHOT_TEST_TRACK").expect("set EARSHOT_TEST_TRACK");
-        let (audio, _) = decode::decode_file(Path::new(&path)).unwrap();
-        let wav = std::env::temp_dir().join(format!("earshot-test-{}.wav", std::process::id()));
-        write_mono_wav(&wav, &audio).unwrap();
-        let mut w = Worker::spawn(4, Priority::Nice(LOADED_NICE)).unwrap();
-        for mode in [Mode::Static, Mode::Dynamic] {
-            let mut seen = Vec::new();
-            let r = w.analyse(&wav, mode, &mut |f| seen.push(f)).unwrap();
-            assert!(
-                !seen.is_empty() && seen.windows(2).all(|p| p[0] <= p[1]),
-                "progress {seen:?}"
-            );
-            eprintln!(
-                "{mode:?}: bpm {} (dynamic median {:.2}), downbeat {:.3} s, spread {:.1} ms, steady {}, {} beats, {:.1} s",
-                r.bpm,
-                r.median_bpm,
-                r.downbeat,
-                r.spread_ms,
-                r.steady,
-                r.beats.len(),
-                r.seconds
-            );
-        }
-        let _ = std::fs::remove_file(&wav);
-    }
 }

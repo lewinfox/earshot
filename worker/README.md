@@ -1,6 +1,7 @@
 # earshot worker
 
-Stateless Python process that analyses audio for earshot (beatgrids via Beat This!, librosa fallback).
+One long-lived Python process that analyses audio for earshot (beatgrids via Beat This!,
+librosa fallback). The app starts one and keeps it, so each model is loaded once.
 
 ## Setup
 
@@ -9,34 +10,83 @@ Stateless Python process that analyses audio for earshot (beatgrids via Beat Thi
 .venv/bin/python -m pytest
 ```
 
-The app runs it as `earshot/worker/.venv/bin/python -m earshot_worker`. The first
-analysis downloads the Beat This! checkpoint (~80 MB) into the torch cache.
+The app runs it as `earshot/worker/.venv/bin/python -m earshot_worker`. `setup.sh` also
+fetches the Beat This! checkpoints (~80 MB) into the torch cache, so the first analysis
+doesn't need the network.
 
 `analysis.py` and `detectors.py` are copied from `../../tempo-lock/tempolock/`
-(projects in this repo never import each other).
+(projects in this repo never import each other). `analysis.py` has since gained the
+kick snap.
 
-## Protocol
+## Protocol (v2)
 
-JSON lines. stdin: one request per line. stdout: one reply per line, nothing else
-(all logs go to stderr). One request at a time. Exits on stdin EOF.
+JSON lines. stdin: one request per line. stdout: one message per line, nothing else
+(all logs go to stderr). Exits on stdin EOF. The Rust side is
+`gui/src/core/worker_client.rs`.
 
-On startup: `{"type": "ready"}`
+**Handshake.** The app sends `{"type": "hello", "protocol": 2}`. Once torch is
+imported the worker answers
+`{"type": "hello", "protocol": 2, "analysers": {"grid": 2}, "detector": "beat_this", "models_loaded": [...]}`.
+`analysers` maps each analyser to its version, bumped whenever its results change. A
+hello with another protocol gets an `error` (id null) instead.
 
-| request | reply |
+**Jobs.** Many may be sent at once. They wait in a queue ordered by `priority`
+(`deck`, then `preview`, then `background`; first come first served within one) and
+run one at a time.
+
+```json
+→ {"id": 7, "type": "analyse", "wav": "/abs/path.wav", "priority": "deck",
+   "analysers": {"grid": {"mode": "static"}}, "deadline_s": 900}
+← {"id": 7, "type": "started"}                         // left the queue; deadline starts
+← {"id": 7, "type": "progress", "analyser": "grid", "fraction": 0.42}   // rising, 0..1
+← {"id": 7, "type": "result", "analyser": "grid", "version": 2, "data": {...}}
+←   or {"id": 7, "type": "failed", "analyser": "grid", "error": "..."}  // one per analyser
+← {"id": 7, "type": "done", "seconds": 3.1}
+→ {"type": "cancel", "id": 7}
+```
+
+- Every job ends with exactly one of `done`, `cancelled` or `error`
+  (`{"id": 7, "type": "error", "error": "..."}`: bad request, unreadable audio, or past
+  its deadline). One analyser failing is a `failed` message, and the job goes on.
+- `cancel` drops a waiting job at once and stops a running one at its next progress
+  report. Unknown ids are ignored.
+- The worker gives up on a job past `deadline_s` (counted from `started`) at its next
+  progress report.
+- `{"type": "heartbeat"}` every 2 s, whatever else is going on.
+- A line the worker can't read gets `{"type": "error", "id": null, "error": "..."}`.
+- `wav`: mono float32 at the track's own sample rate; all times are seconds from its
+  start.
+
+**The app's side.** Every message is parsed into a typed enum; a missing field is an
+error, never a default. The app kills and restarts the worker when it is silent (not
+even a heartbeat) for 60 s while it has jobs, or when a job runs 15 s past its
+deadline. The running job fails; jobs only waiting in the dead process are sent to the
+new one. The app gives each job `300 s + 4 × track length` as its deadline: the worker
+runs in Linux's idle CPU class, and a busy machine can starve it, so this catches hangs,
+not slow jobs.
+
+**Grid results** (`data` of a `grid` result). Both modes are snapped to where the
+kicks start (`snap.kick_shifts`): Beat This! puts its beats 20-40 ms late.
+
+| mode | `data` |
 |---|---|
-| `{"id": 1, "type": "ping"}` | `{"id": 1, "ok": true, "detector": "beat_this"}` (or `"librosa"`) |
-| `{"id": 2, "type": "analyse", "wav": "/abs/path.wav"}` | `{"id": 2, "ok": true, "detector": ..., "beats": [s...], "beat_index": [int...], "is_downbeat": [bool...], "median_bpm": f, "min_bpm": f, "max_bpm": f, "seconds": f}` |
-| `{"id": 3, "type": "analyse_static", "wav": "/abs/path.wav"}` | `{"id": 3, "ok": true, "detector": "static", "bpm": f, "raw_bpm": f, "beat": s, "downbeat": s, "spread_ms": f, "drift_pct": f, "steady": bool, "seconds": f}` |
-| (while analysing, any number of) | `{"id": 2, "type": "progress", "fraction": 0.42}`, rising from 0 to 1, before the reply |
-| anything that fails | `{"id": <id or null>, "ok": false, "error": "message"}` |
+| `static` | `{"detector": "static", "kick_shift_ms": f, "grid": {"kind": "constant", "bpm": f, "downbeat": s, "steady": bool, "spread_ms": f, "drift_pct": f}}` |
+| `dynamic` | `{"detector": "beat_this", "kick_shift_ms": f, "grid": {"kind": "markers", "beats": [s...], "beat_index": [int...], "is_downbeat": [bool...], "median_bpm": f, "min_bpm": f, "max_bpm": f}}` |
 
-- `wav`: mono float32 at the track's own sample rate; beat times are seconds from its start.
-- `beats` is strictly increasing. `beat_index` counts beats including missed ones
-  (so it can jump by 2+). `is_downbeat` is always false with the librosa detector.
-- `min_bpm` / `max_bpm` are the 2nd / 98th percentile of per-beat tempo.
-- `analyse_static` (see `static_tempo.py`): one tempo for the whole track, in a few
-  seconds. `beat` / `downbeat` are the times of a beat / a 1 on that grid; `steady`
-  is false when the tempo seems to drift (`spread_ms`: how far the sampled excerpts
-  disagree on phase; `drift_pct`: the furthest excerpt's own tempo from `bpm`).
-- `analyse` uses Beat This!'s small checkpoint (`small0`).
-- `seconds` is wall-clock time for that analysis (the first one also loads the model).
+- `static` (see `static_tempo.py`): one tempo for the whole track, in a few seconds.
+  `downbeat` is the time of a 1 on that grid. `steady` is false when the tempo seems to
+  drift (`spread_ms`: how far the sampled excerpts disagree on phase; `drift_pct`: the
+  furthest excerpt's own tempo from `bpm`).
+- `dynamic` uses Beat This!'s full checkpoint (`final0`) over the whole track. `beats`
+  is strictly increasing. `beat_index` counts beats including missed ones (so it can
+  jump by 2+). `is_downbeat` is always false with the librosa detector.
+  `min_bpm` / `max_bpm` are the 2nd / 98th percentile of per-beat tempo. Each stretch
+  of about 32 beats is moved onto the kicks by its own amount.
+- `kick_shift_ms`: how far the kick snap moved the grid (the median, negative is
+  earlier).
+
+**Priority.** The process puts itself in the idle CPU class (nice 19 off Linux) unless
+`EARSHOT_WORKER_PRIORITY=inherit`. An unprivileged process can't leave the idle class,
+so urgent jobs only go first; they don't get more CPU. If that proves too slow, a
+second process just for deck loads, started with `inherit`, needs no protocol change:
+job ids and priorities are per process.

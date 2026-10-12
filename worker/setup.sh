@@ -14,5 +14,10 @@ unset VIRTUAL_ENV
 export UV_PROJECT_ENVIRONMENT="$PWD/.venv"
 "$UV" sync
 
+# Fetch the Beat This! checkpoints now (~80 MB, into the torch cache), so the first
+# analysis doesn't need the network.
+.venv/bin/python -c "from earshot_worker.detectors import CHECKPOINT, SMALL_CHECKPOINT, get_beat_this
+for c in (CHECKPOINT, SMALL_CHECKPOINT): get_beat_this(c)"
+
 echo
 echo "done. the app runs: $PWD/.venv/bin/python -m earshot_worker"

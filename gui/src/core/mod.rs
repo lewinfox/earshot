@@ -13,6 +13,7 @@ pub mod midi;
 pub mod player;
 pub mod store;
 pub mod suggest;
+pub mod worker_client;
 
 use std::sync::Arc;
 

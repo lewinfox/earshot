@@ -61,6 +61,11 @@ def get_beat_this(checkpoint: str = CHECKPOINT, dbn: bool = False):
     return _beat_this_models[key]
 
 
+def loaded_models() -> list[str]:
+    """Names of the models loaded so far (each is loaded once, on first use)."""
+    return sorted(f"beat_this:{c}" + (":dbn" if dbn else "") for c, dbn in _beat_this_models)
+
+
 def detect_beat_this(mono: np.ndarray, sr: int, dbn: bool = False, progress=None) -> RawBeats:
     """`progress(fraction)` is called as each chunk of the model's input is done; on a
     CPU that is most of the analysis time."""
