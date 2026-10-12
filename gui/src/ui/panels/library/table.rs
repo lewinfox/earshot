@@ -369,6 +369,8 @@ pub enum TableView {
     /// Everything in a collection folder.
     Folder,
     Suggest,
+    /// Tracks that share their audio, a group at a time.
+    Duplicates,
 }
 
 impl TableView {
@@ -387,6 +389,7 @@ impl TableView {
             TableView::Playlist | TableView::Flow => {
                 &[Index, Status, Wave, Title, Artist, Bpm, Key, Time]
             }
+            TableView::Duplicates => &[Status, Title, Artist, Bpm, Time, File],
             _ => &[Status, Wave, Title, Artist, Bpm, Key, Time],
         };
         TableState {

@@ -612,8 +612,7 @@ impl Reader {
         self.with(|c| read::collection_tracks(c, id))
     }
 
-    /// Groups of tracks with the same audio, each sorted, for "find duplicates".
-    #[allow(dead_code)] // library management API, not wired to the UI yet (tests use it)
+    /// Groups of tracks with the same audio, each sorted, for the Duplicates view.
     pub fn duplicates(&self) -> Result<Vec<Vec<i64>>> {
         self.with(read::duplicates)
     }

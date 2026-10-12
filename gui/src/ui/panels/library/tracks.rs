@@ -202,6 +202,23 @@ pub fn track_menu(ui: &mut Ui, sel: &[TrackId], v: &CoreView, at: MenuAt, out: &
         out.push(EditCmd::Editor(sel.to_vec()).into());
         ui.close();
     }
+    if n == 1
+        && ui
+            .button("Show in file manager")
+            .on_hover_text(v.lib.get(first).map_or("", |t| t.path.as_str()))
+            .clicked()
+    {
+        out.push(LibraryCmd::Reveal(first).into());
+        ui.close();
+    }
+    if ui
+        .button(format!("{} from the library", count("Remove", n)))
+        .on_hover_text("The file stays on disk, and a rescan doesn't add it back. Undo puts it back.")
+        .clicked()
+    {
+        out.push(EditCmd::RemoveFromLibrary(sel.to_vec()).into());
+        ui.close();
+    }
     ui.separator();
     analyse_items(ui, sel, v, out);
     if let [first] = *sel

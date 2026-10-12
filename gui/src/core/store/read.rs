@@ -453,12 +453,15 @@ pub fn search(c: &Connection, query: &str) -> Result<Vec<i64>> {
         .collect::<rusqlite::Result<_>>()?)
 }
 
-#[allow(dead_code)] // library management API, not wired to the UI yet (tests use it)
+/// Groups of tracks in the library (not removed) with a file of the same audio.
 pub fn duplicates(c: &Connection) -> Result<Vec<Vec<i64>>> {
     let mut st = c.prepare(
-        "SELECT group_concat(DISTINCT track_id) FROM files
-         WHERE content_hash IS NOT NULL AND missing_since IS NULL
-         GROUP BY content_hash HAVING count(DISTINCT track_id) > 1",
+        "SELECT group_concat(DISTINCT f.track_id) FROM files f
+         JOIN tracks t ON t.id = f.track_id
+         WHERE f.content_hash IS NOT NULL AND f.missing_since IS NULL
+           AND t.deleted_at IS NULL
+         GROUP BY f.content_hash HAVING count(DISTINCT f.track_id) > 1
+         ORDER BY min(f.track_id)",
     )?;
     let groups = st
         .query_map([], |r| r.get::<_, String>(0))?

@@ -169,6 +169,22 @@ impl Writer {
                 old: collection_row(c, collection)?.1,
                 new: name,
             },
+            EditCmd::RemoveFromLibrary(tracks) => {
+                // Only those in it now, so undo puts back just those.
+                let mut st = c.prepare_cached(
+                    "SELECT 1 FROM tracks WHERE id = ?1 AND deleted_at IS NULL",
+                )?;
+                let mut kept = vec![];
+                for t in tracks {
+                    if st.exists([t])? && !kept.contains(&t) {
+                        kept.push(t);
+                    }
+                }
+                Edit::Removal {
+                    tracks: kept,
+                    removed: true,
+                }
+            }
         })
     }
 
@@ -273,6 +289,18 @@ impl Writer {
             Edit::Name {
                 collection, new, ..
             } => self.rename(*collection, new),
+            Edit::Removal { tracks, removed } => {
+                let tx = self.conn.transaction()?;
+                let at = removed.then(now);
+                for t in tracks {
+                    tx.execute(
+                        "UPDATE tracks SET deleted_at = ?2 WHERE id = ?1",
+                        params![t, at],
+                    )?;
+                }
+                tx.commit()?;
+                self.emit_library()
+            }
             Edit::FlowGraph { flow, ops, .. } => {
                 let tx = self.conn.transaction()?;
                 if read::kind(&tx, *flow)? != Some(CollectionKind::Flow) {

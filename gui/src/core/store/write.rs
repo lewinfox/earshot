@@ -199,7 +199,7 @@ impl Writer {
         Ok(())
     }
 
-    fn emit_library(&mut self) -> Result<()> {
+    pub(super) fn emit_library(&mut self) -> Result<()> {
         let t = read::tracks(&self.conn, None)?;
         self.emit(StoreEvent::Library(t));
         Ok(())

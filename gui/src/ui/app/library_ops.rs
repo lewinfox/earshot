@@ -28,6 +28,19 @@ impl EarshotApp {
             }
             LibraryCmd::RemoveRoot(path) => self.lib.store.send(StoreCmd::RemoveRoot(path)),
             LibraryCmd::Rescan => self.rescan(),
+            LibraryCmd::Reveal(track) => {
+                if let Some(t) = self.index.get(track)
+                    && let Err(e) = library::reveal(std::path::Path::new(&t.path))
+                {
+                    eprintln!("{e}");
+                }
+            }
+            LibraryCmd::FindDuplicates => {
+                let (reader, sink) = (self.lib.store.reader.clone(), self.sink.clone());
+                std::thread::spawn(move || {
+                    sink(Event::Duplicates(reader.duplicates().map_err(|e| e.to_string())));
+                });
+            }
         }
     }
 

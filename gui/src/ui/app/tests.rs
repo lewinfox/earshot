@@ -193,6 +193,47 @@ fn perform() {
     render(&mut h, "perform");
 }
 
+/// The Duplicates view lists tracks with the same audio; removing one from the
+/// library (never the file) leaves none, and undo puts it back.
+#[test]
+fn duplicates() {
+    let mut h = start("duplicates");
+    let music = scratch_dir("duplicates").join("music");
+    let copy = music.join("Night Bus (copy).wav");
+    std::fs::copy(music.join("Night Bus.wav"), &copy).unwrap();
+    h.state_mut().dispatch(LibraryCmd::Rescan.into());
+    settle_until(&mut h, |a| a.index.tracks().len() == TRACKS.len() + 1);
+    h.state_mut()
+        .dispatch(ViewCmd::Source(Some(crate::core::view::Source::AllTracks)).into());
+    steps(&mut h, 2);
+    h.get_by_label("Duplicates").click();
+    steps(&mut h, 2);
+    assert_eq!(*h.state().panels.library.browser.scope(), Scope::Duplicates);
+    // The copy's audio hash is worked out in the background, then it's found.
+    let groups = |a: &EarshotApp| a.panels.library.browser.duplicates().map(<[_]>::len);
+    for _ in 0..600 {
+        if groups(h.state()) == Some(1) {
+            break;
+        }
+        if h.state().panels.library.browser.duplicates().is_some() {
+            h.state_mut().dispatch(LibraryCmd::FindDuplicates.into());
+        }
+        steps(&mut h, 5);
+    }
+    assert_eq!(groups(h.state()), Some(1));
+    let group = h.state().panels.library.browser.duplicates().unwrap()[0].clone();
+    steps(&mut h, 3);
+    render(&mut h, "duplicates");
+
+    let gone = group[1];
+    h.state_mut()
+        .dispatch(crate::core::edit::EditCmd::RemoveFromLibrary(vec![gone]).into());
+    settle_until(&mut h, |a| a.index.get(gone).is_none() && groups(a) == Some(0));
+    assert!(copy.exists() && music.join("Night Bus.wav").exists());
+    h.state_mut().dispatch(Command::Undo);
+    settle_until(&mut h, |a| a.index.get(gone).is_some() && groups(a) == Some(1));
+}
+
 /// A track played for 30 s is saved in the play history, in the session the app
 /// opened, and stopping the deck ends the play.
 #[test]

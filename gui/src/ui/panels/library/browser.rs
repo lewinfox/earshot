@@ -30,6 +30,8 @@ pub enum Scope {
     Folder(String),
     /// A crate, playlist, smart playlist, Flow, or everything in a folder of them.
     Collection(CollectionId),
+    /// Tracks that share their audio with another, a group at a time.
+    Duplicates,
 }
 
 #[derive(Default)]
@@ -54,6 +56,8 @@ pub struct LibraryUi {
     unanalysed: Vec<TrackId>,
     sel: Selection,
     scroll_to: Option<usize>,
+    /// Groups of tracks with the same audio, as last found (`LibraryCmd::FindDuplicates`).
+    duplicates: Option<Vec<Vec<TrackId>>>,
     pub scanning: bool,
     pub search_focus: bool,
 }
@@ -68,6 +72,18 @@ impl LibraryUi {
             self.scope = scope;
             self.rev += 1;
         }
+    }
+
+    /// The groups of tracks with the same audio, as last found.
+    #[cfg(test)]
+    pub fn duplicates(&self) -> Option<&[Vec<TrackId>]> {
+        self.duplicates.as_deref()
+    }
+
+    /// The groups of tracks with the same audio, as found.
+    pub fn set_duplicates(&mut self, groups: Vec<Vec<TrackId>>) {
+        self.duplicates = Some(groups);
+        self.rev += 1;
     }
 
     /// The track with keyboard focus (for "load selected").
@@ -94,6 +110,7 @@ impl LibraryUi {
     pub fn view(&self, v: &CoreView) -> TableView {
         match &self.scope {
             Scope::All => TableView::Library,
+            Scope::Duplicates => TableView::Duplicates,
             Scope::Folder(_) => TableView::Explorer,
             Scope::Collection(id) => match v.collections.get(*id).map(|c| c.kind) {
                 Some(CollectionKind::Playlist) => TableView::Playlist,
@@ -134,6 +151,8 @@ impl LibraryUi {
         self.built_for = Some((stamp, sort, filter));
         let within: Option<Vec<TrackId>> = match &self.scope {
             Scope::All => None,
+            // A group at a time, in the order found (unless sorted).
+            Scope::Duplicates => Some(self.duplicates.iter().flatten().flatten().copied().collect()),
             Scope::Folder(f) => {
                 let dir = format!("{f}/");
                 Some(
@@ -267,8 +286,15 @@ impl LibraryUi {
     // ---- all tracks ------------------------------------------------------------------------
 
     /// The All tracks source: every track, or only those with an analysis status
-    /// (it sets the status column's filter). True when one was clicked.
-    pub fn all_tracks(&mut self, ui: &mut Ui, v: &CoreView, table: &mut TableState) -> bool {
+    /// (it sets the status column's filter), or the duplicates. True when one was
+    /// clicked.
+    pub fn all_tracks(
+        &mut self,
+        ui: &mut Ui,
+        v: &CoreView,
+        table: &mut TableState,
+        out: &mut Vec<Command>,
+    ) -> bool {
         let mut clicked = false;
         let mut count = [0usize; 4];
         for t in v.lib.tracks() {
@@ -308,6 +334,22 @@ impl LibraryUi {
                 clicked = true;
             }
         }
+        ui.add_space(4.0);
+        ui.label(RichText::new("LIBRARY").size(10.0).color(THEME.muted));
+        let dups = match (&self.duplicates, self.scope == Scope::Duplicates) {
+            (Some(g), true) => format!("Duplicates  ({})", g.len()),
+            _ => "Duplicates".to_string(),
+        };
+        if ui
+            .selectable_label(self.scope == Scope::Duplicates, dups)
+            .on_hover_text("Tracks whose audio is the same as another's")
+            .clicked()
+        {
+            self.set_scope(Scope::Duplicates);
+            // Found afresh each time.
+            out.push(LibraryCmd::FindDuplicates.into());
+            clicked = true;
+        }
         clicked
     }
 
@@ -316,6 +358,7 @@ impl LibraryUi {
     fn title(&self, v: &CoreView) -> String {
         match &self.scope {
             Scope::All => "All tracks".into(),
+            Scope::Duplicates => "Duplicates".into(),
             Scope::Folder(f) => f.rsplit('/').next().unwrap_or(f).into(),
             Scope::Collection(id) => v
                 .collections
@@ -381,6 +424,22 @@ impl LibraryUi {
                 }
             });
         });
+        if self.scope == Scope::Duplicates {
+            let text = match &self.duplicates {
+                None => "Looking for tracks with the same audio…".to_string(),
+                Some(g) if g.is_empty() => "No two tracks have the same audio.".to_string(),
+                Some(g) => format!(
+                    "{} with the same audio, one group after another. Right-click a \
+                     track to show its file, or remove it from the library (the file \
+                     stays on disk).",
+                    match g.len() {
+                        1 => "One group of tracks".to_string(),
+                        n => format!("{n} groups of tracks"),
+                    }
+                ),
+            };
+            ui.label(RichText::new(text).color(THEME.muted));
+        }
         if let Scope::Collection(id) = self.scope
             && let Some(c) = v
                 .collections

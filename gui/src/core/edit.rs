@@ -162,6 +162,12 @@ pub enum Edit {
         ops: Vec<GraphOp>,
         undo: Vec<GraphOp>,
     },
+    /// Tracks taken out of the library (`removed`), or put back (its undo). Their
+    /// files stay on disk; everything about them stays in the database.
+    Removal {
+        tracks: Vec<TrackId>,
+        removed: bool,
+    },
 }
 
 impl Edit {
@@ -216,6 +222,10 @@ impl Edit {
                 ops: undo.clone(),
                 undo: ops.clone(),
             },
+            Edit::Removal { tracks, removed } => Edit::Removal {
+                tracks: tracks.clone(),
+                removed: !removed,
+            },
         }
     }
 
@@ -228,6 +238,7 @@ impl Edit {
             Edit::Parent { old, new, .. } => old == new,
             Edit::Name { old, new, .. } => old == new,
             Edit::FlowGraph { ops, .. } => ops.is_empty(),
+            Edit::Removal { tracks, .. } => tracks.is_empty(),
         }
     }
 
@@ -256,6 +267,17 @@ impl Edit {
             Edit::Parent { .. } => "move".into(),
             Edit::Name { .. } => "rename".into(),
             Edit::FlowGraph { .. } => "Flow edit".into(),
+            Edit::Removal { tracks, removed } => {
+                let what = match tracks.len() {
+                    1 => "track".to_string(),
+                    n => format!("{n} tracks"),
+                };
+                if *removed {
+                    format!("remove {what} from the library")
+                } else {
+                    format!("put {what} back in the library")
+                }
+            }
         }
     }
 }
@@ -303,6 +325,9 @@ pub enum EditCmd {
         collection: CollectionId,
         name: String,
     },
+    /// Take tracks out of the library (they stay on disk, and a rescan doesn't bring
+    /// them back; undo does).
+    RemoveFromLibrary(Vec<TrackId>),
 }
 
 /// The ops that turn Flow `from` into `to`: unlink, remove, put back or move

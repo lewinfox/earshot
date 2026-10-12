@@ -56,6 +56,8 @@ pub enum Event {
     Store(store::StoreEvent),
     /// A track's cover art (RGBA, `library::ART_SIZE` square), or `None` if it has none.
     Art(i64, Option<Vec<u8>>),
+    /// Groups of tracks with the same audio (`Reader::duplicates`).
+    Duplicates(Result<Vec<Vec<i64>>, String>),
     /// Tracks with stale analysis: counted, or queued again (`queued`).
     Stale {
         queued: bool,

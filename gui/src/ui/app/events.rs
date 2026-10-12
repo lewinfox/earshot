@@ -16,6 +16,8 @@ impl EarshotApp {
                 }
                 Event::Scanned(Ok(())) => self.panels.library.browser.scanning = false,
                 Event::Store(e) => self.store_event(e),
+                Event::Duplicates(Ok(groups)) => self.panels.library.browser.set_duplicates(groups),
+                Event::Duplicates(Err(e)) => eprintln!("finding duplicates: {e}"),
                 Event::Stale { queued, result } => {
                     self.stale = match result {
                         Ok(n) if queued => Stale::Queued(n),
@@ -102,6 +104,10 @@ impl EarshotApp {
             StoreEvent::Library(tracks) => {
                 self.index.replace(tracks);
                 self.refresh_previews(None);
+                // Tracks came or went: the duplicates may have changed.
+                if *self.panels.library.browser.scope() == Scope::Duplicates {
+                    self.dispatch(LibraryCmd::FindDuplicates.into());
+                }
             }
             StoreEvent::TracksChanged(tracks) => self.index.patch(tracks),
             StoreEvent::Previews(p) => {

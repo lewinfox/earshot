@@ -141,7 +141,7 @@ impl LibraryPane {
         match source {
             Source::AllTracks => {
                 let table = self.tables.get_mut(TableView::Library);
-                self.browser.all_tracks(ui, &cx.core, table);
+                self.browser.all_tracks(ui, &cx.core, table, cx.out);
             }
             Source::Explorer => self.browser.explorer(ui, &cx.core, cx.out),
             Source::External => placeholder(

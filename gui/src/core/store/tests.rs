@@ -313,6 +313,45 @@ fn copies_of_the_same_audio_are_duplicates() {
     let dupes = read::duplicates(w.conn()).unwrap();
     assert_eq!(dupes.len(), 1);
     assert_eq!(dupes[0].len(), 2);
+
+    // Removing one from the library (an undoable edit) leaves no duplicate; the file
+    // stays, a rescan doesn't bring it back, and undo does.
+    let copy = dupes[0][1];
+    let e = w
+        .edit(crate::core::edit::EditCmd::RemoveFromLibrary(vec![copy, copy]))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        e,
+        crate::core::edit::Edit::Removal {
+            tracks: vec![copy],
+            removed: true
+        }
+    );
+    assert!(w.take_events().iter().any(|e| matches!(e, StoreEvent::Library(l) if l.len() == 2)));
+    assert!(read::duplicates(w.conn()).unwrap().is_empty());
+    // (Every file found, the copy changed.)
+    let music = dir.join("music");
+    let found: Vec<PathBuf> = ["a.mp3", "copy of a.mp3", "b.mp3"]
+        .iter()
+        .map(|f| music.join(f))
+        .collect();
+    w.apply_scan(
+        &[music.clone()],
+        &found,
+        &[file(&found[1], "A", Some(1))],
+    )
+    .unwrap();
+    assert_eq!(library(&mut w).len(), 2);
+    // Removing it again changes nothing.
+    assert_eq!(
+        w.edit(crate::core::edit::EditCmd::RemoveFromLibrary(vec![copy]))
+            .unwrap(),
+        None
+    );
+    w.apply_edit(&e.inverse()).unwrap();
+    assert_eq!(library(&mut w).len(), 3);
+    assert_eq!(read::duplicates(w.conn()).unwrap().len(), 1);
 }
 
 fn analysis(track: i64, bpm: f64, expected: Option<i64>, force: bool) -> AnalysisSave {

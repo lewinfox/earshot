@@ -179,6 +179,10 @@ pub enum LibraryCmd {
     RemoveRoot(String),
     /// Look through the library folders again.
     Rescan,
+    /// Show the track's file in the file manager.
+    Reveal(TrackId),
+    /// Find the tracks that share their audio (answered with `Event::Duplicates`).
+    FindDuplicates,
 }
 
 #[cfg(test)]

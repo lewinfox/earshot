@@ -56,6 +56,51 @@ pub struct Subdir {
 }
 
 /// Immediate subfolders of `path`, for the folder tree.
+/// Show a file in the system's file manager: selected in its folder where the
+/// platform can, else the folder opened. Doesn't wait for it.
+pub fn reveal(path: &Path) -> Result<(), String> {
+    let mut cmd;
+    #[cfg(target_os = "macos")]
+    {
+        cmd = std::process::Command::new("open");
+        cmd.arg("-R").arg(path);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        cmd = std::process::Command::new("explorer");
+        cmd.arg(format!("/select,{}", path.display()));
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        // The freedesktop file manager interface selects the file; xdg-open on its
+        // folder works everywhere else.
+        let uri = format!("file://{}", path.display());
+        let shown = std::process::Command::new("dbus-send")
+            .args([
+                "--session",
+                "--dest=org.freedesktop.FileManager1",
+                "--type=method_call",
+                "/org/freedesktop/FileManager1",
+                "org.freedesktop.FileManager1.ShowItems",
+            ])
+            .arg(format!("array:string:{uri}"))
+            .arg("string:")
+            .status()
+            .is_ok_and(|s| s.success());
+        if shown {
+            return Ok(());
+        }
+        cmd = std::process::Command::new("xdg-open");
+        cmd.arg(path.parent().unwrap_or(path));
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("opening the file manager: {e}"))?;
+    // Reaped on a thread, so it doesn't linger as a zombie.
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+
 pub fn list_subdirs(path: &str) -> Result<Vec<Subdir>, String> {
     let entries = std::fs::read_dir(path).map_err(|e| format!("{path}: {e}"))?;
     let mut out: Vec<Subdir> = entries
