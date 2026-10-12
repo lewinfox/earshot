@@ -265,9 +265,24 @@ impl LibraryPane {
                 );
             }
         }
-        egui::CentralPanel::default().show_inside(ui, |ui| self.middle(ui, cx));
+        // Room on the right: right against a panel's resize handle, the list's
+        // scroll bar and the handle take the hover in turns and its highlight
+        // flickers.
+        let frame = egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin {
+            left: 8,
+            right: 8 + HANDLE_GAP,
+            top: 8,
+            bottom: 8,
+        });
+        egui::CentralPanel::default()
+            .frame(frame)
+            .show_inside(ui, |ui| self.middle(ui, cx));
     }
 }
+
+/// How far the list's scroll bar keeps from the resize handle on its right: more
+/// than the handle's grab radius plus the pointer's search radius.
+const HANDLE_GAP: i8 = 4;
 
 /// A source that isn't built yet.
 fn placeholder(ui: &mut Ui, cx: &Cx, title: &str, text: &str) {

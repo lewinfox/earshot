@@ -672,10 +672,14 @@ impl TrackTable<'_> {
         let mut res = TableOut::default();
         res.changed |= filter_chips(ui, state);
 
+        // A solid scroll bar: it takes its own room inside the pane (a floating one
+        // overlaps the pane's edge, where it fights a resize handle for the hover),
+        // and it's always there to grab.
+        ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
         let auto = auto_widths(ui.ctx(), v.lib);
         // Hand-sized columns keep their width; the text ones fit their contents and
-        // the rest start at their usual width. Then the spare room goes to the text
-        // columns not sized by hand, so the table fills the pane.
+        // the rest start at their usual width. Then the text columns not sized by
+        // hand take up the spare room, or give some up, so the table fits the pane.
         let natural: Vec<(ColumnId, f32)> = state
             .columns
             .iter()
@@ -1100,24 +1104,31 @@ fn filter_chips(ui: &mut Ui, s: &mut TableState) -> bool {
 
 // ---- cells ---------------------------------------------------------------------------
 
-/// Widen the columns `grows` picks, each by its share of their width, so all of
-/// them add up to `room`. Never narrows anything.
+/// Fit the columns into `room`: the ones `grows` picks share what's spare, or
+/// give up width when there's too little, each by its share of their width but not
+/// below [`FIT_MIN`]. The rest keep theirs.
 fn fill(
     natural: &[(ColumnId, f32)],
     room: f32,
     grows: impl Fn(ColumnId) -> bool,
 ) -> Vec<(ColumnId, f32)> {
-    let used: f32 = natural.iter().map(|c| c.1).sum();
+    let fixed: f32 = natural.iter().filter(|c| !grows(c.0)).map(|c| c.1).sum();
     let growing: f32 = natural.iter().filter(|c| grows(c.0)).map(|c| c.1).sum();
-    let spare = (room - used).max(0.0);
+    if growing <= 0.0 {
+        return natural.to_vec();
+    }
+    let scale = (room - fixed).max(0.0) / growing;
     natural
         .iter()
-        .map(|&(c, w)| match growing > 0.0 && grows(c) {
-            true => (c, (w + spare * w / growing).floor()),
+        .map(|&(c, w)| match grows(c) {
+            true => (c, (w * scale).floor().max(FIT_MIN.min(w))),
             false => (c, w),
         })
         .collect()
 }
+
+/// The narrowest [`fill`] squeezes a column to.
+const FIT_MIN: f32 = 60.0;
 
 /// The widest a column grows to fit its contents.
 const AUTO_MAX: f32 = 420.0;
@@ -1371,8 +1382,15 @@ mod tests {
             fill(&natural, 656.0, grows),
             [(Title, 400.0), (Artist, 200.0), (Bpm, 56.0)]
         );
-        // Too little room: nothing narrows.
-        assert_eq!(fill(&natural, 100.0, grows), natural);
+        // Too little room: they give up width by their shares, down to FIT_MIN.
+        assert_eq!(
+            fill(&natural, 206.0, grows),
+            [(Title, 100.0), (Artist, 60.0), (Bpm, 56.0)]
+        );
+        assert_eq!(
+            fill(&natural, 0.0, grows),
+            [(Title, 60.0), (Artist, 60.0), (Bpm, 56.0)]
+        );
         // Nothing to grow: left as it is.
         assert_eq!(fill(&natural, 900.0, |_| false), natural);
     }
