@@ -2,6 +2,7 @@
 //! mode's layout, zoom and panel sizes. Deck and audio settings are engine state and
 //! live in the database instead (`core::settings`).
 
+use earshot_engine::DeckId;
 use serde::{Deserialize, Serialize};
 
 use super::panels::library::table::Tables;
@@ -20,7 +21,7 @@ pub struct UiPrefs {
     pub wave_zoom: f64,
     /// The size of everything (egui's zoom factor).
     pub ui_scale: f32,
-    /// Four decks in Perform instead of two. Not used yet: the engine runs two.
+    /// Four decks in Perform instead of two. The engine always runs four.
     pub four_decks: bool,
     /// Each kind of track list's columns, widths and sort.
     pub tables: Tables,
@@ -41,6 +42,11 @@ impl Default for UiPrefs {
 }
 
 impl UiPrefs {
+    /// The decks Perform shows: two or four.
+    pub fn decks(&self) -> Vec<DeckId> {
+        DeckId::first(if self.four_decks { 4 } else { 2 }).collect()
+    }
+
     pub fn layout(&self) -> &Layout {
         match self.mode {
             Mode::Perform => &self.perform,

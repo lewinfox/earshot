@@ -1,7 +1,7 @@
 - [x] Need a Prepare mode hot cue pane (right hand side of the waveform, like RKB) to allow us to see, label, set colour of, and remove ("x") memory cues.
 - [x] Hot cue pane (4x2) should also allow labels
-- [ ] In Prepare mode, implement Shift+L/R arrow to nudge beat grid
-- [ ] In Prepare mode, implement Ctrl+Up/Down to load prev/next track from the library pane
+- [x] In Prepare mode, implement Shift+L/R arrow to nudge beat grid
+- [x] In Prepare mode, implement Ctrl+Up/Down to load prev/next track from the library pane
 - [x] The whole Library pane needs to become a unified component as it needs to be the same between Prepare and Performance modes. Like RKB, a left-hand vertical icon stack for the various views (all tracks, playlists, flows, crates, extrnal drives (auto-read/import libraries from things that Cratelib supports), SoundCloud, Beatport, Sopotify (TODO))
 - [x] More context menu options for tracks (Add to Playlist, Add to Crate, Add to Flow (does not auto-connect to any nodes))
 - [x] Drag-to-reorder playlist songs
@@ -13,4 +13,4 @@
 - [x] Need to have a tempo-lock tab in Prepare mode (need to think about how we incorporate and navigate the various sub-tools anyway!). Add "normalise tempo" right-click context menu option to track which opens the tab with the track loaded
 - [x] In Flow editor, we still want to be able to browse tracks in the usual way. I think the layout will be `| <normal sidebar including library> | <flow canvas> | <suggestions (hideable)>`. Rekordbox has a suggestions pane that pops out - they use another set of vertically stacked icons on the RHS to control it.
 - [ ] In terms of layout in Prepare mode, I think we can have the vertical icon stacks determine the browsing options available (sources or collections of music - what are we operating on) and horizontal TABS that contain the various tools we use to do things (what are we doing to the media). that means that the exploring tracks experience is consistent in both modes
-- [ ] In Prepare mode, setting a cue point with C should jump the playhead to that cue. Only relevant with Quantise on but implement generically
+- [x] In Prepare mode, setting a cue point with C should jump the playhead to that cue. Only relevant with Quantise on but implement generically

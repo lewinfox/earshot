@@ -125,6 +125,23 @@ pub struct Marks<'a> {
     pub loop_active: bool,
 }
 
+/// Every beat from `t_lo` to `t_hi`, carried on past both ends of the track (into the
+/// lead-in before 0 s too): its time, and its bar number if it's a bar's 1 (counted as
+/// [`Beatgrid::bar_beat`] counts them: 0, -1, … before the first).
+fn beats(g: &Beatgrid, t_lo: f64, t_hi: f64) -> impl Iterator<Item = (f64, Option<i64>)> + '_ {
+    let (first, last) = (
+        g.beat_at(t_lo).ceil() as i64,
+        g.beat_at(t_hi).floor() as i64,
+    );
+    (first..=last).map(move |i| {
+        let t = g.time_at(i as f64);
+        let bar = (g.position_of(i) == 1)
+            .then(|| g.bar_beat(t).map(|(bar, _)| bar))
+            .flatten();
+        (t, bar)
+    })
+}
+
 /// Draw the scrolling waveform: `pos` at the centre, `half` track seconds each side.
 pub fn scrolling(
     painter: &Painter,
@@ -216,18 +233,24 @@ pub fn scrolling(
     }
 
     if let Some(g) = marks.grid {
-        // Every beat in view, carried on past both ends of the track.
-        let (first, last) = (
-            g.beat_at(t_lo).ceil() as i64,
-            g.beat_at(t_hi).floor() as i64,
-        );
-        for i in first..=last {
-            let x = x_of(g.time_at(i as f64));
-            if g.position_of(i) == 1 {
+        // Each bar's 1 gets its number while there's room for it.
+        let bar_w = (4.0 * 60.0 / g.mean_bpm() / spp) as f32;
+        for (t, bar) in beats(g, t_lo, t_hi) {
+            let x = x_of(t);
+            if let Some(bar) = bar {
                 painter.line_segment(
                     [pos2(x, rect.top()), pos2(x, rect.bottom())],
                     Stroke::new(1.5_f32, THEME.downbeat),
                 );
+                if bar_w > 28.0 {
+                    painter.text(
+                        pos2(x + 3.0, rect.top() + 1.0),
+                        egui::Align2::LEFT_TOP,
+                        bar.to_string(),
+                        egui::FontId::proportional(9.0),
+                        THEME.downbeat,
+                    );
+                }
             } else {
                 let s = Stroke::new(1.0_f32, THEME.beat_tick);
                 let tick = rect.height() * 0.18;
@@ -422,4 +445,42 @@ pub fn thumbnail(ctx: &egui::Context, id: i64, preview: &[u8]) -> TextureHandle 
         }
     }
     ctx.load_texture(format!("thumb-{id}"), img, TextureOptions::LINEAR)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use earshot_engine::beatgrid::{Constant, GridModel};
+
+    /// The grid carries on into the lead-in and past the end, bars numbered as the
+    /// deck counts them: 0, -1, … before the first 1.
+    #[test]
+    fn grid_lines_and_bar_numbers_past_both_ends() {
+        // 120 BPM (a bar is 2 s), the first 1 at 0.5 s, a 10 s track.
+        let model = GridModel::Constant(Constant::new(120.0, 0.5));
+        let g = Beatgrid::from_model(model, 10.0).unwrap();
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+
+        // The lead-in: beats before 0 s, the bar before the first numbered 0.
+        let lead: Vec<_> = beats(&g, -4.0, 0.6).collect();
+        assert_eq!(
+            lead.len(),
+            10,
+            "every half second from -4 s to 0.5 s: {lead:?}"
+        );
+        assert!(near(lead[0].0, -4.0), "{lead:?}");
+        let bars: Vec<_> = lead.iter().filter_map(|&(t, b)| Some((t, b?))).collect();
+        assert_eq!(bars.len(), 3, "{lead:?}");
+        assert!(near(bars[0].0, -3.5) && bars[0].1 == -1, "{bars:?}");
+        assert!(near(bars[1].0, -1.5) && bars[1].1 == 0, "{bars:?}");
+        assert!(near(bars[2].0, 0.5) && bars[2].1 == 1, "{bars:?}");
+
+        // Past the end: the beats go on, and so do the bar numbers.
+        let tail: Vec<_> = beats(&g, 9.0, 14.0).collect();
+        assert!(tail.iter().any(|&(t, _)| t > 13.0), "{tail:?}");
+        let bars: Vec<_> = tail.iter().filter_map(|&(t, b)| Some((t, b?))).collect();
+        assert_eq!(bars.len(), 2, "{tail:?}");
+        assert!(near(bars[0].0, 10.5) && bars[0].1 == 6, "{bars:?}");
+        assert!(near(bars[1].0, 12.5) && bars[1].1 == 7, "{bars:?}");
+    }
 }

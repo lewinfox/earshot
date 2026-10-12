@@ -325,6 +325,8 @@ pub enum DeckControl {
     GridNudge(f64),
     /// Load the track selected in the library.
     LoadSelected,
+    /// Load the previous (-1) or next (1) track in the library's focused list.
+    LoadStep(i32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -382,6 +384,7 @@ impl DeckControl {
             SaveMemory => spec("save_memory", "save the cue (or loop) to memory", Button),
             GridNudge(_) => spec("grid_nudge", "nudge the grid", Button),
             LoadSelected => spec("load_selected", "load the selected track", Button),
+            LoadStep(_) => spec("load_step", "load the next track", Button),
         }
     }
 
@@ -442,6 +445,7 @@ impl DeckControl {
             "beatloop" => BeatLoop(arg.filter(|b| *b > 0.0)?),
             "grid_nudge" => GridNudge(arg?),
             "load_selected" => LoadSelected,
+            "load_step" => LoadStep(arg.filter(|n| n.fract() == 0.0 && *n != 0.0)? as i32),
             _ => *Self::ALL
                 .iter()
                 .find(|c| c.spec().name == name && !c.parametrised())?,
@@ -457,6 +461,7 @@ impl DeckControl {
                 | DeckControl::HotcueClear(_)
                 | DeckControl::BeatLoop(_)
                 | DeckControl::GridNudge(_)
+                | DeckControl::LoadStep(_)
         )
     }
 
@@ -501,7 +506,7 @@ impl DeckControl {
             Pfl if pressed => engine(EngineCmd::Pfl(Set::Toggle)),
             Play | Sync | Quantize | Keylock | Pfl => None,
             Cue => engine(EngineCmd::Cue(press)),
-            SetCue if pressed => engine(EngineCmd::SetCue(None)),
+            SetCue => on_press(DeckCmd::SetCue),
             Hotcue(slot) => engine(EngineCmd::Hotcue { slot, press }),
             HotcueClear(slot) if pressed => engine(EngineCmd::HotcueClear(slot)),
             JumpBack => on_press(DeckCmd::Jump { forward: false }),
@@ -528,6 +533,7 @@ impl DeckControl {
             SaveMemory => on_press(DeckCmd::SaveMemory),
             GridNudge(ms) => on_press(DeckCmd::Grid(GridOp::Nudge(ms))),
             LoadSelected if pressed => Some(Command::View(ViewCmd::LoadSelected(deck))),
+            LoadStep(n) if pressed => Some(Command::View(ViewCmd::LoadAdjacent(deck, n))),
             _ => None,
         }
     }
@@ -571,7 +577,7 @@ impl DeckControl {
             // ours, so a MIDI knob maps onto it the same way.
             Filter => Some((MixxxGroup::QuickEffect, "super1".into())),
             LoadSelected => key("LoadSelectedTrack"),
-            SaveMemory | GridNudge(_) => None,
+            SaveMemory | GridNudge(_) | LoadStep(_) => None,
         }
     }
 }
@@ -745,6 +751,9 @@ impl Control {
                 Some(_) => "next track".into(),
                 None => self.spec().help.into(),
             },
+            Control::Deck(_, DeckControl::LoadStep(n)) => {
+                format!("load the {} track", if n < 0 { "previous" } else { "next" })
+            }
             Control::Deck(deck, DeckControl::LoadSelected) => match deck_letter(deck) {
                 Some(l) => format!("load to deck {l}"),
                 None => "load the selected track".into(),

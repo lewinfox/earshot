@@ -47,10 +47,13 @@ impl Panel for TopBar<'_> {
                     ui.selectable_value(&mut mode, Mode::Prepare, "Prepare")
                         .on_hover_text("One player: set cues, fix beat grids, build playlists");
                     ui.selectable_value(&mut mode, Mode::Perform, "Perform")
-                        .on_hover_text("Two decks and the mixer");
+                        .on_hover_text("Two or four decks and the mixer");
                 });
             if mode != cx.prefs.mode {
                 cx.send(ViewCmd::SetMode(mode));
+            }
+            if mode == Mode::Perform {
+                deck_count(ui, cx);
             }
             ui.menu_button("Menu", |ui| {
                 ui.menu_button("Import", |ui| {
@@ -191,6 +194,32 @@ impl TopBar<'_> {
 }
 
 /// The MIDI messages last received, newest first.
+/// Perform's 2 / 4 deck toggle. Back to two only once decks 3 and 4 have stopped, so
+/// nothing plays out of sight.
+fn deck_count(ui: &mut Ui, cx: &mut Cx) {
+    let four = cx.prefs.four_decks;
+    let hidden_playing = cx
+        .engine
+        .snap
+        .as_ref()
+        .is_some_and(|s| s.live().iter().skip(2).any(|d| d.playing));
+    let gap = std::mem::replace(&mut ui.spacing_mut().item_spacing.x, 2.0);
+    let r = ui
+        .add_enabled(!hidden_playing, egui::Button::selectable(!four, "2 decks"))
+        .on_hover_text("Two decks")
+        .on_disabled_hover_text("Stop decks 3 and 4 first");
+    if r.clicked() && four {
+        cx.send(ViewCmd::FourDecks(false));
+    }
+    let r = ui
+        .add(egui::Button::selectable(four, "4 decks"))
+        .on_hover_text("Four decks, smaller");
+    if r.clicked() && !four {
+        cx.send(ViewCmd::FourDecks(true));
+    }
+    ui.spacing_mut().item_spacing.x = gap;
+}
+
 pub struct MidiLog<'a>(pub &'a VecDeque<String>);
 
 impl Panel for MidiLog<'_> {

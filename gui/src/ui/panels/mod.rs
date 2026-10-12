@@ -62,6 +62,8 @@ pub struct CoreView<'a> {
     pub collections: &'a Collections,
     /// The Flow on the canvas, if it has been saved.
     pub open_flow: Option<CollectionId>,
+    /// How many decks Perform shows (two or four).
+    pub decks: usize,
 }
 
 /// The engine as it is this frame, read once by the shell before anything is drawn.

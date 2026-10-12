@@ -22,8 +22,8 @@ use super::library::Library;
 use super::session::{self, Change, DeckSession, PreviewSession, SLOTS};
 use super::store::{GridSource, Reader, Store, StoreCmd};
 
-/// How many decks the engine runs (it can run up to `earshot_engine::MAX_DECKS`).
-pub const DECKS: usize = 2;
+/// How many decks the engine runs: all it can. Perform shows two or four of them.
+pub const DECKS: usize = MAX_DECKS;
 
 /// The engine's id for session `index` (a deck below [`DECKS`], or [`MAX_DECKS`] for
 /// Prepare's player).
@@ -730,8 +730,7 @@ mod tests {
     fn deck_ids_for_sessions() {
         assert_eq!(deck_id(0), Ok(DeckId::new(0).unwrap()));
         assert_eq!(deck_id(MAX_DECKS), Ok(DeckId::PREPARE));
-        // Decks the engine isn't running.
-        assert!(deck_id(DECKS).is_err());
+        assert!(deck_id(MAX_DECKS + 1).is_err());
         let inner = new_player();
         assert_eq!(inner.lock().unwrap().decks.len(), MAX_DECKS + 1);
     }

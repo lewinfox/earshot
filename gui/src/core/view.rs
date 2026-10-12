@@ -103,6 +103,11 @@ pub enum ViewCmd {
     FocusSearch,
     /// Load the selected track onto this deck.
     LoadSelected(DeckId),
+    /// Move the selection in the focused list (negative is up) and load the track it
+    /// lands on onto this deck: the previous or next track.
+    LoadAdjacent(DeckId, i32),
+    /// Four decks in Perform (false: two).
+    FourDecks(bool),
     SetMode(Mode),
     /// Show a source in the library's left pane (`None` closes the pane).
     Source(Option<Source>),

@@ -11,7 +11,6 @@ use crate::core::collections::{CollectionCmd, CollectionId, CollectionKind, Flow
 use crate::core::command::{Command, DeckCmd, PreviewCmd, ViewCmd};
 use crate::core::edit::EditCmd;
 use crate::core::index::LibraryCmd;
-use crate::core::player::DECKS;
 use crate::core::tempo_lock::TempoLockCmd;
 use crate::core::track::{AnalysisState, Track, TrackId};
 use crate::core::view::{Mode, Tool};
@@ -174,7 +173,7 @@ pub fn track_menu(ui: &mut Ui, sel: &[TrackId], v: &CoreView, at: MenuAt, out: &
     let Some(&first) = sel.first() else { return };
     let n = sel.len();
     if n == 1 {
-        load_items(ui, first, out);
+        load_items(ui, first, v.decks, out);
         ui.separator();
     }
     add_to_menus(ui, sel, v, out);
@@ -230,8 +229,9 @@ fn count(verb: &str, n: usize) -> String {
 }
 
 /// Load onto a deck or Prepare's player, or preview in the headphones.
-fn load_items(ui: &mut Ui, id: TrackId, out: &mut Vec<Command>) {
-    let players = DeckId::first(DECKS).chain([DeckId::PREPARE]);
+/// `decks`: how many decks Perform shows.
+fn load_items(ui: &mut Ui, id: TrackId, decks: usize, out: &mut Vec<Command>) {
+    let players = DeckId::first(decks).chain([DeckId::PREPARE]);
     for deck in players {
         let label = match deck_letter(deck) {
             Some(l) => format!("Load to deck {l}"),

@@ -9,7 +9,8 @@
 use std::sync::{Arc, Mutex};
 
 use earshot_engine::{
-    Command as EngineCommand, CommandSender, DeckCmd as EngineCmd, DeckId, ParamId, Routing, Set,
+    Command as EngineCommand, CommandSender, DeckCmd as EngineCmd, DeckId, LEAD_IN, ParamId,
+    Routing, Set,
 };
 
 use super::bus::step_size;
@@ -68,6 +69,9 @@ pub enum DeckCmd {
     Grid(GridOp),
     /// Put a library track on the deck. The UI runs it (it shows the track at once).
     Load(i64),
+    /// Set the cue point at the playhead and put the playhead on it: snapped to the
+    /// beat when quantising, so then the playhead moves to the beat.
+    SetCue,
     /// Save the cue point (or the loop while looping) as a memory cue.
     SaveMemory,
     /// Go to a memory cue (it becomes the cue point) or start a memory loop.
@@ -180,6 +184,7 @@ pub fn dispatch(player: &Player, store: &Store, cmd: Command) -> Result<Option<C
     let looping = snap.is_some_and(|s| s.loop_active);
     let session = inner.session(deck);
     let (jump_size, loop_size, track) = (session.jump_size, session.loop_size, session.track_id);
+    let grid = session.grid.clone();
     match cmd {
         DeckCmd::Jump { forward } => {
             let beats = if forward { jump_size } else { -jump_size };
@@ -207,6 +212,20 @@ pub fn dispatch(player: &Player, store: &Store, cmd: Command) -> Result<Option<C
         DeckCmd::SeekFraction(at) => {
             let duration = snap.map_or(0.0, |s| s.duration);
             inner.send(engine(EngineCmd::Seek(at.min(1.0) * duration)))?;
+        }
+        DeckCmd::SetCue => {
+            let Some(d) = snap else { return Ok(None) };
+            match grid.filter(|_| d.quantize) {
+                // Snapped to the beat: the playhead goes there too, so what you hear
+                // next starts from the cue.
+                Some(g) => {
+                    let at = g.quantize(d.position).max(-LEAD_IN);
+                    inner.send(engine(EngineCmd::SetCue(Some(at))))?;
+                    inner.send(engine(EngineCmd::Seek(at)))?;
+                }
+                // Already at the playhead: the engine takes its own exact position.
+                None => inner.send(engine(EngineCmd::SetCue(None)))?,
+            }
         }
         DeckCmd::SaveMemory => {
             let (Some(track), Some(d)) = (track, snap) else {

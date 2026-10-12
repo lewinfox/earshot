@@ -341,6 +341,16 @@ impl EarshotApp {
                     self.load(Some(deck), id);
                 }
             }
+            ViewCmd::LoadAdjacent(deck, n) => {
+                let from = lib.focused_track(flow);
+                lib.browse(n);
+                let to = lib.focused_track(flow);
+                // Not again at either end of the list.
+                if let Some(id) = to.filter(|_| to != from) {
+                    self.load(Some(deck), id);
+                }
+            }
+            ViewCmd::FourDecks(on) => self.prefs.four_decks = on,
             ViewCmd::SetMode(m) => self.prefs.mode = m,
             ViewCmd::Source(s) => self.prefs.layout_mut().source = s,
             ViewCmd::Aside(a) => self.prefs.layout_mut().aside = a,
@@ -416,6 +426,7 @@ impl EarshotApp {
             history: &self.history,
             collections: &self.collections,
             open_flow: flow.flow,
+            decks: self.prefs.decks().len(),
         };
         lib.suggest
             .refresh(&view, &decks, prepare.as_ref(), selected);
@@ -430,6 +441,7 @@ impl EarshotApp {
                 history: &self.history,
                 collections: &self.collections,
                 open_flow: self.panels.flow.flow,
+                decks: self.prefs.decks().len(),
             },
             engine: &self.frame,
             theme: &THEME,

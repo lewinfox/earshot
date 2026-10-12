@@ -1,19 +1,22 @@
 //! The mixer between the decks, laid out like Mixxx's: each channel has gain, high /
-//! mid / low EQ and filter knobs, a headphone cue button and a fader with a level
-//! meter; the main meters and the crossfader sit in the middle, main and headphone
-//! knobs on the right. Channels on the crossfader's left side sit left of the middle,
-//! the others mirrored on the right.
+//! mid / low EQ and filter knobs, a headphone cue button, a fader with a level
+//! meter and its crossfader side (L, THRU or R) under the fader; the main meters and
+//! the crossfader sit in the middle, main and headphone knobs on the right. Channels
+//! on the crossfader's left side (decks 1 and 3) sit left of the middle, the others
+//! mirrored on the right. Two channels or four, as many as decks are shown.
 //!
 //! Every control is bound to its entry in the control registry: it shows the engine's
 //! current value (so keyboard and MIDI moves show) and sends the registry's
 //! [`Command`] when changed.
 
 use earshot_engine::loudness::TARGET_LUFS;
-use earshot_engine::{DeckId, EQ_HIGH, EQ_LOW, EQ_MID, EngineSnapshot, MasterParam, XfSide};
+use earshot_engine::{
+    DeckCmd as EngineCmd, DeckId, EQ_HIGH, EQ_LOW, EQ_MID, EngineSnapshot, MasterParam, XfSide,
+};
 use egui::{Rect, Response, Sense, Ui, vec2};
 
 use crate::core::bus::{Control, DeckControl};
-use crate::core::command::Command;
+use crate::core::command::{Command, DeckCmd};
 use crate::ui::panels::{Cx, Panel};
 use crate::ui::theme::THEME;
 use crate::ui::widgets::{Fader, HwButton, Knob, Meter, Range, held};
@@ -34,6 +37,8 @@ const PFL_H: f32 = 18.0;
 /// Channel faders and meters.
 const FADER_TOP: f32 = PFL_TOP + PFL_H + 6.0;
 const FADER_BOTTOM: f32 = 4.0 * ROW;
+/// The crossfader side button, under each channel fader.
+const XF_SIDE_TOP: f32 = FADER_BOTTOM - PFL_H;
 const XF_TOP: f32 = FADER_BOTTOM + 6.0;
 const XF_H: f32 = 20.0;
 const STRIP_W: f32 = KNOB_COL + FADER_COL + VU_W;
@@ -165,7 +170,7 @@ pub fn show(
         if held(ui, &r) == Some(true) {
             out.extend(ch(DeckControl::Pfl).command(1.0));
         }
-        let fader_rect = at(fader_x, FADER_TOP, FADER_COL, FADER_BOTTOM - FADER_TOP);
+        let fader_rect = at(fader_x, FADER_TOP, FADER_COL, XF_SIDE_TOP - 2.0 - FADER_TOP);
         bound(ui, shared, ch(DeckControl::Volume), out, |ui, range, v| {
             ui.put(
                 fader_rect,
@@ -173,6 +178,32 @@ pub fn show(
                     .colour(colour),
             )
         });
+        // Which side of the crossfader the channel is on: click for the next.
+        let side = shared.map_or(XfSide::default_for(deck), |s| s.deck(deck).crossfader);
+        let (label, tip) = match side {
+            XfSide::Left => ("L", "On the crossfader's left"),
+            XfSide::Thru => ("THRU", "Not on the crossfader: always heard"),
+            XfSide::Right => ("R", "On the crossfader's right"),
+        };
+        let r = ui
+            .put(
+                at(fader_x + 2.0, XF_SIDE_TOP, FADER_COL - 4.0, PFL_H),
+                HwButton::new(label, colour, vec2(FADER_COL - 4.0, PFL_H))
+                    .font(8.0)
+                    .lit(side != XfSide::Thru),
+            )
+            .on_hover_text(format!("{tip}. Click: L, THRU, R"));
+        if r.clicked() {
+            let next = match side {
+                XfSide::Left => XfSide::Thru,
+                XfSide::Thru => XfSide::Right,
+                XfSide::Right => XfSide::Left,
+            };
+            out.push(Command::Deck(
+                deck,
+                DeckCmd::Engine(EngineCmd::Crossfader(next)),
+            ));
+        }
         let level = shared.map_or(0.0, |s| s.deck(deck).vu);
         ui.put(
             at(vu_x, FADER_TOP, VU_W, FADER_BOTTOM - FADER_TOP),

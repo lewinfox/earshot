@@ -55,9 +55,11 @@ impl Binding {
         }
     }
 
-    /// Whether holding the key down repeats it (browsing does; decks don't).
+    /// Whether holding the key down repeats it: browsing and grid nudges do (a nudge
+    /// is a hair's width on screen); the decks' buttons don't.
     pub fn repeats(&self) -> bool {
         matches!(self.control.spec().kind, Kind::Relative)
+            || matches!(self.control, Control::Deck(_, DeckControl::GridNudge(_)))
     }
 
     pub fn describe(&self) -> String {
@@ -395,7 +397,7 @@ mod tests {
         ));
         assert!(matches!(
             press(Prepare, "C", false),
-            Some(Command::Deck(_, DeckCmd::Engine(EngineCmd::SetCue(None))))
+            Some(Command::Deck(_, DeckCmd::SetCue))
         ));
         assert!(matches!(
             press(Prepare, "M", false),
@@ -415,6 +417,27 @@ mod tests {
             press(Prepare, "Enter", false),
             Some(Command::View(ViewCmd::LoadSelected(d))) if d == p
         ));
+        // Ctrl ↑ / ↓ load the previous and next track; Ctrl alone does nothing else.
+        let km = Keymap::built_in();
+        let ctrl = |key| {
+            km.find_with_ctrl(Prepare, key, false, true)
+                .and_then(Binding::press)
+        };
+        assert!(matches!(
+            ctrl("Down"),
+            Some(Command::View(ViewCmd::LoadAdjacent(d, 1))) if d == p
+        ));
+        assert!(matches!(
+            ctrl("Up"),
+            Some(Command::View(ViewCmd::LoadAdjacent(_, -1)))
+        ));
+        assert!(ctrl("Space").is_none());
+        assert!(
+            km.find_with_ctrl(Mode::Perform, "Down", false, true)
+                .is_none()
+        );
+        let b = km.find_with_ctrl(Prepare, "Down", false, true).unwrap();
+        assert_eq!(b.label(), "Ctrl ↓");
         // Browsing repeats while held, in both modes.
         let km = Keymap::built_in();
         for mode in [Mode::Prepare, Mode::Perform] {
@@ -427,6 +450,7 @@ mod tests {
             ));
         }
         assert!(!km.find(Prepare, "Space", false).unwrap().repeats());
+        assert!(km.find(Prepare, "Left", true).unwrap().repeats());
     }
 
     #[test]

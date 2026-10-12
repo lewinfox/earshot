@@ -69,6 +69,8 @@ prepare  7            prepare  beatloop 8
 prepare  8            prepare  beatloop 16
 prepare  9            prepare  beatloop 32
 prepare  Enter        prepare  load_selected
+prepare  Ctrl+Up      prepare  load_step -1
+prepare  Ctrl+Down    prepare  load_step 1
 
 # ---- Library (both modes) ---------------------------------------------------------------
 any  Up     library  browse -1
