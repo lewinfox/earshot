@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use earshot_engine::{
-    Command, DECKS, HOTCUES, OutputInfo, OutputOptions, PLAYERS, PREP, Shared, TempoRange,
+    Command, DeckCmd, EngineSnapshot, HOTCUES, Monitor, OutputInfo, OutputOptions, TempoRange,
 };
 use egui::{Key, RichText, Stroke, Ui, vec2};
 
@@ -25,7 +25,7 @@ use crate::core::analysis::{Analyser, Mode};
 use crate::core::library::{self, Library};
 use crate::core::midi::{self, Midi};
 use crate::core::controls::CHANNELS;
-use crate::core::player::{self, AudioSettings, GridOp, Player};
+use crate::core::player::{self, DECKS, PLAYERS, PREP, AudioSettings, GridOp, Player};
 use crate::core::suggest::{self, Reference};
 use crate::core::store::{self, EventSink, Store, StoreCmd, StoreEvent};
 use crate::core::{Event, Sink, controls};
@@ -35,7 +35,9 @@ pub struct EarshotApp {
     lib: Arc<Library>,
     sink: Sink,
     rx: Receiver<Event>,
-    shared: Option<Arc<Shared>>,
+    shared: Option<Monitor>,
+    /// The engine's state for this frame.
+    snap: Option<EngineSnapshot>,
     audio: Result<OutputInfo, String>,
     _midi: Midi,
     midi_ports: Vec<String>,
@@ -189,7 +191,7 @@ impl EarshotApp {
             .unwrap_or_default();
         player.lock().unwrap().routing = audio_settings.routing;
         let audio = start_audio(&player, &audio_settings);
-        let shared = player.lock().unwrap().shared();
+        let shared = player.lock().unwrap().monitor();
 
         let store = Store::open(&data_dir().join(store::FILE_NAME), store_sink(&sink))
             .map_err(|e| e.to_string())?;
@@ -203,6 +205,7 @@ impl EarshotApp {
             sink,
             rx,
             shared,
+            snap: None,
             audio,
             _midi: Midi::default(),
             midi_ports: vec![],
@@ -267,17 +270,19 @@ impl EarshotApp {
     }
 
     fn set_tempo_range(&mut self, deck: usize, range: TempoRange) {
-        if let Err(e) = self.player.lock().unwrap().send(Command::TempoRange { deck, range }) {
+        let Ok(id) = player::deck_id(deck) else { return };
+        let cmd = Command::Deck(id, DeckCmd::TempoRange(range));
+        if let Err(e) = self.player.lock().unwrap().send(cmd) {
             eprintln!("tempo range: {e}");
         }
     }
 
     /// Each deck's tempo range, as the engine has it.
     fn tempo_ranges(&self) -> [TempoRange; 2] {
-        let Some(sh) = &self.shared else {
+        let Some(sh) = &self.snap else {
             return Default::default();
         };
-        [0, 1].map(|d| TempoRange::from_index(sh.decks[d].rate_range.load(Relaxed)))
+        [0, 1].map(|d| sh.decks[d].range)
     }
 
     // ---- Prepare mode -----------------------------------------------------------------
@@ -301,8 +306,9 @@ impl EarshotApp {
             (Key::ArrowLeft, false) => self.control(g, "beatjump_backward", 1.0),
             (Key::ArrowRight, false) => self.control(g, "beatjump_forward", 1.0),
             (Key::Space, _) => {
-                let on = controls::current(&self.player.lock().unwrap(), g, "play").unwrap_or(false);
-                self.control(g, "play", if on { 0.0 } else { 1.0 });
+                if let Err(e) = controls::toggle(&mut self.player.lock().unwrap(), g, "play") {
+                    eprintln!("play: {e}");
+                }
             }
             (Key::C, _) => self.control(g, "cue_set", 1.0),
             (Key::M, _) => self.save_memory(PREP),
@@ -334,20 +340,17 @@ impl EarshotApp {
     /// Save the deck's loop (while looping) or cue point to the track's memory.
     fn save_memory(&mut self, deck: usize) {
         let (Some(sh), Some(track)) = (
-            self.shared.clone(),
+            self.snap,
             self.player.lock().unwrap().decks[deck].track_id,
         ) else {
             return;
         };
         let d = &sh.decks[deck];
-        let (start, end) = if d.loop_active.load(Relaxed) {
-            (d.loop_in.get(), Some(d.loop_out.get()))
-        } else {
-            (d.cue_point.get(), None)
+        let (start, end) = match (d.loop_active, d.loop_in, d.loop_out) {
+            (true, Some(start), Some(end)) => (start, Some(end)),
+            (true, _, _) => return,
+            (false, _, _) => (d.cue_point, None),
         };
-        if !start.is_finite() || end.is_some_and(|e| !e.is_finite()) {
-            return;
-        }
         // Prepare's list is updated from the `Memories` event that comes back.
         self.lib
             .store
@@ -356,19 +359,19 @@ impl EarshotApp {
 
     /// Go to a memory cue (it becomes the cue point) or start a memory loop.
     fn recall_memory(&mut self, deck: usize, m: store::Memory) {
+        let Ok(id) = player::deck_id(deck) else { return };
         let mut inner = self.player.lock().unwrap();
         let sent = match m.end {
-            Some(end) => inner.send(Command::SetLoop {
-                deck,
-                start: m.start,
-                end,
-            }),
+            Some(end) => inner.send(Command::Deck(
+                id,
+                DeckCmd::SetLoop {
+                    start: m.start,
+                    end,
+                },
+            )),
             None => inner
-                .send(Command::SetCue {
-                    deck,
-                    at: Some(m.start),
-                })
-                .and_then(|_| inner.send(Command::Seek { deck, seconds: m.start })),
+                .send(Command::Deck(id, DeckCmd::SetCue(Some(m.start))))
+                .and_then(|_| inner.send(Command::Deck(id, DeckCmd::Seek(m.start)))),
         };
         if let Err(e) = sent {
             eprintln!("memory cue: {e}");
@@ -377,7 +380,7 @@ impl EarshotApp {
 
     /// Save any player's hot cues that changed since they were loaded or last saved.
     fn save_hotcues(&mut self) {
-        let Some(sh) = self.shared.clone() else { return };
+        let Some(sh) = self.snap else { return };
         for d in 0..PLAYERS {
             let (track, generation) = {
                 let inner = self.player.lock().unwrap();
@@ -385,13 +388,10 @@ impl EarshotApp {
             };
             // Only once the engine shows this load (its hot cues came with it).
             let Some(track) = track else { continue };
-            if sh.decks[d].generation.load(Relaxed) != generation {
+            if sh.decks[d].generation != generation {
                 continue;
             }
-            let now = sh.decks[d].hotcues.each_ref().map(|h| {
-                let t = h.get();
-                t.is_finite().then_some(t)
-            });
+            let now: [Option<f64>; HOTCUES] = sh.decks[d].hotcues;
             match self.hotcues_saved[d] {
                 Some((g, saved)) if g == generation && saved == now => {}
                 Some((g, _)) if g == generation => {
@@ -573,10 +573,10 @@ impl EarshotApp {
 
     /// Note which deck started playing last, and mark tracks played after 30 s.
     fn track_plays(&mut self) {
-        let Some(sh) = &self.shared else { return };
+        let Some(sh) = &self.snap else { return };
         let now = Instant::now();
         for d in 0..2 {
-            let playing = sh.decks[d].playing.load(Relaxed);
+            let playing = sh.decks[d].playing;
             match (playing, self.play_started[d]) {
                 (true, None) => {
                     self.play_started[d] = Some(now);
@@ -598,17 +598,11 @@ impl EarshotApp {
     fn refresh_suggestions(&mut self) {
         // (deck, track, BPM as playing, how far the key has moved, playing)
         let on_deck = |d: usize| {
-            let sh = self.shared.as_ref()?;
+            let sh = &self.snap.as_ref()?.decks[d];
             let id = self.player.lock().unwrap().decks[d].track_id?;
-            let bpm = sh.decks[d].bpm.get();
             // How far the key has moved: not at all with keylock.
-            let speed = if sh.decks[d].keylock.load(Relaxed) {
-                1.0
-            } else {
-                sh.decks[d].tempo.get()
-            };
-            let playing = sh.decks[d].playing.load(Relaxed);
-            Some((d, id, bpm.is_finite().then_some(bpm), speed, playing))
+            let speed = if sh.keylock { 1.0 } else { sh.tempo };
+            Some((d, id, sh.bpm, speed, sh.playing))
         };
         let source = match self.suggest.source {
             Source::Master => [self.last_started, Some(0), Some(1)]
@@ -760,17 +754,16 @@ impl EarshotApp {
                 playing: true,
             });
         }
-        let sh = self.shared.as_ref()?;
-        let d = sh.preview_duration.get();
-        let at = if d > 0.0 {
-            sh.preview_position.get() / d
+        let sh = &self.snap.as_ref()?.preview;
+        let at = if sh.duration > 0.0 {
+            sh.position / sh.duration
         } else {
             0.0
         };
         Some(PreviewState {
             id: p.id,
             at: at as f32,
-            playing: sh.preview_playing.load(Relaxed),
+            playing: sh.playing,
         })
     }
 
@@ -787,7 +780,8 @@ impl EarshotApp {
                 self.audio_settings = settings;
                 self.preview = None;
                 self.audio = start_audio(&self.player, &self.audio_settings);
-                self.shared = self.player.lock().unwrap().shared();
+                self.shared = self.player.lock().unwrap().monitor();
+                self.snap = self.shared.as_ref().map(|m| m.snapshot());
                 for (deck, range) in ranges.into_iter().enumerate() {
                     self.set_tempo_range(deck, range);
                 }
@@ -1005,10 +999,10 @@ impl EarshotApp {
                 continue;
             }
             if toggle {
-                if pressed {
-                    let on = controls::current(&self.player.lock().unwrap(), group, control)
-                        .unwrap_or(false);
-                    self.control(group, control, if on { 0.0 } else { 1.0 });
+                if pressed
+                    && let Err(e) = controls::toggle(&mut self.player.lock().unwrap(), group, control)
+                {
+                    eprintln!("control {group} {control}: {e}");
                 }
                 continue;
             }
@@ -1228,9 +1222,10 @@ impl EarshotApp {
             "{avg:.0} fps · 1% {low:.0} · worst {:.0} ms",
             dts[0] * 1000.0
         );
-        if let Some(s) = &self.shared {
-            let block = s.last_block_frames.load(Relaxed) as f64;
-            let rate = s.sample_rate.load(Relaxed) as f64;
+        if let Some(m) = &self.shared {
+            let (snap, s) = (m.snapshot(), m.stats());
+            let block = snap.last_block_frames as f64;
+            let rate = snap.sample_rate as f64;
             let budget = if rate > 0.0 {
                 block / rate * 1000.0
             } else {
@@ -1258,10 +1253,11 @@ impl eframe::App for EarshotApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events(ctx);
         // Background analysis holds back while anything plays.
+        self.snap = self.shared.as_ref().map(|m| m.snapshot());
         let playing = self
-            .shared
+            .snap
             .as_ref()
-            .is_some_and(|sh| sh.decks.iter().any(|d| d.playing.load(Relaxed)));
+            .is_some_and(|sh| sh.live().iter().any(|d| d.playing));
         self.lib.analyser.set_playing(playing);
         self.keyboard(ctx);
         self.tick_hud(ctx);
@@ -1269,7 +1265,7 @@ impl eframe::App for EarshotApp {
         self.refresh_suggestions();
         let infos: [DeckInfo; PLAYERS] = std::array::from_fn(|d| self.deck_info(d));
         for (d, info) in infos.iter().enumerate() {
-            let sh = self.shared.as_ref().map(|s| &s.decks[d]);
+            let sh = self.snap.as_ref().map(|s| &s.decks[d]);
             self.decks[d].tick(ctx, sh, info);
         }
         let mut actions: Vec<Action> = vec![];
@@ -1340,7 +1336,7 @@ impl eframe::App for EarshotApp {
                             .inner_margin(egui::Margin::symmetric(8, 6))
                             .show(ui, |ui| {
                                 ui.set_width(mixer_w - 16.0);
-                                mixer::show(ui, self.shared.as_deref(), &mut actions);
+                                mixer::show(ui, self.snap.as_ref(), &mut actions);
                             });
                     });
                     self.decks[1].show(ui, w, height, &infos[1], &mut actions);

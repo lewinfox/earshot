@@ -6,9 +6,8 @@
 //! Every control shows the engine's current value (so keyboard and MIDI moves show)
 //! and sends changes through the control bus as an [`Action`].
 
-use std::sync::atomic::Ordering::Relaxed;
 
-use earshot_engine::Shared;
+use earshot_engine::EngineSnapshot;
 use earshot_engine::loudness::TARGET_LUFS;
 use egui::{Rect, Response, Sense, Ui, vec2};
 
@@ -124,7 +123,7 @@ pub const HEIGHT: f32 = XF_TOP + XF_H;
 /// an engine) and sends what the user changes.
 fn bound(
     ui: &mut Ui,
-    shared: Option<&Shared>,
+    shared: Option<&EngineSnapshot>,
     (group, key): (&'static str, &'static str),
     default: f64,
     actions: &mut Vec<Action>,
@@ -140,7 +139,7 @@ fn bound(
     }
 }
 
-pub fn show(ui: &mut Ui, shared: Option<&Shared>, actions: &mut Vec<Action>) {
+pub fn show(ui: &mut Ui, shared: Option<&EngineSnapshot>, actions: &mut Vec<Action>) {
     let (area, _) = ui.allocate_exact_size(vec2(WIDTH, HEIGHT), Sense::hover());
     let at =
         |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(area.min + vec2(x, y), vec2(w, h));
@@ -200,7 +199,7 @@ pub fn show(ui: &mut Ui, shared: Option<&Shared>, actions: &mut Vec<Action>) {
             GAIN.default,
             actions,
             |ui, v| {
-                let auto = shared.map_or(1.0, |s| s.decks[d].auto_gain.get());
+                let auto = shared.map_or(1.0, |s| s.decks[d].auto_gain);
                 ui.put(
                     at(fader_x, 0.0, FADER_COL, ROW),
                     Knob::new(&GAIN, v)
@@ -215,7 +214,7 @@ pub fn show(ui: &mut Ui, shared: Option<&Shared>, actions: &mut Vec<Action>) {
                 ))
             },
         );
-        let pfl = shared.is_some_and(|s| s.decks[d].pfl.load(Relaxed));
+        let pfl = shared.is_some_and(|s| s.decks[d].pfl);
         let r = ui
             .put(
                 at(fader_x + 2.0, PFL_TOP, FADER_COL - 4.0, PFL_H),
@@ -246,7 +245,7 @@ pub fn show(ui: &mut Ui, shared: Option<&Shared>, actions: &mut Vec<Action>) {
                 )
             },
         );
-        let level = shared.map_or(0.0, |s| s.decks[d].vu.get());
+        let level = shared.map_or(0.0, |s| s.decks[d].vu);
         ui.put(
             at(vu_x, FADER_TOP, VU_W, FADER_BOTTOM - FADER_TOP),
             Meter::new(level, vec2(VU_W - 2.0, FADER_BOTTOM - FADER_TOP)),
@@ -256,7 +255,7 @@ pub fn show(ui: &mut Ui, shared: Option<&Shared>, actions: &mut Vec<Action>) {
     // Main meters, left and right, between the channels.
     let main_x = KNOB_COL + FADER_COL + VU_W;
     for side in 0..2 {
-        let level = shared.map_or(0.0, |s| s.vu_main[side].get());
+        let level = shared.map_or(0.0, |s| s.mixer.vu_main[side]);
         ui.put(
             at(
                 main_x + CENTRE_W / 2.0 - VU_W + side as f32 * VU_W,
@@ -272,7 +271,7 @@ pub fn show(ui: &mut Ui, shared: Option<&Shared>, actions: &mut Vec<Action>) {
     let main_label = at(main_x, PFL_TOP, CENTRE_W, PFL_H);
     let now = ui.input(|i| i.time);
     let held = egui::Id::new("earshot-limit-held");
-    if shared.is_some_and(|s| s.limiting.get() > 0.5) {
+    if shared.is_some_and(|s| s.mixer.limiting > 0.5) {
         ui.ctx().data_mut(|d| d.insert_temp(held, now));
     }
     let limiting = ui

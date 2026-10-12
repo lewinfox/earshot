@@ -1,7 +1,7 @@
 //! The decks' side of the app: the audio engine, what is loaded on each deck, loading
 //! tracks and editing their beatgrids. Shared between the UI thread and the analysis
-//! threads behind one mutex; the UI reads playback state straight from the engine's
-//! atomics ([`Shared`]) without taking it.
+//! threads behind one mutex; the UI reads playback state from the engine's snapshots
+//! ([`Monitor`]) without taking it.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -9,12 +9,28 @@ use std::sync::{Arc, Mutex};
 use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::decode::{self, TrackAudio};
 use earshot_engine::{
-    Command, Engine, HOTCUES, PLAYERS, OutputInfo, OutputOptions, Routing, Shared, energy, loudness, waveform,
+    Command, CueSet, DeckCmd, DeckId, Engine, EngineSnapshot, LoadedTrack, Monitor, OutputInfo,
+    OutputOptions, PreviewCmd, Routing, Set, energy, loudness, waveform,
 };
 use serde::{Deserialize, Serialize};
 
 use super::analysis::Mode;
 use super::library::Library;
+
+/// Decks A and B (the engine can run up to `earshot_engine::MAX_DECKS`).
+pub const DECKS: usize = 2;
+/// The decks plus Prepare mode's player, which plays straight to the main output (no
+/// channel fader, crossfader or sync: see `DeckCmd::Direct`).
+pub const PLAYERS: usize = 3;
+/// Prepare mode's player.
+pub const PREP: usize = 2;
+
+/// Player `d`, if the app has it.
+pub fn deck_id(d: usize) -> Result<DeckId, String> {
+    DeckId::new(d)
+        .filter(|_| d < PLAYERS)
+        .ok_or_else(|| format!("no deck {d}"))
+}
 use super::store::{GridSource, Store, StoreCmd};
 
 #[derive(Default, Clone)]
@@ -31,6 +47,23 @@ pub struct DeckSlot {
     pub detail: Arc<Vec<u8>>,
     /// Bumped on every load, so the UI can rebuild its caches.
     pub generation: u64,
+    /// Linear.
+    pub auto_gain: f64,
+}
+
+impl DeckSlot {
+    /// What the engine needs to play this track again, with the grid as it is now.
+    /// (On a restart its cues come from the engine's last state instead.)
+    fn loaded(&self) -> Option<Arc<LoadedTrack>> {
+        Some(Arc::new(LoadedTrack {
+            track_id: self.track_id?,
+            generation: self.generation,
+            audio: self.audio.clone()?,
+            grid: self.grid.clone(),
+            cues: CueSet::default(),
+            auto_gain: self.auto_gain,
+        }))
+    }
 }
 
 pub struct Inner {
@@ -53,8 +86,12 @@ impl Inner {
             .send(cmd)
     }
 
-    pub fn shared(&self) -> Option<Arc<Shared>> {
-        self.engine.as_ref().map(|e| e.shared().clone())
+    pub fn monitor(&self) -> Option<Monitor> {
+        self.engine.as_ref().map(|e| e.monitor().clone())
+    }
+
+    pub fn snapshot(&self) -> Option<EngineSnapshot> {
+        self.engine.as_ref().map(|e| e.snapshot())
     }
 }
 
@@ -146,50 +183,56 @@ pub fn preview(player: &Player, store: &Store, id: i64, start: f64) -> Result<()
         return Ok(()); // another preview was asked for meanwhile
     }
     let start = start * audio.duration();
-    inner.send(Command::Preview { audio, start, gain })
+    inner.send(Command::Preview(PreviewCmd::Start { audio, start, gain }))
 }
 
 /// Pause or resume the preview.
 pub fn play_preview(player: &Player, on: bool) -> Result<(), String> {
-    player.lock().unwrap().send(Command::PreviewPlay(on))
+    player
+        .lock()
+        .unwrap()
+        .send(Command::Preview(PreviewCmd::Play(Set::from_bool(on))))
 }
 
 /// Move the preview to `at` (0..1 of the way in).
 pub fn seek_preview(player: &Player, at: f64) -> Result<(), String> {
     let mut inner = player.lock().unwrap();
-    let d = inner.shared().map_or(0.0, |s| s.preview_duration.get());
-    inner.send(Command::PreviewSeek(at * d))
+    let d = inner.snapshot().map_or(0.0, |s| s.preview.duration);
+    inner.send(Command::Preview(PreviewCmd::Seek(at * d)))
 }
 
 pub fn stop_preview(player: &Player) -> Result<(), String> {
     let mut inner = player.lock().unwrap();
     inner.preview_seq += 1;
-    inner.send(Command::PreviewStop)
+    inner.send(Command::Preview(PreviewCmd::Stop))
 }
 
-/// Start (or restart) audio and reload whatever was on the decks.
+/// Start (or restart) audio. On a restart the decks and mixer come back as they were:
+/// tracks, position, cues, loops, tempo, sync, EQ and faders.
 pub fn start_engine(player: &Player, opts: &OutputOptions) -> Result<OutputInfo, String> {
     let mut inner = player.lock().unwrap();
-    // Hot cues live in the engine: carry them over.
-    let hotcues = |d: usize| match inner.shared() {
-        Some(sh) => sh.decks[d].hotcues.each_ref().map(|h| {
-            let t = h.get();
-            t.is_finite().then_some(t)
-        }),
-        None => [None; HOTCUES],
-    };
-    let kept: Vec<_> = (0..PLAYERS).map(hotcues).collect();
-    inner.engine = None; // stop the old stream first so the device is free
-    let mut engine = Engine::start(opts)?;
-    for (deck, slot) in inner.decks.iter().enumerate() {
-        if let Some(audio) = &slot.audio {
-            engine.send(Command::Load {
-                deck,
-                audio: audio.clone(),
-                grid: slot.grid.clone(),
-                generation: 0,
-                hotcues: kept[deck],
-            })?;
+    // Stop the old stream first so the device is free, keeping its last state.
+    let last = inner.engine.take().map(|e| e.snapshot());
+    let mut engine = Engine::start(opts, PLAYERS)?;
+    engine.send(Command::Deck(deck_id(PREP)?, DeckCmd::Direct(Set::On)))?;
+    match last {
+        Some(snap) => {
+            let mut state = snap.state();
+            for (st, slot) in state.decks.iter_mut().zip(&inner.decks) {
+                st.track = slot.loaded();
+            }
+            engine.send(Command::Restore(Box::new(state)))?;
+        }
+        // Audio wasn't running (it failed to start last time): just the tracks.
+        None => {
+            for (d, slot) in inner.decks.iter().enumerate() {
+                if let Some(track) = slot.loaded() {
+                    engine.send(Command::Load {
+                        deck: deck_id(d)?,
+                        track,
+                    })?;
+                }
+            }
         }
     }
     let info = engine.info().clone();
@@ -203,9 +246,7 @@ pub fn start_engine(player: &Player, opts: &OutputOptions) -> Result<OutputInfo,
 /// Decode a library track and put it on a deck. Blocking (about a second): call it
 /// from a background thread.
 pub fn load_track(player: &Player, lib: &Library, deck: usize, id: i64) -> Result<(), String> {
-    if deck >= PLAYERS {
-        return Err("no such deck".into());
-    }
+    let deck_id = deck_id(deck)?;
     let reader = &lib.store.reader;
     let track = reader.track(id).map_err(|e| e.to_string())?;
     let path = reader.track_path(id).map_err(|e| e.to_string())?;
@@ -265,16 +306,20 @@ pub fn load_track(player: &Player, lib: &Library, deck: usize, id: i64) -> Resul
     let mut inner = player.lock().unwrap();
     inner.generation += 1;
     let generation = inner.generation;
+    let auto_gain = level.auto_gain();
     inner.send(Command::Load {
-        deck,
-        audio: audio.clone(),
-        grid: grid.clone(),
-        generation,
-        hotcues,
-    })?;
-    inner.send(Command::AutoGain {
-        deck,
-        gain: level.auto_gain(),
+        deck: deck_id,
+        track: Arc::new(LoadedTrack {
+            track_id: id,
+            generation,
+            audio: audio.clone(),
+            grid: grid.clone(),
+            cues: CueSet {
+                main: None,
+                hot: hotcues,
+            },
+            auto_gain,
+        }),
     })?;
     inner.decks[deck] = DeckSlot {
         track_id: Some(id),
@@ -286,6 +331,7 @@ pub fn load_track(player: &Player, lib: &Library, deck: usize, id: i64) -> Resul
         waveform: Arc::new(wave),
         detail: Arc::new(detail),
         generation,
+        auto_gain,
     };
     Ok(())
 }
@@ -305,9 +351,10 @@ pub enum GridOp {
 /// Edit a deck's grid. The deck gets it at once; the Store saves it afterwards (as a
 /// new grid row, with the track's BPM), outside the player lock.
 pub fn edit_grid(player: &Player, store: &Store, deck: usize, op: GridOp) -> Result<(), String> {
+    let deck_id = deck_id(deck)?;
     let mut inner = player.lock().unwrap();
-    let playhead = inner.shared().map_or(0.0, |s| s.decks[deck].position.get());
-    let slot = inner.decks.get(deck).ok_or("no such deck")?;
+    let playhead = inner.snapshot().map_or(0.0, |s| s.deck(deck_id).position);
+    let slot = &inner.decks[deck];
     let duration = slot.audio.as_ref().ok_or("deck is empty")?.duration();
     let grid = match &slot.grid {
         Some(g) => g.clone(),
@@ -334,8 +381,10 @@ pub fn edit_grid(player: &Player, store: &Store, deck: usize, op: GridOp) -> Res
     }
     .map_err(|e| e.to_string())?;
     let edited = Some(Arc::new(edited));
+    let generation = slot.generation;
     inner.send(Command::SetGrid {
-        deck,
+        deck: deck_id,
+        generation,
         grid: edited.clone(),
     })?;
     inner.decks[deck].grid = edited.clone();

@@ -4,11 +4,12 @@
 //! Buttons send 1 on press and 0 on release. Controls that the UI owns (library
 //! navigation, loading the selected track) are handed back to the caller to forward.
 
-use std::sync::atomic::Ordering::Relaxed;
+use earshot_engine::{
+    ChannelParam, Command, DeckCmd, DeckId, EQ_HIGH, EQ_LOW, EQ_MID, EngineSnapshot, MasterParam,
+    ParamId, Press, Set,
+};
 
-use earshot_engine::{Command, EQ_HIGH, EQ_LOW, EQ_MID, Press, Shared, TempoRange};
-
-use crate::core::player::Inner;
+use crate::core::player::{Inner, deck_id};
 
 pub enum Outcome {
     Done,
@@ -29,8 +30,12 @@ pub const FILTER_GROUPS: [&str; 2] = [
     "[QuickEffectRack1_[Channel2]]",
 ];
 
-fn deck_of(group: &str) -> Option<usize> {
-    CHANNELS.iter().position(|g| *g == group)
+fn deck_of(group: &str) -> Option<DeckId> {
+    deck_id(CHANNELS.iter().position(|g| *g == group)?).ok()
+}
+
+fn deck_in(groups: &[&str], group: &str) -> Option<DeckId> {
+    deck_id(groups.iter().position(|g| *g == group)?).ok()
 }
 
 /// EQ band (0 low, 1 mid, 2 high) for Mixxx's `parameter1..3`.
@@ -48,48 +53,53 @@ pub fn apply(inner: &mut Inner, group: &str, key: &str, value: f64) -> Result<Ou
         return Ok(Outcome::Ui);
     }
     if group == "[Master]" {
-        let cmd = match key {
-            "crossfader" => Command::Crossfader { value },
-            "gain" => Command::MainGain { value },
-            "balance" => Command::Balance { value },
-            "headGain" => Command::HeadGain { value },
-            "headMix" => Command::HeadMix { value },
+        let p = match key {
+            "crossfader" => MasterParam::Crossfader,
+            "gain" => MasterParam::Gain,
+            "balance" => MasterParam::Balance,
+            "headGain" => MasterParam::HeadGain,
+            "headMix" => MasterParam::HeadMix,
             _ => return Err(format!("unknown control {group} {key}")),
         };
-        inner.send(cmd)?;
+        inner.send(Command::Param(ParamId::Master(p), value))?;
         return Ok(Outcome::Done);
     }
-    if let Some(deck) = EQ_GROUPS.iter().position(|g| *g == group) {
+    let channel = |deck, p| Command::Param(ParamId::Channel(deck, p), value);
+    if let Some(deck) = deck_in(&EQ_GROUPS, group) {
         let band = eq_band(key).ok_or_else(|| format!("unknown control {group} {key}"))?;
-        inner.send(Command::Eq { deck, band, value })?;
+        inner.send(channel(deck, ChannelParam::Eq(band)))?;
         return Ok(Outcome::Done);
     }
-    if let Some(deck) = FILTER_GROUPS.iter().position(|g| *g == group) {
+    if let Some(deck) = deck_in(&FILTER_GROUPS, group) {
         if key != "super1" {
             return Err(format!("unknown control {group} {key}"));
         }
         // Mixxx's super1 is 0..1 with the filter off at 0.5.
-        inner.send(Command::Filter {
-            deck,
-            value: value * 2.0 - 1.0,
-        })?;
+        let value = value * 2.0 - 1.0;
+        inner.send(Command::Param(
+            ParamId::Channel(deck, ChannelParam::Filter),
+            value,
+        ))?;
         return Ok(Outcome::Done);
     }
     let deck = deck_of(group).ok_or_else(|| format!("unknown group {group}"))?;
+    let d = deck.index();
     let pressed = value > 0.0;
     let press = if pressed { Press::Down } else { Press::Up };
+    let set = Set::from_bool(pressed);
+    let dc = |c| Command::Deck(deck, c);
 
     // Parametrised keys first: hotcue_N_activate, hotcue_N_clear, beatloop_X_toggle.
     if let Some(rest) = key.strip_prefix("hotcue_") {
         let (n, action) = rest.split_once('_').ok_or("bad hotcue control")?;
         let slot = n
-            .parse::<usize>()
+            .parse::<u8>()
             .map_err(|e| e.to_string())?
             .checked_sub(1)
             .ok_or("hotcues start at 1")?;
         let cmd = match action {
-            "activate" => Command::Hotcue { deck, slot, press },
-            "clear" if pressed => Command::HotcueClear { deck, slot },
+            "activate" => dc(DeckCmd::Hotcue { slot, press }),
+            "clear" if pressed => dc(DeckCmd::HotcueClear(slot)),
             "clear" => return Ok(Outcome::Done),
             _ => return Err(format!("unknown control {group} {key}")),
         };
@@ -102,88 +112,62 @@ pub fn apply(inner: &mut Inner, group: &str, key: &str, value: f64) -> Result<Ou
     {
         if pressed {
             let beats = size.parse::<f64>().map_err(|e| e.to_string())?;
-            inner.send(Command::BeatLoop { deck, beats })?;
+            inner.send(dc(DeckCmd::BeatLoop(beats)))?;
         }
         return Ok(Outcome::Done);
     }
 
     let cmd = match key {
-        "play" => Command::Play { deck, on: pressed },
-        "cue_default" => Command::Cue { deck, press },
-        "sync_enabled" => Command::Sync { deck, on: pressed },
-        "quantize" => Command::Quantize { deck, on: pressed },
+        "play" => dc(DeckCmd::Play(set)),
+        "cue_default" => dc(DeckCmd::Cue(press)),
+        "sync_enabled" => dc(DeckCmd::Sync(set)),
+        "quantize" => dc(DeckCmd::Quantize(set)),
         // Put the cue point at the playhead (snapped when quantising).
-        "cue_set" if pressed => Command::SetCue { deck, at: None },
+        "cue_set" if pressed => dc(DeckCmd::SetCue(None)),
         "cue_set" => return Ok(Outcome::Done),
-        "keylock" => Command::Keylock { deck, on: pressed },
-        "pfl" => Command::Pfl { deck, on: pressed },
-        "volume" => Command::Volume { deck, value },
-        "pregain" => Command::Pregain { deck, value },
+        "keylock" => dc(DeckCmd::Keylock(set)),
+        "pfl" => dc(DeckCmd::Pfl(set)),
+        "volume" => channel(deck, ChannelParam::Volume),
+        "pregain" => channel(deck, ChannelParam::Trim),
         // Mixxx's `rate` is the fader, -1..1 across its range. The engine decides
-        // whether it moves the tempo (see `Command::TempoFader`).
-        "rate" => Command::TempoFader {
-            deck,
-            position: value,
-        },
+        // whether it moves the tempo (see `DeckCmd::TempoFader`).
+        "rate" => dc(DeckCmd::TempoFader(value)),
         // Step to the next range (±6, ±10, ±16, WIDE), like a CDJ's tempo range button.
-        "rateRange" if pressed => Command::TempoRange {
-            deck,
-            range: range_of(inner, deck).next(),
-        },
+        "rateRange" if pressed => dc(DeckCmd::TempoRangeNext),
         "rateRange" => return Ok(Outcome::Done),
-        "rate_temp_up" => Command::Nudge {
-            deck,
-            amount: if pressed { 0.04 } else { 0.0 },
-        },
-        "rate_temp_down" => Command::Nudge {
-            deck,
-            amount: if pressed { -0.04 } else { 0.0 },
-        },
+        "rate_temp_up" => dc(DeckCmd::Nudge(if pressed { 0.04 } else { 0.0 })),
+        "rate_temp_down" => dc(DeckCmd::Nudge(if pressed { -0.04 } else { 0.0 })),
         // Mixxx's 0..1 through the track; below 0 is the lead-in before it.
         "playposition" => {
-            let duration = inner.shared().map_or(0.0, |s| s.decks[deck].duration.get());
-            Command::Seek {
-                deck,
-                seconds: value.min(1.0) * duration,
-            }
+            let duration = inner.snapshot().map_or(0.0, |s| s.deck(deck).duration);
+            dc(DeckCmd::Seek(value.min(1.0) * duration))
         }
         "beatjump_size" => {
-            inner.jump_size[deck] = value;
+            inner.jump_size[d] = value;
             return Ok(Outcome::Done);
         }
         "beatloop_size" => {
-            inner.loop_size[deck] = value;
+            inner.loop_size[d] = value;
             return Ok(Outcome::Done);
         }
-        "beatjump" if value != 0.0 => Command::BeatJump { deck, beats: value },
-        "beatjump_forward" if pressed => Command::BeatJump {
-            deck,
-            beats: inner.jump_size[deck],
-        },
-        "beatjump_backward" if pressed => Command::BeatJump {
-            deck,
-            beats: -inner.jump_size[deck],
-        },
+        "beatjump" if value != 0.0 => dc(DeckCmd::BeatJump(value)),
+        "beatjump_forward" if pressed => dc(DeckCmd::BeatJump(inner.jump_size[d])),
+        "beatjump_backward" if pressed => dc(DeckCmd::BeatJump(-inner.jump_size[d])),
         // The loop button: starts a loop of the chosen size, or ends the current one
         // (whatever its size by now).
         "beatloop_activate" if pressed => {
-            let looping = inner
-                .shared()
-                .is_some_and(|s| s.decks[deck].loop_active.load(Relaxed));
+            let looping = inner.snapshot().is_some_and(|s| s.deck(deck).loop_active);
             if looping {
-                Command::ReloopToggle { deck }
+                dc(DeckCmd::Reloop(Set::Off))
             } else {
-                Command::BeatLoop {
-                    deck,
-                    beats: inner.loop_size[deck],
-                }
+                dc(DeckCmd::BeatLoop(inner.loop_size[d]))
             }
         }
-        "loop_in" if pressed => Command::LoopIn { deck },
-        "loop_out" if pressed => Command::LoopOut { deck },
-        "reloop_toggle" if pressed => Command::ReloopToggle { deck },
-        "loop_halve" if pressed => Command::LoopScale { deck, factor: 0.5 },
-        "loop_double" if pressed => Command::LoopScale { deck, factor: 2.0 },
+        "loop_in" if pressed => dc(DeckCmd::LoopIn),
+        "loop_out" if pressed => dc(DeckCmd::LoopOut),
+        "reloop_toggle" if pressed => dc(DeckCmd::Reloop(Set::Toggle)),
+        "loop_halve" if pressed => dc(DeckCmd::LoopScale(0.5)),
+        "loop_double" if pressed => dc(DeckCmd::LoopScale(2.0)),
         "beatjump" | "beatjump_forward" | "beatjump_backward" | "beatloop_activate" | "loop_in"
         | "loop_out" | "reloop_toggle" | "loop_halve" | "loop_double" => return Ok(Outcome::Done), // releases
         _ => return Err(format!("unknown control {group} {key}")),
@@ -192,52 +176,46 @@ pub fn apply(inner: &mut Inner, group: &str, key: &str, value: f64) -> Result<Ou
     Ok(Outcome::Done)
 }
 
-/// The deck's tempo fader range, as the engine last published it.
-fn range_of(inner: &Inner, deck: usize) -> TempoRange {
-    inner
-        .shared()
-        .map(|s| TempoRange::from_index(s.decks[deck].rate_range.load(Relaxed)))
-        .unwrap_or_default()
-}
-
-/// Current value of a toggle-style control, so button presses can flip it.
-pub fn current(inner: &Inner, group: &str, key: &str) -> Option<bool> {
-    let shared = inner.shared()?;
-    let d = &shared.decks[deck_of(group)?];
-    match key {
-        "play" => Some(d.playing.load(Relaxed)),
-        "sync_enabled" => Some(d.sync.load(Relaxed)),
-        "quantize" => Some(d.quantize.load(Relaxed)),
-        "keylock" => Some(d.keylock.load(Relaxed)),
-        "pfl" => Some(d.pfl.load(Relaxed)),
-        _ => None,
-    }
+/// Flip a toggle-style control (play, sync, quantize, keylock, pfl). The engine flips
+/// it against its live state, so two quick presses can't both read a stale one.
+pub fn toggle(inner: &mut Inner, group: &str, key: &str) -> Result<(), String> {
+    let deck = deck_of(group).ok_or_else(|| format!("unknown group {group}"))?;
+    let cmd = match key {
+        "play" => DeckCmd::Play(Set::Toggle),
+        "sync_enabled" => DeckCmd::Sync(Set::Toggle),
+        "quantize" => DeckCmd::Quantize(Set::Toggle),
+        "keylock" => DeckCmd::Keylock(Set::Toggle),
+        "pfl" => DeckCmd::Pfl(Set::Toggle),
+        _ => return Err(format!("{group} {key} isn't a toggle")),
+    };
+    inner.send(Command::Deck(deck, cmd))
 }
 
 /// Current value of a continuous control, in the units [`apply`] takes, so on-screen
 /// knobs and faders show what the keyboard and MIDI last set.
-pub fn value(shared: &Shared, group: &str, key: &str) -> Option<f64> {
+pub fn value(snap: &EngineSnapshot, group: &str, key: &str) -> Option<f64> {
     if group == "[Master]" {
+        let m = &snap.mixer;
         return Some(match key {
-            "crossfader" => shared.crossfader.get(),
-            "gain" => shared.main_gain.get(),
-            "balance" => shared.balance.get(),
-            "headGain" => shared.head_gain.get(),
-            "headMix" => shared.head_mix.get(),
+            "crossfader" => m.crossfader,
+            "gain" => m.main_gain,
+            "balance" => m.balance,
+            "headGain" => m.head_gain,
+            "headMix" => m.head_mix,
             _ => return None,
         });
     }
-    if let Some(d) = EQ_GROUPS.iter().position(|g| *g == group) {
-        return Some(shared.decks[d].eq[eq_band(key)?].get());
+    if let Some(d) = deck_in(&EQ_GROUPS, group) {
+        return Some(snap.deck(d).eq[eq_band(key)?]);
     }
-    if let Some(d) = FILTER_GROUPS.iter().position(|g| *g == group) {
-        return (key == "super1").then(|| (shared.decks[d].filter.get() + 1.0) / 2.0);
+    if let Some(d) = deck_in(&FILTER_GROUPS, group) {
+        return (key == "super1").then(|| (snap.deck(d).filter + 1.0) / 2.0);
     }
-    let d = &shared.decks[deck_of(group)?];
+    let d = snap.deck(deck_of(group)?);
     Some(match key {
-        "volume" => d.volume.get(),
-        "pregain" => d.pregain.get(),
-        "rate" => d.fader.get(),
+        "volume" => d.volume,
+        "pregain" => d.pregain,
+        "rate" => d.fader,
         _ => return None,
     })
 }

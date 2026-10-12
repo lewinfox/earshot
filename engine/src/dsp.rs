@@ -273,10 +273,16 @@ impl Smoothed {
         }
     }
 
-    /// `k`: the fraction of the remaining distance to move per sample.
+    /// `k`: the fraction of the remaining distance to move per sample. Lands exactly
+    /// on the target once within a millionth of it, so a fader at 0 is silent.
     #[inline]
     pub fn next(&mut self, k: f64) -> f64 {
-        self.current += (self.target - self.current) * k;
+        let d = self.target - self.current;
+        if d.abs() < 1e-6 {
+            self.current = self.target;
+        } else {
+            self.current += d * k;
+        }
         self.current
     }
 }

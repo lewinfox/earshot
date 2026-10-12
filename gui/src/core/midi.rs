@@ -189,11 +189,12 @@ fn on_message(sink: &Sink, player: &Player, port: &str, bytes: &[u8], table: &[M
     let value = match mp.kind {
         Kind::Button => (data2 > 0) as u8 as f64,
         Kind::Toggle => {
-            if data2 == 0 {
-                return;
+            if data2 != 0
+                && let Err(e) = controls::toggle(&mut inner, mp.group, mp.key)
+            {
+                eprintln!("MIDI: {e}");
             }
-            let on = controls::current(&inner, mp.group, mp.key).unwrap_or(false);
-            (!on) as u8 as f64
+            return;
         }
         Kind::Absolute(lo, hi) => lo + (hi - lo) * data2 as f64 / 127.0,
         Kind::Relative => {

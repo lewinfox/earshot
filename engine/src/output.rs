@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig, SupportedBufferSize};
 
-use crate::engine::{Renderer, Shared};
+use crate::engine::Renderer;
+use crate::snapshot::Stats;
 
 #[derive(Debug, Clone, Default)]
 pub struct OutputOptions {
@@ -91,7 +92,7 @@ impl Drop for OutputHandle {
 /// Start output. `make_renderer` is called once the sample rate is known.
 pub fn start(
     opts: &OutputOptions,
-    shared: Arc<Shared>,
+    stats: Arc<Stats>,
     make_renderer: impl FnOnce(u32) -> Renderer + Send + 'static,
 ) -> Result<(OutputHandle, OutputInfo), String> {
     if opts.null {
@@ -103,7 +104,7 @@ pub fn start(
     let thread = thread::Builder::new()
         .name("earshot-audio-owner".into())
         .spawn(move || {
-            let built = build_stream(&opts2, shared, make_renderer);
+            let built = build_stream(&opts2, stats, make_renderer);
             match built {
                 Ok((stream, info)) => {
                     if let Err(e) = stream.play() {
@@ -132,7 +133,7 @@ pub fn start(
 
 fn build_stream(
     opts: &OutputOptions,
-    shared: Arc<Shared>,
+    stats: Arc<Stats>,
     make_renderer: impl FnOnce(u32) -> Renderer + Send + 'static,
 ) -> Result<(cpal::Stream, OutputInfo), String> {
     let host = cpal::default_host();
@@ -212,9 +213,9 @@ fn build_stream(
     };
     let renderer = make_renderer(config.sample_rate);
     let stream = match supported.sample_format() {
-        SampleFormat::F32 => build::<f32>(&device, config, renderer, shared),
-        SampleFormat::I32 => build::<i32>(&device, config, renderer, shared),
-        SampleFormat::I16 => build::<i16>(&device, config, renderer, shared),
+        SampleFormat::F32 => build::<f32>(&device, config, renderer, stats),
+        SampleFormat::I32 => build::<i32>(&device, config, renderer, stats),
+        SampleFormat::I16 => build::<i16>(&device, config, renderer, stats),
         f => return Err(format!("unsupported sample format {f:?}")),
     }?;
     Ok((stream, info))
@@ -224,7 +225,7 @@ fn build<T>(
     device: &cpal::Device,
     config: StreamConfig,
     mut renderer: Renderer,
-    shared: Arc<Shared>,
+    stats: Arc<Stats>,
 ) -> Result<cpal::Stream, String>
 where
     T: SizedSample + FromSample<f32> + 'static,
@@ -233,7 +234,7 @@ where
     // Conversion scratch, allocated up front; grows only if the backend hands us a
     // bigger buffer than it promised (which would be an allocation on the audio thread).
     let mut scratch = vec![0f32; 8192 * channels];
-    let err_shared = shared.clone();
+    let err_stats = stats.clone();
     device
         .build_output_stream(
             config,
@@ -249,7 +250,7 @@ where
             },
             move |err| {
                 if err.kind() == cpal::ErrorKind::Xrun {
-                    err_shared.xruns.fetch_add(1, Relaxed);
+                    err_stats.xruns.fetch_add(1, Relaxed);
                 } else {
                     eprintln!("audio stream error: {err}");
                 }

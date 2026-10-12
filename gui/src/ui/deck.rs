@@ -8,12 +8,12 @@
 
 use std::f32::consts::TAU;
 use std::sync::Arc;
-use std::sync::atomic::Ordering::Relaxed;
 
-use earshot_engine::{DECKS, TempoRange};
-use earshot_engine::engine::LEAD_IN;
+use earshot_engine::{HOTCUES, LEAD_IN, TempoRange};
 use earshot_engine::beatgrid::Beatgrid;
-use earshot_engine::engine::DeckShared;
+use earshot_engine::DeckSnap;
+
+use crate::core::player::DECKS;
 use egui::{
     Align, Color32, CornerRadius, FontId, Layout, Rect, RichText, Sense, Stroke,
     StrokeKind, Ui, pos2, vec2,
@@ -129,7 +129,7 @@ struct State {
     rate: f64,
     range: TempoRange,
     /// The tempo fader's position, and whether it's in control (see
-    /// `DeckShared::fader`).
+    /// `DeckSnap::fader`).
     fader: f64,
     fader_live: bool,
     bpm: Option<f64>,
@@ -140,39 +140,31 @@ struct State {
     loop_out: Option<f64>,
     loop_active: bool,
     cue: f64,
-    hotcues: [Option<f64>; 8],
+    hotcues: [Option<f64>; HOTCUES],
     generation: u64,
 }
 
-fn finite(x: f64) -> Option<f64> {
-    x.is_finite().then_some(x)
-}
-
-fn read(sh: &DeckShared) -> State {
-    let mut hotcues = [None; 8];
-    for (h, v) in hotcues.iter_mut().zip(&sh.hotcues) {
-        *h = finite(v.get());
-    }
+fn read(sh: &DeckSnap) -> State {
     State {
-        position: sh.position.get(),
-        duration: sh.duration.get(),
-        playing: sh.playing.load(Relaxed),
-        speed: sh.speed.get(),
-        tempo: sh.tempo.get(),
-        rate: sh.rate.get(),
-        range: TempoRange::from_index(sh.rate_range.load(Relaxed)),
-        fader: sh.fader.get(),
-        fader_live: sh.fader_live.load(Relaxed),
-        bpm: finite(sh.bpm.get()),
-        sync: sh.sync.load(Relaxed),
-        quantize: sh.quantize.load(Relaxed),
-        keylock: sh.keylock.load(Relaxed),
-        loop_in: finite(sh.loop_in.get()),
-        loop_out: finite(sh.loop_out.get()),
-        loop_active: sh.loop_active.load(Relaxed),
-        cue: sh.cue_point.get(),
-        hotcues,
-        generation: sh.generation.load(Relaxed),
+        position: sh.position,
+        duration: sh.duration,
+        playing: sh.playing,
+        speed: sh.speed,
+        tempo: sh.tempo,
+        rate: sh.rate,
+        range: sh.range,
+        fader: sh.fader,
+        fader_live: sh.fader_live,
+        bpm: sh.bpm,
+        sync: sh.sync,
+        quantize: sh.quantize,
+        keylock: sh.keylock,
+        loop_in: sh.loop_in,
+        loop_out: sh.loop_out,
+        loop_active: sh.loop_active,
+        cue: sh.cue_point,
+        hotcues: sh.hotcues,
+        generation: sh.generation,
     }
 }
 
@@ -318,7 +310,7 @@ impl DeckUi {
     }
 
     /// Read the engine and advance the smoothed playhead. Once per frame, before drawing.
-    pub fn tick(&mut self, ctx: &egui::Context, sh: Option<&DeckShared>, info: &DeckInfo) {
+    pub fn tick(&mut self, ctx: &egui::Context, sh: Option<&DeckSnap>, info: &DeckInfo) {
         let Some(sh) = sh else { return };
         let s = read(sh);
         let dt = ctx.input(|i| i.stable_dt).min(0.1) as f64;

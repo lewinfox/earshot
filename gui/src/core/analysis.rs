@@ -458,9 +458,14 @@ fn update_decks(app: &Ctx, track_id: i64, grid: Beatgrid, source: GridSource) {
         if inner.decks[deck].track_id != Some(track_id) {
             continue;
         }
+        let Ok(id) = super::player::deck_id(deck) else {
+            continue;
+        };
+        let generation = inner.decks[deck].generation;
         if inner
             .send(Command::SetGrid {
-                deck,
+                deck: id,
+                generation,
                 grid: grid.clone(),
             })
             .is_err()

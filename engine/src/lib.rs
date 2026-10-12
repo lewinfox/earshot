@@ -1,13 +1,18 @@
 //! earshot's real-time audio engine: decks, mixer and output.
 //!
 //! [`Engine`] is the control-side handle: it owns the output stream, sends
-//! [`Command`]s to the audio thread and exposes the [`Shared`] state it publishes.
+//! [`Command`]s to the audio thread, collects [`EngineEvent`]s from it, and hands out
+//! a [`Monitor`] for reading the latest [`EngineSnapshot`].
 
+pub mod command;
 pub mod dsp;
 pub mod engine;
 pub mod keylock;
 pub mod output;
+pub mod processor;
+pub mod snapshot;
 pub mod tempo;
+pub mod transport;
 
 // The offline code moved to `earshot-audio`. Re-exported so existing imports keep
 // working; new code should use `earshot_audio` directly.
@@ -18,17 +23,24 @@ use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::thread;
 use std::time::Duration;
 
-pub use engine::{
-    Command, DECKS, EQ_HIGH, EQ_LOW, EQ_MID, HOTCUES, Out, PLAYERS, PREP, Press, Routing, Shared,
+pub use command::{
+    ChannelParam, ChannelState, Command, CueSet, DeckCmd, DeckId, DeckState, EQ_HIGH, EQ_LOW,
+    EQ_MID, EngineState, HOTCUES, LoadedTrack, LoopState, MAX_DECKS, MasterParam, MixerState,
+    ParamId, PreviewCmd, Press, Set, XfSide,
 };
-pub use tempo::TempoRange;
+pub use engine::{Out, Routing};
 pub use output::{OutputInfo, OutputOptions};
+pub use snapshot::{DeckSnap, EngineEvent, EngineSnapshot, MixerSnap, Monitor, PreviewSnap, Stats};
+pub use tempo::TempoRange;
+pub use transport::LEAD_IN;
 
-use engine::{Garbage, Renderer};
+use engine::Renderer;
 
 pub struct Engine {
     commands: rtrb::Producer<Command>,
-    shared: Arc<Shared>,
+    events: rtrb::Consumer<EngineEvent>,
+    monitor: Monitor,
+    decks: usize,
     info: OutputInfo,
     gc_stop: Arc<AtomicBool>,
     // Dropped last: stops the audio thread.
@@ -36,10 +48,11 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn start(opts: &OutputOptions) -> Result<Engine, String> {
-        let (commands, command_rx) = rtrb::RingBuffer::<Command>::new(1024);
-        let (garbage_tx, mut garbage_rx) = rtrb::RingBuffer::<Garbage>::new(64);
-        let shared = Arc::new(Shared::default());
+    /// Start audio with `decks` live decks (at most [`MAX_DECKS`]).
+    pub fn start(opts: &OutputOptions, decks: usize) -> Result<Engine, String> {
+        let decks = decks.min(MAX_DECKS);
+        let (app, ends) = engine::wire();
+        let mut garbage_rx = app.garbage;
 
         let gc_stop = Arc::new(AtomicBool::new(false));
         let stop = gc_stop.clone();
@@ -55,12 +68,14 @@ impl Engine {
             })
             .map_err(|e| e.to_string())?;
 
-        let s = shared.clone();
-        let make = move |rate| Renderer::new(command_rx, garbage_tx, s, rate);
-        let (output, info) = output::start(opts, shared.clone(), make)?;
+        let stats = ends.stats().clone();
+        let make = move |rate| Renderer::new(ends, rate, decks);
+        let (output, info) = output::start(opts, stats, make)?;
         Ok(Engine {
-            commands,
-            shared,
+            commands: app.commands,
+            events: app.events,
+            monitor: app.monitor,
+            decks,
             info,
             gc_stop,
             _output: output,
@@ -74,8 +89,28 @@ impl Engine {
             .map_err(|_| "engine command queue is full".to_string())
     }
 
-    pub fn shared(&self) -> &Arc<Shared> {
-        &self.shared
+    /// How many decks are live.
+    pub fn decks(&self) -> usize {
+        self.decks
+    }
+
+    /// Deck `index`, if it's live.
+    pub fn deck(&self, index: usize) -> Option<DeckId> {
+        DeckId::new(index).filter(|_| index < self.decks)
+    }
+
+    /// The next thing that happened on the audio thread, oldest first.
+    pub fn next_event(&mut self) -> Option<EngineEvent> {
+        self.events.pop().ok()
+    }
+
+    pub fn monitor(&self) -> &Monitor {
+        &self.monitor
+    }
+
+    /// The state as of the most recent callback.
+    pub fn snapshot(&self) -> EngineSnapshot {
+        self.monitor.snapshot()
     }
 
     pub fn info(&self) -> &OutputInfo {
