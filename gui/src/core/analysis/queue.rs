@@ -247,7 +247,7 @@ impl JobQueue {
     }
 
     /// Background lanes wanted for the work there is: one per [`TRACKS_PER_WORKER`]
-    /// tracks, up to the cap; one while a deck plays.
+    /// tracks, up to the cap; one while a deck plays in Perform mode.
     pub fn background_wanted(&self) -> usize {
         if self.playing {
             return 1;

@@ -1115,11 +1115,13 @@ impl eframe::App for EarshotApp {
         self.drain_events(ctx);
         // Catch the decks' sessions up with the engine (and save changed hot cues).
         self.snap = player::poll(&self.player, &self.lib.store);
-        // Background analysis holds back while anything plays.
-        let playing = self
-            .snap
-            .as_ref()
-            .is_some_and(|sh| sh.prepare.playing || sh.live().iter().any(|d| d.playing));
+        // Background analysis holds back while a deck plays in Perform mode. In Prepare,
+        // listening while an import analyses is normal, so it runs at full width.
+        let playing = self.mode == UiMode::Perform
+            && self
+                .snap
+                .as_ref()
+                .is_some_and(|sh| sh.live().iter().any(|d| d.playing));
         self.lib.analyser.set_playing(playing);
         self.keyboard(ctx);
         self.tick_hud(ctx);

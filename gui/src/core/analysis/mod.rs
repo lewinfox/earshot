@@ -99,7 +99,7 @@ pub const SETTING_BACKGROUND_WORKERS: &str = "analysis.background_workers";
 pub const DEFAULT_BACKGROUND_WORKERS: usize = 4;
 
 /// Playback comes first. Background lanes (folders, previews) run in Linux's idle CPU
-/// and disk classes, and only one at a time while a deck is playing; so do their
+/// and disk classes, and only one at a time while a deck plays in Perform mode; so do their
 /// worker processes. The deck lane decodes at this nice value, below the audio engine
 /// and the UI; its worker process runs at normal priority.
 const LOADED_NICE: i32 = 5;
