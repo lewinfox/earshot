@@ -38,6 +38,7 @@ use engine::Renderer;
 
 pub struct Engine {
     commands: rtrb::Producer<Command>,
+    spare: Vec<rtrb::Producer<Command>>,
     events: rtrb::Consumer<EngineEvent>,
     monitor: Monitor,
     decks: usize,
@@ -73,6 +74,7 @@ impl Engine {
         let (output, info) = output::start(opts, stats, make)?;
         Ok(Engine {
             commands: app.commands,
+            spare: app.spare,
             events: app.events,
             monitor: app.monitor,
             decks,
@@ -87,6 +89,12 @@ impl Engine {
         self.commands
             .push(cmd)
             .map_err(|_| "engine command queue is full".to_string())
+    }
+
+    /// A command ring of its own for another thread (e.g. MIDI), so it can send
+    /// without sharing [`Engine::send`]'s. There are a few; `None` once they're gone.
+    pub fn sender(&mut self) -> Option<CommandSender> {
+        self.spare.pop().map(CommandSender)
     }
 
     /// How many decks are live.
@@ -115,6 +123,22 @@ impl Engine {
 
     pub fn info(&self) -> &OutputInfo {
         &self.info
+    }
+}
+
+/// One thread's own ring into the engine (see [`Engine::sender`]). Commands from one
+/// ring arrive in order; rings are drained one after another each block.
+pub struct CommandSender(rtrb::Producer<Command>);
+
+impl CommandSender {
+    /// Queue a command. Fails if the queue is full or the engine has stopped.
+    pub fn send(&mut self, cmd: Command) -> Result<(), String> {
+        if self.0.is_abandoned() {
+            return Err("audio is not running".into());
+        }
+        self.0
+            .push(cmd)
+            .map_err(|_| "engine command queue is full".to_string())
     }
 }
 

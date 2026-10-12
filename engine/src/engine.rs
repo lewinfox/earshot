@@ -1,7 +1,8 @@
 //! The real-time part: decks, mixer and the render loop that runs on the audio thread.
 //!
 //! Rules for everything reachable from [`Renderer::process`]: no allocation, no locks,
-//! no frees. Commands arrive on an `rtrb` ring buffer; replaced track data leaves on
+//! no frees. Commands arrive on `rtrb` ring buffers (one per sending thread, since a
+//! ring has one producer); replaced track data leaves on
 //! another ring buffer to be dropped elsewhere; events go out on a third; state is
 //! published as one [`EngineSnapshot`] per callback through a triple buffer.
 
@@ -28,6 +29,9 @@ pub const MAX_BLOCK: usize = 4096;
 /// Seconds for a level meter to fall back by a factor of e.
 const VU_FALL_SECS: f64 = 0.25;
 const COMMAND_SLOTS: usize = 1024;
+/// Command rings: the main one plus spares for other threads (MIDI), each with one
+/// sender, so no thread has to lock another's to send.
+pub(crate) const COMMAND_RINGS: usize = 3;
 const EVENT_SLOTS: usize = 256;
 const GARBAGE_SLOTS: usize = 64;
 
@@ -109,6 +113,8 @@ pub enum Garbage {
 /// The app's ends of the engine's rings.
 pub(crate) struct AppEnds {
     pub commands: rtrb::Producer<Command>,
+    /// The other rings' senders, handed out by [`crate::Engine::sender`].
+    pub spare: Vec<rtrb::Producer<Command>>,
     pub events: rtrb::Consumer<EngineEvent>,
     pub garbage: rtrb::Consumer<Garbage>,
     pub monitor: Monitor,
@@ -116,7 +122,7 @@ pub(crate) struct AppEnds {
 
 /// The audio thread's ends, handed to [`Renderer::new`].
 pub(crate) struct RendererEnds {
-    commands: rtrb::Consumer<Command>,
+    commands: [rtrb::Consumer<Command>; COMMAND_RINGS],
     events: rtrb::Producer<EngineEvent>,
     garbage: rtrb::Producer<Garbage>,
     snapshots: triple_buffer::Input<EngineSnapshot>,
@@ -131,7 +137,13 @@ impl RendererEnds {
 
 /// Make the rings and the snapshot buffer between the app and a renderer.
 pub(crate) fn wire() -> (AppEnds, RendererEnds) {
-    let (commands, command_rx) = rtrb::RingBuffer::new(COMMAND_SLOTS);
+    let mut senders = Vec::with_capacity(COMMAND_RINGS);
+    let command_rx = std::array::from_fn(|_| {
+        let (tx, rx) = rtrb::RingBuffer::new(COMMAND_SLOTS);
+        senders.push(tx);
+        rx
+    });
+    let commands = senders.remove(0);
     let (event_tx, events) = rtrb::RingBuffer::new(EVENT_SLOTS);
     let (garbage_tx, garbage) = rtrb::RingBuffer::new(GARBAGE_SLOTS);
     let (snap_in, snap_out) = triple_buffer::triple_buffer(&EngineSnapshot::default());
@@ -139,6 +151,7 @@ pub(crate) fn wire() -> (AppEnds, RendererEnds) {
     (
         AppEnds {
             commands,
+            spare: senders,
             events,
             garbage,
             monitor: Monitor::new(snap_out, stats.clone()),
@@ -651,7 +664,7 @@ impl Deck {
 // ---- renderer (audio thread) -------------------------------------------------------
 
 pub struct Renderer {
-    commands: rtrb::Consumer<Command>,
+    commands: [rtrb::Consumer<Command>; COMMAND_RINGS],
     garbage: rtrb::Producer<Garbage>,
     outbox: Outbox,
     snapshots: triple_buffer::Input<EngineSnapshot>,
@@ -794,8 +807,10 @@ impl Renderer {
     }
 
     fn render_block(&mut self, n: usize) {
-        while let Ok(cmd) = self.commands.pop() {
-            self.apply(cmd);
+        for ring in 0..COMMAND_RINGS {
+            while let Ok(cmd) = self.commands[ring].pop() {
+                self.apply(cmd);
+            }
         }
         self.update_speeds(n);
 
@@ -1295,6 +1310,7 @@ mod tests {
 
     struct Rig {
         tx: rtrb::Producer<Command>,
+        spare: Vec<rtrb::Producer<Command>>,
         events: rtrb::Consumer<EngineEvent>,
         garbage: rtrb::Consumer<Garbage>,
         monitor: Monitor,
@@ -1310,6 +1326,7 @@ mod tests {
             let (app, ends) = wire();
             Rig {
                 tx: app.commands,
+                spare: app.spare,
                 events: app.events,
                 garbage: app.garbage,
                 monitor: app.monitor,
@@ -2077,6 +2094,20 @@ mod tests {
             rig.snap().decks[0].range,
             TempoRange::default().next().next()
         );
+    }
+
+    #[test]
+    fn every_command_ring_is_drained() {
+        let mut rig = Rig::new();
+        rig.load(0, 120.0, 120.0);
+        assert_eq!(rig.spare.len(), COMMAND_RINGS - 1);
+        // Another thread's ring (MIDI's, say) alongside the main one.
+        let c = Command::Deck(id(0), DeckCmd::Keylock(Set::On));
+        assert!(rig.spare[0].push(c).is_ok());
+        rig.deck(0, DeckCmd::Pfl(Set::On));
+        rig.run(0.01);
+        let s = rig.snap().decks[0];
+        assert!(s.keylock && s.pfl);
     }
 
     #[test]
