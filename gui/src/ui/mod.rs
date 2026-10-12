@@ -4,6 +4,7 @@
 //! what the UI keeps between runs.
 
 pub mod app;
+pub mod fonts;
 pub mod modals;
 pub mod panels;
 pub mod prefs;

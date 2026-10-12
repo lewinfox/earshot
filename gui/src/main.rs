@@ -20,12 +20,14 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "earshot",
         options,
-        Box::new(
-            |cc| match ui::app::EarshotApp::new(cc, core::services::Services::real()) {
+        Box::new(|cc| {
+            // Not in the tests: their pictures use egui's own fonts only.
+            ui::fonts::install_fallbacks(&cc.egui_ctx);
+            match ui::app::EarshotApp::new(cc, core::services::Services::real()) {
                 Ok(app) => Ok(Box::new(app)),
                 Err(e) => Err(e.into()),
-            },
-        ),
+            }
+        }),
     )
 }
 

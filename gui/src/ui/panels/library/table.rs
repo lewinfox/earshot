@@ -936,8 +936,8 @@ fn drop_place(rows: &[(usize, egui::Rect)], y: f32) -> Option<usize> {
 fn header_label(ui: &mut Ui, c: ColumnId, s: &TableState) {
     let d = def(c);
     let arrow = match s.sort {
-        Some((sc, Dir::Asc)) if sc == c => " ^",
-        Some((sc, Dir::Desc)) if sc == c => " v",
+        Some((sc, Dir::Asc)) if sc == c => " ⏶",
+        Some((sc, Dir::Desc)) if sc == c => " ⏷",
         _ => "",
     };
     let colour = if s.filter_of(c).is_some() {
