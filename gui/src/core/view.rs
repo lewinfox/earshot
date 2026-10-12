@@ -73,10 +73,23 @@ pub enum Tool {
 /// The windows over the app. They stack: the last one opened is on top.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Modal {
-    Audio,
+    /// Audio, analysis and the keymap, a tab each ([`SettingsTab`]).
+    Settings,
     Keys,
     /// The metadata editor (opened on tracks by `EditCmd::Editor`).
     Metadata,
+}
+
+/// The settings window's tabs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SettingsTab {
+    /// The output device, buffer and routing.
+    #[default]
+    Audio,
+    /// How many background workers analyse at once.
+    Analysis,
+    /// The keymap file.
+    Keymap,
 }
 
 /// Which list has focus: the keyboard and the controller's browse knob move through
@@ -116,6 +129,8 @@ pub enum ViewCmd {
     Tool(Tool),
     /// Open a window, or close it if it's open.
     ToggleModal(Modal),
+    /// Open the settings window on this tab (or bring it to this tab).
+    Settings(SettingsTab),
     CloseModal(Modal),
     /// Real seconds of waveform either side of the playhead.
     WaveZoom(f64),

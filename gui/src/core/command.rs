@@ -119,6 +119,13 @@ pub enum AppCmd {
     ReconnectMidi,
     /// Forget the analysis failures counted so far.
     DismissFailures,
+    /// Let this many background analysis workers run at once (and save it).
+    BackgroundWorkers(usize),
+    /// Read the user's keymap file again (the built-in one if there's none).
+    ReloadKeymap,
+    /// Write the built-in keymap to the user's keymap file, to edit (not over one
+    /// that's there).
+    CopyKeymap,
 }
 
 impl From<(DeckId, EngineCmd)> for Command {

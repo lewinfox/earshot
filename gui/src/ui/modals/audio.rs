@@ -1,6 +1,6 @@
-//! The Audio settings window: output device, buffer size, and which device channels
-//! the master and headphone buses go to (e.g. a controller's 1/2 and 3/4, or a
-//! laptop's one pair split left/right for cueing).
+//! The settings window's Audio tab: output device, buffer size, and which device
+//! channels the master and headphone buses go to (e.g. a controller's 1/2 and 3/4, or
+//! a laptop's one pair split left/right for cueing).
 
 use std::sync::{Arc, Mutex};
 
@@ -13,8 +13,6 @@ use crate::core::player::AudioSettings;
 use crate::ui::theme::THEME;
 
 const BUFFERS: [u32; 6] = [64, 128, 256, 512, 1024, 2048];
-/// The window's title, which is also its id.
-pub const TITLE: &str = "Audio";
 
 #[derive(Default)]
 pub struct AudioUi {
@@ -26,7 +24,7 @@ pub struct AudioUi {
 }
 
 impl AudioUi {
-    /// Opening the window: list the devices again and drop an old draft.
+    /// Opening the settings: list the devices again and drop an old draft.
     pub fn reset(&mut self) {
         self.listed = false;
         self.draft = None;
@@ -42,34 +40,25 @@ impl AudioUi {
         });
     }
 
-    pub fn show(
+    pub fn ui(
         &mut self,
-        ctx: &egui::Context,
+        ui: &mut Ui,
         saved: &AudioSettings,
         info: &Result<OutputInfo, String>,
         routing: Routing,
-        open: &mut bool,
     ) -> Option<Command> {
         if !self.listed {
-            self.list(ctx);
+            self.list(ui.ctx());
         }
-        let mut action = None;
-        egui::Window::new(TITLE)
-            .open(open)
-            .resizable(false)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                ui.set_width(460.0);
-                action = self.device_section(ui, saved, info);
-                ui.separator();
-                let channels = match info {
-                    Ok(i) => i.channels,
-                    Err(_) => 2,
-                };
-                if let Some(r) = routing_section(ui, routing, channels) {
-                    action = Some(Command::Audio(AudioCmd::Route(r)));
-                }
-            });
+        let mut action = self.device_section(ui, saved, info);
+        ui.separator();
+        let channels = match info {
+            Ok(i) => i.channels,
+            Err(_) => 2,
+        };
+        if let Some(r) = routing_section(ui, routing, channels) {
+            action = Some(Command::Audio(AudioCmd::Route(r)));
+        }
         action
     }
 

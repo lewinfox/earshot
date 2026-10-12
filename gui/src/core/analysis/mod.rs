@@ -94,9 +94,10 @@ const DECODED: f64 = 0.1;
 const WORKER_START: f64 = 0.15;
 
 /// The setting (in the Store's `settings`) for how many background worker processes
-/// may run at once, [`DEFAULT_BACKGROUND_WORKERS`] if unset; read at startup, and kept
-/// to 1..=CPU cores. Each process holds its own copy of torch and the models, and
-/// they share the cores, so more than the core count only adds memory.
+/// may run at once, [`DEFAULT_BACKGROUND_WORKERS`] if unset; read at startup, changed
+/// live by [`Analyser::set_background_workers`], and kept to 1..=CPU cores. Each
+/// process holds its own copy of torch and the models, and they share the cores, so
+/// more than the core count only adds memory.
 pub const SETTING_BACKGROUND_WORKERS: &str = "analysis.background_workers";
 pub const DEFAULT_BACKGROUND_WORKERS: usize = 4;
 
@@ -108,6 +109,11 @@ const LOADED_NICE: i32 = 5;
 
 pub struct Analyser {
     shared: Arc<Shared>,
+}
+
+/// The CPU cores: the most background workers there can be.
+pub fn cores() -> usize {
+    std::thread::available_parallelism().map_or(4, |n| n.get())
 }
 
 struct Shared {
@@ -129,7 +135,7 @@ impl Analyser {
         store: Store,
         worker: fn(Role, usize) -> WorkerConfig,
     ) -> Analyser {
-        let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let cores = cores();
         let cap = store
             .reader
             .setting(SETTING_BACKGROUND_WORKERS)
@@ -143,9 +149,11 @@ impl Analyser {
         // the cores: the rest are left for the audio engine and the UI.
         let deck = WorkerClient::start(worker(Role::Deck, (cores / 2).max(1)));
         deck.warm_up();
-        // Background workers share the cores between them.
+        // A lane (and a worker, which starts only when it has work) per core, so the
+        // cap can change while the app runs. The cores are shared between the workers
+        // the cap allowed at startup.
         let threads = (cores / cap).max(1);
-        let background = (0..cap)
+        let background = (0..cores)
             .map(|_| WorkerClient::start(worker(Role::Background, threads)))
             .collect();
         let shared = Arc::new(Shared {
@@ -156,7 +164,7 @@ impl Analyser {
             deck,
             background,
         });
-        let lanes = std::iter::once(Lane::Deck).chain((0..cap).map(Lane::Background));
+        let lanes = std::iter::once(Lane::Deck).chain((0..cores).map(Lane::Background));
         for (n, lane) in lanes.enumerate() {
             let (shared, player) = (shared.clone(), player.clone());
             std::thread::Builder::new()
@@ -167,6 +175,21 @@ impl Analyser {
         let analyser = Analyser { shared };
         analyser.restore();
         analyser
+    }
+
+    /// How many background workers may run at once.
+    pub fn background_workers(&self) -> usize {
+        self.shared.queue.lock().unwrap().background_cap
+    }
+
+    /// Let up to `n` background workers run at once (kept to 1..=cores), from now on.
+    /// Fewer: the ones over finish their track and stop taking more. Returns the cap.
+    /// (Saving it is the caller's: [`SETTING_BACKGROUND_WORKERS`].)
+    pub fn set_background_workers(&self, n: usize) -> usize {
+        let n = n.clamp(1, self.shared.background.len());
+        self.shared.queue.lock().unwrap().background_cap = n;
+        self.shared.ready.notify_all();
+        n
     }
 
     /// Tell the queue whether a deck is playing, which holds background jobs back.

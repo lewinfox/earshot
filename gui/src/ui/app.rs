@@ -16,6 +16,7 @@ use earshot_engine::{
 };
 use egui::Key;
 
+use super::modals::settings::{AnalysisEnv, KeymapEnv};
 use super::modals::{ModalEnv, Modals};
 use super::panels::deck::{DeckInfo, PendingLoad};
 use super::panels::flow::FlowUi;
@@ -27,7 +28,7 @@ use super::panels::{CoreView, Cx, EngineFrame, Panel, PreviewState};
 use super::prefs::{self, UiPrefs};
 use super::theme::THEME;
 use super::views::{self, Panels};
-use crate::core::analysis::{Analyser, Mode as AnalysisMode};
+use crate::core::analysis::{self, Analyser, Mode as AnalysisMode};
 use crate::core::collections::{
     CollectionCmd, CollectionId, CollectionKind, Collections, FlowCmd, FlowGraph, Section,
 };
@@ -35,7 +36,7 @@ use crate::core::command::{self, AppCmd, AudioCmd, Command, DeckCmd, PreviewCmd,
 use crate::core::edit;
 use crate::core::history::{DeckNow, History};
 use crate::core::index::{LibraryCmd, LibraryIndex};
-use crate::core::keymap::Keymap;
+use crate::core::keymap::{self, Keymap};
 use crate::core::library::{self, Library};
 use crate::core::midi::{self, Midi};
 use crate::core::player::{self, AudioSettings, DECKS, Player};
@@ -91,6 +92,11 @@ pub struct EarshotApp {
     /// A collection just made, to rename once the Store's list has it.
     pending_rename: Option<CollectionId>,
     keymap: Keymap,
+    /// The user's keymap file, and whether the keymap in use came from it.
+    keymap_path: std::path::PathBuf,
+    keymap_origin: keymap::Origin,
+    /// Background analysis workers allowed at once (as the analyser has it).
+    background_workers: usize,
     /// Keys held down for buttons that act while held, and what letting go sends.
     held_keys: HashMap<Key, Command>,
     hud: Hud,
@@ -172,10 +178,13 @@ impl EarshotApp {
         let analyser =
             Analyser::start(sink.clone(), player.clone(), store.clone(), services.worker);
         let hasher = library::start_hasher(store.clone());
+        let data_dir = services.db.parent().unwrap_or(std::path::Path::new("."));
+        let keymap_path = data_dir.join(keymap::FILE_NAME);
+        let (keymap, keymap_origin) = keymap::load_user(&keymap_path, spell_key);
+        let background_workers = analyser.background_workers();
         let tempo_lock = {
             let sink = sink.clone();
-            let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
-            let data_dir = services.db.parent().unwrap_or(std::path::Path::new("."));
+            let cores = analysis::cores();
             TempoLock::with_worker(
                 (services.worker)(Role::Background, cores),
                 store.clone(),
@@ -217,8 +226,10 @@ impl EarshotApp {
             preview: None,
             settings,
             pending_rename: None,
-            keymap: Keymap::built_in()
-                .spell_keys(|name| Key::from_name(name).map(|k| k.name().to_string()))?,
+            keymap,
+            keymap_path,
+            keymap_origin,
+            background_workers,
             held_keys: HashMap::new(),
             hud: Hud::default(),
             prefs,
@@ -299,6 +310,26 @@ impl EarshotApp {
                 self.analysis.failed = 0;
                 self.analysis.last_error.clear();
             }
+            Command::App(AppCmd::BackgroundWorkers(n)) => {
+                self.background_workers = self.lib.analyser.set_background_workers(n);
+                self.lib.store.send(settings::save(
+                    analysis::SETTING_BACKGROUND_WORKERS,
+                    &self.background_workers,
+                ));
+            }
+            Command::App(AppCmd::ReloadKeymap) => self.reload_keymap(),
+            Command::App(AppCmd::CopyKeymap) => {
+                // Never over the user's own file.
+                let made = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&self.keymap_path)
+                    .and_then(|mut f| std::io::Write::write_all(&mut f, keymap::BUILT_IN.as_bytes()));
+                if let Err(e) = made {
+                    eprintln!("{}: {e}", self.keymap_path.display());
+                }
+                self.reload_keymap();
+            }
             Command::Deck(deck, DeckCmd::Load(id)) => self.load(Some(deck), id),
             Command::Library(c) => self.library_cmd(c),
             Command::TempoLock(TempoLockCmd::Listen(c)) => self.listen(c),
@@ -356,6 +387,7 @@ impl EarshotApp {
             ViewCmd::Aside(a) => self.prefs.layout_mut().aside = a,
             ViewCmd::Tool(t) => self.prefs.layout_mut().tool = t,
             ViewCmd::ToggleModal(m) => self.modals.toggle(m),
+            ViewCmd::Settings(tab) => self.modals.settings(tab),
             ViewCmd::CloseModal(m) => self.modals.close(m),
             ViewCmd::WaveZoom(z) => self.prefs.wave_zoom = z,
             ViewCmd::UiScale(z) => {
@@ -374,6 +406,12 @@ impl EarshotApp {
                 }
             }
         }
+    }
+
+    /// Read the user's keymap file again; the built-in keymap if it's not there or
+    /// doesn't load. Keys held down keep what letting go sends.
+    fn reload_keymap(&mut self) {
+        (self.keymap, self.keymap_origin) = keymap::load_user(&self.keymap_path, spell_key);
     }
 
     /// The decks as the play history sees them: track, playing, tempo, key shift.
@@ -474,6 +512,14 @@ impl EarshotApp {
             routing,
             keymap: &self.keymap,
             mode: self.prefs.mode,
+            analysis: AnalysisEnv {
+                workers: self.background_workers,
+                cores: analysis::cores(),
+            },
+            keymap_file: KeymapEnv {
+                path: &self.keymap_path,
+                origin: &self.keymap_origin,
+            },
         };
         self.modals.show(ctx, &env, cx.out);
         out
@@ -525,6 +571,11 @@ impl eframe::App for EarshotApp {
         self.save_flow_view(ctx);
         self.schedule_repaint(ctx);
     }
+}
+
+/// The UI's name for a key the keymap file names (`;` → `Semicolon`).
+fn spell_key(name: &str) -> Option<String> {
+    Key::from_name(name).map(|k| k.name().to_string())
 }
 
 /// Store events, delivered through the app's channel like everything else.

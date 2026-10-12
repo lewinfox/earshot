@@ -9,17 +9,18 @@
 pub mod audio;
 pub mod keys;
 pub mod metadata;
+pub mod settings;
 
 use earshot_engine::{OutputInfo, Routing};
 
-use self::audio::AudioUi;
 use self::metadata::MetaEditor;
+use self::settings::{AnalysisEnv, KeymapEnv, SettingsUi};
 use crate::core::command::{Command, ViewCmd};
 use crate::core::index::LibraryIndex;
 use crate::core::keymap::Keymap;
 use crate::core::player::AudioSettings;
 use crate::core::track::TrackId;
-use crate::core::view::{Modal, Mode};
+use crate::core::view::{Modal, Mode, SettingsTab};
 
 /// What the windows show, gathered by the shell.
 pub struct ModalEnv<'a> {
@@ -28,6 +29,8 @@ pub struct ModalEnv<'a> {
     pub routing: Routing,
     pub keymap: &'a Keymap,
     pub mode: Mode,
+    pub analysis: AnalysisEnv,
+    pub keymap_file: KeymapEnv<'a>,
 }
 
 #[derive(Default)]
@@ -36,7 +39,7 @@ pub struct Modals {
     stack: Vec<Modal>,
     /// Opened since last drawn: brought to the top when next drawn.
     raise: Option<Modal>,
-    audio: AudioUi,
+    settings: SettingsUi,
     meta: MetaEditor,
 }
 
@@ -49,11 +52,24 @@ impl Modals {
         if self.is_open(m) {
             return;
         }
-        if m == Modal::Audio {
-            self.audio.reset();
+        if m == Modal::Settings {
+            self.settings.reset();
         }
         self.stack.push(m);
         self.raise = Some(m);
+    }
+
+    /// Open the settings on a tab (or show that tab, if they're open).
+    pub fn settings(&mut self, tab: SettingsTab) {
+        self.open(Modal::Settings);
+        self.settings.tab = tab;
+        self.raise = Some(Modal::Settings);
+    }
+
+    /// The settings window's tab.
+    #[cfg(test)]
+    pub fn settings_tab(&self) -> SettingsTab {
+        self.settings.tab
     }
 
     /// Open the metadata editor on these tracks (afresh, if it was open).
@@ -78,7 +94,7 @@ impl Modals {
     pub fn show(&mut self, ctx: &egui::Context, env: &ModalEnv, out: &mut Vec<Command>) {
         if let Some(m) = self.raise.take() {
             let title = match m {
-                Modal::Audio => audio::TITLE,
+                Modal::Settings => settings::TITLE,
                 Modal::Keys => keys::TITLE,
                 Modal::Metadata => metadata::TITLE,
             };
@@ -90,12 +106,7 @@ impl Modals {
         for m in self.stack.clone() {
             let mut open = true;
             match m {
-                Modal::Audio => {
-                    let c =
-                        self.audio
-                            .show(ctx, env.audio_settings, env.audio, env.routing, &mut open);
-                    out.extend(c);
-                }
+                Modal::Settings => out.extend(self.settings.show(ctx, env, &mut open)),
                 Modal::Keys => {
                     egui::Window::new(keys::TITLE)
                         .open(&mut open)

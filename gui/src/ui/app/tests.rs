@@ -557,11 +557,66 @@ fn layout_is_kept_per_mode() {
     app.dispatch(ViewCmd::SetMode(Mode::Perform).into());
     assert_eq!(app.prefs.layout().aside, None);
     assert!(app.prefs.layout().source.is_some());
-    app.dispatch(ViewCmd::ToggleModal(crate::core::view::Modal::Audio).into());
-    assert!(app.modals.is_open(crate::core::view::Modal::Audio));
-    app.dispatch(ViewCmd::CloseModal(crate::core::view::Modal::Audio).into());
-    assert!(!app.modals.is_open(crate::core::view::Modal::Audio));
+    app.dispatch(ViewCmd::ToggleModal(crate::core::view::Modal::Settings).into());
+    assert!(app.modals.is_open(crate::core::view::Modal::Settings));
+    app.dispatch(ViewCmd::CloseModal(crate::core::view::Modal::Settings).into());
+    assert!(!app.modals.is_open(crate::core::view::Modal::Settings));
     steps(&mut h, 3);
+}
+
+/// The settings window: the analysis tab changes the background worker cap at once
+/// (and saves it), the keymap tab loads the user's keymap file or says why it didn't.
+#[test]
+fn settings() {
+    use crate::core::view::{Modal, SettingsTab};
+    let mut h = start("settings");
+    h.state_mut()
+        .dispatch(ViewCmd::Settings(SettingsTab::Analysis).into());
+    assert!(h.state().modals.is_open(Modal::Settings));
+    assert_eq!(h.state().modals.settings_tab(), SettingsTab::Analysis);
+    steps(&mut h, 3);
+    render(&mut h, "settings-analysis");
+    h.state_mut().dispatch(AppCmd::BackgroundWorkers(1).into());
+    assert_eq!(h.state().lib.analyser.background_workers(), 1);
+    assert_eq!(h.state().background_workers, 1);
+    settle_until(&mut h, |a| {
+        a.lib.store.reader.setting(analysis::SETTING_BACKGROUND_WORKERS)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("1")
+    });
+    // Kept to the cores.
+    h.state_mut().dispatch(AppCmd::BackgroundWorkers(10_000).into());
+    assert_eq!(h.state().background_workers, analysis::cores());
+
+    // The keymap: built in, then a copy to edit, then a broken file.
+    let path = h.state().keymap_path.clone();
+    assert_eq!(path.file_name().unwrap(), keymap::FILE_NAME);
+    assert_eq!(h.state().keymap_origin, keymap::Origin::BuiltIn);
+    h.state_mut().dispatch(AppCmd::CopyKeymap.into());
+    assert_eq!(h.state().keymap_origin, keymap::Origin::File);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), keymap::BUILT_IN);
+    std::fs::write(&path, "perform  P  deck1  play\nperform  P  deck2  play\n").unwrap();
+    // Not over the user's file.
+    h.state_mut().dispatch(AppCmd::CopyKeymap.into());
+    assert!(std::fs::read_to_string(&path).unwrap().starts_with("perform  P"));
+    assert!(matches!(h.state().keymap_origin, keymap::Origin::Broken(_)));
+    assert!(h.state().keymap.find(Mode::Perform, "S", false).is_some(), "built in");
+    std::fs::write(&path, "perform  P  deck1  play\n").unwrap();
+    h.state_mut().dispatch(AppCmd::ReloadKeymap.into());
+    assert_eq!(h.state().keymap_origin, keymap::Origin::File);
+    assert!(h.state().keymap.find(Mode::Perform, "S", false).is_none());
+    std::fs::write(&path, "perform  P  deck1  play\nperform  P  deck2  play\n").unwrap();
+    h.state_mut().dispatch(AppCmd::ReloadKeymap.into());
+    h.state_mut()
+        .dispatch(ViewCmd::Settings(SettingsTab::Keymap).into());
+    steps(&mut h, 3);
+    render(&mut h, "settings-keymap");
+    h.state_mut()
+        .dispatch(ViewCmd::Settings(SettingsTab::Audio).into());
+    steps(&mut h, 3);
+    render(&mut h, "settings-audio");
 }
 
 /// Edits from the shell: metadata, the Flow canvas and a grid, each undone and

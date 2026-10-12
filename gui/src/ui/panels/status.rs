@@ -9,7 +9,7 @@ use egui::{RichText, Ui};
 use super::{Cx, Panel};
 use crate::core::command::{AppCmd, Command, ViewCmd};
 use crate::core::index::LibraryCmd;
-use crate::core::view::{Modal, Mode};
+use crate::core::view::{Modal, Mode, SettingsTab};
 
 /// Tracks being analysed, and failures since they were last dismissed.
 #[derive(Default)]
@@ -62,8 +62,8 @@ impl Panel for TopBar<'_> {
                         ui.close();
                     }
                 });
-                if ui.button("Audio…").clicked() {
-                    cx.send(ViewCmd::ToggleModal(Modal::Audio));
+                if ui.button("Settings…").clicked() {
+                    cx.send(ViewCmd::ToggleModal(Modal::Settings));
                     ui.close();
                 }
                 if ui.button("Rescan library").clicked() {
@@ -119,7 +119,7 @@ impl Panel for TopBar<'_> {
                 .on_hover_text("Audio settings")
                 .clicked()
             {
-                cx.send(ViewCmd::ToggleModal(Modal::Audio));
+                cx.send(ViewCmd::Settings(SettingsTab::Audio));
             }
             let midi = if self.midi_ports.is_empty() {
                 "MIDI: none".to_string()

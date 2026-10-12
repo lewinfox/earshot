@@ -1,5 +1,7 @@
 //! The keyboard map: which key does what, read from a data file (`keymap.txt`, built
 //! in), as controls from the registry ([`super::bus`]). The key help is made from it.
+//! A `keymap.txt` of the user's own in the data folder replaces the built-in one
+//! ([`load_user`]).
 //!
 //! Keys are kept as names here (core doesn't know egui); the UI turns them into its
 //! keys once, when it loads the map.
@@ -14,6 +16,45 @@ pub const BUILT_IN: &str = include_str!("keymap.txt");
 
 /// Which of the app's modes a binding works in.
 pub use super::view::Mode;
+
+/// The user's own keymap, in the data folder (beside the database).
+pub const FILE_NAME: &str = "keymap.txt";
+
+/// Where the keymap in use came from.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Origin {
+    /// No file of the user's: the built-in map.
+    BuiltIn,
+    /// The user's file.
+    File,
+    /// The user's file is there but didn't load (why): the built-in map instead.
+    Broken(String),
+}
+
+/// The user's keymap at `path` if there is one and it loads, else the built-in map.
+/// `spell` is [`Keymap::spell_keys`]'s key namer.
+pub fn load_user(
+    path: &std::path::Path,
+    spell: impl Fn(&str) -> Option<String> + Copy,
+) -> (Keymap, Origin) {
+    let built_in = || {
+        Keymap::built_in()
+            .spell_keys(spell)
+            .expect("the built-in keymap names keys the UI knows")
+    };
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (built_in(), Origin::BuiltIn),
+        Err(e) => return (built_in(), Origin::Broken(format!("reading it: {e}"))),
+    };
+    match Keymap::parse(&text).and_then(|k| k.spell_keys(spell)) {
+        Ok(k) => (k, Origin::File),
+        Err(e) => {
+            eprintln!("{}: {e}; using the built-in keymap", path.display());
+            (built_in(), Origin::Broken(e))
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Binding {
@@ -297,6 +338,34 @@ mod tests {
 
     fn press(mode: Mode, key: &str, shift: bool) -> Option<Command> {
         Keymap::built_in().find(mode, key, shift)?.press()
+    }
+
+    #[test]
+    fn a_user_keymap_replaces_the_built_in_one_unless_it_is_broken() {
+        let dir = std::env::temp_dir().join(format!("earshot-keymap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(FILE_NAME);
+        let _ = std::fs::remove_file(&path);
+        let spell = |k: &str| Some(k.to_string());
+
+        let (k, origin) = load_user(&path, spell);
+        assert_eq!(origin, Origin::BuiltIn);
+        assert_eq!(k.bindings.len(), Keymap::built_in().bindings.len());
+
+        std::fs::write(&path, "perform  P  deck1  play\n").unwrap();
+        let (k, origin) = load_user(&path, spell);
+        assert_eq!(origin, Origin::File);
+        assert_eq!(k.bindings.len(), 1);
+        assert!(k.find(Mode::Perform, "P", false).is_some());
+
+        std::fs::write(&path, "perform  P  deck1  play\nperform  Q  deck9  play\n").unwrap();
+        let (k, origin) = load_user(&path, spell);
+        let Origin::Broken(e) = origin else {
+            panic!("{origin:?}")
+        };
+        assert!(e.contains("line 2"), "{e}");
+        assert_eq!(k.bindings.len(), Keymap::built_in().bindings.len());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
