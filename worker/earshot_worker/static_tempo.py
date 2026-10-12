@@ -174,7 +174,7 @@ def excerpt_starts(t: np.ndarray, env: np.ndarray, low: np.ndarray, sr: int) -> 
 
 # How far (s) a straight grid may miss the excerpts' beats and still be "on the beat",
 # when choosing a rounder tempo.
-GRID_TOLERANCE = 0.015  # as the engine's Beatgrid::straightened
+GRID_TOLERANCE = 0.015  # the one copy of tempo rounding (choose_tempo)
 
 
 def wrap(x: np.ndarray, period: float) -> np.ndarray:
