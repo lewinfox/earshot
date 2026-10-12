@@ -29,7 +29,7 @@ use super::theme::THEME;
 use super::views::{self, Panels};
 use crate::core::analysis::{Analyser, Mode as AnalysisMode};
 use crate::core::collections::{
-    CollectionCmd, CollectionId, CollectionKind, Collections, FlowCmd, Section,
+    CollectionCmd, CollectionId, CollectionKind, Collections, FlowCmd, FlowGraph, Section,
 };
 use crate::core::command::{self, AppCmd, AudioCmd, Command, DeckCmd, PreviewCmd, ViewCmd};
 use crate::core::edit;
@@ -45,7 +45,7 @@ use crate::core::settings::{self, Settings};
 use crate::core::store::{self, EventSink, Store, StoreCmd, StoreEvent};
 use crate::core::tempo_lock::{TempoLock, TempoLockCmd};
 use crate::core::track::AnalysisState;
-use crate::core::view::{Mode, Pane, Region};
+use crate::core::view::{Mode, Pane, Region, Tool};
 use crate::core::worker_client::Role;
 use crate::core::{Event, Sink};
 
@@ -191,7 +191,6 @@ impl EarshotApp {
             .and_then(|s| eframe::get_value(s, prefs::KEY))
             .unwrap_or_default();
         cc.egui_ctx.set_zoom_factor(prefs.ui_scale);
-        let flow = FlowUi::from_saved(prefs.flow.clone());
         let tables = prefs.tables.clone();
         let mut app = EarshotApp {
             ctx: cc.egui_ctx.clone(),
@@ -224,7 +223,7 @@ impl EarshotApp {
             hud: Hud::default(),
             prefs,
             modals: Modals::default(),
-            panels: Panels::new(LibraryPane::new(flow, tables)),
+            panels: Panels::new(LibraryPane::new(tables)),
             frame: EngineFrame::default(),
             settle_until: None,
         };
@@ -326,7 +325,7 @@ impl EarshotApp {
 
     /// What's on screen: the mode, the layout, focus, windows and zoom.
     fn view_cmd(&mut self, cmd: ViewCmd) {
-        let lib = &mut self.panels.library;
+        let (lib, flow) = (&mut self.panels.library, &self.panels.flow);
         match cmd {
             ViewCmd::Browse(n) => lib.browse(n),
             ViewCmd::TogglePane => {
@@ -338,7 +337,7 @@ impl EarshotApp {
             ViewCmd::FocusPane(p) => lib.focused_pane = p,
             ViewCmd::FocusSearch => lib.browser.search_focus = true,
             ViewCmd::LoadSelected(deck) => {
-                if let Some(id) = lib.focused_track() {
+                if let Some(id) = lib.focused_track(flow) {
                     self.load(Some(deck), id);
                 }
             }
@@ -346,7 +345,6 @@ impl EarshotApp {
             ViewCmd::Source(s) => self.prefs.layout_mut().source = s,
             ViewCmd::Aside(a) => self.prefs.layout_mut().aside = a,
             ViewCmd::Tool(t) => self.prefs.layout_mut().tool = t,
-            ViewCmd::ShowFlow(on) => lib.flow.open = on,
             ViewCmd::ToggleModal(m) => self.modals.toggle(m),
             ViewCmd::CloseModal(m) => self.modals.close(m),
             ViewCmd::WaveZoom(z) => self.prefs.wave_zoom = z,
@@ -362,6 +360,7 @@ impl EarshotApp {
                     Region::Waves => sizes.waves = size,
                     Region::Source => sizes.source = size,
                     Region::Aside => sizes.aside = size,
+                    Region::FlowLibrary => sizes.flow_library = size,
                 }
             }
         }
@@ -406,17 +405,17 @@ impl EarshotApp {
     fn refresh_suggestions(&mut self) {
         let decks = self.decks_now();
         let prepare = (self.prefs.mode == Mode::Prepare).then(|| self.deck_now(DeckId::PREPARE));
-        let lib = &mut self.panels.library;
+        let (lib, flow) = (&mut self.panels.library, &self.panels.flow);
         // The suggestions' own selection isn't a reference for themselves.
         let selected = match lib.focused_pane {
             Pane::Suggest => lib.browser.focused(),
-            _ => lib.focused_track(),
+            _ => lib.focused_track(flow),
         };
         let view = CoreView {
             lib: &self.index,
             history: &self.history,
             collections: &self.collections,
-            open_flow: lib.flow.flow,
+            open_flow: flow.flow,
         };
         lib.suggest
             .refresh(&view, &decks, prepare.as_ref(), selected);
@@ -430,7 +429,7 @@ impl EarshotApp {
                 lib: &self.index,
                 history: &self.history,
                 collections: &self.collections,
-                open_flow: self.panels.library.flow.flow,
+                open_flow: self.panels.flow.flow,
             },
             engine: &self.frame,
             theme: &THEME,
@@ -471,7 +470,6 @@ impl EarshotApp {
 
 impl eframe::App for EarshotApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        self.prefs.flow = self.panels.library.flow.saved();
         self.prefs.tables = self.panels.library.tables.clone();
         eframe::set_value(storage, prefs::KEY, &self.prefs);
     }
@@ -512,6 +510,7 @@ impl eframe::App for EarshotApp {
             }
         }
         self.save_flow();
+        self.save_flow_view(ctx);
         self.schedule_repaint(ctx);
     }
 }
@@ -529,5 +528,7 @@ mod input;
 mod library_ops;
 mod preview;
 mod tempo_lock;
+#[cfg(test)]
+mod flow_tests;
 #[cfg(test)]
 mod tests;

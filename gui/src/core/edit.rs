@@ -12,6 +12,8 @@
 //! - The Flow canvas keeps its graph itself: its edits are recorded by the shell when
 //!   it saves them ([`graph_diff`]), and undone on the canvas while that Flow is open.
 
+use std::time::{Duration, Instant};
+
 use super::collections::{CollectionId, FlowGraph, GraphOp, NodeId};
 use super::keys::key_name;
 use super::track::{Track, TrackId};
@@ -343,16 +345,50 @@ pub fn flow_edit(flow: CollectionId, before: &FlowGraph, after: &FlowGraph) -> E
 /// How many steps undo goes back.
 pub const UNDO_STEPS: usize = 200;
 
+/// Renames of one collection this close together are one step (typing a name).
+pub const RENAME_RUN: Duration = Duration::from_secs(3);
+
 /// The undo and redo stacks.
 #[derive(Default)]
 pub struct History {
     undo: Vec<Edit>,
     redo: Vec<Edit>,
+    /// When the last edit was recorded.
+    last: Option<Instant>,
 }
 
 impl History {
     /// A new edit: it can be undone, and what was undone can no longer be redone.
     pub fn record(&mut self, e: Edit) {
+        self.record_at(e, Instant::now());
+    }
+
+    /// [`Self::record`], as of `now`. A rename straight after a rename of the same
+    /// collection (within [`RENAME_RUN`]) joins it, so a name typed a letter at a time
+    /// is undone in one go.
+    pub fn record_at(&mut self, e: Edit, now: Instant) {
+        let recent = self.last.is_some_and(|t| now.duration_since(t) < RENAME_RUN);
+        self.last = Some(now);
+        if let (
+            true,
+            Edit::Name {
+                collection, new, ..
+            },
+            Some(Edit::Name {
+                collection: c,
+                new: last,
+                ..
+            }),
+        ) = (recent, &e, self.undo.last_mut())
+            && c == collection
+            && self.redo.is_empty()
+        {
+            *last = new.clone();
+            if self.undo.last().is_some_and(Edit::is_noop) {
+                self.undo.pop();
+            }
+            return;
+        }
         if e.is_noop() {
             return;
         }
@@ -552,5 +588,26 @@ mod tests {
         g.nodes.sort_by_key(|n| n.id);
         g.edges.sort();
         g
+    }
+
+    #[test]
+    fn a_name_typed_letter_by_letter_is_one_step() {
+        let name = |old: &str, new: &str| Edit::Name {
+            collection: 7,
+            old: old.into(),
+            new: new.into(),
+        };
+        let mut h = History::default();
+        let t = Instant::now();
+        h.record_at(name("Flow", "Flow N"), t);
+        h.record_at(name("Flow N", "Flow Ni"), t + Duration::from_millis(200));
+        h.record_at(name("Flow Ni", "Flow Nig"), t + Duration::from_millis(400));
+        assert_eq!(h.undo(), Some(name("Flow Nig", "Flow")));
+        assert!(h.undo().is_none(), "one step");
+        h.redo();
+        // A while later: a step of its own.
+        h.record_at(name("Flow Nig", "Set"), t + RENAME_RUN * 2);
+        assert_eq!(h.undo(), Some(name("Set", "Flow Nig")));
+        assert!(h.undo().is_some());
     }
 }

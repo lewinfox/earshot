@@ -4,7 +4,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::panels::flow;
 use super::panels::library::table::Tables;
 use crate::core::view::{Aside, Mode, Source, Tool};
 
@@ -23,8 +22,6 @@ pub struct UiPrefs {
     pub ui_scale: f32,
     /// Four decks in Perform instead of two. Not used yet: the engine runs two.
     pub four_decks: bool,
-    /// The Flow canvas: the Flow that was open and where it was looking.
-    pub flow: flow::Saved,
     /// Each kind of track list's columns, widths and sort.
     pub tables: Tables,
 }
@@ -38,7 +35,6 @@ impl Default for UiPrefs {
             wave_zoom: 4.0,
             ui_scale: 1.0,
             four_decks: false,
-            flow: flow::Saved::default(),
             tables: Tables::default(),
         }
     }
@@ -50,6 +46,11 @@ impl UiPrefs {
             Mode::Perform => &self.perform,
             Mode::Prepare => &self.prepare,
         }
+    }
+
+    /// Prepare's Flow editor is on screen.
+    pub fn flow_tab(&self) -> bool {
+        self.mode == Mode::Prepare && self.prepare.tool == Tool::Flow
     }
 
     pub fn layout_mut(&mut self) -> &mut Layout {
@@ -94,6 +95,8 @@ pub struct Sizes {
     pub source: f32,
     /// The library's right pane.
     pub aside: f32,
+    /// The library beside the Flow canvas.
+    pub flow_library: f32,
 }
 
 impl Default for Sizes {
@@ -102,6 +105,7 @@ impl Default for Sizes {
             waves: 150.0,
             source: 250.0,
             aside: 380.0,
+            flow_library: 640.0,
         }
     }
 }

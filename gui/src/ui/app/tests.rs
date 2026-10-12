@@ -11,14 +11,19 @@ use egui::vec2;
 use super::*;
 use crate::core::worker_client::testing::stand_in;
 
-type H = egui_kittest::Harness<'static, EarshotApp>;
+pub(super) type H = egui_kittest::Harness<'static, EarshotApp>;
 
 /// A folder of its own for one test: the database and the music.
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("earshot-app-{name}-{}", std::process::id()));
+pub(super) fn scratch(name: &str) -> PathBuf {
+    let dir = scratch_dir(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("music")).unwrap();
     dir
+}
+
+/// Where [`scratch`] puts one test's folder.
+pub(super) fn scratch_dir(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("earshot-app-{name}-{}", std::process::id()))
 }
 
 /// Write `seconds` of a four-to-the-floor beat at `bpm`: a decaying low thump on
@@ -77,7 +82,7 @@ fn shot_path(test: &str) -> Option<PathBuf> {
 
 /// Start the app on the fixture library, scan it and analyse every track (with the
 /// stand-in worker). Renders with wgpu only when a picture is wanted.
-fn start(test: &str) -> H {
+pub(super) fn start(test: &str) -> H {
     let dir = scratch(test);
     for (title, bpm) in TRACKS {
         write_track(&dir.join("music").join(format!("{title}.wav")), bpm, 24.0);
@@ -109,7 +114,7 @@ fn start(test: &str) -> H {
 }
 
 /// Step frames (in real time: the work happens on other threads) until `ok` holds.
-fn settle_until(h: &mut H, ok: impl Fn(&EarshotApp) -> bool) {
+pub(super) fn settle_until(h: &mut H, ok: impl Fn(&EarshotApp) -> bool) {
     for _ in 0..1000 {
         h.step();
         if ok(h.state()) {
@@ -120,18 +125,18 @@ fn settle_until(h: &mut H, ok: impl Fn(&EarshotApp) -> bool) {
     panic!("timed out");
 }
 
-fn steps(h: &mut H, n: usize) {
+pub(super) fn steps(h: &mut H, n: usize) {
     for _ in 0..n {
         h.step();
         std::thread::sleep(Duration::from_millis(16));
     }
 }
 
-fn ids(h: &H) -> Vec<i64> {
+pub(super) fn ids(h: &H) -> Vec<i64> {
     h.state().index.tracks().iter().map(|t| t.id).collect()
 }
 
-fn render(h: &mut H, test: &str) {
+pub(super) fn render(h: &mut H, test: &str) {
     if let Some(path) = shot_path(test) {
         h.render().expect("render").save(&path).expect("save");
         eprintln!("wrote {}", path.display());
@@ -208,18 +213,22 @@ fn prepare() {
     assert!(h.state().settle_until.is_none());
 }
 
-/// The Flow tab with two cards and the "+" suggestions open.
+/// Prepare's Flow tab with two cards and the "+" suggestions open.
 #[test]
 fn flow() {
     let mut h = start("flow");
     let ids: Vec<i64> = ids(&h).into_iter().take(2).collect();
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
+    h.state_mut()
+        .dispatch(ViewCmd::Tool(crate::core::view::Tool::Flow).into());
     h.state_mut().dispatch(FlowCmd::AddTracks(ids).into());
     h.state_mut().flow().fit();
     steps(&mut h, 10);
     h.state_mut().flow().open_first_suggestions();
     steps(&mut h, 5);
     render(&mut h, "flow");
-    assert!(h.state().panels.library.flow.open);
+    assert!(h.state().prefs.flow_tab());
 }
 
 /// Layout commands land in the preferences, per mode.
@@ -277,7 +286,6 @@ fn edits_undo_and_redo() {
         .dispatch(FlowCmd::AddTracks(ids[..2].to_vec()).into());
     let cards = |a: &EarshotApp| {
         a.panels
-            .library
             .flow
             .flow
             .and_then(|f| a.collections.get(f))
@@ -532,7 +540,10 @@ fn master_in_prepare_is_the_player() {
     app.dispatch(ViewCmd::FocusPane(Pane::Suggest).into());
     app.dispatch(ViewCmd::Browse(1).into());
     let pick = app.panels.library.suggest.focused().expect("a suggestion");
-    assert_eq!(app.panels.library.focused_track(), Some(pick));
+    assert_eq!(
+        app.panels.library.focused_track(&app.panels.flow),
+        Some(pick)
+    );
     let a = DeckId::new(0).unwrap();
     app.dispatch(ViewCmd::LoadSelected(a).into());
     settle_until(&mut h, |app| app.panels.decks[a.index()].wave.is_some());

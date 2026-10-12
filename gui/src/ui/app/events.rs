@@ -116,12 +116,12 @@ impl EarshotApp {
                     self.cues.insert(track, Arc::new(cues));
                 }
             }
-            StoreEvent::FlowLoaded(flow) => self.flow().load(flow),
+            StoreEvent::FlowLoaded(flow) => self.load_flow(flow),
             StoreEvent::Deleted(ids) => {
-                let lib = &mut self.panels.library;
-                if lib.flow.flow.is_some_and(|id| ids.contains(&id)) {
-                    lib.flow.load(None);
+                if self.flow().flow.is_some_and(|id| ids.contains(&id)) {
+                    self.flow().load(None, None);
                 }
+                let lib = &mut self.panels.library;
                 if matches!(lib.browser.scope(), Scope::Collection(id) if ids.contains(id)) {
                     lib.browser.set_scope(Scope::All);
                 }

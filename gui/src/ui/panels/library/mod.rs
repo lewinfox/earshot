@@ -1,8 +1,8 @@
-//! The library: one component, the same in both modes. An icon stack on the left
-//! picks the source (what we're operating on: all tracks, playlists, crates, Flows,
-//! folders on disk, other libraries), shown in the pane beside it; the track table
-//! (or the Flow canvas) fills the middle; an icon stack on the right opens side
-//! panes such as the suggestions.
+//! The library: one component, the same in both modes (and beside the Flow canvas).
+//! An icon stack on the left picks the source (what we're operating on: all tracks,
+//! playlists, crates, Flows, folders on disk, other libraries), shown in the pane
+//! beside it; the track table fills the middle; an icon stack on the right opens
+//! side panes such as the suggestions.
 //!
 //! One list has focus at a time ([`LibraryPane::focused_pane`]), each with its own
 //! selection: the keyboard and the controller's browse knob move through it, "load
@@ -77,7 +77,6 @@ pub struct LibraryPane {
     pub browser: LibraryUi,
     pub collections: CollectionsUi,
     pub suggest: SuggestUi,
-    pub flow: FlowUi,
     /// Waveform thumbnails and cover art for every list.
     pub media: Media,
     /// Every table's columns and sort, by view (saved in `UiPrefs`).
@@ -87,30 +86,24 @@ pub struct LibraryPane {
 }
 
 impl LibraryPane {
-    pub fn new(flow: FlowUi, tables: Tables) -> LibraryPane {
+    pub fn new(tables: Tables) -> LibraryPane {
         LibraryPane {
             browser: LibraryUi::default(),
             collections: CollectionsUi::default(),
             suggest: SuggestUi::default(),
-            flow,
             media: Media::default(),
             tables,
             focused_pane: Pane::Library,
         }
     }
 
-    /// Full-screen Flow: the decks and side panes hide while planning.
-    pub fn planning(&self) -> bool {
-        self.flow.open && self.flow.full
-    }
-
     /// The focused list's focused track: what "load selected" loads and the
-    /// suggestions' *Selected* is.
-    pub fn focused_track(&self) -> Option<TrackId> {
+    /// suggestions' *Selected* is. `flow`: the Flow canvas, for its selected card.
+    pub fn focused_track(&self, flow: &FlowUi) -> Option<TrackId> {
         match self.focused_pane {
             Pane::Library => self.browser.focused(),
             Pane::Suggest => self.suggest.focused(),
-            Pane::Flow => self.flow.selected_track().or(self.browser.focused()),
+            Pane::Flow => flow.selected_track().or(self.browser.focused()),
         }
     }
 
@@ -125,8 +118,9 @@ impl LibraryPane {
     /// The left pane: the source picked in the icon stack.
     fn source(&mut self, ui: &mut Ui, source: Source, cx: &mut Cx) {
         if let Some(section) = source.section() {
-            let open = if self.flow.open {
-                self.flow.flow
+            // The Flow on the canvas, while the Flow editor is showing.
+            let open = if cx.prefs.flow_tab() {
+                cx.core.open_flow
             } else {
                 match self.browser.scope() {
                     Scope::Collection(id) => Some(*id),
@@ -147,9 +141,7 @@ impl LibraryPane {
         match source {
             Source::AllTracks => {
                 let table = self.tables.get_mut(TableView::Library);
-                if self.browser.all_tracks(ui, &cx.core, table) {
-                    cx.send(ViewCmd::ShowFlow(false));
-                }
+                self.browser.all_tracks(ui, &cx.core, table);
             }
             Source::Explorer => self.browser.explorer(ui, &cx.core, cx.out),
             Source::External => placeholder(
@@ -184,45 +176,78 @@ impl LibraryPane {
         }
     }
 
-    /// The middle: the track list, or the Flow canvas.
+    /// The middle: the track list.
     fn middle(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        ui.horizontal(|ui| {
-            if ui.selectable_label(!self.flow.open, "Tracks").clicked() {
-                cx.send(ViewCmd::ShowFlow(false));
-            }
-            if ui
-                .selectable_label(self.flow.open, "Flow")
-                .on_hover_text("Plan a set: add tracks, then grow it from suggestions")
-                .clicked()
-            {
-                cx.send(ViewCmd::ShowFlow(true));
-            }
-        });
-        ui.separator();
-        if self.flow.open {
-            let preview = cx.engine.preview;
-            let area = ui.available_rect_before_wrap();
-            self.flow
-                .show(ui, &cx.core, &mut self.media, preview, cx.out);
-            // A click on the canvas gives it focus (its selected card is "Selected").
-            if ui.input(|i| i.pointer.any_pressed())
-                && ui
-                    .ctx()
-                    .pointer_interact_pos()
-                    .is_some_and(|p| area.contains(p))
-                && self.focused_pane != Pane::Flow
-            {
-                cx.send(ViewCmd::FocusPane(Pane::Flow));
-            }
-        } else {
-            let table = self.tables.get_mut(self.browser.view(&cx.core));
-            if self
-                .browser
-                .list(ui, &cx.core, &mut self.media, table, cx.out)
-            {
-                cx.send(ViewCmd::FocusPane(Pane::Library));
+        let table = self.tables.get_mut(self.browser.view(&cx.core));
+        if self
+            .browser
+            .list(ui, &cx.core, &mut self.media, table, cx.out)
+        {
+            cx.send(ViewCmd::FocusPane(Pane::Library));
+        }
+    }
+
+    /// Draw it, with or without the right icon stack and its panes (`asides`; the
+    /// Flow editor has its own).
+    pub fn show(&mut self, ui: &mut Ui, cx: &mut Cx, asides: bool) {
+        let layout = cx.prefs.layout().clone();
+        // Panel ids per mode, so each mode keeps its own sizes.
+        let id = |name: &str| match cx.prefs.mode {
+            Mode::Perform => format!("{name}-perform"),
+            Mode::Prepare => format!("{name}-prepare"),
+        };
+        let stack_frame = egui::Frame::new()
+            .fill(cx.theme.bg)
+            .inner_margin(egui::Margin::symmetric(3, 6));
+        egui::SidePanel::left(id("source-stack"))
+            .resizable(false)
+            .exact_width(WIDTH + 6.0)
+            .frame(stack_frame)
+            .show_inside(ui, |ui| {
+                if let Some(s) = icon_stack(ui, &SOURCES, layout.source, Opens::Right) {
+                    cx.send(ViewCmd::Source(s));
+                }
+            });
+        if let Some(source) = layout.source {
+            let r = egui::SidePanel::left(id("source"))
+                .resizable(true)
+                .default_width(layout.sizes.source)
+                .width_range(140.0..=600.0)
+                .show_inside(ui, |ui| self.source(ui, source, cx));
+            resized(
+                ui.ctx(),
+                r.response.rect.width(),
+                Region::Source,
+                layout.sizes.source,
+                cx,
+            );
+        }
+        egui::SidePanel::right(id("aside-stack"))
+            .resizable(false)
+            .exact_width(WIDTH + 6.0)
+            .frame(stack_frame)
+            .show_animated_inside(ui, asides, |ui| {
+                if let Some(a) = icon_stack(ui, &ASIDES, layout.aside, Opens::Left) {
+                    cx.send(ViewCmd::Aside(a));
+                }
+            });
+        if let Some(aside) = layout.aside {
+            let r = egui::SidePanel::right(id("aside"))
+                .resizable(true)
+                .default_width(layout.sizes.aside)
+                .width_range(240.0..=700.0)
+                .show_animated_inside(ui, asides, |ui| self.aside(ui, aside, cx));
+            if let Some(r) = r {
+                resized(
+                    ui.ctx(),
+                    r.response.rect.width(),
+                    Region::Aside,
+                    layout.sizes.aside,
+                    cx,
+                );
             }
         }
+        egui::CentralPanel::default().show_inside(ui, |ui| self.middle(ui, cx));
     }
 }
 
@@ -239,66 +264,6 @@ fn placeholder(ui: &mut Ui, cx: &Cx, title: &str, text: &str) {
 
 impl Panel for LibraryPane {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        let layout = cx.prefs.layout().clone();
-        let show_sides = !self.planning();
-        // Panel ids per mode, so each mode keeps its own sizes.
-        let id = |name: &str| match cx.prefs.mode {
-            Mode::Perform => format!("{name}-perform"),
-            Mode::Prepare => format!("{name}-prepare"),
-        };
-        let stack_frame = egui::Frame::new()
-            .fill(cx.theme.bg)
-            .inner_margin(egui::Margin::symmetric(3, 6));
-        egui::SidePanel::left(id("source-stack"))
-            .resizable(false)
-            .exact_width(WIDTH + 6.0)
-            .frame(stack_frame)
-            .show_animated_inside(ui, show_sides, |ui| {
-                if let Some(s) = icon_stack(ui, &SOURCES, layout.source, Opens::Right) {
-                    cx.send(ViewCmd::Source(s));
-                }
-            });
-        if let Some(source) = layout.source {
-            let r = egui::SidePanel::left(id("source"))
-                .resizable(true)
-                .default_width(layout.sizes.source)
-                .width_range(140.0..=600.0)
-                .show_animated_inside(ui, show_sides, |ui| self.source(ui, source, cx));
-            if let Some(r) = r {
-                resized(
-                    ui.ctx(),
-                    r.response.rect.width(),
-                    Region::Source,
-                    layout.sizes.source,
-                    cx,
-                );
-            }
-        }
-        egui::SidePanel::right(id("aside-stack"))
-            .resizable(false)
-            .exact_width(WIDTH + 6.0)
-            .frame(stack_frame)
-            .show_animated_inside(ui, show_sides, |ui| {
-                if let Some(a) = icon_stack(ui, &ASIDES, layout.aside, Opens::Left) {
-                    cx.send(ViewCmd::Aside(a));
-                }
-            });
-        if let Some(aside) = layout.aside {
-            let r = egui::SidePanel::right(id("aside"))
-                .resizable(true)
-                .default_width(layout.sizes.aside)
-                .width_range(240.0..=700.0)
-                .show_animated_inside(ui, show_sides, |ui| self.aside(ui, aside, cx));
-            if let Some(r) = r {
-                resized(
-                    ui.ctx(),
-                    r.response.rect.width(),
-                    Region::Aside,
-                    layout.sizes.aside,
-                    cx,
-                );
-            }
-        }
-        egui::CentralPanel::default().show_inside(ui, |ui| self.middle(ui, cx));
+        self.show(ui, cx, true);
     }
 }

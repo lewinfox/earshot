@@ -57,6 +57,10 @@ pub fn icon_stack<T: Copy + PartialEq>(
                 Sense::hover()
             };
             let (rect, resp) = ui.allocate_exact_size(vec2(WIDTH, WIDTH), sense);
+            // Named by its tip for screen readers (and tests).
+            resp.widget_info(|| {
+                egui::WidgetInfo::selected(egui::WidgetType::Button, it.enabled, on, it.tip)
+            });
             let p = ui.painter();
             let fill = if on || (resp.hovered() && it.enabled) {
                 THEME.panel_2

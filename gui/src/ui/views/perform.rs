@@ -12,7 +12,6 @@ use crate::ui::panels::mixer::{self, MixerPanel};
 use crate::ui::panels::{Cx, Panel, resized};
 
 pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
-    let planning = panels.library.planning();
     let decks: Vec<DeckId> = DeckId::first(DECKS).collect();
     let waves_h = cx.prefs.perform.sizes.waves;
     let r = egui::TopBottomPanel::top("waves-perform")
@@ -20,7 +19,7 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
         .default_height(waves_h)
         .height_range(60.0..=520.0)
         .frame(row_frame(cx, Margin::same(6)))
-        .show_animated(ctx, !planning, |ui| {
+        .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.y = 3.0;
             let n = decks.len() as f32;
             let height = (ui.available_height() - 3.0 * (n - 1.0)) / n;
@@ -29,16 +28,14 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
                 WavePanel { deck, height }.ui(ui, cx);
             }
         });
-    if let Some(r) = r {
-        resized(ctx, r.response.rect.height(), Region::Waves, waves_h, cx);
-    }
+    resized(ctx, r.response.rect.height(), Region::Waves, waves_h, cx);
     // A fixed height (the mixer's), so the decks can't be stretched by a height egui
     // remembered from an older layout.
     let height = mixer::HEIGHT + 12.0;
     egui::TopBottomPanel::top("decks-perform")
         .exact_height(height + 8.0)
         .frame(row_frame(cx, Margin::symmetric(6, 4)))
-        .show_animated(ctx, !planning, |ui| {
+        .show(ctx, |ui| {
             // Decks on the crossfader's left, the mixer, then the rest.
             let side = |d: &DeckId| {
                 if mixer::on_left(*d) {

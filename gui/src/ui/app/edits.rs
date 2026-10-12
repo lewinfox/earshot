@@ -28,7 +28,7 @@ impl EarshotApp {
     /// Make an edit as it is (undo's inverse, or redo's edit), not recording it.
     fn apply_edit(&mut self, e: Edit) {
         let store = self.lib.store.clone();
-        let flow = &mut self.panels.library.flow;
+        let flow = &mut self.panels.flow;
         match e {
             // The canvas has this Flow: change it there (else its next save would undo
             // this), and save at once so the change isn't recorded as a new edit.

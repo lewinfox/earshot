@@ -66,6 +66,8 @@ pub enum Tool {
     /// Analyse a track's tempo, straighten it and save the result (to come: a
     /// placeholder for now).
     TempoLock,
+    /// The Flow editor: plan a set as a graph of cards, grown from suggestions.
+    Flow,
 }
 
 /// The windows over the app. They stack: the last one opened is on top.
@@ -107,8 +109,6 @@ pub enum ViewCmd {
     /// Open a pane on the library's right (`None` closes it).
     Aside(Option<Aside>),
     Tool(Tool),
-    /// The track list (false) or the Flow canvas (true) in the library's middle.
-    ShowFlow(bool),
     /// Open a window, or close it if it's open.
     ToggleModal(Modal),
     CloseModal(Modal),
@@ -129,4 +129,6 @@ pub enum Region {
     Source,
     /// The library's right pane (its width).
     Aside,
+    /// The library beside the Flow canvas (its width).
+    FlowLibrary,
 }
