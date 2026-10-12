@@ -147,6 +147,12 @@ impl Analyser {
         // Started now (importing torch takes a few seconds), so a track loaded onto a
         // deck is analysed straight away. It runs at normal priority, so it gets half
         // the cores: the rest are left for the audio engine and the UI.
+        // Each worker must report the worker analysers at our versions, or its
+        // results would be saved under the wrong one.
+        let worker = |role, threads| WorkerConfig {
+            expect: registry::worker_versions(),
+            ..worker(role, threads)
+        };
         let deck = WorkerClient::start(worker(Role::Deck, (cores / 2).max(1)));
         deck.warm_up();
         // A lane (and a worker, which starts only when it has work) per core, so the
@@ -175,6 +181,15 @@ impl Analyser {
         let analyser = Analyser { shared };
         analyser.restore();
         analyser
+    }
+
+    /// Why the analysis worker was refused (its analysers aren't the versions this
+    /// app expects), if it was: every job it gets fails until the app restarts.
+    pub fn worker_problem(&self) -> Option<String> {
+        let s = &self.shared;
+        std::iter::once(&s.deck)
+            .chain(&s.background)
+            .find_map(WorkerClient::refused)
     }
 
     /// How many background workers may run at once.

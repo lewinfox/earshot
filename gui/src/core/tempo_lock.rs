@@ -1180,6 +1180,7 @@ for line in sys.stdin:
             grace: Duration::from_secs(5),
             idle_exit: None,
             keep_alive: false,
+            expect: vec![],
         }
     }
 

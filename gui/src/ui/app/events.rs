@@ -68,6 +68,9 @@ impl EarshotApp {
                     if let Some(AnalysisState::Failed(e)) = &ev.state {
                         a.failed += 1;
                         a.last_error = format!("{title}: {e}");
+                        if a.worker_problem.is_none() {
+                            a.worker_problem = self.lib.analyser.worker_problem();
+                        }
                     }
                     // The results themselves (BPM, grid, thumbnail) come from the
                     // Store as `TracksChanged` and `Previews`.

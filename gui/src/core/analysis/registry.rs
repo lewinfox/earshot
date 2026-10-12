@@ -129,6 +129,16 @@ impl AnalyserId {
     }
 }
 
+/// The analysers the worker runs, by name, with their versions: what its hello
+/// must report.
+pub fn worker_versions() -> Vec<(String, u32)> {
+    REGISTRY
+        .iter()
+        .filter(|s| s.runs_in == RunsIn::Worker)
+        .map(|s| (s.id.as_str().to_string(), s.version))
+        .collect()
+}
+
 /// The analysers whose features are all among `names`.
 pub fn measured_by(names: &[&str]) -> impl Iterator<Item = &'static AnalyserSpec> {
     REGISTRY

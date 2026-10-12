@@ -9,7 +9,8 @@ use std::time::Duration;
 use egui::vec2;
 
 use super::*;
-use crate::core::worker_client::testing::stand_in;
+use crate::core::worker_client::WorkerConfig;
+use crate::core::worker_client::testing::{stand_in, stand_in_old_grid};
 
 pub(super) type H = egui_kittest::Harness<'static, EarshotApp>;
 
@@ -83,6 +84,21 @@ fn shot_path(test: &str) -> Option<PathBuf> {
 /// Start the app on the fixture library, scan it and analyse every track (with the
 /// stand-in worker). Renders with wgpu only when a picture is wanted.
 pub(super) fn start(test: &str) -> H {
+    let mut h = start_with(test, stand_in);
+    let ids: Vec<i64> = h.state().index.tracks().iter().map(|t| t.id).collect();
+    h.state_mut().dispatch(
+        LibraryCmd::Analyse {
+            tracks: ids,
+            dynamic: false,
+        }
+        .into(),
+    );
+    settle_until(&mut h, |a| a.index.tracks().iter().all(|t| t.analysed()));
+    h
+}
+
+/// Start the app on the fixture library with this analysis worker, and scan it.
+pub(super) fn start_with(test: &str, worker: fn(Role, usize) -> WorkerConfig) -> H {
     let dir = scratch(test);
     for (title, bpm) in TRACKS {
         write_track(&dir.join("music").join(format!("{title}.wav")), bpm, 24.0);
@@ -90,7 +106,7 @@ pub(super) fn start(test: &str) -> H {
     let services = Services {
         db: dir.join(store::FILE_NAME),
         null_audio: true,
-        worker: stand_in,
+        worker,
         midi: false,
     };
     let mut b = egui_kittest::Harness::builder().with_size(vec2(1700.0, 1000.0));
@@ -101,15 +117,6 @@ pub(super) fn start(test: &str) -> H {
     h.state_mut()
         .dispatch(LibraryCmd::AddRoots(vec![dir.join("music")]).into());
     settle_until(&mut h, |a| a.index.tracks().len() == TRACKS.len());
-    let ids: Vec<i64> = h.state().index.tracks().iter().map(|t| t.id).collect();
-    h.state_mut().dispatch(
-        LibraryCmd::Analyse {
-            tracks: ids,
-            dynamic: false,
-        }
-        .into(),
-    );
-    settle_until(&mut h, |a| a.index.tracks().iter().all(|t| t.analysed()));
     h
 }
 
@@ -617,6 +624,28 @@ fn settings() {
         .dispatch(ViewCmd::Settings(SettingsTab::Audio).into());
     steps(&mut h, 3);
     render(&mut h, "settings-audio");
+}
+
+/// A worker whose grid analyser isn't the app's version is refused: the tracks fail
+/// with why, and the top bar says the worker is out of date.
+#[test]
+fn a_worker_with_another_grid_version_is_refused() {
+    let mut h = start_with("old-worker", stand_in_old_grid);
+    let id = ids(&h)[0];
+    h.state_mut().dispatch(
+        LibraryCmd::Analyse {
+            tracks: vec![id],
+            dynamic: false,
+        }
+        .into(),
+    );
+    settle_until(&mut h, |a| a.analysis.worker_problem.is_some());
+    let why = h.state().analysis.worker_problem.clone().unwrap();
+    assert!(why.contains("grid analyser is version 2, this app's is 3"), "{why}");
+    assert!(!h.state().index.get(id).unwrap().analysed());
+    steps(&mut h, 3);
+    h.get_by_label("analysis worker out of date");
+    render(&mut h, "old-worker");
 }
 
 /// The settings' analysis tab counts the tracks with stale analysis, and re-analyses

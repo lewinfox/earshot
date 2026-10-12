@@ -18,6 +18,9 @@ pub struct AnalysisSummary {
     pub running: HashMap<i64, f64>,
     pub failed: u32,
     pub last_error: String,
+    /// The analysis worker was refused (it doesn't match this app): why. Until a
+    /// restart, nothing is analysed.
+    pub worker_problem: Option<String>,
 }
 
 pub struct TopBar<'a> {
@@ -160,6 +163,11 @@ impl Panel for TopBar<'_> {
 impl TopBar<'_> {
     fn analysis_pill(&self, ui: &mut Ui, cx: &mut Cx) {
         let (a, t) = (self.analysis, cx.theme);
+        if let Some(why) = &a.worker_problem {
+            t.pill(ui, "analysis worker out of date", t.bad)
+                .on_hover_text(why);
+            return;
+        }
         let fail = if a.failed > 0 {
             format!(" · {} failed", a.failed)
         } else {

@@ -237,6 +237,10 @@ pub struct WorkerConfig {
     pub idle_exit: Option<Duration>,
     /// Start a new process straight away when one dies, not on the next job.
     pub keep_alive: bool,
+    /// Analysers (name, version) the worker's hello must report at exactly these
+    /// versions; otherwise it's refused, and so is every job after
+    /// ([`WorkerClient::refused`]).
+    pub expect: Vec<(String, u32)>,
 }
 
 /// What a worker process is for.
@@ -282,6 +286,7 @@ impl WorkerConfig {
             grace: Duration::from_secs(15),
             idle_exit: (role == Role::Background).then_some(IDLE_EXIT),
             keep_alive: role == Role::Deck,
+            expect: vec![],
         }
     }
 }
@@ -298,6 +303,8 @@ struct Inner {
     next_id: AtomicU64,
     /// A process is up (starting or ready), as the supervisor last left it.
     running: Arc<AtomicBool>,
+    /// Why the worker was refused for good, if it was.
+    refused: Arc<Mutex<Option<String>>>,
 }
 
 impl Drop for Inner {
@@ -317,18 +324,26 @@ impl WorkerClient {
         let (tx, rx) = mpsc::channel();
         let supervisor_tx = tx.clone();
         let running = Arc::new(AtomicBool::new(false));
-        let flag = running.clone();
+        let refused: Arc<Mutex<Option<String>>> = Arc::default();
+        let (flag, why) = (running.clone(), refused.clone());
         std::thread::Builder::new()
             .name("earshot-worker-supervisor".into())
-            .spawn(move || Supervisor::new(config, supervisor_tx, flag).run(rx))
+            .spawn(move || Supervisor::new(config, supervisor_tx, flag, why).run(rx))
             .expect("spawn worker supervisor");
         WorkerClient {
             inner: Arc::new(Inner {
                 tx: Mutex::new(tx),
                 next_id: AtomicU64::new(1),
                 running,
+                refused,
             }),
         }
+    }
+
+    /// Why the worker was refused for good (its analysers aren't the versions this
+    /// app expects): every job fails with this until the app restarts.
+    pub fn refused(&self) -> Option<String> {
+        self.inner.refused.lock().unwrap().clone()
     }
 
     /// Whether the worker process is up (starting or ready).
@@ -551,10 +566,17 @@ struct Supervisor {
     idle_since: Option<Instant>,
     /// Shared with the client: `proc` is Some.
     running: Arc<AtomicBool>,
+    /// Shared with the client: why the worker was refused for good.
+    refused: Arc<Mutex<Option<String>>>,
 }
 
 impl Supervisor {
-    fn new(config: WorkerConfig, tx: Sender<Ctl>, running: Arc<AtomicBool>) -> Self {
+    fn new(
+        config: WorkerConfig,
+        tx: Sender<Ctl>,
+        running: Arc<AtomicBool>,
+        refused: Arc<Mutex<Option<String>>>,
+    ) -> Self {
         Supervisor {
             config,
             tx,
@@ -563,6 +585,7 @@ impl Supervisor {
             generations: 0,
             idle_since: None,
             running,
+            refused,
         }
     }
 
@@ -592,6 +615,7 @@ impl Supervisor {
                 Ok(Ctl::Cancel(id)) => self.cancel(id),
                 Ok(Ctl::WarmUp) => {
                     if self.proc.is_none()
+                        && self.refusal().is_none()
                         && let Err(e) = self.spawn()
                     {
                         eprintln!("analysis worker: {e}");
@@ -621,9 +645,18 @@ impl Supervisor {
             .is_some_and(|p| p.generation == generation)
     }
 
+    /// Why the worker was refused for good, if it was.
+    fn refusal(&self) -> Option<String> {
+        self.refused.lock().unwrap().clone()
+    }
+
     /// Send every job not yet with the current process, starting one if needed.
     fn send_waiting(&mut self) {
         if !self.jobs.values().any(|s| s.sent_to.is_none()) {
+            return;
+        }
+        if let Some(why) = self.refusal() {
+            self.fail_all(&why);
             return;
         }
         if self.proc.is_none()
@@ -745,6 +778,15 @@ impl Supervisor {
                         "the analysis worker speaks protocol {protocol} with {analysers:?}; \
                          this app needs {PROTOCOL} with a grid analyser"
                     ));
+                    return;
+                }
+                if let Some(why) = wrong_versions(&self.config.expect, &analysers) {
+                    // Its results would be saved as another version than they are: not
+                    // until the worker and the app agree (a restart after updating).
+                    eprintln!("{why}");
+                    *self.refused.lock().unwrap() = Some(why.clone());
+                    self.kill();
+                    self.fail_all(&why);
                     return;
                 }
                 eprintln!(
@@ -930,6 +972,26 @@ impl Supervisor {
     }
 }
 
+/// Why a worker reporting `analysers` in its hello won't do, if it won't: one of
+/// `expect` missing or at another version.
+fn wrong_versions(expect: &[(String, u32)], analysers: &BTreeMap<String, u32>) -> Option<String> {
+    let wrong: Vec<String> = expect
+        .iter()
+        .filter(|(name, v)| analysers.get(name) != Some(v))
+        .map(|(name, v)| match analysers.get(name) {
+            Some(has) => format!("its {name} analyser is version {has}, this app's is {v}"),
+            None => format!("it has no {name} analyser (this app's is version {v})"),
+        })
+        .collect();
+    (!wrong.is_empty()).then(|| {
+        format!(
+            "the analysis worker doesn't match this app: {}. Update both from the same \
+             commit (run worker/setup.sh) and restart earshot",
+            wrong.join("; ")
+        )
+    })
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
@@ -1010,7 +1072,7 @@ def tempo_chart(path):
 for line in sys.stdin:
     r = json.loads(line)
     if r["type"] == "hello":
-        send({"type": "hello", "protocol": int(sys.argv[1]), "analysers": {"grid": 3},
+        send({"type": "hello", "protocol": int(sys.argv[1]), "analysers": {"grid": int(os.environ.get("FAKE_GRID_VERSION", "3"))},
               "steps": {"tempo_lock": 1, "straighten": 1, "measure": 1},
               "detector": "fake", "models_loaded": []})
     elif r["type"] == "tempo_lock":
@@ -1073,12 +1135,20 @@ for line in sys.stdin:
             grace: Duration::from_millis(200),
             idle_exit: None,
             keep_alive: false,
+            expect: vec![],
         }
     }
 
     /// A stand-in for the real worker, for tests that start the whole app.
     pub fn stand_in(_role: Role, _threads: usize) -> WorkerConfig {
         fake(PROTOCOL, false)
+    }
+
+    /// [`stand_in`] with an older grid analyser than the app's (version 2).
+    pub fn stand_in_old_grid(_role: Role, _threads: usize) -> WorkerConfig {
+        let mut c = fake(PROTOCOL, false);
+        c.envs.push(("FAKE_GRID_VERSION".into(), "2".into()));
+        c
     }
 }
 
@@ -1178,6 +1248,28 @@ mod tests {
         let client = WorkerClient::start(fake(1, false));
         let e = client.analyse(&req("x", 5000), &mut |_| {}).unwrap_err();
         assert!(e.contains("protocol 1"), "{e}");
+    }
+
+    #[test]
+    fn other_analyser_versions_are_refused_for_good() {
+        // The stand-in's grid analyser is version 3.
+        let mut config = fake(PROTOCOL, false);
+        config.expect = vec![("grid".into(), 4)];
+        let client = WorkerClient::start(config);
+        let e = client.analyse(&req("x", 5000), &mut |_| {}).unwrap_err();
+        assert!(e.contains("grid analyser is version 3, this app's is 4"), "{e}");
+        assert_eq!(client.refused(), Some(e.clone()));
+        // Not started again for the next job.
+        assert!(!client.is_running());
+        let again = client.analyse(&req("x", 5000), &mut |_| {}).unwrap_err();
+        assert_eq!(again, e);
+        assert!(!client.is_running());
+
+        let mut config = fake(PROTOCOL, false);
+        config.expect = vec![("grid".into(), 3)];
+        let client = WorkerClient::start(config);
+        assert!(client.analyse(&req("x", 5000), &mut |_| {}).is_ok());
+        assert_eq!(client.refused(), None);
     }
 
     #[test]
