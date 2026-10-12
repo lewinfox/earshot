@@ -1125,3 +1125,37 @@ fn master_in_prepare_is_the_player() {
 }
 
 mod tempo_lock;
+
+/// The text columns fit their contents; clicking a row sizes nothing, and dragging
+/// the edge between Title and Artist sizes Title only.
+#[test]
+fn library_columns_fit_their_contents_until_dragged() {
+    use crate::ui::panels::library::table::{ColumnId, TableView, auto_widths};
+    let mut h = start("columns");
+    h.state_mut().dispatch(ViewCmd::Aside(None).into());
+    steps(&mut h, 3);
+    render(&mut h, "columns");
+    let auto = auto_widths(&h.ctx, &h.state().index);
+    let head = at(&h, "Title");
+    let artist = at(&h, "Artist");
+    // The Title header cell starts where its column does: its width is the fit.
+    assert!(
+        (artist.left() - head.left() - auto[&ColumnId::Title]).abs() < 12.0,
+        "{head:?} {artist:?} {auto:?}"
+    );
+    let row = title(&h, ids(&h)[0]);
+    h.get_by_label(&row).click();
+    steps(&mut h, 3);
+    let state = |h: &H| h.state().panels.library.tables.0[&TableView::Library].clone();
+    assert!(state(&h).sized.is_empty());
+
+    let edge = Pos2::new(artist.left() - 4.0, artist.center().y);
+    drag(&mut h, edge, edge + egui::vec2(60.0, 0.0), |_| {});
+    let s = state(&h);
+    assert_eq!(
+        s.sized.iter().copied().collect::<Vec<_>>(),
+        [ColumnId::Title]
+    );
+    let w = s.columns.iter().find(|c| c.0 == ColumnId::Title).unwrap().1;
+    assert!(w > auto[&ColumnId::Title] + 30.0, "{w}");
+}

@@ -30,7 +30,7 @@ use crate::ui::widgets::key_chip;
 
 // ---- columns --------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ColumnId {
     /// The row's place in the list (a playlist's order).
     Index,
@@ -396,6 +396,8 @@ impl TableView {
             columns: ids.iter().map(|&id| (id, def(id).width)).collect(),
             sort: None,
             filters: vec![],
+            sized: BTreeSet::new(),
+            fitted: 0,
         }
     }
 }
@@ -486,6 +488,12 @@ pub struct TableState {
     /// Filters by column, all of which must match. Not kept between runs.
     #[serde(skip)]
     pub filters: Vec<(ColumnId, Filter)>,
+    /// Columns sized by hand. The text columns not in it fit the library's longest
+    /// value ([`auto_widths`]).
+    pub sized: BTreeSet<ColumnId>,
+    /// Bumped by "Fit columns to contents", so egui forgets the dragged widths.
+    #[serde(skip)]
+    pub fitted: u32,
 }
 
 impl Default for TableState {
@@ -664,20 +672,30 @@ impl TrackTable<'_> {
         let mut res = TableOut::default();
         res.changed |= filter_chips(ui, state);
 
-        let shown: Vec<(ColumnId, f32)> = state.columns.clone();
+        let auto = auto_widths(ui.ctx(), v.lib);
+        // Hand-sized columns keep their width; the text ones fit their contents.
+        let shown: Vec<(ColumnId, f32)> = state
+            .columns
+            .iter()
+            .map(|&(c, w)| match auto.get(&c) {
+                Some(&a) if !state.sized.contains(&c) => (c, a),
+                _ => (c, w),
+            })
+            .collect();
         // A different set of columns is a different table to egui (its saved widths
-        // are by position).
-        let salt: Vec<ColumnId> = shown.iter().map(|c| c.0).collect();
+        // are by position), and so are new contents widths, so they take effect.
+        let salt: Vec<(ColumnId, u32)> = shown
+            .iter()
+            .map(|&(c, _)| (c, auto.get(&c).map_or(0, |w| *w as u32)))
+            .collect();
         let mut table = TableBuilder::new(ui)
-            .id_salt((id, salt))
+            .id_salt((id, salt, state.fitted))
             .striped(true)
             .sense(Sense::click_and_drag())
             .cell_layout(egui::Layout::left_to_right(Align::Center));
         for &(c, w) in &shown {
             let d = def(c);
-            table = table.column(if c == ColumnId::Title {
-                Column::remainder().at_least(120.0).clip(true)
-            } else if d.fixed {
+            table = table.column(if d.fixed {
                 Column::exact(d.width)
             } else {
                 Column::initial(w).at_least(24.0).resizable(true).clip(true)
@@ -697,7 +715,10 @@ impl TrackTable<'_> {
         let body = table
             .header(20.0, |mut h| {
                 for &(c, _) in &shown {
-                    let (rect, _) = h.col(|ui| {
+                    // The column's width (not the header's contents').
+                    let mut col_w = 0.0;
+                    h.col(|ui| {
+                        col_w = ui.max_rect().width();
                         let r =
                             ui.interact(ui.max_rect(), ui.id().with(("header", c)), Sense::click());
                         header_label(ui, c, &state_now);
@@ -710,7 +731,7 @@ impl TrackTable<'_> {
                                 header_menu(ui, c, s, available, v);
                             });
                     });
-                    widths.push((c, rect.width()));
+                    widths.push((c, col_w));
                 }
             })
             .body(|body| {
@@ -783,12 +804,16 @@ impl TrackTable<'_> {
         // Widths as dragged (not as a new table first lays itself out).
         let dragging = ui.input(|i| i.pointer.primary_down());
         for (c, w) in widths.into_iter().filter(|_| dragging) {
+            // Dragged: its width moved from what it was given.
+            let given = shown.iter().find(|e| e.0 == c).map_or(w, |e| e.1);
+            if (given - w).abs() <= 0.5 {
+                continue;
+            }
             if let Some(e) = state.columns.iter_mut().find(|e| e.0 == c)
                 && !def(c).fixed
-                && c != ColumnId::Title
-                && (e.1 - w).abs() > 0.5
             {
                 e.1 = w;
+                state.sized.insert(c);
             }
         }
 
@@ -995,6 +1020,11 @@ fn header_menu(ui: &mut Ui, c: ColumnId, s: &mut TableState, available: &[Column
             }
         }
     });
+    if !s.sized.is_empty() && ui.button("Fit columns to contents").clicked() {
+        s.sized.clear();
+        s.fitted += 1;
+        ui.close();
+    }
     if s.has_filters() && ui.button("Clear all filters").clicked() {
         s.filters.clear();
         ui.close();
@@ -1039,6 +1069,68 @@ fn filter_chips(ui: &mut Ui, s: &mut TableState) -> bool {
 }
 
 // ---- cells ---------------------------------------------------------------------------
+
+/// The widest a column grows to fit its contents.
+const AUTO_MAX: f32 = 420.0;
+
+/// The columns that fit their contents.
+const AUTO: [ColumnId; 6] = [
+    ColumnId::Title,
+    ColumnId::Artist,
+    ColumnId::Album,
+    ColumnId::Genre,
+    ColumnId::Comment,
+    ColumnId::File,
+];
+
+/// The text an [`AUTO`] column shows.
+fn cell_text(c: ColumnId, t: &Track) -> &str {
+    match c {
+        ColumnId::Title => &t.title,
+        ColumnId::Artist => &t.artist,
+        ColumnId::Album => &t.album,
+        ColumnId::Genre => &t.genre,
+        ColumnId::Comment => &t.comment,
+        ColumnId::File => t.path.rsplit('/').next().unwrap_or(&t.path),
+        _ => "",
+    }
+}
+
+/// Each [`AUTO`] column's width to fit the library's longest value in it (and its
+/// header), up to [`AUTO_MAX`]. Worked out again when the library changes.
+pub fn auto_widths(
+    ctx: &egui::Context,
+    lib: &crate::core::index::LibraryIndex,
+) -> HashMap<ColumnId, f32> {
+    let id = egui::Id::new("table-auto-widths");
+    if let Some((rev, w)) = ctx.data(|d| d.get_temp::<(u64, HashMap<ColumnId, f32>)>(id))
+        && rev == lib.rev()
+    {
+        return w;
+    }
+    let font = egui::TextStyle::Body.resolve(&ctx.style());
+    let width = |s: &str| {
+        ctx.fonts_mut(|f| {
+            f.layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE)
+                .size()
+                .x
+        })
+    };
+    let mut out = HashMap::new();
+    for c in AUTO {
+        // The longest few by characters: in a proportional font the widest is one of
+        // those, near enough.
+        let mut texts: Vec<&str> = lib.tracks().iter().map(|t| cell_text(c, t)).collect();
+        texts.sort_unstable_by_key(|t| std::cmp::Reverse(t.chars().count()));
+        texts.dedup();
+        let widest = texts.iter().take(20).map(|t| width(t)).fold(0.0, f32::max);
+        // Room for the sort arrow beside the header, and the cell's margins.
+        let header = width(def(c).title) + 24.0;
+        out.insert(c, (widest + 12.0).max(header).max(40.0).min(AUTO_MAX));
+    }
+    ctx.data_mut(|d| d.insert_temp(id, (lib.rev(), out.clone())));
+    out
+}
 
 fn muted(ui: &mut Ui, s: &str) {
     ui.add(
