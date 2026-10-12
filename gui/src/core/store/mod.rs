@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use earshot_engine::HOTCUES;
 use rusqlite::{Connection, OpenFlags};
 
-pub use read::{JobRow, LibTrack, Memory, Preview, ResultState};
+pub use read::{JobRow, LibTrack, Memory, Preview, ResultState, TrackCues};
 pub use write::{AnalysisSave, GridSave, ScannedFile, Writer};
 
 use super::collections::{Collection, CollectionKind, FlowGraph, NodeId};
@@ -183,22 +183,44 @@ pub enum StoreCmd {
         file: i64,
         hash: [u8; 32],
     },
-    /// Replace a track's hot cues (pad → seconds).
+    /// A track's hot cue times (pad → seconds). A pad that stays set keeps its label;
+    /// a cleared pad loses it. Answered with [`StoreEvent::Cues`].
     SaveHotcues {
         track: i64,
         cues: [Option<f64>; HOTCUES],
     },
+    /// Name a hot cue (`None` clears the name). Does nothing to a pad that isn't set.
+    /// Answered with [`StoreEvent::Cues`].
+    SetHotcueLabel {
+        track: i64,
+        slot: u8,
+        label: Option<String>,
+    },
     /// Save a memory cue (or loop, with `end`), unless the same one is already saved.
-    /// Answered with [`StoreEvent::Memories`].
+    /// Answered with [`StoreEvent::Cues`].
     AddMemory {
         track: i64,
         start: f64,
         end: Option<f64>,
     },
-    /// Answered with [`StoreEvent::Memories`].
+    /// Answered with [`StoreEvent::Cues`].
     DeleteMemory {
         track: i64,
         id: i64,
+    },
+    /// Name a memory cue or loop (`None` clears the name). Answered with
+    /// [`StoreEvent::Cues`].
+    SetMemoryLabel {
+        track: i64,
+        id: i64,
+        label: Option<String>,
+    },
+    /// Colour a memory cue or loop (0xRRGGBB; `None`: the default). Answered with
+    /// [`StoreEvent::Cues`].
+    SetMemoryColor {
+        track: i64,
+        id: i64,
+        color: Option<u32>,
     },
     ListCollections,
     /// Answered with [`StoreEvent::FlowLoaded`].
@@ -268,10 +290,10 @@ pub enum StoreEvent {
     TracksChanged(Vec<LibTrack>),
     /// Waveform thumbnails for the track list.
     Previews(Vec<Preview>),
-    /// A track's memory cues and loops, in order through the track.
-    Memories {
+    /// A track's hot cue labels, and its memory cues and loops in order through it.
+    Cues {
         track: i64,
-        memories: Vec<Memory>,
+        cues: TrackCues,
     },
     /// Every collection (after any of them changes).
     Collections(Vec<Collection>),
@@ -357,11 +379,12 @@ impl Store {
         self.next_collection.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Load a track's memory cues on a reader thread and send them as an event.
-    pub fn request_memories(&self, track: i64, sink: EventSink) {
+    /// Load a track's hot cue labels and memory cues on a reader thread and send them
+    /// as an event.
+    pub fn request_cues(&self, track: i64, sink: EventSink) {
         let reader = self.reader.clone();
-        std::thread::spawn(move || match reader.with(|c| read::memories(c, track)) {
-            Ok(memories) => sink(StoreEvent::Memories { track, memories }),
+        std::thread::spawn(move || match reader.with(|c| read::cues(c, track)) {
+            Ok(cues) => sink(StoreEvent::Cues { track, cues }),
             Err(e) => sink(StoreEvent::Error(e)),
         });
     }

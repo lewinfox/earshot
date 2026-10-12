@@ -34,7 +34,14 @@ must recreate everything below. Tick each one off once it works in the new UI.
 - [ ] Memory cues and memory loops, saved per track.
 - [ ] Memory list: "MEMORY" label, a "+ M" button, click an entry to go there (a cue
   becomes the cue point; a loop starts), × to forget it. When empty it shows the
-  hint "C sets a cue, M saves it here".
+  hint "C sets a cue, M saves it here". Now a cue pane on the right of Prepare's
+  waveform (like Rekordbox's): one row per memory cue or loop with its colour, time,
+  loop length and name. Double-click a row to name it (Enter saves, Esc cancels),
+  click the colour to pick one of 8. Memory cues show on the waveforms as coloured
+  triangles along the bottom.
+- [ ] Hot cue labels: right-click a pad → "Label…" / "Clear label". The name shows on
+  the pad and beside the hot cue's marker on the waveform. Moving a hot cue keeps its
+  name; clearing it drops the name.
 - [ ] Quantise button ("Q") on Prepare's player.
 
 ## Beat jump and loops

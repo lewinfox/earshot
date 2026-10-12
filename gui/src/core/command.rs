@@ -68,6 +68,12 @@ pub enum DeckCmd {
     RecallMemory(Memory),
     /// Forget one of the loaded track's memory cues.
     DeleteMemory(i64),
+    /// Name one of the loaded track's memory cues (`None` clears it).
+    SetMemoryLabel(i64, Option<String>),
+    /// Colour one of the loaded track's memory cues (0xRRGGBB; `None`: the default).
+    SetMemoryColor(i64, Option<u32>),
+    /// Name a hot cue of the loaded track (`None` clears it).
+    SetHotcueLabel(u8, Option<String>),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -206,7 +212,7 @@ pub fn dispatch(player: &Player, store: &Store, cmd: Command) -> Result<Option<C
                 (true, _, _) => return Ok(None),
                 (false, _, _) => (d.cue_point, None),
             };
-            // The UI's list is updated from the `Memories` event that comes back.
+            // The UI's list is updated from the `Cues` event that comes back.
             store.send(StoreCmd::AddMemory { track, start, end });
         }
         DeckCmd::RecallMemory(m) => match m.end {
@@ -219,9 +225,25 @@ pub fn dispatch(player: &Player, store: &Store, cmd: Command) -> Result<Option<C
                 inner.send(engine(EngineCmd::Seek(m.start)))?;
             }
         },
+        // These change what the UI shows from the `Cues` event that comes back.
         DeckCmd::DeleteMemory(id) => {
             if let Some(track) = track {
                 store.send(StoreCmd::DeleteMemory { track, id });
+            }
+        }
+        DeckCmd::SetMemoryLabel(id, label) => {
+            if let Some(track) = track {
+                store.send(StoreCmd::SetMemoryLabel { track, id, label });
+            }
+        }
+        DeckCmd::SetMemoryColor(id, color) => {
+            if let Some(track) = track {
+                store.send(StoreCmd::SetMemoryColor { track, id, color });
+            }
+        }
+        DeckCmd::SetHotcueLabel(slot, label) => {
+            if let Some(track) = track {
+                store.send(StoreCmd::SetHotcueLabel { track, slot, label });
             }
         }
         DeckCmd::Load(_) => return Ok(Some(Command::Deck(deck, cmd))),

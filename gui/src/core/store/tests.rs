@@ -524,7 +524,7 @@ fn hot_cues_and_memories_save_and_load() {
         [(10.0, None), (40.0, Some(48.0))]
     );
     assert!(w.take_events().iter().all(
-        |e| matches!(e, StoreEvent::Memories { track, memories } if *track == id && !memories.is_empty())
+        |e| matches!(e, StoreEvent::Cues { track, cues } if *track == id && !cues.memories.is_empty())
     ));
     let kinds: Vec<i64> = w
         .conn()
@@ -538,8 +538,95 @@ fn hot_cues_and_memories_save_and_load() {
 
     // Deleting a memory cue leaves the hot cues alone.
     w.delete_memory(id, m[0].id).unwrap();
-    assert_eq!(read::memories(w.conn(), id).unwrap(), [m[1]]);
+    assert_eq!(read::memories(w.conn(), id).unwrap(), [m[1].clone()]);
     assert_eq!(read::hotcues(w.conn(), id).unwrap(), hot);
+}
+
+#[test]
+fn hot_cue_labels_follow_their_pad() {
+    let (_dir, mut w, id) = one_track("hot-labels");
+    let mut hot = [None; earshot_engine::HOTCUES];
+    hot[1] = Some(4.0);
+    hot[2] = Some(8.0);
+    w.save_hotcues(id, &hot).unwrap();
+    w.set_hotcue_label(id, 1, Some("  Drop ")).unwrap();
+    w.set_hotcue_label(id, 2, Some("Break")).unwrap();
+    // A pad that isn't set has nothing to name.
+    w.set_hotcue_label(id, 5, Some("Nope")).unwrap();
+    let labels = |w: &Writer| read::hot_labels(w.conn(), id).unwrap();
+    assert_eq!(labels(&w)[1].as_deref(), Some("Drop"), "trimmed");
+    assert_eq!(labels(&w)[5], None);
+
+    // Saving times (as the engine reports them) keeps the labels of pads still set,
+    // even at a new time.
+    w.take_events();
+    hot[1] = Some(4.5);
+    w.apply(StoreCmd::SaveHotcues {
+        track: id,
+        cues: hot,
+    })
+    .unwrap();
+    assert_eq!(read::hotcues(w.conn(), id).unwrap(), hot);
+    assert_eq!(labels(&w)[1].as_deref(), Some("Drop"));
+    assert!(matches!(
+        w.take_events().last(),
+        Some(StoreEvent::Cues { track, cues }) if *track == id && cues.hot_labels[2].is_some()
+    ));
+
+    // Clearing a pad clears its label: set again, it comes back unnamed.
+    hot[2] = None;
+    w.save_hotcues(id, &hot).unwrap();
+    hot[2] = Some(9.0);
+    w.save_hotcues(id, &hot).unwrap();
+    assert_eq!(labels(&w)[2], None);
+    // And an empty name is no name.
+    w.set_hotcue_label(id, 1, Some("")).unwrap();
+    assert!(labels(&w).iter().all(Option::is_none));
+}
+
+#[test]
+fn memory_labels_and_colours_round_trip() {
+    let (_dir, mut w, id) = one_track("memory-labels");
+    w.add_memory(id, 10.0, None).unwrap();
+    w.add_memory(id, 20.0, Some(24.0)).unwrap();
+    let m = read::memories(w.conn(), id).unwrap();
+    assert_eq!((m[0].label.as_deref(), m[0].color), (None, None));
+
+    w.take_events();
+    w.set_memory_label(id, m[0].id, Some("Vocal in")).unwrap();
+    w.set_memory_color(id, m[1].id, Some(0x30_5a_ff)).unwrap();
+    let after = read::memories(w.conn(), id).unwrap();
+    assert_eq!(after[0].label.as_deref(), Some("Vocal in"));
+    assert_eq!(after[1].color, Some(0x30_5a_ff));
+    // Each edit is answered with the track's cues as they now are.
+    let events = w.take_events();
+    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        events.last(),
+        Some(StoreEvent::Cues { track, cues }) if *track == id && cues.memories == after
+    ));
+
+    // Hot cue saves leave memory cues alone, labels and colours included.
+    let mut hot = [None; earshot_engine::HOTCUES];
+    hot[0] = Some(1.0);
+    w.save_hotcues(id, &hot).unwrap();
+    assert_eq!(read::memories(w.conn(), id).unwrap(), after);
+
+    // Clearing goes back to the defaults; deleting takes the row, name and colour.
+    w.set_memory_label(id, m[0].id, None).unwrap();
+    w.set_memory_color(id, m[1].id, None).unwrap();
+    assert_eq!(read::memories(w.conn(), id).unwrap(), m);
+    w.set_memory_label(id, m[1].id, Some("Loop")).unwrap();
+    w.delete_memory(id, m[1].id).unwrap();
+    assert_eq!(read::memories(w.conn(), id).unwrap(), [m[0].clone()]);
+    // A memory cue's id can't be used to name a hot cue's row.
+    let hot_row: i64 = w
+        .conn()
+        .query_row("SELECT id FROM cues WHERE kind = 0", [], |r| r.get(0))
+        .unwrap();
+    w.set_memory_label(id, hot_row, Some("x")).unwrap();
+    let labels = read::hot_labels(w.conn(), id).unwrap();
+    assert!(labels.iter().all(Option::is_none));
 }
 
 #[test]

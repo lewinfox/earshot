@@ -311,11 +311,22 @@ pub fn loudness(c: &Connection, id: i64) -> Result<Option<Loudness>> {
 // ---- cues --------------------------------------------------------------------------
 
 /// A memory cue (a point) or memory loop (with an end), as Rekordbox has them.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Memory {
     pub id: i64,
     pub start: f64,
     pub end: Option<f64>,
+    pub label: Option<String>,
+    /// 0xRRGGBB; `None` shows the default for a cue or a loop.
+    pub color: Option<u32>,
+}
+
+/// What the UI shows of a track's cues besides the hot cue times (those go to the
+/// engine on load): the hot cue labels by pad, and the memory cues and loops.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TrackCues {
+    pub hot_labels: [Option<String>; HOTCUES],
+    pub memories: Vec<Memory>,
 }
 
 pub fn hotcues(c: &Connection, track: i64) -> Result<[Option<f64>; HOTCUES]> {
@@ -334,10 +345,29 @@ pub fn hotcues(c: &Connection, track: i64) -> Result<[Option<f64>; HOTCUES]> {
     Ok(out)
 }
 
+/// A track's hot cue labels, by pad.
+pub fn hot_labels(c: &Connection, track: i64) -> Result<[Option<String>; HOTCUES]> {
+    let mut out: [Option<String>; HOTCUES] = Default::default();
+    let mut st = c.prepare_cached(
+        "SELECT slot, label FROM cues WHERE track_id = ?1 AND kind = ?2 AND label IS NOT NULL",
+    )?;
+    let rows = st.query_map(params![track, CueKind::Hot.as_i64()], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (slot, label) = row?;
+        if let Some(h) = usize::try_from(slot).ok().and_then(|s| out.get_mut(s)) {
+            *h = Some(label);
+        }
+    }
+    Ok(out)
+}
+
 /// A track's memory cues and loops, in order through the track.
 pub fn memories(c: &Connection, track: i64) -> Result<Vec<Memory>> {
     let mut st = c.prepare_cached(
-        "SELECT id, start_s, end_s FROM cues WHERE track_id = ?1 AND kind IN (?2, ?3)
+        "SELECT id, start_s, end_s, label, color FROM cues
+         WHERE track_id = ?1 AND kind IN (?2, ?3)
          ORDER BY start_s, end_s",
     )?;
     let rows = st.query_map(
@@ -347,10 +377,19 @@ pub fn memories(c: &Connection, track: i64) -> Result<Vec<Memory>> {
                 id: r.get(0)?,
                 start: r.get(1)?,
                 end: r.get(2)?,
+                label: r.get(3)?,
+                color: r.get(4)?,
             })
         },
     )?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+pub fn cues(c: &Connection, track: i64) -> Result<TrackCues> {
+    Ok(TrackCues {
+        hot_labels: hot_labels(c, track)?,
+        memories: memories(c, track)?,
+    })
 }
 
 pub fn files_without_hash(c: &Connection) -> Result<Vec<(i64, PathBuf)>> {

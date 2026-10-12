@@ -30,6 +30,8 @@ pub struct HwButton<'a> {
     tinted: bool,
     /// A circle (like a CDJ's play and cue buttons) as wide as the button is tall.
     round: bool,
+    /// Small text under the label (a hot cue's name), cut off at the button's edges.
+    caption: Option<&'a str>,
 }
 
 impl<'a> HwButton<'a> {
@@ -43,7 +45,13 @@ impl<'a> HwButton<'a> {
             font: 11.0,
             tinted: false,
             round: false,
+            caption: None,
         }
+    }
+
+    pub fn caption(mut self, caption: Option<&'a str>) -> Self {
+        self.caption = caption;
+        self
     }
 
     pub fn lit(mut self, on: bool) -> Self {
@@ -138,15 +146,39 @@ impl Widget for HwButton<'_> {
                     Color32::WHITE,
                 );
             }
-            None => {
-                p.text(
-                    rect.center(),
-                    Align2::CENTER_CENTER,
-                    self.label,
-                    FontId::proportional(self.font),
-                    text,
-                );
-            }
+            None => match self.caption {
+                Some(caption) => {
+                    p.text(
+                        rect.center() - vec2(0.0, self.font * 0.45),
+                        Align2::CENTER_CENTER,
+                        self.label,
+                        FontId::proportional(self.font),
+                        text,
+                    );
+                    // Left-aligned once it's too long to centre, and cut off.
+                    let galley = p.layout_no_wrap(caption.into(), FontId::proportional(8.5), text);
+                    let inner = rect.shrink(3.0);
+                    let x = if galley.size().x > inner.width() {
+                        inner.left()
+                    } else {
+                        rect.center().x - galley.size().x / 2.0
+                    };
+                    p.with_clip_rect(inner).galley(
+                        pos2(x, rect.center().y + self.font * 0.2),
+                        galley,
+                        text,
+                    );
+                }
+                None => {
+                    p.text(
+                        rect.center(),
+                        Align2::CENTER_CENTER,
+                        self.label,
+                        FontId::proportional(self.font),
+                        text,
+                    );
+                }
+            },
         }
         resp
     }
@@ -177,9 +209,10 @@ fn play_pause(p: &egui::Painter, rect: Rect, size: f32, colour: Color32) {
 }
 
 /// Press and release edges of a button that acts while held: `Some(true)` on press,
-/// `Some(false)` on release.
+/// `Some(false)` on release. Only the primary button presses (a right-click opens a
+/// menu, where there is one).
 pub fn held(ui: &Ui, r: &Response) -> Option<bool> {
-    let down = r.is_pointer_button_down_on();
+    let down = r.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down());
     let id = r.id.with("held");
     let was = ui.ctx().data(|d| d.get_temp::<bool>(id).unwrap_or(false));
     if down == was {

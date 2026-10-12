@@ -17,6 +17,7 @@ use egui::{
 };
 
 use super::util::{self, band_colour};
+use crate::core::store::Memory;
 
 /// Detail bins per bin of the coarse min/max copy.
 const MIP: usize = 16;
@@ -116,6 +117,9 @@ pub struct Marks<'a> {
     pub grid: Option<&'a Beatgrid>,
     pub cue: f64,
     pub hotcues: &'a [Option<f64>],
+    /// By pad, like `hotcues`.
+    pub hot_labels: &'a [Option<String>],
+    pub memories: &'a [Memory],
     pub loop_range: Option<(f64, f64)>,
     pub loop_active: bool,
 }
@@ -247,19 +251,52 @@ pub fn scrolling(
             Stroke::NONE,
         ));
         if !label.is_empty() {
-            painter.text(
-                pos2(x + 4.0, rect.bottom() - 3.0),
-                egui::Align2::LEFT_BOTTOM,
-                label,
-                egui::FontId::proportional(10.0),
-                c,
-            );
+            // A tag in the cue's colour beside the flag, like Rekordbox's.
+            let galley =
+                painter.layout_no_wrap(label.into(), egui::FontId::proportional(10.0), util::BG);
+            let tag = Rect::from_min_size(pos2(x + 1.0, rect.top() + 9.0), galley.size())
+                .expand2(vec2(2.0, 0.0))
+                .translate(vec2(2.0, 0.0));
+            painter.rect_filled(tag, 2.0, c);
+            painter.galley(tag.min + vec2(2.0, 0.0), galley, util::BG);
         }
     };
+    // Memory cues: a triangle on the bottom edge; a memory loop also underlines its span.
+    for m in marks.memories {
+        let c = util::memory_colour(m);
+        if let Some(end) = m.end
+            && end >= t_lo
+            && m.start <= t_hi
+        {
+            let span = x_of(m.start).max(rect.left())..=x_of(end).min(rect.right());
+            painter.rect_filled(
+                Rect::from_x_y_ranges(span, rect.bottom() - 3.0..=rect.bottom()),
+                0.0,
+                c.gamma_multiply(0.7),
+            );
+        }
+        if (t_lo..=t_hi).contains(&m.start) {
+            let x = x_of(m.start);
+            painter.add(Shape::convex_polygon(
+                vec![
+                    pos2(x - 6.0, rect.bottom()),
+                    pos2(x, rect.bottom() - 8.0),
+                    pos2(x + 6.0, rect.bottom()),
+                ],
+                c,
+                Stroke::NONE,
+            ));
+        }
+    }
     marker(marks.cue, util::ACCENT, "");
     for (i, h) in marks.hotcues.iter().enumerate() {
         if let Some(t) = h {
-            marker(*t, util::HOTCUE[i % 8], &"ABCDEFGH"[i..i + 1]);
+            let letter = &"ABCDEFGH"[i..i + 1];
+            let label = match marks.hot_labels.get(i).and_then(Option::as_deref) {
+                Some(l) => format!("{letter} {l}"),
+                None => letter.to_string(),
+            };
+            marker(*t, util::HOTCUE[i % 8], &label);
         }
     }
     painter.line_segment(
@@ -338,6 +375,18 @@ pub fn overview(
             Stroke::NONE,
         ));
     };
+    for m in marks.memories {
+        let x = x_of(m.start);
+        painter.add(Shape::convex_polygon(
+            vec![
+                pos2(x - 4.0, rect.bottom()),
+                pos2(x, rect.bottom() - 6.0),
+                pos2(x + 4.0, rect.bottom()),
+            ],
+            util::memory_colour(m),
+            Stroke::NONE,
+        ));
+    }
     tri(marks.cue, util::ACCENT);
     for (i, h) in marks.hotcues.iter().enumerate() {
         if let Some(t) = h {

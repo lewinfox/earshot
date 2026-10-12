@@ -125,9 +125,21 @@ impl Writer {
             StoreCmd::SetContentHash { file, hash } => {
                 self.set_content_hash(file, &hash).map(|_| ())
             }
-            StoreCmd::SaveHotcues { track, cues } => self.save_hotcues(track, &cues),
+            StoreCmd::SaveHotcues { track, cues } => {
+                self.save_hotcues(track, &cues)?;
+                self.emit_cues(track)
+            }
+            StoreCmd::SetHotcueLabel { track, slot, label } => {
+                self.set_hotcue_label(track, slot, label.as_deref())
+            }
             StoreCmd::AddMemory { track, start, end } => self.add_memory(track, start, end),
             StoreCmd::DeleteMemory { track, id } => self.delete_memory(track, id),
+            StoreCmd::SetMemoryLabel { track, id, label } => {
+                self.set_memory_label(track, id, label.as_deref())
+            }
+            StoreCmd::SetMemoryColor { track, id, color } => {
+                self.set_memory_color(track, id, color)
+            }
             StoreCmd::ListCollections => self.emit_collections(),
             StoreCmd::LoadFlow(id) => {
                 let f = read::flow(&self.conn, id)?;
@@ -492,24 +504,41 @@ impl Writer {
 
     // ---- cues --------------------------------------------------------------------------
 
-    /// Replace a track's hot cues.
+    /// Save a track's hot cue times, pad by pad. The engine only knows times, so a pad
+    /// that is set keeps its row (and so its label) with the new time; a pad that
+    /// isn't loses its row, label and all.
     pub fn save_hotcues(&mut self, track: i64, cues: &[Option<f64>]) -> Result<()> {
         let tx = self.conn.transaction()?;
         let hot = CueKind::Hot.as_i64();
         tx.execute(
-            "DELETE FROM cues WHERE track_id = ?1 AND kind = ?2",
-            params![track, hot],
+            "DELETE FROM cues WHERE track_id = ?1 AND kind = ?2 AND slot >= ?3",
+            params![track, hot, cues.len() as i64],
         )?;
         for (slot, t) in cues.iter().enumerate() {
-            if let Some(t) = t {
-                tx.execute(
-                    "INSERT INTO cues(track_id, kind, slot, start_s) VALUES (?1, ?2, ?3, ?4)",
+            match t {
+                Some(t) => tx.execute(
+                    "INSERT INTO cues(track_id, kind, slot, start_s) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT (track_id, kind, slot) DO UPDATE SET start_s = excluded.start_s",
                     params![track, hot, slot as i64, t],
-                )?;
-            }
+                )?,
+                None => tx.execute(
+                    "DELETE FROM cues WHERE track_id = ?1 AND kind = ?2 AND slot = ?3",
+                    params![track, hot, slot as i64],
+                )?,
+            };
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Name a hot cue that is set (a pad that isn't has no row to name). Empty is no
+    /// name.
+    pub fn set_hotcue_label(&mut self, track: i64, slot: u8, label: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE cues SET label = ?4 WHERE track_id = ?1 AND kind = ?2 AND slot = ?3",
+            params![track, CueKind::Hot.as_i64(), slot as i64, tidy(label)],
+        )?;
+        self.emit_cues(track)
     }
 
     /// Save a memory cue (or loop, with `end`), unless the same one is already saved.
@@ -533,7 +562,7 @@ impl Writer {
                 params![track, kind.as_i64(), start, end],
             )?;
         }
-        self.emit_memories(track)
+        self.emit_cues(track)
     }
 
     pub fn delete_memory(&mut self, track: i64, id: i64) -> Result<()> {
@@ -541,12 +570,42 @@ impl Writer {
             "DELETE FROM cues WHERE id = ?1 AND track_id = ?2 AND kind IN (?3, ?4)",
             params![id, track, CueKind::Memory.as_i64(), CueKind::Loop.as_i64()],
         )?;
-        self.emit_memories(track)
+        self.emit_cues(track)
     }
 
-    fn emit_memories(&mut self, track: i64) -> Result<()> {
-        let memories = read::memories(&self.conn, track)?;
-        self.emit(StoreEvent::Memories { track, memories });
+    /// Name a memory cue or loop. Empty is no name.
+    pub fn set_memory_label(&mut self, track: i64, id: i64, label: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE cues SET label = ?3 WHERE id = ?1 AND track_id = ?2 AND kind IN (?4, ?5)",
+            params![
+                id,
+                track,
+                tidy(label),
+                CueKind::Memory.as_i64(),
+                CueKind::Loop.as_i64()
+            ],
+        )?;
+        self.emit_cues(track)
+    }
+
+    /// Colour a memory cue or loop (0xRRGGBB).
+    pub fn set_memory_color(&mut self, track: i64, id: i64, color: Option<u32>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE cues SET color = ?3 WHERE id = ?1 AND track_id = ?2 AND kind IN (?4, ?5)",
+            params![
+                id,
+                track,
+                color,
+                CueKind::Memory.as_i64(),
+                CueKind::Loop.as_i64()
+            ],
+        )?;
+        self.emit_cues(track)
+    }
+
+    fn emit_cues(&mut self, track: i64) -> Result<()> {
+        let cues = read::cues(&self.conn, track)?;
+        self.emit(StoreEvent::Cues { track, cues });
         Ok(())
     }
 
@@ -849,6 +908,11 @@ const FLOW_SPACING: Spacing = Spacing {
     col: 326.0,
     row: 126.0,
 };
+
+/// A cue label as typed: trimmed, and nothing left is no label.
+fn tidy(label: Option<&str>) -> Option<&str> {
+    label.map(str::trim).filter(|s| !s.is_empty())
+}
 
 /// Make the stored Flow match `graph`, writing only what changed.
 fn write_graph(tx: &Connection, id: i64, graph: &FlowGraph) -> Result<()> {

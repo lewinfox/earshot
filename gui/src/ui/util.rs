@@ -36,6 +36,37 @@ pub const HOTCUE: [Color32; 8] = [
     Color32::from_rgb(0xe6, 0xe0, 0x4a),
 ];
 
+/// Memory cues and loops with no colour of their own.
+pub const MEMORY_CUE: Color32 = WARN;
+pub const MEMORY_LOOP: Color32 = Color32::from_rgb(0x3c, 0xd3, 0x6b);
+
+/// The colours a memory cue can be given, as Rekordbox offers them. Saved as 0xRRGGBB,
+/// so a colour from elsewhere (an import) still shows.
+pub const CUE_PALETTE: [(u32, &str); 8] = [
+    (0xde_44_cf, "Pink"),
+    (0xe6_28_28, "Red"),
+    (0xff_8c_00, "Orange"),
+    (0xe0_d2_20, "Yellow"),
+    (0x28_e2_14, "Green"),
+    (0x10_b1_76, "Aqua"),
+    (0x30_5a_ff, "Blue"),
+    (0x8c_32_ff, "Purple"),
+];
+
+/// A saved 0xRRGGBB colour.
+pub fn rgb(c: u32) -> Color32 {
+    Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
+}
+
+/// A memory cue's or loop's colour: its own, or the default for its kind.
+pub fn memory_colour(m: &crate::core::store::Memory) -> Color32 {
+    match (m.color, m.end) {
+        (Some(c), _) => rgb(c),
+        (None, Some(_)) => MEMORY_LOOP,
+        (None, None) => MEMORY_CUE,
+    }
+}
+
 pub fn dim(c: Color32, k: f32) -> Color32 {
     Color32::from_rgb(
         (c.r() as f32 * k) as u8,

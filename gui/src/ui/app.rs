@@ -15,7 +15,7 @@ use egui::{Key, RichText, Stroke, Ui, vec2};
 
 use super::audio_ui::AudioUi;
 use super::collections_ui::{CollectionsUi, TreeCtx};
-use super::deck::{DeckInfo, DeckUi, PendingLoad, Side};
+use super::deck::{self, DeckInfo, DeckUi, PendingLoad, Side};
 use super::flow::FlowUi;
 use super::library_ui::{LibraryUi, PreviewState, Scope};
 use super::mixer;
@@ -52,8 +52,8 @@ pub struct EarshotApp {
     decks: [DeckUi; SLOTS],
     /// Prepare (one player, grid and cue editing) or Perform (the decks and a mixer).
     mode: UiMode,
-    /// Memory cues and loops of the track in Prepare's player.
-    memories: Vec<store::Memory>,
+    /// Hot cue labels and memory cues of the tracks on the players, by track id.
+    cues: HashMap<i64, Arc<store::TrackCues>>,
     /// Real seconds of waveform either side of the playhead, shared by both decks.
     half_window: f64,
     /// The library, collections and play history: the domain state the panes read.
@@ -224,7 +224,7 @@ impl EarshotApp {
                 .storage
                 .and_then(|s| eframe::get_value(s, MODE_KEY))
                 .unwrap_or_default(),
-            memories: vec![],
+            cues: HashMap::new(),
             half_window: cc
                 .storage
                 .and_then(|s| eframe::get_value(s, WAVE_ZOOM_KEY))
@@ -289,20 +289,22 @@ impl EarshotApp {
         sh.live().iter().map(|d| d.range).collect()
     }
 
-    // ---- Prepare mode -----------------------------------------------------------------
+    // ---- cue labels and memory cues ---------------------------------------------------
 
-    /// Ask for the memory cues of the track in Prepare's player (they arrive as
-    /// `StoreEvent::Memories`).
-    fn refresh_memories(&mut self) {
-        match self
-            .player
-            .lock()
-            .unwrap()
-            .session(DeckId::PREPARE)
-            .track_id
-        {
-            Some(id) => self.lib.store.request_memories(id, store_sink(&self.sink)),
-            None => self.memories.clear(),
+    /// The tracks on the players now.
+    fn loaded_tracks(&self) -> Vec<i64> {
+        let inner = self.player.lock().unwrap();
+        inner.decks.iter().filter_map(|s| s.track_id).collect()
+    }
+
+    /// A player has a new track: ask for its hot cue labels and memory cues (they
+    /// arrive as `StoreEvent::Cues`), and forget those of tracks no longer loaded.
+    fn refresh_cues(&mut self, deck: DeckId) {
+        let loaded = self.loaded_tracks();
+        self.cues.retain(|id, _| loaded.contains(id));
+        let track = self.player.lock().unwrap().session(deck).track_id;
+        if let Some(id) = track {
+            self.lib.store.request_cues(id, store_sink(&self.sink));
         }
     }
 
@@ -708,17 +710,10 @@ impl EarshotApp {
                     self.colls.start_rename(collections.get(id).unwrap());
                 }
             }
-            StoreEvent::Memories { track, memories } => {
-                // Only the track still in Prepare's player.
-                if self
-                    .player
-                    .lock()
-                    .unwrap()
-                    .session(DeckId::PREPARE)
-                    .track_id
-                    == Some(track)
-                {
-                    self.memories = memories;
+            StoreEvent::Cues { track, cues } => {
+                // Only for a track still on a player.
+                if self.loaded_tracks().contains(&track) {
+                    self.cues.insert(track, Arc::new(cues));
                 }
             }
             StoreEvent::FlowLoaded(flow) => self.flow.load(flow),
@@ -762,8 +757,7 @@ impl EarshotApp {
                     // it had). A stale result, for an older request, changes nothing.
                     self.decks[deck.index()].finish_load(track_id);
                     match result {
-                        Ok(()) if deck == DeckId::PREPARE => self.refresh_memories(),
-                        Ok(()) => {}
+                        Ok(()) => self.refresh_cues(deck),
                         Err(e) => eprintln!("load to deck {}: {e}", deck.index() + 1),
                     }
                 }
@@ -1049,6 +1043,10 @@ impl EarshotApp {
             jump_size: s.jump_size,
             loop_size: s.loop_size,
             leader: inner.sync_leader == Some(deck),
+            cues: s
+                .track_id
+                .and_then(|id| self.cues.get(&id).cloned())
+                .unwrap_or_default(),
         }
     }
 
@@ -1177,15 +1175,17 @@ impl eframe::App for EarshotApp {
             .show_animated(ctx, !planning, |ui| {
                 ui.spacing_mut().item_spacing.y = 3.0;
                 if self.mode == UiMode::Prepare {
-                    let h = ui.available_height();
-                    let deck = &mut self.decks[prep];
-                    deck.show_wave(
-                        ui,
-                        h,
-                        info(DeckId::PREPARE),
-                        &mut self.half_window,
-                        &mut out,
-                    );
+                    // The waveform, with the cue pane on its right, as in Rekordbox.
+                    let (w, h) = (ui.available_width(), ui.available_height());
+                    let wave_w = (w - deck::CUE_PANE_W - 6.0).max(w / 2.0);
+                    let (deck, info) = (&mut self.decks[prep], info(DeckId::PREPARE));
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.allocate_ui(vec2(wave_w, h), |ui| {
+                            deck.show_wave(ui, h, info, &mut self.half_window, &mut out);
+                        });
+                        deck.cue_pane(ui, info, &mut out);
+                    });
                     return;
                 }
                 let n = decks.len() as f32;
@@ -1209,8 +1209,8 @@ impl eframe::App for EarshotApp {
                 let height = decks_h;
                 if self.mode == UiMode::Prepare {
                     let w = ui.available_width();
-                    let (memories, info) = (&self.memories, info(DeckId::PREPARE));
-                    self.decks[prep].show_prepare(ui, w, height, info, memories, &mut out);
+                    let info = info(DeckId::PREPARE);
+                    self.decks[prep].show_prepare(ui, w, height, info, &mut out);
                     return;
                 }
                 // Decks on the crossfader's left, the mixer, then the rest.
