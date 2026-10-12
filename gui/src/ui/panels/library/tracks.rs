@@ -9,6 +9,7 @@ use egui::{Color32, RichText, Sense, TextureHandle, TextureId, Ui, vec2};
 use crate::core::bus::deck_letter;
 use crate::core::collections::{CollectionCmd, CollectionId, CollectionKind, FlowCmd};
 use crate::core::command::{Command, DeckCmd, PreviewCmd};
+use crate::core::edit::EditCmd;
 use crate::core::index::LibraryCmd;
 use crate::core::player::DECKS;
 use crate::core::track::{AnalysisState, Track, TrackId};
@@ -246,6 +247,14 @@ pub fn track_menu(ui: &mut Ui, sel: &[TrackId], v: &CoreView, at: MenuAt, out: &
             }
             .into(),
         );
+    }
+    let edit = if n == 1 {
+        "Edit…".to_string()
+    } else {
+        format!("Edit {n} tracks…")
+    };
+    if ui.button(edit).clicked() {
+        push(ui, EditCmd::Editor(sel.to_vec()).into());
     }
     ui.separator();
     let analyse = |tracks: Vec<TrackId>, dynamic| LibraryCmd::Analyse { tracks, dynamic }.into();

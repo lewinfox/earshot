@@ -243,3 +243,75 @@ fn layout_is_kept_per_mode() {
     assert!(!app.modals.is_open(crate::core::view::Modal::Audio));
     steps(&mut h, 3);
 }
+
+/// Edits from the shell: metadata, the Flow canvas and a grid, each undone and
+/// redone with `Command::Undo` / `Redo` (what Ctrl+Z, MIDI and the Edit menu send).
+#[test]
+fn edits_undo_and_redo() {
+    use crate::core::edit::{EditCmd, Field, Value};
+    let mut h = start("undo");
+    let ids = ids(&h);
+    let title = |a: &EarshotApp| a.index.get(ids[0]).unwrap().title.clone();
+    let tag_title = title(h.state());
+
+    // Metadata, through the editor's command.
+    h.state_mut().dispatch(EditCmd::Editor(vec![ids[0]]).into());
+    assert!(h.state().modals.is_open(crate::core::view::Modal::Metadata));
+    h.state_mut().dispatch(
+        EditCmd::Set {
+            tracks: vec![ids[0]],
+            values: vec![(Field::Title, Some(Value::Text("Renamed".into())))],
+        }
+        .into(),
+    );
+    settle_until(&mut h, |a| {
+        title(a) == "Renamed" && a.edits.next_undo().is_some()
+    });
+    h.state_mut().dispatch(Command::Undo);
+    settle_until(&mut h, |a| title(a) == tag_title);
+    h.state_mut().dispatch(Command::Redo);
+    settle_until(&mut h, |a| title(a) == "Renamed");
+
+    // The Flow canvas: adding two cards is one step.
+    h.state_mut()
+        .dispatch(FlowCmd::AddTracks(ids[..2].to_vec()).into());
+    let cards = |a: &EarshotApp| {
+        a.panels
+            .library
+            .flow
+            .flow
+            .and_then(|f| a.collections.get(f))
+            .map_or(0, |c| c.tracks.len())
+    };
+    settle_until(&mut h, |a| cards(a) == 2);
+    h.state_mut().dispatch(Command::Undo);
+    settle_until(&mut h, |a| cards(a) == 0);
+    h.state_mut().dispatch(Command::Redo);
+    settle_until(&mut h, |a| cards(a) == 2);
+
+    // A grid edit on Prepare's player; undo puts the analysed grid back on it too.
+    let deck = DeckId::PREPARE;
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
+    h.state_mut().dispatch(LibraryCmd::Load(ids[1]).into());
+    settle_until(&mut h, |a| a.panels.decks[deck.index()].wave.is_some());
+    let bpm = |a: &EarshotApp| a.index.get(ids[1]).unwrap().bpm;
+    let analysed = bpm(h.state());
+    let on_deck = |a: &EarshotApp| {
+        let inner = a.player.lock().unwrap();
+        inner
+            .session(deck)
+            .grid
+            .as_ref()
+            .map(|g| g.mean_bpm().round())
+    };
+    h.state_mut().dispatch(Command::Deck(
+        deck,
+        DeckCmd::Grid(crate::core::player::GridOp::SetBpm(140.0)),
+    ));
+    settle_until(&mut h, |a| bpm(a) == Some(140.0));
+    assert_eq!(on_deck(h.state()), Some(140.0));
+    h.state_mut().dispatch(Command::Undo);
+    settle_until(&mut h, |a| bpm(a) == analysed && on_deck(a) != Some(140.0));
+    assert_eq!(on_deck(h.state()), analysed.map(f64::round));
+}

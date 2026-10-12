@@ -44,6 +44,8 @@ pub enum Tool {
 pub enum Modal {
     Audio,
     Keys,
+    /// The metadata editor (opened on tracks by `EditCmd::Editor`).
+    Metadata,
 }
 
 /// Which list the keyboard and the controller's browse knob move through.

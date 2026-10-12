@@ -8,8 +8,7 @@ use crate::core::edit::{Edit, EditCmd};
 impl EarshotApp {
     pub(super) fn edit_cmd(&mut self, c: EditCmd) {
         match c {
-            // The metadata editor isn't built yet.
-            EditCmd::Editor(_) => {}
+            EditCmd::Editor(tracks) => self.modals.edit_tracks(tracks, &self.index),
             c => self.lib.store.send(StoreCmd::Edit(c)),
         }
     }
