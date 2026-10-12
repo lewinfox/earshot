@@ -1,7 +1,9 @@
 # earshot worker
 
-One long-lived Python process that analyses audio for earshot (beatgrids via Beat This!,
-librosa fallback). The app starts one and keeps it, so each model is loaded once.
+A long-lived Python process that analyses audio for earshot (beatgrids via Beat This!,
+librosa fallback). Each process loads its models once. The app runs several (see
+**Processes** below): one for tracks loaded onto a deck, always up, and background ones
+that come and go with library work.
 
 ## Setup
 
@@ -32,7 +34,8 @@ hello with another protocol gets an `error` (id null) instead.
 
 **Jobs.** Many may be sent at once. They wait in a queue ordered by `priority`
 (`deck`, then `preview`, then `background`; first come first served within one) and
-run one at a time.
+run one at a time. A running job is never stopped for a more urgent one. (The app
+sends each process one job at a time anyway, and deck loads go to their own process.)
 
 ```json
 → {"id": 7, "type": "analyse", "wav": "/abs/path.wav", "priority": "deck",
@@ -48,10 +51,6 @@ run one at a time.
 - Every job ends with exactly one of `done`, `cancelled` or `error`
   (`{"id": 7, "type": "error", "error": "..."}`: bad request, unreadable audio, or past
   its deadline). One analyser failing is a `failed` message, and the job goes on.
-- A `deck` job doesn't wait for a lower-priority job that is running: that job stops
-  at its next progress report, sends `{"id": 7, "type": "requeued"}`, goes back in the
-  queue (ahead of later jobs of its priority) and later sends `started` again and runs
-  from the beginning. It is neither failed nor cancelled; its deadline restarts.
 - `cancel` drops a waiting job at once and stops a running one at its next progress
   report. Unknown ids are ignored.
 - The worker gives up on a job past `deadline_s` (counted from `started`) at its next
@@ -65,9 +64,11 @@ run one at a time.
 error, never a default. The app kills and restarts the worker when it is silent (not
 even a heartbeat) for 60 s while it has jobs, or when a job runs 15 s past its
 deadline. The running job fails; jobs only waiting in the dead process are sent to the
-new one. The app gives each job `300 s + 4 × track length` as its deadline: the worker
-runs in Linux's idle CPU class, and a busy machine can starve it, so this catches hangs,
-not slow jobs.
+new one. The app gives each job `300 s + 4 × track length` as its deadline: background
+workers run in Linux's idle CPU class, and a busy machine can starve them, so this
+catches hangs, not slow jobs. The app cancels a job when a newer request supersedes it:
+a deck load of a track a background worker is analysing (the deck worker does it
+instead), or a forced re-analysis of a track being analysed.
 
 **Grid results** (`data` of a `grid` result). Both modes are snapped to where the
 kicks start (`snap.kick_shifts`): Beat This! puts its beats 20-40 ms late.
@@ -89,10 +90,23 @@ kicks start (`snap.kick_shifts`): Beat This! puts its beats 20-40 ms late.
 - `kick_shift_ms`: how far the kick snap moved the grid (the median, negative is
   earlier).
 
-**Priority.** The process puts itself in the idle CPU class (nice 19 off Linux) unless
-`EARSHOT_WORKER_PRIORITY=inherit`, and an unprivileged process can't leave the idle
-class. So deck jobs run in the idle CPU class too, like background ones (before v2
-they ran at nice 5): they go first and preempt background work, but get no more CPU
-than it would. If that proves too slow, a
-second process just for deck loads, started with `inherit`, needs no protocol change:
-job ids and priorities are per process.
+**Processes and priority.** The process puts itself in the idle CPU class (nice 19 off
+Linux) unless `EARSHOT_WORKER_PRIORITY=inherit`; an unprivileged process can't leave
+the idle class again, so each process has one priority for life. The app
+(`gui/src/core/analysis/mod.rs`) runs:
+
+- **One deck worker**, started with the app, at normal CPU priority (`inherit`), with
+  half the cores for torch. It only ever gets tracks just loaded onto a deck, so they
+  are analysed straight away and never wait behind library work. If it dies it is
+  started again at once.
+- **Background workers** for library work (imports, "Analyse …"), in the idle CPU
+  class. None run until there is background work; another starts for every 4 tracks
+  waiting, up to the cap; each exits after 60 s with nothing to do (analysis is mostly
+  needed on first import, and each process holds its own copy of torch and the models).
+  While a deck plays, only one background track is analysed at a time. The cap is the
+  `analysis.background_workers` setting (default 4, kept to 1..=CPU cores, read at
+  startup); they share the cores between them for torch.
+
+Job ids and priorities are per process. With a process just for deck loads, a deck job
+never has to stop background work, so the worker doesn't preempt (protocol v2 as first
+merged did, with a `requeued` message; that's gone).

@@ -9,11 +9,12 @@ use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::decode::TrackTags;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::read::{self, source_rank, waveform_params};
+use super::read::{self, JOB_PREFIX, JobRow, source_rank, waveform_params};
 use super::{
     CueKind, GridSource, Result, StoreCmd, StoreError, StoreEvent, WAVEFORM_VERSION, bytes_path,
     now, path_bytes,
 };
+use crate::core::analysis::registry::{self, AnalyserId};
 use crate::core::flows::{self, Card};
 use crate::core::hash::Hash;
 
@@ -43,6 +44,8 @@ pub struct AnalysisSave {
     pub features: Vec<(&'static str, f64)>,
     pub waveform: Option<Vec<u8>>,
     pub grid: Option<GridSave>,
+    /// One `analysis_results` row per analyser that ran: (name, version, error).
+    pub results: Vec<(&'static str, u32, Option<String>)>,
 }
 
 #[derive(Debug)]
@@ -89,6 +92,12 @@ impl Writer {
         std::mem::take(&mut self.events)
     }
 
+    /// The active grid's row id and source. On the writer thread, so it's ordered
+    /// with the writes (see `core::analysis`).
+    pub fn active_grid(&self, track: i64) -> Result<Option<(i64, GridSource)>> {
+        read::active_grid(&self.conn, track)
+    }
+
     #[cfg(test)]
     pub(super) fn conn(&self) -> &Connection {
         &self.conn
@@ -102,9 +111,11 @@ impl Writer {
             StoreCmd::SaveUserGrid { track, grid } => self.save_user_grid(track, &grid).map(|_| ()),
             StoreCmd::SaveWaveform { track, data } => self.save_waveform(track, &data),
             StoreCmd::SaveFeatures { track, features } => {
-                save_features(&self.conn, track, &features, None)?;
+                self.save_measured(track, &features)?;
                 self.tracks_changed(&[track])
             }
+            StoreCmd::SaveJobs { track, jobs } => self.save_jobs(track, &jobs),
+            StoreCmd::SetSetting { key, value } => self.set_setting(&key, &value),
             StoreCmd::SetMeta {
                 track,
                 field,
@@ -326,6 +337,12 @@ impl Writer {
             }
             None => None,
         };
+        // Results made before the hash was known were made from this audio.
+        tx.execute(
+            "UPDATE analysis_results SET content_hash = ?2
+             WHERE track_id = ?1 AND content_hash IS NULL",
+            params![merged.map_or(track, |m| m.1), hash.to_vec()],
+        )?;
         tx.commit()?;
         if merged.is_some() {
             self.emit_library()?;
@@ -361,6 +378,9 @@ impl Writer {
         )?;
         let run = tx.last_insert_rowid();
         save_features(&tx, s.track, &s.features, Some(run))?;
+        for (analyser, version, error) in &s.results {
+            put_result(&tx, s.track, analyser, *version, Some(run), error.as_deref())?;
+        }
         let preview = match &s.waveform {
             Some(w) => Some(put_waveform(&tx, s.track, w)?),
             None => None,
@@ -402,9 +422,58 @@ impl Writer {
         Ok(id)
     }
 
+    /// A waveform worked out outside analysis (on load): it counts as the waveform
+    /// analyser's result.
     pub fn save_waveform(&mut self, track: i64, data: &[u8]) -> Result<()> {
-        let p = put_waveform(&self.conn, track, data)?;
+        let tx = self.conn.transaction()?;
+        let p = put_waveform(&tx, track, data)?;
+        let spec = AnalyserId::Waveform.spec();
+        put_result(&tx, track, spec.id.as_str(), spec.version, None, None)?;
+        tx.commit()?;
         self.emit(StoreEvent::Previews(vec![(track, p)]));
+        Ok(())
+    }
+
+    /// Numbers measured outside analysis (loudness on load). An analyser whose
+    /// features are all here counts as having run.
+    pub fn save_measured(&mut self, track: i64, features: &[(&'static str, f64)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        save_features(&tx, track, features, None)?;
+        let names: Vec<&str> = features.iter().map(|f| f.0).collect();
+        for spec in registry::measured_by(&names) {
+            put_result(&tx, track, spec.id.as_str(), spec.version, None, None)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Replace what's queued for a track (`jobs`, kind `analyse:<analyser>`).
+    pub fn save_jobs(&mut self, track: i64, jobs: &[JobRow]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM jobs WHERE track_id = ?1 AND kind LIKE ?2 || '%'",
+            params![track, JOB_PREFIX],
+        )?;
+        let mut st = tx.prepare_cached(
+            "INSERT INTO jobs(kind, track_id, status, created_at, want, params)
+             SELECT ?1, ?2, 'queued', ?3, ?4, ?5 WHERE EXISTS (SELECT 1 FROM tracks WHERE id = ?2)",
+        )?;
+        for j in jobs {
+            debug_assert_eq!(j.track, track);
+            let kind = format!("{JOB_PREFIX}{}", j.analyser);
+            st.execute(params![kind, track, now(), j.want, j.params])?;
+        }
+        drop(st);
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn set_setting(&mut self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
         Ok(())
     }
 
@@ -790,6 +859,30 @@ fn insert_grid(
     Ok(c.last_insert_rowid())
 }
 
+/// Record an analyser's result, with the hash of the audio it ran on: the track's
+/// present file, the one `read::track_path` gives the analysis to decode.
+fn put_result(
+    c: &Connection,
+    track: i64,
+    analyser: &str,
+    version: u32,
+    run: Option<i64>,
+    error: Option<&str>,
+) -> Result<()> {
+    c.prepare_cached(
+        "INSERT INTO analysis_results(track_id, analyser, version, content_hash, run_id, error, analysed_at)
+         VALUES (?1, ?2, ?3,
+                 (SELECT content_hash FROM files WHERE track_id = ?1 AND missing_since IS NULL
+                  ORDER BY id LIMIT 1),
+                 ?4, ?5, ?6)
+         ON CONFLICT(track_id, analyser) DO UPDATE SET version = excluded.version,
+           content_hash = excluded.content_hash, run_id = excluded.run_id,
+           error = excluded.error, analysed_at = excluded.analysed_at",
+    )?
+    .execute(params![track, analyser, version, run, error, now()])?;
+    Ok(())
+}
+
 /// Make a grid the active one; the track's BPM always comes with it.
 fn activate_grid(c: &Connection, track: i64, grid: i64, bpm: f64) -> Result<()> {
     c.execute(
@@ -956,6 +1049,10 @@ fn merge(c: &Connection, from: i64, into: i64) -> Result<()> {
     }
     c.execute(
         "UPDATE OR IGNORE track_features SET track_id = ?2 WHERE track_id = ?1",
+        p,
+    )?;
+    c.execute(
+        "UPDATE OR IGNORE analysis_results SET track_id = ?2 WHERE track_id = ?1",
         p,
     )?;
     c.execute(

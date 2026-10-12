@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use earshot_engine::HOTCUES;
 use rusqlite::{Connection, OpenFlags};
 
-pub use read::{LibTrack, Memory, Preview};
+pub use read::{JobRow, LibTrack, Memory, Preview, ResultState};
 pub use write::{AnalysisSave, GridSave, ScannedFile, Writer};
 
 use super::flows::{Card, FlowEntry, Folder};
@@ -32,7 +32,10 @@ pub const WAVEFORM_VERSION: i64 = 1;
 /// scratch, and an old database is left alone rather than migrated.
 pub const FILE_NAME: &str = "library.db";
 
-const MIGRATIONS: &[&str] = &[include_str!("../../../migrations/001_baseline.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../../../migrations/001_baseline.sql"),
+    include_str!("../../../migrations/002_analysis_results.sql"),
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -155,6 +158,16 @@ pub enum StoreCmd {
     SaveFeatures {
         track: i64,
         features: Vec<(&'static str, f64)>,
+    },
+    /// Replace what's in the analysis queue for a track (it survives a restart).
+    SaveJobs {
+        track: i64,
+        jobs: Vec<JobRow>,
+    },
+    #[allow(dead_code)] // no settings screen yet (tests use it)
+    SetSetting {
+        key: String,
+        value: String,
     },
     /// A field the user typed (`None` clears it, so the tag's value shows again).
     #[allow(dead_code)] // library management API, not wired to the UI yet (tests use it)
@@ -462,6 +475,26 @@ impl Reader {
     /// A track's saved hot cues, by pad.
     pub fn hotcues(&self, id: i64) -> Result<[Option<f64>; HOTCUES]> {
         self.with(|c| read::hotcues(c, id))
+    }
+
+    /// A track's saved analyser results.
+    pub fn analysis_results(&self, id: i64) -> Result<Vec<ResultState>> {
+        self.with(|c| read::analysis_results(c, id))
+    }
+
+    /// Tracks needing `analyser` (at `version`) run again: no result, a failed one,
+    /// an older version, or other audio.
+    pub fn stale_tracks(&self, analyser: &str, version: u32) -> Result<Vec<i64>> {
+        self.with(|c| read::stale_tracks(c, analyser, version))
+    }
+
+    /// The analysis queue as saved, oldest first.
+    pub fn queued_jobs(&self) -> Result<Vec<JobRow>> {
+        self.with(read::queued_jobs)
+    }
+
+    pub fn setting(&self, key: &str) -> Result<Option<String>> {
+        self.with(|c| read::setting(c, key))
     }
 
     /// Files whose audio hash hasn't been worked out: (file id, path).

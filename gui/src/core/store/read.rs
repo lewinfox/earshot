@@ -469,3 +469,97 @@ pub fn file_path(c: &Connection, file: i64) -> Result<PathBuf> {
     let b: Vec<u8> = c.query_row("SELECT path FROM files WHERE id = ?1", [file], |r| r.get(0))?;
     Ok(bytes_path(b))
 }
+
+// ---- analysis results and jobs ---------------------------------------------------------
+
+/// A saved analyser result, as far as staleness goes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResultState {
+    pub analyser: String,
+    pub version: u32,
+    pub failed: bool,
+    /// Made from the audio the track has now (or one side's hash isn't known yet).
+    pub same_audio: bool,
+}
+
+/// `r` (an `analysis_results` row) was made from the audio its track has now, as far
+/// as anyone knows: a hash missing on either side counts as the same.
+const SAME_AUDIO: &str = "(r.content_hash IS NULL
+   OR NOT EXISTS (SELECT 1 FROM files f WHERE f.track_id = r.track_id
+                  AND f.missing_since IS NULL AND f.content_hash IS NOT NULL)
+   OR EXISTS (SELECT 1 FROM files f WHERE f.track_id = r.track_id
+              AND f.missing_since IS NULL AND f.content_hash = r.content_hash))";
+
+pub fn analysis_results(c: &Connection, track: i64) -> Result<Vec<ResultState>> {
+    let mut st = c.prepare_cached(&format!(
+        "SELECT r.analyser, r.version, r.error IS NOT NULL, {SAME_AUDIO}
+         FROM analysis_results r WHERE r.track_id = ?1"
+    ))?;
+    Ok(st
+        .query_map([track], |r| {
+            Ok(ResultState {
+                analyser: r.get(0)?,
+                version: r.get(1)?,
+                failed: r.get(2)?,
+                same_audio: r.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// Present tracks whose result from `analyser` is missing, failed, older than
+/// `version`, or from other audio.
+pub fn stale_tracks(c: &Connection, analyser: &str, version: u32) -> Result<Vec<i64>> {
+    let mut st = c.prepare_cached(&format!(
+        "SELECT t.id FROM tracks t
+         WHERE t.deleted_at IS NULL
+           AND EXISTS (SELECT 1 FROM files f WHERE f.track_id = t.id AND f.missing_since IS NULL)
+           AND NOT EXISTS (SELECT 1 FROM analysis_results r
+                           WHERE r.track_id = t.id AND r.analyser = ?1 AND r.version >= ?2
+                             AND r.error IS NULL AND {SAME_AUDIO})
+         ORDER BY t.id"
+    ))?;
+    Ok(st
+        .query_map(params![analyser, version], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// One queued analysis job (a `jobs` row).
+#[derive(Clone, Debug, PartialEq)]
+pub struct JobRow {
+    pub track: i64,
+    /// The analyser's name (the row's kind is [`JOB_PREFIX`] + it).
+    pub analyser: String,
+    /// missing | stale | force
+    pub want: String,
+    /// The grid mode.
+    pub params: Option<String>,
+}
+
+pub const JOB_PREFIX: &str = "analyse:";
+
+/// The analysis queue as it was saved, oldest first.
+pub fn queued_jobs(c: &Connection) -> Result<Vec<JobRow>> {
+    let mut st = c.prepare(
+        "SELECT track_id, substr(kind, length(?1) + 1), coalesce(want, 'missing'), params
+         FROM jobs WHERE kind LIKE ?1 || '%' AND track_id IS NOT NULL ORDER BY id",
+    )?;
+    Ok(st
+        .query_map([JOB_PREFIX], |r| {
+            Ok(JobRow {
+                track: r.get(0)?,
+                analyser: r.get(1)?,
+                want: r.get(2)?,
+                params: r.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn setting(c: &Connection, key: &str) -> Result<Option<String>> {
+    Ok(c
+        .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+            r.get(0)
+        })
+        .optional()?)
+}

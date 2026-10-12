@@ -52,6 +52,43 @@ fn grid(bpm: f64) -> Beatgrid {
 }
 
 #[test]
+fn migration_2_carries_over_earlier_results() {
+    let c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch(MIGRATIONS[0]).unwrap();
+    c.execute_batch(
+        "INSERT INTO tracks(id, added_at) VALUES (1, 0), (2, 0);
+         INSERT INTO files(track_id, path, size, mtime_ns, content_hash) VALUES (1, x'61', 1, 1, x'07');
+         INSERT INTO beatgrids(id, track_id, source, beats, created_at) VALUES (5, 1, 'analysis', x'00', 0),
+                                                                            (6, 2, 'user', x'00', 0);
+         UPDATE tracks SET active_grid_id = id + 4;
+         INSERT INTO blobs(track_id, kind, format_version, data) VALUES (1, 'waveform', 1, x'00');
+         INSERT INTO track_features(track_id, name, value) VALUES (1, 'lufs', -9), (1, 'peak', 1),
+                                                                  (1, 'energy', 0.5);",
+    )
+    .unwrap();
+    c.execute_batch(MIGRATIONS[1]).unwrap();
+    let rows: Vec<(i64, String, u32, Option<Vec<u8>>)> = c
+        .prepare("SELECT track_id, analyser, version, content_hash FROM analysis_results ORDER BY 1, 2")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let h = Some(vec![7u8]);
+    assert_eq!(
+        rows,
+        [
+            (1, "energy".into(), 1, h.clone()),
+            // An analysed grid of unknown version: kept, but stale. A hand-fixed one
+            // isn't an analysis result.
+            (1, "grid".into(), 0, h.clone()),
+            (1, "loudness".into(), 1, h.clone()),
+            (1, "waveform".into(), 1, h),
+        ]
+    );
+}
+
+#[test]
 fn opens_twice_and_is_strict() {
     let (dir, w) = setup("open");
     drop(w);
@@ -268,6 +305,7 @@ fn analysis(track: i64, bpm: f64, expected: Option<i64>, force: bool) -> Analysi
             expected_active: expected,
             force,
         }),
+        results: vec![("waveform", 1, None), ("grid", 2, None)],
     }
 }
 
@@ -277,6 +315,89 @@ fn one_track(name: &str) -> (PathBuf, Writer, i64) {
     scan(&mut w, &dir, &[file(&dir.join("music/a.mp3"), "A", None)]);
     let id = library(&mut w)[0].id;
     (dir, w, id)
+}
+
+#[test]
+fn stale_analyser_results_are_one_query() {
+    let (dir, mut w) = setup("stale");
+    w.add_roots(&[dir.join("music")]).unwrap();
+    scan(
+        &mut w,
+        &dir,
+        &[
+            file(&dir.join("music/a.mp3"), "A", None),
+            file(&dir.join("music/b.mp3"), "B", None),
+        ],
+    );
+    let ids: Vec<i64> = library(&mut w).iter().map(|t| t.id).collect();
+    let (a, b) = (ids[0], ids[1]);
+    let stale = |w: &Writer, analyser: &str, v: u32| read::stale_tracks(w.conn(), analyser, v).unwrap();
+    w.save_analysis(analysis(a, 125.0, None, false)).unwrap();
+    // Only the track never analysed…
+    assert_eq!(stale(&w, "grid", 2), [b]);
+    assert_eq!(stale(&w, "waveform", 1), [b]);
+    // …until the analyser's version goes up.
+    assert_eq!(stale(&w, "grid", 3), [a, b]);
+    // Its file's hash, worked out later, is taken to be the audio it analysed.
+    let file: i64 = w
+        .conn()
+        .query_row("SELECT id FROM files WHERE track_id = ?1", [a], |r| r.get(0))
+        .unwrap();
+    w.set_content_hash(file, &[7; 32]).unwrap();
+    assert_eq!(stale(&w, "grid", 2), [b]);
+    // Different audio under the same name (re-encoded, say): stale again.
+    w.conn()
+        .execute("UPDATE files SET content_hash = ?1 WHERE id = ?2", rusqlite::params![vec![8u8; 32], file])
+        .unwrap();
+    assert_eq!(stale(&w, "grid", 2), [a, b]);
+    let r = read::analysis_results(w.conn(), a).unwrap();
+    assert!(r.iter().all(|r| !r.same_audio && !r.failed));
+
+    // Loudness measured on a deck load counts; a failed run doesn't.
+    w.save_measured(b, &[("lufs", -9.0), ("peak", 0.9), ("energy", 0.4)])
+        .unwrap();
+    assert_eq!((stale(&w, "loudness", 1), stale(&w, "energy", 1)), (vec![a], vec![a]));
+    let mut failed = analysis(b, 125.0, None, false);
+    (failed.grid, failed.results) = (None, vec![("grid", 2, Some("no beats".into()))]);
+    w.save_analysis(failed).unwrap();
+    assert!(stale(&w, "grid", 2).contains(&b));
+}
+
+#[test]
+fn the_analysis_queue_and_settings_are_saved() {
+    let (_dir, mut w, id) = one_track("jobs");
+    let job = |analyser: &str, want: &str| JobRow {
+        track: id,
+        analyser: analyser.into(),
+        want: want.into(),
+        params: Some("dynamic".into()),
+    };
+    w.save_jobs(id, &[job("waveform", "missing"), job("grid", "force")])
+        .unwrap();
+    assert_eq!(
+        read::queued_jobs(w.conn()).unwrap(),
+        [job("waveform", "missing"), job("grid", "force")]
+    );
+    // Saving a track's jobs replaces them; none left clears them.
+    w.save_jobs(id, &[job("grid", "stale")]).unwrap();
+    assert_eq!(read::queued_jobs(w.conn()).unwrap(), [job("grid", "stale")]);
+    w.save_jobs(id, &[]).unwrap();
+    assert!(read::queued_jobs(w.conn()).unwrap().is_empty());
+    // A track deleted meanwhile is skipped, not an error.
+    w.save_jobs(9999, &[JobRow { track: 9999, ..job("grid", "stale") }])
+        .unwrap();
+    assert!(read::queued_jobs(w.conn()).unwrap().is_empty());
+
+    assert_eq!(read::setting(w.conn(), "analysis.background_workers").unwrap(), None);
+    w.apply(StoreCmd::SetSetting {
+        key: "analysis.background_workers".into(),
+        value: "2".into(),
+    })
+    .unwrap();
+    assert_eq!(
+        read::setting(w.conn(), "analysis.background_workers").unwrap().as_deref(),
+        Some("2")
+    );
 }
 
 /// Bug 1: a grid fixed by hand while analysis ran isn't overwritten.

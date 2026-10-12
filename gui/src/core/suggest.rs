@@ -173,11 +173,18 @@ impl Scorer {
             .map(|((f, w), score)| Part {
                 name: f.name(),
                 score,
-                share: if score.is_some() && known > 0.0 { w / known } else { 0.0 },
+                share: if score.is_some() && known > 0.0 {
+                    w / known
+                } else {
+                    0.0
+                },
             })
             .collect();
         let mut total: f64 = parts.iter().map(|p| p.share * p.score.unwrap_or(0.0)).sum();
-        if parts.iter().any(|p| p.name == "tempo" && p.score == Some(0.0)) {
+        if parts
+            .iter()
+            .any(|p| p.name == "tempo" && p.score == Some(0.0))
+        {
             total *= UNMIXABLE;
         }
         if r.played.contains(&c.id) {

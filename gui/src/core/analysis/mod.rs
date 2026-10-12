@@ -1,17 +1,30 @@
-//! Analysis queue: up to [`JOBS`] background threads work through tracks in
-//! parallel, plus one lane for tracks just loaded onto a deck; each computes the
-//! waveform here and asks the one Python worker process (`earshot/worker`, Beat This!,
-//! see [`worker_client`]) for the beatgrid. The worker queues those by priority, so a
-//! deck's track goes first. See [`LOADED_NICE`] for how they share the CPU with
-//! playback.
+//! The analysis queue and the lanes that work through it.
+//!
+//! - **What.** The analysers are listed in [`registry`]; each result is saved with the
+//!   analyser's version and the hash of the audio, so stale results can be found.
+//! - **Queue.** [`queue::JobQueue`] is keyed by (track, analyser): asking again
+//!   merges into what's queued. It is saved in the `jobs` table, so it survives a
+//!   restart.
+//! - **Lanes.** One deck lane, for tracks just loaded onto a deck, sends its grids to
+//!   the deck worker: a worker process started with the app and kept running, at
+//!   normal CPU priority, so a loaded track is analysed straight away. Background
+//!   lanes (library work) each have their own worker process, started when there's
+//!   work and stopped after a minute without (`worker_client::IDLE_EXIT`), in the idle
+//!   CPU class. They ramp up with the backlog to [`SETTING_BACKGROUND_WORKERS`].
+//! - **One decode.** A lane takes every analyser waiting for a track at once: it
+//!   decodes the file once (or uses the deck's copy), runs the Rust analysers, then
+//!   sends the worker one job for the worker analysers, and saves everything in one
+//!   transaction.
 //!
 //! The worker never decodes files itself. We send it a mono WAV from our own decoder,
 //! so its beat times line up exactly with what the decks play.
 
-use std::collections::{HashMap, VecDeque};
+pub mod queue;
+pub mod registry;
+
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex};
 
 use earshot_engine::Command;
@@ -20,21 +33,14 @@ use earshot_engine::decode::{self, TrackAudio};
 use earshot_engine::{energy, loudness, waveform};
 use serde::Deserialize;
 
+use self::queue::{Batch, JobQueue, Lane, Req, Want};
+use self::registry::{AnalyserId, REGISTRY, RunsIn};
 use super::player::Player;
-use super::store::{AnalysisSave, GridSave, GridSource, Store};
+use super::store::{AnalysisSave, GridSave, GridSource, JobRow, ResultState, Store, StoreCmd};
 use super::worker_client::{
-    self, GridData, GridMode, JobPriority, Update, WorkerClient, WorkerConfig,
+    self, GridData, GridMode, JobPriority, Role, Update, WorkerClient, WorkerConfig,
 };
 use super::{Event, Sink};
-
-struct Job {
-    id: i64,
-    /// Already-decoded audio when the track was just loaded onto a deck.
-    audio: Option<Arc<TrackAudio>>,
-    /// Re-analyse even if the track already has a grid.
-    force: bool,
-    mode: Mode,
-}
 
 /// How to analyse a track, like Rekordbox's Normal / Dynamic.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize)]
@@ -44,6 +50,23 @@ pub enum Mode {
     Static,
     /// Beat This! over the whole track; the grid follows any drift.
     Dynamic,
+}
+
+impl Mode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Mode::Static => "static",
+            Mode::Dynamic => "dynamic",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Mode> {
+        match s {
+            "static" => Some(Mode::Static),
+            "dynamic" => Some(Mode::Dynamic),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -78,370 +101,508 @@ impl AnalysisEvent {
 const DECODED: f64 = 0.1;
 const WORKER_START: f64 = 0.15;
 
-/// Parallel background analysis jobs (override with `EARSHOT_ANALYSIS_JOBS`). They
-/// decode and measure in parallel; their grids wait their turn in the one worker.
-const JOBS: usize = 4;
+/// The setting (in the Store's `settings`) for how many background worker processes
+/// may run at once, [`DEFAULT_BACKGROUND_WORKERS`] if unset; read at startup, and kept
+/// to 1..=CPU cores. Each process holds its own copy of torch and the models, and
+/// they share the cores, so more than the core count only adds memory.
+pub const SETTING_BACKGROUND_WORKERS: &str = "analysis.background_workers";
+pub const DEFAULT_BACKGROUND_WORKERS: usize = 4;
 
-/// Playback comes first. Background jobs (folders, previews) run in Linux's idle CPU
-/// and disk classes, and only one at a time while a deck is playing. A track just
-/// loaded onto a deck is decoded straight away on its own lane: normal scheduling,
-/// but at this nice value, below the audio engine and the UI. The worker process runs
-/// in the idle CPU class for every job; a deck's track just goes first in its queue.
+/// Playback comes first. Background lanes (folders, previews) run in Linux's idle CPU
+/// and disk classes, and only one at a time while a deck is playing; so do their
+/// worker processes. The deck lane decodes at this nice value, below the audio engine
+/// and the UI; its worker process runs at normal priority.
 const LOADED_NICE: i32 = 5;
 
-#[derive(Default)]
-struct Queue {
-    /// (tracks just loaded onto a deck, everything else)
-    jobs: Mutex<(VecDeque<Job>, VecDeque<Job>)>,
-    ready: Condvar,
-}
-
-impl Queue {
-    fn pop(&self, urgent: bool) -> Job {
-        let mut jobs = self.jobs.lock().unwrap();
-        loop {
-            let lane = if urgent { &mut jobs.0 } else { &mut jobs.1 };
-            if let Some(j) = lane.pop_front() {
-                return j;
-            }
-            jobs = self.ready.wait(jobs).unwrap();
-        }
-    }
-}
-
 pub struct Analyser {
-    queue: Arc<Queue>,
-    /// Tracks waiting or running, and whether on the loaded-track lane.
-    pending: Arc<Mutex<HashMap<i64, bool>>>,
-    sink: Sink,
-    /// A deck is playing (set by the UI every frame).
-    playing: Arc<AtomicBool>,
+    shared: Arc<Shared>,
 }
 
-/// What the analysis threads need: where to report, and the decks to update.
-#[derive(Clone)]
-struct Ctx {
+struct Shared {
+    queue: Mutex<JobQueue>,
+    /// Signalled whenever a lane might now be able to take work.
+    ready: Condvar,
+    store: Store,
     sink: Sink,
-    player: Player,
+    deck: WorkerClient,
+    /// One per background lane.
+    background: Vec<WorkerClient>,
 }
 
 impl Analyser {
     pub fn start(sink: Sink, player: Player, store: Store) -> Analyser {
-        let ctx = Ctx {
-            sink: sink.clone(),
-            player,
-        };
-        let jobs = std::env::var("EARSHOT_ANALYSIS_JOBS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(JOBS)
-            .max(1);
-        // One worker for every lane, with every core: it runs one job at a time, in
-        // the idle CPU class.
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
-        let worker = WorkerClient::start(WorkerConfig::python(cores));
-        // Start it now (importing torch takes a few seconds), so a track loaded onto a
-        // deck is analysed straight away.
-        worker.warm_up();
-        let queue = Arc::new(Queue::default());
-        let pending = Arc::new(Mutex::new(HashMap::new()));
-        let playing = Arc::new(AtomicBool::new(false));
-        let background_running = Arc::new(AtomicUsize::new(0));
-        // The loaded-track lane, then the background ones.
-        let lanes = std::iter::once(true).chain(std::iter::repeat_n(false, jobs));
-        for (n, urgent) in lanes.enumerate() {
-            let (q, p, a, store) = (queue.clone(), pending.clone(), ctx.clone(), store.clone());
-            let worker = worker.clone();
-            let (playing, running) = (playing.clone(), background_running.clone());
+        let cap = store
+            .reader
+            .setting(SETTING_BACKGROUND_WORKERS)
+            .ok()
+            .flatten()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(DEFAULT_BACKGROUND_WORKERS)
+            .clamp(1, cores);
+        // Started now (importing torch takes a few seconds), so a track loaded onto a
+        // deck is analysed straight away. It runs at normal priority, so it gets half
+        // the cores: the rest are left for the audio engine and the UI.
+        let deck = WorkerClient::start(WorkerConfig::python(Role::Deck, (cores / 2).max(1)));
+        deck.warm_up();
+        // Background workers share the cores between them.
+        let threads = (cores / cap).max(1);
+        let background = (0..cap)
+            .map(|_| WorkerClient::start(WorkerConfig::python(Role::Background, threads)))
+            .collect();
+        let shared = Arc::new(Shared {
+            queue: Mutex::new(JobQueue::new(cap)),
+            ready: Condvar::new(),
+            store,
+            sink,
+            deck,
+            background,
+        });
+        let lanes = std::iter::once(Lane::Deck).chain((0..cap).map(Lane::Background));
+        for (n, lane) in lanes.enumerate() {
+            let (shared, player) = (shared.clone(), player.clone());
             std::thread::Builder::new()
                 .name(format!("earshot-analysis-{n}"))
-                .spawn(move || {
-                    let priority = if urgent {
-                        Priority::Nice(LOADED_NICE)
-                    } else {
-                        Priority::Idle
-                    };
-                    priority.apply();
-                    loop {
-                        let job = q.pop(urgent);
-                        if !urgent {
-                            take_background_slot(&playing, &running);
-                        }
-                        let ev = match run(&a, &store, &worker, urgent, &job) {
-                            Ok(ev) => ev,
-                            Err(e) => {
-                                eprintln!("analysis of track {}: {e}", job.id);
-                                AnalysisEvent {
-                                    error: Some(e),
-                                    ..AnalysisEvent::new(job.id, "error")
-                                }
-                            }
-                        };
-                        if !urgent {
-                            running.fetch_sub(1, Ordering::SeqCst);
-                        }
-                        // Leave it pending if the other lane has taken it over.
-                        let mut pending = p.lock().unwrap();
-                        if pending.get(&job.id) == Some(&urgent) {
-                            pending.remove(&job.id);
-                        }
-                        drop(pending);
-                        (a.sink)(Event::Analysis(ev));
-                    }
-                })
+                .spawn(move || shared.lane(lane, &player))
                 .expect("spawn analysis thread");
         }
-        Analyser {
-            queue,
-            pending,
-            sink,
-            playing,
-        }
+        let analyser = Analyser { shared };
+        analyser.restore();
+        analyser
     }
 
     /// Tell the queue whether a deck is playing, which holds background jobs back.
     pub fn set_playing(&self, on: bool) {
-        self.playing.store(on, Ordering::Relaxed);
+        let mut q = self.shared.queue.lock().unwrap();
+        if q.playing != on {
+            q.playing = on;
+            drop(q);
+            self.shared.ready.notify_all();
+        }
     }
 
-    /// Queue a track unless it is already waiting. A track just loaded onto a deck
-    /// (`audio` given) goes to the front of the loaded-track lane, ahead of everything,
-    /// and is taken over from the background if it was waiting or running there.
+    /// Make sure a track is analysed. A track just loaded onto a deck (`audio` given)
+    /// goes to the deck lane, ahead of everything, taking it over from the background
+    /// if it was waiting or running there. `force` re-analyses the grid whatever there
+    /// is (in `mode`), and anything else whose result is stale.
     pub fn queue(&self, id: i64, audio: Option<Arc<TrackAudio>>, force: bool, mode: Mode) {
-        let urgent = audio.is_some();
-        let job = Job {
-            id,
-            audio,
-            force,
-            mode,
+        let priority = match audio {
+            Some(_) => JobPriority::Deck,
+            None => JobPriority::Background,
         };
-        let mut jobs = self.queue.jobs.lock().unwrap();
-        let mut pending = self.pending.lock().unwrap();
-        match pending.get(&id) {
-            // Already on the loaded-track lane, or waiting in the background.
-            Some(true) => return,
-            Some(false) if !urgent => return,
-            // In the background (waiting or already running) but now loaded: take it
-            // out of the background queue and analyse it on the loaded-track lane. A
-            // background run already under way finishes too; the grid is the same.
-            Some(false) => {
-                jobs.1.retain(|j| j.id != id);
+        let wants: Vec<(AnalyserId, Req)> = AnalyserId::ALL
+            .iter()
+            .map(|&a| {
+                let want = match (a, force) {
+                    (_, false) => Want::Missing,
+                    (AnalyserId::Grid, true) => Want::Force,
+                    (_, true) => Want::Stale,
+                };
+                (
+                    a,
+                    Req {
+                        priority,
+                        want,
+                        mode,
+                    },
+                )
+            })
+            .collect();
+        self.shared.request(id, &wants, audio);
+    }
+
+    /// Queue everything whose results are stale: an older analyser version, other
+    /// audio, failed, or missing. A grid is redone in the mode it has.
+    #[allow(dead_code)] // not in the UI yet (step 7)
+    pub fn queue_stale(&self) -> Result<usize, String> {
+        let reader = &self.shared.store.reader;
+        let mut n = 0;
+        for spec in REGISTRY {
+            let ids = reader
+                .stale_tracks(spec.id.as_str(), spec.version)
+                .map_err(|e| e.to_string())?;
+            for id in ids {
+                let mode = match reader.active_grid(id) {
+                    Ok(Some((_, GridSource::AnalysisDynamic))) => Mode::Dynamic,
+                    _ => Mode::Static,
+                };
+                let req = Req {
+                    priority: JobPriority::Background,
+                    want: Want::Stale,
+                    mode,
+                };
+                self.shared.request(id, &[(spec.id, req)], None);
+                n += 1;
             }
-            None => (self.sink)(Event::Analysis(AnalysisEvent::new(id, "queued"))),
         }
-        pending.insert(id, urgent);
-        if urgent {
-            // The newest load first.
-            jobs.0.push_front(job);
-        } else {
-            jobs.1.push_back(job);
+        Ok(n)
+    }
+
+    /// Put back what was queued when the app last closed (as background work).
+    fn restore(&self) {
+        let rows = match self.shared.store.reader.queued_jobs() {
+            Ok(r) => r,
+            Err(e) => return eprintln!("reading the analysis queue: {e}"),
+        };
+        for row in rows {
+            let (Some(a), Some(want)) = (AnalyserId::parse(&row.analyser), Want::parse(&row.want))
+            else {
+                continue;
+            };
+            let mode = row
+                .params
+                .as_deref()
+                .and_then(Mode::parse)
+                .unwrap_or(Mode::Static);
+            let req = Req {
+                priority: JobPriority::Background,
+                want,
+                mode,
+            };
+            self.shared.request(row.track, &[(a, req)], None);
         }
-        self.queue.ready.notify_all();
     }
 }
 
-/// Wait for a turn to run a background job: any time while nothing is playing, but
-/// only one at a time while a deck plays.
-fn take_background_slot(playing: &AtomicBool, running: &AtomicUsize) {
-    loop {
-        let n = running.load(Ordering::SeqCst);
-        if playing.load(Ordering::Relaxed) && n >= 1 {
-            std::thread::sleep(std::time::Duration::from_millis(250));
-            continue;
-        }
-        if running
-            .compare_exchange(n, n + 1, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            return;
-        }
-    }
-}
-
-fn run(
-    app: &Ctx,
-    store: &Store,
-    worker: &WorkerClient,
-    urgent: bool,
-    job: &Job,
-) -> Result<AnalysisEvent, String> {
-    let progress = |fraction: f64, stage: &'static str| {
-        (app.sink)(Event::Analysis(AnalysisEvent {
-            progress: Some(fraction),
-            stage: Some(stage),
-            ..AnalysisEvent::new(job.id, "running")
-        }));
-    };
-    let started_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64);
-    // The grid now; the result only replaces it if it's still this one when saved.
-    let existing = store.reader.active_grid(job.id).map_err(|e| e.to_string())?;
-    if !job.force && existing.is_some() {
-        // Analysed (or hand-fixed) since this job was queued.
-        return Ok(AnalysisEvent::new(job.id, "done"));
+impl Shared {
+    fn emit(&self, ev: AnalysisEvent) {
+        (self.sink)(Event::Analysis(ev));
     }
 
-    let audio = match &job.audio {
-        Some(a) => a.clone(),
-        None => {
-            progress(0.0, "decoding");
-            let path = store.reader.track_path(job.id).map_err(|e| e.to_string())?;
-            Arc::new(decode::decode_file(&path)?.0)
+    fn worker(&self, lane: Lane) -> &WorkerClient {
+        match lane {
+            Lane::Deck => &self.deck,
+            Lane::Background(n) => &self.background[n],
         }
-    };
+    }
 
-    progress(DECODED, "waveform");
-    let level = loudness::measure(&audio);
-    let mut features = vec![
-        ("energy", energy::energy(&audio)),
-        ("lufs", level.lufs),
-        ("peak", level.peak),
-    ];
-    // Waveform: cheap, done here, cached so later loads skip it.
-    let cached = store
-        .reader
-        .waveform(job.id, waveform::BINS_PER_SECOND)
-        .map_err(|e| e.to_string())?
-        .is_some();
-    let wave = (job.force || !cached).then(|| waveform::summarise(&audio));
-    // Everything the job found goes to the Store in one transaction, at the end
-    // (also when the worker fails, so the waveform and loudness aren't lost).
-    let mode = match job.mode {
-        Mode::Static => "static",
-        Mode::Dynamic => "dynamic",
-    };
-    let save = |analyser: String,
-                error: Option<String>,
-                features: Vec<(&'static str, f64)>,
-                grid: Option<GridSave>| {
-        let s = AnalysisSave {
-            track: job.id,
-            analyser,
-            mode,
-            started_at,
-            error,
+    fn request(&self, track: i64, wants: &[(AnalyserId, Req)], audio: Option<Arc<TrackAudio>>) {
+        let mut q = self.queue.lock().unwrap();
+        let r = q.request(track, wants, audio);
+        self.save_queue(&q, track);
+        drop(q);
+        if let Some((lane, Some(job))) = r.superseded {
+            self.worker(lane).cancel(job);
+        }
+        if r.new_track || r.superseded.is_some() {
+            self.emit(AnalysisEvent::new(track, "queued"));
+        }
+        self.ready.notify_all();
+    }
+
+    /// Save what's queued for a track. Called with the queue locked, so the Store gets
+    /// the changes in order.
+    fn save_queue(&self, q: &JobQueue, track: i64) {
+        let jobs = q
+            .requests(track)
+            .into_iter()
+            .map(|(a, r)| JobRow {
+                track,
+                analyser: a.as_str().into(),
+                want: r.want.as_str().into(),
+                params: Some(r.mode.as_str().into()),
+            })
+            .collect();
+        self.store.send(StoreCmd::SaveJobs { track, jobs });
+    }
+
+    /// A lane's thread: take a track, analyse it, repeat.
+    fn lane(&self, lane: Lane, player: &Player) {
+        match lane {
+            Lane::Deck => Priority::Nice(LOADED_NICE).apply(),
+            Lane::Background(_) => Priority::Idle.apply(),
+        }
+        loop {
+            let batch = {
+                let mut q = self.queue.lock().unwrap();
+                loop {
+                    if let Some(b) = q.take(lane) {
+                        break b;
+                    }
+                    q = self.ready.wait(q).unwrap();
+                }
+            };
+            let track = batch.track;
+            let result = self.run(lane, player, &batch);
+            let superseded = batch.superseded.load(Ordering::Relaxed);
+            if let Err(e) = &result
+                && !superseded
+            {
+                eprintln!("analysis of track {track}: {e}");
+            }
+            let mut q = self.queue.lock().unwrap();
+            let idle = q.finish(lane).is_some_and(|(_, idle)| idle);
+            self.save_queue(&q, track);
+            drop(q);
+            self.ready.notify_all();
+            self.emit(match result {
+                // More was asked for meanwhile (or this was taken over): still waiting.
+                _ if !idle => AnalysisEvent::new(track, "queued"),
+                Ok(()) => AnalysisEvent::new(track, "done"),
+                Err(e) => AnalysisEvent {
+                    error: Some(e),
+                    ..AnalysisEvent::new(track, "error")
+                },
+            });
+        }
+    }
+
+    fn run(&self, lane: Lane, player: &Player, batch: &Batch) -> Result<(), String> {
+        let id = batch.track;
+        let store = &self.store;
+        let progress = |fraction: f64, stage: &'static str| {
+            self.emit(AnalysisEvent {
+                progress: Some(fraction),
+                stage: Some(stage),
+                ..AnalysisEvent::new(id, "running")
+            });
+        };
+        let started_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        // The grid now; the result only replaces it if it's still this one when saved.
+        // Read on the writer thread, so a run this one took over either saved before
+        // this or finds itself superseded when it tries (and saves nothing).
+        let existing = store
+            .call(move |w| w.active_grid(id))
+            .map_err(|e| e.to_string())?;
+        let results = store
+            .reader
+            .analysis_results(id)
+            .map_err(|e| e.to_string())?;
+        // Done or hand-fixed since it was queued, perhaps.
+        let todo: Vec<(AnalyserId, Req)> = batch
+            .analysers
+            .iter()
+            .copied()
+            .filter(|(a, r)| needed(*a, r.want, &results, existing))
+            .collect();
+        if todo.is_empty() {
+            return Ok(());
+        }
+        let has = |a: AnalyserId| todo.iter().any(|t| t.0 == a);
+
+        let audio = match &batch.audio {
+            Some(a) => a.clone(),
+            None => {
+                progress(0.0, "decoding");
+                let path = store.reader.track_path(id).map_err(|e| e.to_string())?;
+                Arc::new(decode::decode_file(&path)?.0)
+            }
+        };
+
+        // The Rust analysers, in registry order.
+        progress(DECODED, "waveform");
+        let mut done: Vec<(&'static str, u32, Option<String>)> = vec![];
+        let mut ran = |a: AnalyserId| done.push((a.as_str(), a.spec().version, None));
+        let wave = has(AnalyserId::Waveform).then(|| waveform::summarise(&audio));
+        if wave.is_some() {
+            ran(AnalyserId::Waveform);
+        }
+        let mut features = vec![];
+        if has(AnalyserId::Loudness) {
+            let level = loudness::measure(&audio);
+            features.extend([("lufs", level.lufs), ("peak", level.peak)]);
+            ran(AnalyserId::Loudness);
+        }
+        if has(AnalyserId::Energy) {
+            features.push(("energy", energy::energy(&audio)));
+            ran(AnalyserId::Energy);
+        }
+        // The worker's part: so far just the grid.
+        let grid_req = todo
+            .iter()
+            .find(|t| t.0.spec().runs_in == RunsIn::Worker)
+            .inspect(|t| debug_assert_eq!(t.0, AnalyserId::Grid))
+            .map(|t| t.1);
+        let mode = grid_req.map_or(Mode::Static, |r| r.mode);
+        // Everything the job found goes to the Store in one transaction, at the end
+        // (also when the worker fails, so the waveform and loudness aren't lost). Not
+        // if a newer request took this work over: its own run saves.
+        let save = |analyser: String,
+                    features: Vec<(&'static str, f64)>,
+                    grid: Option<GridSave>,
+                    results: Vec<(&'static str, u32, Option<String>)>| {
+            let s = AnalysisSave {
+                track: id,
+                analyser,
+                mode: mode.as_str(),
+                started_at,
+                error: results.iter().find_map(|r| r.2.clone()),
+                features,
+                waveform: wave.clone(),
+                grid,
+                results,
+            };
+            let superseded = batch.superseded.clone();
+            store
+                .call(move |w| {
+                    if superseded.load(Ordering::Relaxed) {
+                        return Ok(None);
+                    }
+                    w.save_analysis(s).map(Some)
+                })
+                .map_err(|e| e.to_string())
+        };
+        let Some(grid_req) = grid_req else {
+            let names: Vec<&str> = done.iter().map(|d| d.0).collect();
+            save(names.join(","), features, None, done)?;
+            return Ok(());
+        };
+        let grid_version = AnalyserId::Grid.spec().version;
+        let fail = |e: String| {
+            let mut results = done.clone();
+            results.push((AnalyserId::Grid.as_str(), grid_version, Some(e.clone())));
+            if !batch.superseded.load(Ordering::Relaxed)
+                && let Err(se) = save("worker".into(), features.clone(), None, results)
+            {
+                eprintln!("saving track {id}'s analysis: {se}");
+            }
+            e
+        };
+
+        // Beatgrid: in the worker.
+        let wav =
+            std::env::temp_dir().join(format!("earshot-analyse-{}-{}.wav", std::process::id(), id));
+        write_mono_wav(&wav, &audio)
+            .map_err(|e| fail(format!("writing {}: {e}", wav.display())))?;
+        progress(WORKER_START, "waiting for the analyser");
+        let request = worker_client::Request {
+            wav: wav.clone(),
+            priority: match lane {
+                Lane::Deck => JobPriority::Deck,
+                Lane::Background(_) => JobPriority::Background,
+            },
+            grid: Some(match grid_req.mode {
+                Mode::Static => GridMode::Static,
+                Mode::Dynamic => GridMode::Dynamic,
+            }),
+            deadline: worker_client::deadline_for(audio.duration()),
+        };
+        let worker = self.worker(lane);
+        let job = worker.submit(&request);
+        if !self.queue.lock().unwrap().worker_job(lane, job.id()) {
+            worker.cancel(job.id()); // taken over while we decoded
+        }
+        let outcome = job.wait(&mut |u| {
+            let f = match u {
+                Update::Started => 0.0,
+                Update::Progress { fraction, .. } => fraction,
+            };
+            let stage = match grid_req.mode {
+                Mode::Static if f < 0.25 => "finding the tempo",
+                Mode::Static => "placing the grid",
+                Mode::Dynamic if f < 0.8 => "finding beats",
+                Mode::Dynamic => "refining beats",
+            };
+            progress(WORKER_START + (1.0 - WORKER_START) * f, stage)
+        });
+        let _ = std::fs::remove_file(&wav);
+        let outcome = outcome.map_err(fail)?;
+        let reply = match outcome.grid {
+            Some(Ok(g)) => g,
+            Some(Err(e)) => return Err(fail(e)),
+            None => return Err(fail("the worker sent no grid".into())),
+        };
+        let duration = audio.duration();
+        let (grid, bpm, source, min, max, steady) = match &reply.grid {
+            // One tempo: a straight grid with a 1 at the worker's downbeat.
+            GridData::Constant {
+                bpm,
+                downbeat,
+                steady,
+                ..
+            } => {
+                let g = Beatgrid::constant(*bpm, *downbeat, duration)
+                    .map_err(|e| fail(format!("worker returned an unusable tempo: {e}")))?;
+                (g, *bpm, GridSource::Analysis, *bpm, *bpm, *steady)
+            }
+            // Every detected beat, so the grid follows the drift. Its BPM is the average.
+            GridData::Markers {
+                beats,
+                beat_index,
+                is_downbeat,
+                min_bpm,
+                max_bpm,
+                ..
+            } => {
+                let g = Beatgrid::from_indexed(beats, beat_index, is_downbeat)
+                    .and_then(|g| g.refit(duration))
+                    .map_err(|e| fail(format!("worker returned an unusable grid: {e}")))?;
+                let bpm = (g.mean_bpm() * 100.0).round() / 100.0;
+                (
+                    g,
+                    bpm,
+                    GridSource::AnalysisDynamic,
+                    *min_bpm,
+                    *max_bpm,
+                    true,
+                )
+            }
+        };
+        let drifts = grid_req.mode == Mode::Static && !steady;
+
+        features.extend([
+            ("bpm_min", min),
+            ("bpm_max", max),
+            ("drifts", drifts as u8 as f64),
+        ]);
+        done.push((AnalyserId::Grid.as_str(), reply.version, None));
+        // The Store makes it the active grid only if the grid hasn't changed since the
+        // job started (a grid fixed by hand meanwhile wins), and sets the BPM with it.
+        let out = save(
+            reply.detector.clone(),
             features,
-            waveform: wave.clone(),
-            grid,
-        };
-        store
-            .call(move |w| w.save_analysis(s))
-            .map_err(|e| e.to_string())
-    };
-    let fail = |e: String| {
-        if let Err(se) = save("worker".into(), Some(e.clone()), features.clone(), None) {
-            eprintln!("saving track {}'s analysis: {se}", job.id);
+            Some(GridSave {
+                grid: grid.clone(),
+                source,
+                bpm,
+                expected_active: existing.map(|e| e.0),
+                force: grid_req.want == Want::Force,
+            }),
+            done,
+        )?;
+        if out.is_some_and(|o| o.switched) {
+            update_decks(player, id, grid, source);
         }
-        e
-    };
-
-    // Beatgrid: in the worker.
-    let wav = std::env::temp_dir().join(format!(
-        "earshot-analyse-{}-{}.wav",
-        std::process::id(),
-        job.id
-    ));
-    write_mono_wav(&wav, &audio)
-        .map_err(|e| fail(format!("writing {}: {e}", wav.display())))?;
-    progress(WORKER_START, "waiting for the analyser");
-    let request = worker_client::Request {
-        wav: wav.clone(),
-        priority: if urgent {
-            JobPriority::Deck
-        } else {
-            JobPriority::Background
-        },
-        grid: Some(match job.mode {
-            Mode::Static => GridMode::Static,
-            Mode::Dynamic => GridMode::Dynamic,
-        }),
-        deadline: worker_client::deadline_for(audio.duration()),
-    };
-    let outcome = worker.analyse(&request, &mut |u| {
-        let f = match u {
-            // A deck's track took the worker over; this one runs again later.
-            Update::Requeued => return progress(WORKER_START, "waiting for the analyser"),
-            Update::Started => 0.0,
-            Update::Progress { fraction, .. } => fraction,
+        let detail = match &reply.grid {
+            GridData::Constant { spread_ms, .. } => format!("phase spread {spread_ms:.0} ms"),
+            GridData::Markers { median_bpm, .. } => format!("median {median_bpm:.2} BPM"),
         };
-        let stage = match job.mode {
-            Mode::Static if f < 0.25 => "finding the tempo",
-            Mode::Static => "placing the grid",
-            Mode::Dynamic if f < 0.8 => "finding beats",
-            Mode::Dynamic => "refining beats",
-        };
-        progress(WORKER_START + (1.0 - WORKER_START) * f, stage)
-    });
-    let _ = std::fs::remove_file(&wav);
-    let outcome = outcome.map_err(fail)?;
-    let reply = match outcome.grid {
-        Some(Ok(g)) => g,
-        Some(Err(e)) => return Err(fail(e)),
-        None => return Err(fail("the worker sent no grid".into())),
-    };
-    let duration = audio.duration();
-    let (grid, bpm, source, min, max, steady) = match &reply.grid {
-        // One tempo: a straight grid with a 1 at the worker's downbeat.
-        GridData::Constant {
-            bpm,
-            downbeat,
-            steady,
-            ..
-        } => {
-            let g = Beatgrid::constant(*bpm, *downbeat, duration)
-                .map_err(|e| fail(format!("worker returned an unusable tempo: {e}")))?;
-            (g, *bpm, GridSource::Analysis, *bpm, *bpm, *steady)
-        }
-        // Every detected beat, so the grid follows the drift. Its BPM is the average.
-        GridData::Markers {
-            beats,
-            beat_index,
-            is_downbeat,
-            min_bpm,
-            max_bpm,
-            ..
-        } => {
-            let g = Beatgrid::from_indexed(beats, beat_index, is_downbeat)
-                .and_then(|g| g.refit(duration))
-                .map_err(|e| fail(format!("worker returned an unusable grid: {e}")))?;
-            let bpm = (g.mean_bpm() * 100.0).round() / 100.0;
-            (g, bpm, GridSource::AnalysisDynamic, *min_bpm, *max_bpm, true)
-        }
-    };
-    let drifts = job.mode == Mode::Static && !steady;
-
-    features.extend([
-        ("bpm_min", min),
-        ("bpm_max", max),
-        ("drifts", drifts as u8 as f64),
-    ]);
-    // The Store makes it the active grid only if the grid hasn't changed since the
-    // job started (a grid fixed by hand meanwhile wins), and sets the BPM with it.
-    let out = save(
-        reply.detector.clone(),
-        None,
-        features,
-        Some(GridSave {
-            grid: grid.clone(),
-            source,
-            bpm,
-            expected_active: existing.map(|e| e.0),
-            force: job.force,
-        }),
-    )?;
-    if out.switched {
-        update_decks(app, job.id, grid, source);
+        eprintln!(
+            "analysed track {id} ({:?}): {bpm} BPM, {detail}, moved {:.0} ms onto the kicks, {:.1} s in the worker",
+            grid_req.mode, reply.kick_shift_ms, outcome.seconds
+        );
+        Ok(())
     }
-    let detail = match &reply.grid {
-        GridData::Constant { spread_ms, .. } => format!("phase spread {spread_ms:.0} ms"),
-        GridData::Markers { median_bpm, .. } => format!("median {median_bpm:.2} BPM"),
-    };
-    eprintln!(
-        "analysed track {} ({:?}): {bpm} BPM, {detail}, moved {:.0} ms onto the kicks, {:.1} s in the worker",
-        job.id, job.mode, reply.kick_shift_ms, outcome.seconds
-    );
-    Ok(AnalysisEvent::new(job.id, "done"))
+}
+
+/// Whether analyser `a` still has to run for a track, given what it asked for, the
+/// saved results, and the active grid.
+fn needed(
+    a: AnalyserId,
+    want: Want,
+    results: &[ResultState],
+    grid: Option<(i64, GridSource)>,
+) -> bool {
+    let spec = a.spec();
+    let result = results.iter().find(|r| r.analyser == spec.id.as_str());
+    let fresh = result.is_some_and(|r| !r.failed && r.version >= spec.version && r.same_audio);
+    match (a, want) {
+        (_, Want::Force) => true,
+        // Any grid will do: a hand-fixed or imported one, or an analysed one from
+        // before results were versioned.
+        (AnalyserId::Grid, Want::Missing) => grid.is_none(),
+        (_, Want::Missing) => result.is_none(),
+        // Only ever replaces an analysed grid.
+        (AnalyserId::Grid, Want::Stale) => {
+            !fresh
+                && grid.is_none_or(|g| {
+                    matches!(g.1, GridSource::Analysis | GridSource::AnalysisDynamic)
+                })
+        }
+        (_, Want::Stale) => !fresh,
+    }
 }
 
 /// How hard an analysis thread may compete for the machine.
@@ -478,9 +639,9 @@ impl Priority {
 }
 
 /// Give the new grid to any deck that has this track loaded.
-fn update_decks(app: &Ctx, track_id: i64, grid: Beatgrid, source: GridSource) {
+fn update_decks(player: &Player, track_id: i64, grid: Beatgrid, source: GridSource) {
     let grid = Some(Arc::new(grid));
-    let mut inner = app.player.lock().unwrap();
+    let mut inner = player.lock().unwrap();
     for deck in 0..inner.decks.len() {
         if inner.decks[deck].track_id != Some(track_id) {
             continue;
@@ -525,4 +686,57 @@ pub(super) fn write_mono_wav(path: &Path, audio: &TrackAudio) -> std::io::Result
         w.write_all(&(0.5 * (f[0] + f[1])).to_le_bytes())?;
     }
     w.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(analyser: &str, version: u32, failed: bool, same_audio: bool) -> ResultState {
+        ResultState {
+            analyser: analyser.into(),
+            version,
+            failed,
+            same_audio,
+        }
+    }
+
+    #[test]
+    fn what_still_needs_running() {
+        use AnalyserId::*;
+        let analysed = Some((1, GridSource::Analysis));
+        let user = Some((1, GridSource::User));
+        let old = [
+            result("grid", 0, false, true),
+            result("waveform", 1, false, true),
+        ];
+        // A deck load wants anything missing: an old grid is still a grid.
+        assert!(!needed(Grid, Want::Missing, &old, analysed));
+        assert!(needed(Grid, Want::Missing, &[], None));
+        assert!(!needed(Waveform, Want::Missing, &old, None));
+        assert!(needed(Loudness, Want::Missing, &old, None));
+        // "Re-analyse stale" redoes the old analysed grid, but never a hand-fixed one.
+        assert!(needed(Grid, Want::Stale, &old, analysed));
+        assert!(!needed(Grid, Want::Stale, &old, user));
+        assert!(!needed(Waveform, Want::Stale, &old, None));
+        assert!(needed(
+            Waveform,
+            Want::Stale,
+            &[result("waveform", 1, false, false)],
+            None
+        ));
+        assert!(needed(
+            Waveform,
+            Want::Stale,
+            &[result("waveform", 1, true, true)],
+            None
+        ));
+        // Forced: always.
+        assert!(needed(
+            Grid,
+            Want::Force,
+            &[result("grid", 2, false, true)],
+            user
+        ));
+    }
 }

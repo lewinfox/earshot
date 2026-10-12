@@ -1,23 +1,24 @@
 //! The analysis worker (`earshot/worker`, Python) and the client that drives it over
 //! protocol v2 (written down in `worker/README.md`).
 //!
-//! One long-lived worker process serves every job, so each model is loaded once. It
-//! keeps its own priority queue: a job for a track just loaded onto a deck goes ahead
-//! of background ones. Any number of threads may call [`WorkerClient::analyse`] at
-//! once; one supervisor thread owns the process and routes its replies by job id.
+//! A [`WorkerClient`] owns one long-lived worker process, so each model is loaded once
+//! per process. Any number of threads may call [`WorkerClient::analyse`] at once; one
+//! supervisor thread owns the process and routes its replies by job id. The analysis
+//! queue (`core::analysis`) runs several: one for deck loads, always up, and
+//! background ones that start when there's work and stop after
+//! [`WorkerConfig::idle_exit`] without any (see [`Role`]).
 //!
 //! The supervisor kills and restarts the process when it stops answering (no
 //! heartbeat for [`WorkerConfig::heartbeat_timeout`]) or a job runs past its deadline.
 //! The job that was running fails; jobs that were only waiting in the dead process are
-//! sent again to the new one. A second process (say, one just for deck loads) would be
-//! a second `WorkerClient`: job ids and priorities are per process.
+//! sent again to the new one. Job ids and priorities are per process.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -27,6 +28,9 @@ use serde_json::json;
 
 /// The protocol version this client speaks; the worker must answer hello with it.
 pub const PROTOCOL: u32 = 2;
+
+/// What [`Job::wait`] returns for a cancelled job.
+pub const CANCELLED: &str = "cancelled";
 
 /// How often the supervisor checks deadlines and heartbeats.
 const TICK: Duration = Duration::from_millis(250);
@@ -40,8 +44,8 @@ pub fn deadline_for(audio_seconds: f64) -> Duration {
     Duration::from_secs_f64(300.0 + 4.0 * audio_seconds.max(0.0))
 }
 
-/// Which jobs the worker runs first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Which jobs run first, most urgent first (so `Deck < Background`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum JobPriority {
     /// A track just loaded onto a deck.
     Deck,
@@ -51,7 +55,7 @@ pub enum JobPriority {
 }
 
 impl JobPriority {
-    fn wire(self) -> &'static str {
+    pub fn wire(self) -> &'static str {
         match self {
             JobPriority::Deck => "deck",
             JobPriority::Preview => "preview",
@@ -116,11 +120,6 @@ enum Reply {
     Heartbeat,
     /// The job has left the worker's queue and is running; its deadline starts now.
     Started {
-        id: u64,
-    },
-    /// A deck job arrived while this one ran: it stopped and waits to run again (it
-    /// will be `started` again; its deadline restarts then).
-    Requeued {
         id: u64,
     },
     Progress {
@@ -209,9 +208,10 @@ pub struct Outcome {
 pub enum Update {
     /// It left the worker's queue (until then it waits behind other jobs).
     Started,
-    /// A deck job took over the worker: it's back in the queue, and starts again later.
-    Requeued,
-    Progress { analyser: String, fraction: f64 },
+    Progress {
+        analyser: String,
+        fraction: f64,
+    },
 }
 
 /// How to start the worker, and how long to give it.
@@ -229,27 +229,56 @@ pub struct WorkerConfig {
     /// Past a job's own deadline, before the worker is killed. (The worker gives up on
     /// its own at the deadline, at its next progress report.)
     pub grace: Duration,
+    /// Stop the process after this long with no jobs (it starts again on the next).
+    /// `None`: keep it.
+    pub idle_exit: Option<Duration>,
+    /// Start a new process straight away when one dies, not on the next job.
+    pub keep_alive: bool,
 }
+
+/// What a worker process is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// Tracks just loaded onto a deck: started with the app and kept running, at
+    /// normal CPU priority, so a loaded track is analysed straight away.
+    Deck,
+    /// Library work: started when there is some, stopped after [`IDLE_EXIT`] without,
+    /// in Linux's idle CPU class (it only gets what nothing else wants).
+    Background,
+}
+
+/// How long a background worker waits for more work before it exits. Analysis is
+/// mostly needed on import, so there's no point keeping a process (and its models in
+/// memory) around for long after.
+pub const IDLE_EXIT: Duration = Duration::from_secs(60);
 
 impl WorkerConfig {
     /// The real worker: `worker/.venv/bin/python -m earshot_worker`, letting torch use
     /// `threads` CPU threads.
-    pub fn python(threads: usize) -> WorkerConfig {
+    pub fn python(role: Role, threads: usize) -> WorkerConfig {
         let dir = std::env::var_os("EARSHOT_WORKER_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../worker"));
         let threads = threads.to_string();
+        let mut envs: Vec<(String, String)> =
+            ["OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"]
+                .iter()
+                .map(|k| (k.to_string(), threads.clone()))
+                .collect();
+        if role == Role::Deck {
+            // The worker would otherwise put itself in the idle CPU class.
+            envs.push(("EARSHOT_WORKER_PRIORITY".into(), "inherit".into()));
+        }
         WorkerConfig {
             program: dir.join(".venv/bin/python"),
             args: vec!["-m".into(), "earshot_worker".into()],
             dir,
-            envs: ["OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"]
-                .iter()
-                .map(|k| (k.to_string(), threads.clone()))
-                .collect(),
+            envs,
             start_timeout: Duration::from_secs(180),
             heartbeat_timeout: Duration::from_secs(60),
             grace: Duration::from_secs(15),
+            idle_exit: (role == Role::Background).then_some(IDLE_EXIT),
+            keep_alive: role == Role::Deck,
         }
     }
 }
@@ -264,6 +293,8 @@ pub struct WorkerClient {
 struct Inner {
     tx: Mutex<Sender<Ctl>>,
     next_id: AtomicU64,
+    /// A process is up (starting or ready), as the supervisor last left it.
+    running: Arc<AtomicBool>,
 }
 
 impl Drop for Inner {
@@ -274,7 +305,6 @@ impl Drop for Inner {
 
 /// A submitted job: wait for it, or cancel it from another thread by its id.
 pub struct Job {
-    #[allow(dead_code)] // for cancelling, once the job queue can cancel
     id: u64,
     rx: Receiver<JobMsg>,
 }
@@ -283,16 +313,25 @@ impl WorkerClient {
     pub fn start(config: WorkerConfig) -> WorkerClient {
         let (tx, rx) = mpsc::channel();
         let supervisor_tx = tx.clone();
+        let running = Arc::new(AtomicBool::new(false));
+        let flag = running.clone();
         std::thread::Builder::new()
             .name("earshot-worker-supervisor".into())
-            .spawn(move || Supervisor::new(config, supervisor_tx).run(rx))
+            .spawn(move || Supervisor::new(config, supervisor_tx, flag).run(rx))
             .expect("spawn worker supervisor");
         WorkerClient {
             inner: Arc::new(Inner {
                 tx: Mutex::new(tx),
                 next_id: AtomicU64::new(1),
+                running,
             }),
         }
+    }
+
+    /// Whether the worker process is up (starting or ready).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn is_running(&self) -> bool {
+        self.inner.running.load(Ordering::Relaxed)
     }
 
     fn send(&self, ctl: Ctl) {
@@ -318,13 +357,14 @@ impl WorkerClient {
     }
 
     /// Stop a job: dropped if it's still waiting, stopped at its next progress report
-    /// if it's running. Its `wait` then returns an error.
-    #[allow(dead_code)] // the job queue doesn't cancel yet
+    /// if it's running. Its `wait` then returns [`CANCELLED`]. Unknown ids (already
+    /// finished) are ignored.
     pub fn cancel(&self, id: u64) {
         self.send(Ctl::Cancel(id));
     }
 
     /// Submit a job and wait for it.
+    #[cfg_attr(not(test), allow(dead_code))] // the queue submits, to be able to cancel
     pub fn analyse(
         &self,
         req: &Request,
@@ -335,7 +375,6 @@ impl WorkerClient {
 }
 
 impl Job {
-    #[allow(dead_code)]
     pub fn id(&self) -> u64 {
         self.id
     }
@@ -390,9 +429,14 @@ enum Ctl {
     Cancel(u64),
     WarmUp,
     /// A line from process `generation`.
-    Reply { generation: u64, reply: Reply },
+    Reply {
+        generation: u64,
+        reply: Reply,
+    },
     /// Process `generation` closed its stdout (it exited).
-    Eof { generation: u64 },
+    Eof {
+        generation: u64,
+    },
     Shutdown,
 }
 
@@ -440,16 +484,22 @@ struct Supervisor {
     proc: Option<Proc>,
     jobs: HashMap<u64, Slot>,
     generations: u64,
+    /// Since when there have been no jobs.
+    idle_since: Option<Instant>,
+    /// Shared with the client: `proc` is Some.
+    running: Arc<AtomicBool>,
 }
 
 impl Supervisor {
-    fn new(config: WorkerConfig, tx: Sender<Ctl>) -> Self {
+    fn new(config: WorkerConfig, tx: Sender<Ctl>, running: Arc<AtomicBool>) -> Self {
         Supervisor {
             config,
             tx,
             proc: None,
             jobs: HashMap::new(),
             generations: 0,
+            idle_since: None,
+            running,
         }
     }
 
@@ -503,7 +553,9 @@ impl Supervisor {
     }
 
     fn current(&self, generation: u64) -> bool {
-        self.proc.as_ref().is_some_and(|p| p.generation == generation)
+        self.proc
+            .as_ref()
+            .is_some_and(|p| p.generation == generation)
     }
 
     /// Send every job not yet with the current process, starting one if needed.
@@ -610,6 +662,7 @@ impl Supervisor {
             spawned: now,
             last_heard: now,
         });
+        self.running.store(true, Ordering::Relaxed);
         Ok(())
     }
 
@@ -645,20 +698,11 @@ impl Supervisor {
                     let _ = s.tx.send(JobMsg::Update(Update::Started));
                 }
             }
-            Reply::Requeued { id } => {
-                if let Some(s) = self.jobs.get_mut(&id) {
-                    s.started = None;
-                    let _ = s.tx.send(JobMsg::Update(Update::Requeued));
-                }
-            }
             Reply::Progress {
                 id,
                 analyser,
                 fraction,
-            } => self.to_job(
-                id,
-                JobMsg::Update(Update::Progress { analyser, fraction }),
-            ),
+            } => self.to_job(id, JobMsg::Update(Update::Progress { analyser, fraction })),
             Reply::Result {
                 id,
                 analyser,
@@ -678,8 +722,11 @@ impl Supervisor {
                 error,
             } => self.to_job(id, JobMsg::Failed { analyser, error }),
             Reply::Done { id, seconds } => self.end(id, Ok(seconds)),
-            Reply::Cancelled { id } => self.end(id, Err("cancelled".into())),
-            Reply::Error { id: Some(id), error } => self.end(id, Err(error)),
+            Reply::Cancelled { id } => self.end(id, Err(CANCELLED.into())),
+            Reply::Error {
+                id: Some(id),
+                error,
+            } => self.end(id, Err(error)),
             Reply::Error { id: None, error } => {
                 if proc.ready {
                     eprintln!("analysis worker: {error}");
@@ -713,17 +760,32 @@ impl Supervisor {
             (Some(p), Some(generation)) if p.generation == generation => {
                 // The worker answers with `cancelled`, which ends the job.
                 let msg = json!({ "type": "cancel", "id": id });
-                if writeln!(p.stdin, "{msg}").and_then(|_| p.stdin.flush()).is_err() {
+                if writeln!(p.stdin, "{msg}")
+                    .and_then(|_| p.stdin.flush())
+                    .is_err()
+                {
                     self.lost("the analysis worker has stopped");
                 }
             }
-            _ => self.end(id, Err("cancelled".into())),
+            _ => self.end(id, Err(CANCELLED.into())),
         }
     }
 
     fn check_timers(&mut self) {
+        let idle_for = match self.jobs.is_empty() {
+            true => self.idle_since.get_or_insert_with(Instant::now).elapsed(),
+            false => {
+                self.idle_since = None;
+                Duration::ZERO
+            }
+        };
         let Some(proc) = &self.proc else { return };
         let generation = proc.generation;
+        if proc.ready && self.config.idle_exit.is_some_and(|d| idle_for > d) {
+            eprintln!("analysis worker: idle, stopping it");
+            self.kill();
+            return;
+        }
         if !proc.ready {
             if proc.spawned.elapsed() > self.config.start_timeout {
                 self.kill();
@@ -773,7 +835,7 @@ impl Supervisor {
         for id in ids {
             let s = self.jobs.get_mut(&id).unwrap();
             if s.cancelled {
-                self.end(id, Err("cancelled".into()));
+                self.end(id, Err(CANCELLED.into()));
             } else if s.started.is_some() || s.resends >= MAX_RESENDS {
                 self.end(id, Err(why.to_string()));
             } else {
@@ -782,6 +844,12 @@ impl Supervisor {
             }
         }
         self.send_waiting();
+        if self.config.keep_alive
+            && self.proc.is_none()
+            && let Err(e) = self.spawn()
+        {
+            eprintln!("analysis worker: {e}");
+        }
     }
 
     fn kill(&mut self) {
@@ -789,6 +857,7 @@ impl Supervisor {
             let _ = p.child.kill();
             let _ = p.child.wait();
         }
+        self.running.store(false, Ordering::Relaxed);
     }
 
     fn fail_all(&mut self, why: &str) {
@@ -804,7 +873,8 @@ mod tests {
 
     /// A stand-in worker: answers hello (with protocol argv[1]), then runs jobs one at
     /// a time. A job whose wav is "hang" starts and never finishes; "fail" fails its
-    /// grid analyser; "requeue" is preempted once, as by a deck job. With argv[2] = "beat", it sends heartbeats every 0.1 s.
+    /// grid analyser; "die" makes the process exit. With argv[2] = "beat", it sends
+    /// heartbeats every 0.1 s.
     const FAKE: &str = r#"
 import json, sys, threading, time
 lock = threading.Lock()
@@ -824,10 +894,8 @@ for line in sys.stdin:
     elif r["type"] == "analyse":
         i = r["id"]
         send({"id": i, "type": "started"})
-        if r["wav"] == "requeue":
-            send({"id": i, "type": "progress", "analyser": "grid", "fraction": 0.2})
-            send({"id": i, "type": "requeued"})
-            send({"id": i, "type": "started"})
+        if r["wav"] == "die":
+            sys.exit(1)
         if r["wav"] == "hang":
             time.sleep(1000)
         send({"id": i, "type": "progress", "analyser": "grid", "fraction": 0.5})
@@ -853,6 +921,8 @@ for line in sys.stdin:
             start_timeout: Duration::from_secs(20),
             heartbeat_timeout: Duration::from_secs(30),
             grace: Duration::from_millis(200),
+            idle_exit: None,
+            keep_alive: false,
         }
     }
 
@@ -886,37 +956,59 @@ for line in sys.stdin:
     fn runs_a_job() {
         let client = WorkerClient::start(fake(PROTOCOL, false));
         let mut updates = vec![];
-        let out = client.analyse(&req("x", 5000), &mut |u| updates.push(u)).unwrap();
+        let out = client
+            .analyse(&req("x", 5000), &mut |u| updates.push(u))
+            .unwrap();
         assert_eq!(updates[0], Update::Started);
         assert!(matches!(&updates[1], Update::Progress { fraction, .. } if *fraction == 0.5));
         let grid = out.grid.unwrap().unwrap();
         assert_eq!(grid.version, 2);
-        assert!(matches!(grid.grid, GridData::Constant { downbeat: 0.5, .. }));
+        assert!(matches!(
+            grid.grid,
+            GridData::Constant { downbeat: 0.5, .. }
+        ));
         // One analyser failing is in the outcome, not a failed job.
         let out = client.analyse(&req("fail", 5000), &mut |_| {}).unwrap();
         assert_eq!(out.grid.unwrap().unwrap_err(), "no beats");
     }
 
+    /// Poll until `f` holds, for up to 10 s.
+    fn eventually(f: impl Fn() -> bool) -> bool {
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(10) {
+            if f() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
     #[test]
-    fn a_preempted_job_starts_again() {
-        let client = WorkerClient::start(fake(PROTOCOL, false));
-        let mut updates = vec![];
-        let out = client
-            .analyse(&req("requeue", 5000), &mut |u| updates.push(u))
-            .unwrap();
-        assert!(out.grid.unwrap().is_ok());
-        let kinds: Vec<&str> = updates
-            .iter()
-            .map(|u| match u {
-                Update::Started => "started",
-                Update::Requeued => "requeued",
-                Update::Progress { .. } => "progress",
-            })
-            .collect();
-        assert_eq!(
-            kinds,
-            ["started", "progress", "requeued", "started", "progress"]
-        );
+    fn deck_worker_stays_up_while_a_background_one_comes_and_goes() {
+        let mut deck = fake(PROTOCOL, false);
+        deck.keep_alive = true;
+        let deck = WorkerClient::start(deck);
+        let mut background = fake(PROTOCOL, false);
+        background.idle_exit = Some(Duration::from_millis(300));
+        let background = WorkerClient::start(background);
+        deck.warm_up();
+        assert!(eventually(|| deck.is_running()));
+        // No background work yet: no background process.
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(!background.is_running());
+        // Work arrives: it starts, does it, and exits once idle for a while.
+        assert!(background.analyse(&req("x", 5000), &mut |_| {}).is_ok());
+        assert!(background.is_running());
+        assert!(eventually(|| !background.is_running()));
+        // And starts again for the next job.
+        assert!(background.analyse(&req("x", 5000), &mut |_| {}).is_ok());
+        // The deck worker was there throughout, and still answers straight away.
+        assert!(deck.is_running());
+        assert!(deck.analyse(&req("x", 5000), &mut |_| {}).is_ok());
+        // If it dies it's started again at once, not on the next deck load.
+        assert!(deck.analyse(&req("die", 5000), &mut |_| {}).is_err());
+        assert!(eventually(|| deck.is_running()));
     }
 
     #[test]
@@ -986,7 +1078,7 @@ for line in sys.stdin:
         let (audio, _) = decode::decode_file(Path::new(&path)).unwrap();
         let wav = std::env::temp_dir().join(format!("earshot-test-{}.wav", std::process::id()));
         super::super::analysis::write_mono_wav(&wav, &audio).unwrap();
-        let client = WorkerClient::start(WorkerConfig::python(4));
+        let client = WorkerClient::start(WorkerConfig::python(Role::Deck, 4));
         for mode in [GridMode::Static, GridMode::Dynamic] {
             let mut seen = Vec::new();
             let r = Request {
@@ -1014,10 +1106,18 @@ for line in sys.stdin:
                 g.kick_shift_ms,
                 out.seconds,
                 match &g.grid {
-                    GridData::Constant { bpm, downbeat, steady, spread_ms, .. } =>
-                        format!("{bpm} BPM, downbeat {downbeat:.3} s, spread {spread_ms:.1} ms, steady {steady}"),
-                    GridData::Markers { beats, median_bpm, .. } =>
-                        format!("{} beats, median {median_bpm:.2} BPM", beats.len()),
+                    GridData::Constant {
+                        bpm,
+                        downbeat,
+                        steady,
+                        spread_ms,
+                        ..
+                    } => format!(
+                        "{bpm} BPM, downbeat {downbeat:.3} s, spread {spread_ms:.1} ms, steady {steady}"
+                    ),
+                    GridData::Markers {
+                        beats, median_bpm, ..
+                    } => format!("{} beats, median {median_bpm:.2} BPM", beats.len()),
                 }
             );
         }
