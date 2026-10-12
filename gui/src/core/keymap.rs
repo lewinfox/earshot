@@ -13,11 +13,7 @@ use super::command::Command;
 pub const BUILT_IN: &str = include_str!("keymap.txt");
 
 /// Which of the app's modes a binding works in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mode {
-    Perform,
-    Prepare,
-}
+pub use super::view::Mode;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Binding {

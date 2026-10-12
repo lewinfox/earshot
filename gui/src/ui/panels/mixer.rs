@@ -12,10 +12,11 @@ use earshot_engine::loudness::TARGET_LUFS;
 use earshot_engine::{DeckId, EQ_HIGH, EQ_LOW, EQ_MID, EngineSnapshot, MasterParam, XfSide};
 use egui::{Rect, Response, Sense, Ui, vec2};
 
-use super::controls::{Fader, HwButton, Knob, Meter, Range, held};
-use super::util;
 use crate::core::bus::{Control, DeckControl};
 use crate::core::command::Command;
+use crate::ui::panels::{Cx, Panel};
+use crate::ui::theme::THEME;
+use crate::ui::widgets::{Fader, HwButton, Knob, Meter, Range, held};
 
 // Layout, in points from the mixer's top left. Columns from the left: deck A's knobs,
 // its gain / cue / fader, its meter, the main meters, then deck B mirrored, then the
@@ -99,7 +100,7 @@ pub fn show(
                 .map(|(i, d)| (*d, main_x + CENTRE_W + i as f32 * STRIP_W, false)),
         );
     for (deck, base, left_side) in strips {
-        let colour = util::deck_colour(deck);
+        let colour = THEME.deck_colour(deck);
         let ch = |c| Control::Deck(deck, c);
         // Knobs on the outside, then the fader, then the meter by the middle.
         let (knob_x, fader_x, vu_x) = if left_side {
@@ -213,7 +214,7 @@ pub fn show(
         egui::Align2::CENTER_CENTER,
         if limiting { "LIMIT" } else { "MAIN" },
         egui::FontId::proportional(9.0),
-        if limiting { util::BAD } else { util::MUTED },
+        if limiting { THEME.bad } else { THEME.muted },
     );
 
     let xf_w = channels_w - 2.0 * KNOB_COL;
@@ -247,6 +248,21 @@ pub fn show(
             egui::pos2(x, area.top()),
             egui::pos2(x, area.top() + FADER_BOTTOM),
         ],
-        egui::Stroke::new(1.0_f32, util::LINE),
+        egui::Stroke::new(1.0_f32, THEME.line),
     );
+}
+
+/// The mixer for `decks`, in its frame, `width` wide (see [`width`]).
+pub struct MixerPanel<'a> {
+    pub decks: &'a [DeckId],
+    pub width: f32,
+}
+
+impl Panel for MixerPanel<'_> {
+    fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        cx.theme.panel_frame().show(ui, |ui| {
+            ui.set_width(self.width - 16.0);
+            show(ui, cx.engine.snap.as_ref(), self.decks, cx.out);
+        });
+    }
 }

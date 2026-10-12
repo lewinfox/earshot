@@ -144,8 +144,14 @@ pub enum LibraryCmd {
         tracks: Vec<TrackId>,
         dynamic: bool,
     },
+    /// Ask for music folders to add (a folder picker), then scan them.
+    PickRoots,
+    /// Add music folders to the library and scan them.
+    AddRoots(Vec<std::path::PathBuf>),
     /// Stop scanning a library folder.
     RemoveRoot(String),
+    /// Look through the library folders again.
+    Rescan,
 }
 
 #[cfg(test)]

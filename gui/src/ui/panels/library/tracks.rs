@@ -6,25 +6,15 @@ use std::collections::HashMap;
 use earshot_engine::DeckId;
 use egui::{Color32, RichText, Sense, TextureHandle, TextureId, Ui, vec2};
 
-use super::util;
-use super::wave;
 use crate::core::bus::deck_letter;
-use crate::core::collections::{CollectionCmd, CollectionId, CollectionKind, Collections, FlowCmd};
+use crate::core::collections::{CollectionCmd, CollectionId, CollectionKind, FlowCmd};
 use crate::core::command::{Command, DeckCmd, PreviewCmd};
-use crate::core::history::History;
-use crate::core::index::{LibraryCmd, LibraryIndex};
+use crate::core::index::LibraryCmd;
 use crate::core::player::DECKS;
 use crate::core::track::{AnalysisState, Track, TrackId};
-
-/// The domain state the panes read, all from core.
-#[derive(Clone, Copy)]
-pub struct View<'a> {
-    pub lib: &'a LibraryIndex,
-    pub history: &'a History,
-    pub collections: &'a Collections,
-    /// The Flow on the canvas, if it has been saved.
-    pub open_flow: Option<CollectionId>,
-}
+use crate::ui::panels::CoreView;
+use crate::ui::panels::deck::wave;
+use crate::ui::theme::THEME;
 
 // ---- thumbnails and art ------------------------------------------------------------
 
@@ -92,7 +82,7 @@ fn art_wanted() -> egui::Id {
 pub fn title_cell(ui: &mut Ui, t: &Track, played: bool, two_lines: bool) {
     let title = RichText::new(&t.title);
     let title = if played {
-        title.color(util::MUTED)
+        title.color(THEME.muted)
     } else {
         title
     };
@@ -104,7 +94,7 @@ pub fn title_cell(ui: &mut Ui, t: &Track, played: bool, two_lines: bool) {
         ui.spacing_mut().item_spacing.y = 0.0;
         ui.add(egui::Label::new(title).truncate().selectable(false));
         ui.add(
-            egui::Label::new(RichText::new(&t.artist).size(11.0).color(util::MUTED))
+            egui::Label::new(RichText::new(&t.artist).size(11.0).color(THEME.muted))
                 .truncate()
                 .selectable(false),
         );
@@ -120,22 +110,22 @@ pub fn status_mark(ui: &mut Ui, t: &Track, state: Option<&AnalysisState>) {
         None,
     }
     let (mark, tip) = match state {
-        Some(AnalysisState::Failed(e)) => (Mark::Text("!".into(), util::BAD), e.clone()),
+        Some(AnalysisState::Failed(e)) => (Mark::Text("!".into(), THEME.bad), e.clone()),
         Some(AnalysisState::Running { progress, stage }) => (
-            Mark::Text(format!("{:.0}%", progress * 100.0), util::WARN),
+            Mark::Text(format!("{:.0}%", progress * 100.0), THEME.warn),
             stage.to_string(),
         ),
-        Some(AnalysisState::Queued) => (Mark::Ring(util::WARN), "Waiting to be analysed".into()),
+        Some(AnalysisState::Queued) => (Mark::Ring(THEME.warn), "Waiting to be analysed".into()),
         None if t.dynamic() => (
-            Mark::Text("~".into(), util::OK),
+            Mark::Text("~".into(), THEME.ok),
             "Analysed (dynamic): the grid follows the tempo".into(),
         ),
         None if t.drifts => (
-            Mark::Text("~".into(), util::WARN),
+            Mark::Text("~".into(), THEME.warn),
             "The tempo seems to drift: right-click, Analyse (dynamic)".into(),
         ),
         None if t.analysed() => (
-            Mark::Dot(util::OK),
+            Mark::Dot(THEME.ok),
             "Beatgrid analysed (static: one steady tempo)".into(),
         ),
         None => (Mark::None, "Not analysed".into()),
@@ -175,7 +165,7 @@ pub struct MenuAt {
 
 /// The one right-click menu for tracks, in every list: `sel` is what it acts on
 /// (the selection, or just the row clicked outside it).
-pub fn track_menu(ui: &mut Ui, sel: &[TrackId], v: &View, at: MenuAt, out: &mut Vec<Command>) {
+pub fn track_menu(ui: &mut Ui, sel: &[TrackId], v: &CoreView, at: MenuAt, out: &mut Vec<Command>) {
     let Some(&first) = sel.first() else { return };
     let n = sel.len();
     let mut push = |ui: &mut Ui, c: Command| {

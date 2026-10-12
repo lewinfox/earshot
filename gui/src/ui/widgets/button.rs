@@ -7,7 +7,7 @@ use egui::{
     Widget, pos2, vec2,
 };
 
-use super::BUTTON;
+use crate::ui::theme::THEME;
 use crate::ui::util;
 
 /// Symbols drawn as shapes, for glyphs the font lacks.
@@ -92,15 +92,11 @@ impl Widget for HwButton<'_> {
         }
         let down = resp.is_pointer_button_down_on();
         let (fill, border, text) = if self.lit {
-            (
-                self.colour,
-                self.colour,
-                Color32::from_rgb(0x10, 0x10, 0x12),
-            )
+            (self.colour, self.colour, THEME.ink)
         } else if self.tinted {
             (util::dim(self.colour, 0.25), self.colour, self.colour)
         } else {
-            (BUTTON, util::LINE, util::TEXT)
+            (THEME.button, THEME.line, THEME.text)
         };
         let fill = if down {
             util::dim(fill, 0.75)
@@ -136,14 +132,20 @@ impl Widget for HwButton<'_> {
                 let (c, half) = (rect.center(), rect.height() * 0.32);
                 let w = 3.0;
                 p.rect_filled(
-                    Rect::from_min_max(egui::pos2(c.x - w / 2.0, c.y - half), egui::pos2(c.x + w / 2.0, c.y)),
+                    Rect::from_min_max(
+                        egui::pos2(c.x - w / 2.0, c.y - half),
+                        egui::pos2(c.x + w / 2.0, c.y),
+                    ),
                     0,
-                    Color32::from_rgb(0xff, 0x46, 0x46),
+                    THEME.downbeat,
                 );
                 p.rect_filled(
-                    Rect::from_min_max(egui::pos2(c.x - w / 2.0, c.y), egui::pos2(c.x + w / 2.0, c.y + half)),
+                    Rect::from_min_max(
+                        egui::pos2(c.x - w / 2.0, c.y),
+                        egui::pos2(c.x + w / 2.0, c.y + half),
+                    ),
                     0,
-                    Color32::WHITE,
+                    THEME.marker,
                 );
             }
             None => match self.caption {

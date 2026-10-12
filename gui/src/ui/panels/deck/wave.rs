@@ -16,8 +16,9 @@ use egui::{
     pos2, vec2,
 };
 
-use super::util::{self, band_colour};
 use crate::core::store::Memory;
+use crate::ui::theme::THEME;
+use crate::ui::util::{self, band_colour};
 
 /// Detail bins per bin of the coarse min/max copy.
 const MIP: usize = 16;
@@ -101,7 +102,7 @@ impl DeckWave {
     fn colour_at(&self, t: f64) -> Color32 {
         let n = self.bands.len() / 4;
         if n == 0 {
-            return util::MUTED;
+            return THEME.muted;
         }
         let i = ((t * self.band_rate) as usize).min(n - 1);
         band_colour(
@@ -133,7 +134,7 @@ pub fn scrolling(
     half: f64,
     marks: &Marks,
 ) {
-    painter.rect_filled(rect, 4.0, util::WAVE_BG);
+    painter.rect_filled(rect, 4.0, THEME.wave_bg);
     let w = rect.width();
     let cx = rect.center().x;
     let spp = 2.0 * half / w as f64; // track seconds per point
@@ -150,9 +151,9 @@ pub fn scrolling(
                 r,
                 0.0,
                 if marks.loop_active {
-                    Color32::from_rgba_unmultiplied(255, 180, 40, 50)
+                    THEME.loop_shade
                 } else {
-                    Color32::from_white_alpha(18)
+                    THEME.loop_shade_idle
                 },
             );
         }
@@ -216,16 +217,19 @@ pub fn scrolling(
 
     if let Some(g) = marks.grid {
         // Every beat in view, carried on past both ends of the track.
-        let (first, last) = (g.beat_at(t_lo).ceil() as i64, g.beat_at(t_hi).floor() as i64);
+        let (first, last) = (
+            g.beat_at(t_lo).ceil() as i64,
+            g.beat_at(t_hi).floor() as i64,
+        );
         for i in first..=last {
             let x = x_of(g.time_at(i as f64));
             if g.position_of(i) == 1 {
                 painter.line_segment(
                     [pos2(x, rect.top()), pos2(x, rect.bottom())],
-                    Stroke::new(1.5_f32, Color32::from_rgba_unmultiplied(255, 70, 70, 230)),
+                    Stroke::new(1.5_f32, THEME.downbeat),
                 );
             } else {
-                let s = Stroke::new(1.0_f32, Color32::from_white_alpha(90));
+                let s = Stroke::new(1.0_f32, THEME.beat_tick);
                 let tick = rect.height() * 0.18;
                 painter.line_segment([pos2(x, rect.top()), pos2(x, rect.top() + tick)], s);
                 painter.line_segment([pos2(x, rect.bottom() - tick), pos2(x, rect.bottom())], s);
@@ -253,17 +257,17 @@ pub fn scrolling(
         if !label.is_empty() {
             // A tag in the cue's colour beside the flag, like Rekordbox's.
             let galley =
-                painter.layout_no_wrap(label.into(), egui::FontId::proportional(10.0), util::BG);
+                painter.layout_no_wrap(label.into(), egui::FontId::proportional(10.0), THEME.bg);
             let tag = Rect::from_min_size(pos2(x + 1.0, rect.top() + 9.0), galley.size())
                 .expand2(vec2(2.0, 0.0))
                 .translate(vec2(2.0, 0.0));
             painter.rect_filled(tag, 2.0, c);
-            painter.galley(tag.min + vec2(2.0, 0.0), galley, util::BG);
+            painter.galley(tag.min + vec2(2.0, 0.0), galley, THEME.bg);
         }
     };
     // Memory cues: a triangle on the bottom edge; a memory loop also underlines its span.
     for m in marks.memories {
-        let c = util::memory_colour(m);
+        let c = THEME.memory_colour(m);
         if let Some(end) = m.end
             && end >= t_lo
             && m.start <= t_hi
@@ -288,7 +292,7 @@ pub fn scrolling(
             ));
         }
     }
-    marker(marks.cue, util::ACCENT, "");
+    marker(marks.cue, THEME.accent, "");
     for (i, h) in marks.hotcues.iter().enumerate() {
         if let Some(t) = h {
             let letter = &"ABCDEFGH"[i..i + 1];
@@ -296,12 +300,12 @@ pub fn scrolling(
                 Some(l) => format!("{letter} {l}"),
                 None => letter.to_string(),
             };
-            marker(*t, util::HOTCUE[i % 8], &label);
+            marker(*t, THEME.hotcue_colour(i), &label);
         }
     }
     painter.line_segment(
         [pos2(cx, rect.top()), pos2(cx, rect.bottom())],
-        Stroke::new(2.0_f32, Color32::WHITE),
+        Stroke::new(2.0_f32, THEME.marker),
     );
 }
 
@@ -338,13 +342,13 @@ pub fn overview(
     marks: &Marks,
     analysing: Option<f64>,
 ) {
-    painter.rect_filled(rect, 3.0, util::WAVE_BG);
+    painter.rect_filled(rect, 3.0, THEME.wave_bg);
     if let Some(tex) = wave.and_then(|w| w.overview.as_ref()) {
         painter.image(
             tex.id(),
             rect,
             Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
-            Color32::WHITE,
+            Color32::WHITE, // as drawn: no tint
         );
     }
     if duration <= 0.0 {
@@ -355,13 +359,13 @@ pub fn overview(
         painter.rect_filled(
             Rect::from_x_y_ranges(x_of(a)..=x_of(b).max(x_of(a) + 2.0), rect.y_range()),
             0.0,
-            Color32::from_rgba_unmultiplied(255, 180, 40, 80),
+            THEME.loop_shade_overview,
         );
     }
     painter.rect_filled(
         Rect::from_x_y_ranges(rect.left()..=x_of(pos), rect.y_range()),
         0.0,
-        Color32::from_black_alpha(115),
+        THEME.played_shade,
     );
     let tri = |t: f64, c: Color32| {
         let x = x_of(t);
@@ -383,26 +387,26 @@ pub fn overview(
                 pos2(x, rect.bottom() - 6.0),
                 pos2(x + 4.0, rect.bottom()),
             ],
-            util::memory_colour(m),
+            THEME.memory_colour(m),
             Stroke::NONE,
         ));
     }
-    tri(marks.cue, util::ACCENT);
+    tri(marks.cue, THEME.accent);
     for (i, h) in marks.hotcues.iter().enumerate() {
         if let Some(t) = h {
-            tri(*t, util::HOTCUE[i % 8]);
+            tri(*t, THEME.hotcue_colour(i));
         }
     }
     painter.line_segment(
         [pos2(x_of(pos), rect.top()), pos2(x_of(pos), rect.bottom())],
-        Stroke::new(2.0_f32, Color32::WHITE),
+        Stroke::new(2.0_f32, THEME.marker),
     );
     if let Some(p) = analysing {
         let r = Rect::from_min_size(
             pos2(rect.left(), rect.bottom() - 3.0),
             vec2(rect.width() * p as f32, 3.0),
         );
-        painter.rect_filled(r, 0.0, util::WARN);
+        painter.rect_filled(r, 0.0, THEME.warn);
     }
 }
 

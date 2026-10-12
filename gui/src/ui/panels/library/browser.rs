@@ -10,9 +10,7 @@ use std::collections::HashMap;
 use egui::{Align, RichText, Sense, Ui, vec2};
 use egui_extras::{Column, TableBuilder};
 
-use super::deck::key_chip;
-use super::tracks::{Media, MenuAt, View, status_mark, title_cell, track_menu};
-use super::util;
+use super::tracks::{Media, MenuAt, status_mark, title_cell, track_menu};
 use crate::core::collections::{CollectionCmd, CollectionId, CollectionKind};
 use crate::core::command::Command;
 use crate::core::index::LibraryCmd;
@@ -20,16 +18,10 @@ use crate::core::library::{self, Subdir};
 use crate::core::query::{self, Dir, Expr, Field, Query, Sort};
 use crate::core::selection::{Mods, Selection};
 use crate::core::track::TrackId;
-
-/// The track in the headphones' preview player.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct PreviewState {
-    pub id: TrackId,
-    /// How far through, 0..1.
-    pub at: f32,
-    /// Playing (or about to, while it decodes) rather than paused or finished.
-    pub playing: bool,
-}
+use crate::ui::panels::CoreView;
+use crate::ui::theme::THEME;
+use crate::ui::util;
+use crate::ui::widgets::key_chip;
 
 /// What the track list shows.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -108,7 +100,7 @@ impl LibraryUi {
 
     /// Work the rows out again if the library, the collections, the search, the
     /// scope or the sort changed.
-    pub fn refresh(&mut self, v: &View) {
+    pub fn refresh(&mut self, v: &CoreView) {
         let stamp = (v.lib.rev(), v.collections.rev(), self.rev);
         if self.built_for == Some(stamp) {
             return;
@@ -179,7 +171,7 @@ impl LibraryUi {
     pub fn tree(
         &mut self,
         ui: &mut Ui,
-        v: &View,
+        v: &CoreView,
         out: &mut Vec<Command>,
         collections: impl FnOnce(&mut Ui),
     ) {
@@ -195,12 +187,12 @@ impl LibraryUi {
                 ui.add_space(6.0);
                 collections(ui);
                 ui.add_space(6.0);
-                ui.label(RichText::new("EXPLORER").size(10.0).color(util::MUTED));
+                ui.label(RichText::new("EXPLORER").size(10.0).color(THEME.muted));
                 if self.folders.is_empty() {
                     ui.label(
                         RichText::new("No folders yet. Menu > Import > Folder...")
                             .size(11.0)
-                            .color(util::MUTED),
+                            .color(THEME.muted),
                     );
                 }
                 for root in self.folders.clone() {
@@ -220,7 +212,7 @@ impl LibraryUi {
             });
     }
 
-    fn label(&mut self, ui: &mut Ui, d: &Subdir, root: bool, v: &View, out: &mut Vec<Command>) {
+    fn label(&mut self, ui: &mut Ui, d: &Subdir, root: bool, v: &CoreView, out: &mut Vec<Command>) {
         let selected = matches!(&self.scope, Scope::Folder(f) if *f == d.path);
         let text = if root {
             RichText::new(&d.name).strong()
@@ -234,7 +226,7 @@ impl LibraryUi {
         r.context_menu(|ui| folder_menu(ui, &d.path, root, v, out));
     }
 
-    fn node(&mut self, ui: &mut Ui, d: &Subdir, root: bool, v: &View, out: &mut Vec<Command>) {
+    fn node(&mut self, ui: &mut Ui, d: &Subdir, root: bool, v: &CoreView, out: &mut Vec<Command>) {
         if !d.has_children {
             ui.horizontal(|ui| {
                 ui.add_space(ui.spacing().indent);
@@ -260,7 +252,7 @@ impl LibraryUi {
 
     // ---- track list -----------------------------------------------------------------------
 
-    fn title(&self, v: &View) -> String {
+    fn title(&self, v: &CoreView) -> String {
         match &self.scope {
             Scope::All => "All tracks".into(),
             Scope::Folder(f) => f.rsplit('/').next().unwrap_or(f).into(),
@@ -275,7 +267,7 @@ impl LibraryUi {
     pub fn list(
         &mut self,
         ui: &mut Ui,
-        v: &View,
+        v: &CoreView,
         media: &mut Media,
         out: &mut Vec<Command>,
     ) -> bool {
@@ -308,12 +300,12 @@ impl LibraryUi {
                 } else {
                     format!("{} tracks", self.shown.len())
                 };
-                ui.label(RichText::new(count).color(util::MUTED));
+                ui.label(RichText::new(count).color(THEME.muted));
                 let mut edit = egui::TextEdit::singleline(&mut self.search)
                     .hint_text("Search   bpm:120-126  key:8A  -tag:x  sort:-bpm   ( / )")
                     .desired_width(f32::INFINITY);
                 if self.error.is_some() {
-                    edit = edit.text_color(util::BAD);
+                    edit = edit.text_color(THEME.bad);
                 }
                 let mut search = ui.add(edit);
                 if let Some(e) = &self.error {
@@ -335,7 +327,7 @@ impl LibraryUi {
         {
             ui.horizontal(|ui| {
                 let q = c.query.as_deref().unwrap_or("");
-                ui.label(RichText::new("Smart:").color(util::MUTED));
+                ui.label(RichText::new("Smart:").color(THEME.muted));
                 ui.label(RichText::new(if q.is_empty() { "(every track)" } else { q }).monospace());
                 if ui
                     .add_enabled(
@@ -357,7 +349,7 @@ impl LibraryUi {
             ui.vertical_centered(|ui| {
                 ui.label(
                     RichText::new("No library folders yet. Menu > Import > Folder...")
-                        .color(util::MUTED),
+                        .color(THEME.muted),
                 )
             });
             return false;
@@ -422,7 +414,7 @@ impl LibraryUi {
                         };
                         let text = RichText::new(format!("{name}{arrow}"))
                             .size(11.0)
-                            .color(util::MUTED);
+                            .color(THEME.muted);
                         match field {
                             Some(f) => {
                                 if ui
@@ -454,7 +446,7 @@ impl LibraryUi {
                     row.col(|ui| title_cell(ui, t, v.history.was_played(id), false));
                     row.col(|ui| {
                         ui.add(
-                            egui::Label::new(RichText::new(&t.artist).color(util::MUTED))
+                            egui::Label::new(RichText::new(&t.artist).color(THEME.muted))
                                 .truncate()
                                 .selectable(false),
                         );
@@ -464,7 +456,7 @@ impl LibraryUi {
                             .bpm
                             .map(|b| format!("{b:.2}"))
                             .unwrap_or_else(|| "-".into());
-                        let text = RichText::new(bpm).color(util::MUTED);
+                        let text = RichText::new(bpm).color(THEME.muted);
                         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                             ui.add(
                                 egui::Label::new(if t.analysed() { text } else { text.italics() })
@@ -485,7 +477,7 @@ impl LibraryUi {
                     row.col(|ui| {
                         ui.label(
                             RichText::new(t.duration.map(util::mmss).unwrap_or_default())
-                                .color(util::MUTED),
+                                .color(THEME.muted),
                         );
                     });
                     let resp = row.response();
@@ -534,7 +526,7 @@ impl LibraryUi {
 }
 
 /// Right-click on an Explorer folder: analyse what's in it, or stop scanning it.
-fn folder_menu(ui: &mut Ui, path: &str, root: bool, v: &View, out: &mut Vec<Command>) {
+fn folder_menu(ui: &mut Ui, path: &str, root: bool, v: &CoreView, out: &mut Vec<Command>) {
     let prefix = format!("{path}/");
     let inside: Vec<_> = v
         .lib

@@ -300,8 +300,10 @@ CREATE TABLE library_roots (
   added_at  INTEGER NOT NULL
 ) STRICT;
 
--- Settings the analysis reads: 'analysis.background_workers' (how many background
--- worker processes may run at once).
+-- Settings, as text (JSON for structured ones): 'analysis.background_workers' (how
+-- many background worker processes may run at once), 'audio.output' (device, buffer
+-- size, routing) and 'decks.tempo_ranges' (each deck's tempo fader range). The UI's
+-- own preferences (layout, zoom) are kept by eframe, not here.
 CREATE TABLE settings (
   key    TEXT PRIMARY KEY,
   value  TEXT NOT NULL

@@ -6,6 +6,11 @@
 //! Drawing reads the engine's snapshot; every button becomes a [`Command`] (from the
 //! control registry, where there is a control for it) that the app dispatches after
 //! the frame, the same way as keyboard and MIDI.
+//!
+//! [`DeckUi`] keeps one player's view state. The panels at the end draw its parts
+//! where a view puts them: [`DeckPanel`] (a Perform deck), [`WavePanel`] (its
+//! scrolling waveform), [`PreparePlayer`] (Prepare's player row) and [`CuePane`]
+//! (Prepare's memory cue list).
 
 use std::f32::consts::TAU;
 use std::sync::Arc;
@@ -14,18 +19,21 @@ use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::{DeckCmd as EngineCmd, DeckId, DeckSnap, LEAD_IN, Set, TempoRange};
 
 use egui::{
-    Align, Color32, CornerRadius, FontId, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Ui,
-    pos2, vec2,
+    Align, Color32, FontId, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
 };
 
-use super::controls::{Fader, HwButton, Icon, Range, held};
-use super::util::{self, Camelot};
-use super::wave::{self, DeckWave, Marks};
+pub mod wave;
+
+use self::wave::{DeckWave, Marks};
 use crate::core::bus::{Control, DeckControl, JUMP_STEPS, deck_letter};
-use crate::core::command::{Command, DeckCmd, MixerCmd};
+use crate::core::command::{Command, DeckCmd, MixerCmd, ViewCmd};
 use crate::core::player::GridOp;
 use crate::core::store::{Memory, TrackCues};
 use crate::core::track::Track;
+use crate::ui::panels::{Cx, Panel};
+use crate::ui::theme::{self, THEME};
+use crate::ui::util::{self, Camelot};
+use crate::ui::widgets::{Fader, HwButton, Icon, Range, held, key_chip};
 
 /// Which side of the mixer a deck sits on. Its tempo fader goes on the outside edge
 /// and its controls run outwards from the mixer.
@@ -144,9 +152,6 @@ const TRANSPORT: f32 = BTN_H;
 const CONTROLS_H: f32 = 2.0 * BTN_H + 4.0;
 /// The jog ring (with the BPM in it) fills the height of the controls.
 const JOG: f32 = CONTROLS_H;
-const CUE_COLOUR: Color32 = Color32::from_rgb(0xf0, 0xa0, 0x30);
-const PLAY_COLOUR: Color32 = Color32::from_rgb(0x4f, 0xd4, 0x7a);
-const LOOP_COLOUR: Color32 = Color32::from_rgb(0x3c, 0xd3, 0x6b);
 /// Prepare's cue pane: its width beside the waveform, and a row's height.
 pub const CUE_PANE_W: f32 = 300.0;
 const CUE_ROW_H: f32 = 20.0;
@@ -273,13 +278,18 @@ impl DeckUi {
         }
     }
 
+    /// Moving by itself: a track loading, or the waveform being scrubbed.
+    pub fn busy(&self) -> bool {
+        self.pending.is_some() || self.scrub.is_some()
+    }
+
     #[cfg(test)]
     pub fn pending(&self) -> Option<&PendingLoad> {
         self.pending.as_ref()
     }
 
     fn colour(&self) -> Color32 {
-        util::deck_colour(self.id)
+        THEME.deck_colour(self.id)
     }
 
     /// Send what one of this deck's controls sends for `value`.
@@ -345,13 +355,13 @@ impl DeckUi {
     /// The quiet stand-in for a waveform while a track decodes.
     fn loading(&self, ui: &Ui, rect: Rect) {
         let p = ui.painter_at(rect);
-        p.rect_filled(rect, 4.0, util::WAVE_BG);
+        p.rect_filled(rect, 4.0, THEME.wave_bg);
         p.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
             "Loading…",
             FontId::proportional(12.0),
-            util::MUTED,
+            THEME.muted,
         );
     }
 
@@ -366,7 +376,7 @@ impl DeckUi {
         ui: &mut Ui,
         height: f32,
         info: &DeckInfo,
-        half_window: &mut f64,
+        half_window: f64,
         out: &mut Vec<Command>,
     ) {
         let (rect, resp) =
@@ -378,7 +388,7 @@ impl DeckUi {
             }
             return;
         }
-        let half = *half_window
+        let half = half_window
             * if self.state.tempo > 0.0 {
                 self.state.tempo
             } else {
@@ -431,7 +441,8 @@ impl DeckUi {
             let scroll = ui.input(|i| i.raw_scroll_delta.y);
             if scroll != 0.0 {
                 // About 7% per wheel notch.
-                *half_window = (*half_window * (-(scroll as f64) * 0.0014).exp()).clamp(0.5, 30.0);
+                let zoom = (half_window * (-(scroll as f64) * 0.0014).exp()).clamp(0.5, 30.0);
+                out.push(ViewCmd::WaveZoom(zoom).into());
             }
         }
         if let Some(id) = resp.dnd_release_payload::<i64>() {
@@ -460,12 +471,8 @@ impl DeckUi {
         self.side = side;
         let loading = self.pending.as_ref().map(PendingLoad::info);
         let info = loading.as_ref().unwrap_or(info);
-        let frame = egui::Frame::new()
-            .fill(util::PANEL)
-            .stroke(Stroke::new(1.0_f32, util::LINE))
-            .corner_radius(8)
-            .inner_margin(egui::Margin::symmetric(8, 6));
-        let resp = frame
+        let resp = THEME
+            .panel_frame()
             .show(ui, |ui| {
                 let inner = width - 18.0;
                 ui.set_width(inner);
@@ -502,7 +509,7 @@ impl DeckUi {
             ui.painter().rect_stroke(
                 resp.rect,
                 8.0,
-                Stroke::new(2.0_f32, util::ACCENT),
+                Stroke::new(2.0_f32, THEME.accent),
                 StrokeKind::Inside,
             );
         }
@@ -525,50 +532,44 @@ impl DeckUi {
     ) {
         let loading = self.pending.as_ref().map(PendingLoad::info);
         let info = loading.as_ref().unwrap_or(info);
-        egui::Frame::new()
-            .fill(util::PANEL)
-            .stroke(Stroke::new(1.0_f32, util::LINE))
-            .corner_radius(8)
-            .inner_margin(egui::Margin::symmetric(8, 6))
-            .show(ui, |ui| {
-                ui.set_width(width - 18.0);
-                let inner_h = height - 12.0;
-                ui.set_min_height(inner_h);
-                ui.spacing_mut().item_spacing = vec2(4.0, 5.0);
-                let top = ui.cursor().min.y;
-                self.header(ui, info);
-                let used = ui.cursor().min.y - top;
-                let overview_h =
-                    (inner_h - used - CONTROLS_H - ui.spacing().item_spacing.y).max(24.0);
-                self.overview(ui, info, out, overview_h);
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(3.0, 4.0);
-                    self.transport(ui, out);
-                    ui.add_space(6.0);
-                    self.pads(ui, info, out);
-                    ui.add_space(6.0);
-                    self.loops(ui, info, out);
-                    ui.add_space(6.0);
-                    self.jumps(ui, info, out);
-                    ui.add_space(10.0);
-                    ui.vertical(|ui| {
-                        ui.set_height(CONTROLS_H);
-                        ui.set_width(330.0);
-                        let s = self.state;
-                        let r = ui
-                            .add(
-                                HwButton::new("Q", util::ACCENT, vec2(24.0, 18.0))
-                                    .font(10.0)
-                                    .lit(s.quantize),
-                            )
-                            .on_hover_text("Quantise: snap cues, loops and hot cues to the beat");
-                        if held(ui, &r) == Some(true) {
-                            self.control(out, DeckControl::Quantize, 1.0);
-                        }
-                        self.grid_editor(ui, info, out);
-                    });
+        THEME.panel_frame().show(ui, |ui| {
+            ui.set_width(width - 18.0);
+            let inner_h = height - 12.0;
+            ui.set_min_height(inner_h);
+            ui.spacing_mut().item_spacing = vec2(4.0, 5.0);
+            let top = ui.cursor().min.y;
+            self.header(ui, info);
+            let used = ui.cursor().min.y - top;
+            let overview_h = (inner_h - used - CONTROLS_H - ui.spacing().item_spacing.y).max(24.0);
+            self.overview(ui, info, out, overview_h);
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing = vec2(3.0, 4.0);
+                self.transport(ui, out);
+                ui.add_space(6.0);
+                self.pads(ui, info, out);
+                ui.add_space(6.0);
+                self.loops(ui, info, out);
+                ui.add_space(6.0);
+                self.jumps(ui, info, out);
+                ui.add_space(10.0);
+                ui.vertical(|ui| {
+                    ui.set_height(CONTROLS_H);
+                    ui.set_width(330.0);
+                    let s = self.state;
+                    let r = ui
+                        .add(
+                            HwButton::new("Q", THEME.accent, vec2(24.0, 18.0))
+                                .font(10.0)
+                                .lit(s.quantize),
+                        )
+                        .on_hover_text("Quantise: snap cues, loops and hot cues to the beat");
+                    if held(ui, &r) == Some(true) {
+                        self.control(out, DeckControl::Quantize, 1.0);
+                    }
+                    self.grid_editor(ui, info, out);
                 });
             });
+        });
     }
 
     /// Prepare's cue pane, beside its waveform: the track's memory cues and loops in
@@ -582,8 +583,8 @@ impl DeckUi {
         // Top to bottom, whatever the layout it's placed in.
         let ui = &mut ui.new_child(egui::UiBuilder::new().layout(Layout::top_down(Align::Min)));
         egui::Frame::new()
-            .fill(util::PANEL)
-            .stroke(Stroke::new(1.0_f32, util::LINE))
+            .fill(THEME.panel)
+            .stroke(Stroke::new(1.0_f32, THEME.line))
             .corner_radius(4)
             .inner_margin(egui::Margin::symmetric(6, 4))
             .show(ui, |ui| {
@@ -591,7 +592,7 @@ impl DeckUi {
                 ui.set_height(size.y - 10.0);
                 ui.spacing_mut().item_spacing.y = 2.0;
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("MEMORY").size(10.0).color(util::MUTED));
+                    ui.label(RichText::new("MEMORY").size(10.0).color(THEME.muted));
                     let rest = vec2(ui.available_width(), 18.0);
                     ui.allocate_ui_with_layout(rest, Layout::right_to_left(Align::Center), |ui| {
                         if ui
@@ -611,7 +612,7 @@ impl DeckUi {
                             ui.label(
                                 RichText::new("C sets a cue, M saves it here")
                                     .size(11.0)
-                                    .color(util::MUTED),
+                                    .color(THEME.muted),
                             );
                         }
                         for m in memories {
@@ -634,10 +635,10 @@ impl DeckUi {
             ui.allocate_exact_size(vec2(ui.available_width(), CUE_ROW_H), Sense::click());
         let p = ui.painter_at(rect);
         if row.hovered() {
-            p.rect_filled(rect, 3.0, util::PANEL_2);
+            p.rect_filled(rect, 3.0, THEME.panel_2);
         }
         let (cy, left) = (rect.center().y, rect.left());
-        let colour = util::memory_colour(m);
+        let colour = THEME.memory_colour(m);
 
         // The colour: a square for a cue, a wider bar for a loop. Click to pick one.
         let swatch = Rect::from_center_size(
@@ -656,21 +657,22 @@ impl DeckUi {
             p.rect_stroke(
                 swatch.expand(1.5),
                 2.0,
-                Stroke::new(1.0_f32, util::TEXT),
+                Stroke::new(1.0_f32, THEME.text),
                 StrokeKind::Outside,
             );
         }
         egui::Popup::menu(&pick).show(|ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
-                for (rgb, name) in util::CUE_PALETTE {
+                for (rgb, name) in theme::CUE_PALETTE {
                     let (r, resp) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
-                    ui.painter().rect_filled(r.shrink(1.0), 3.0, util::rgb(rgb));
+                    ui.painter()
+                        .rect_filled(r.shrink(1.0), 3.0, theme::rgb(rgb));
                     if m.color == Some(rgb) {
                         ui.painter().rect_stroke(
                             r,
                             3.0,
-                            Stroke::new(1.5_f32, util::TEXT),
+                            Stroke::new(1.5_f32, THEME.text),
                             StrokeKind::Inside,
                         );
                     }
@@ -696,7 +698,7 @@ impl DeckUi {
             egui::Align2::LEFT_CENTER,
             util::fmt_tenths(m.start),
             font,
-            util::TEXT,
+            THEME.text,
         );
         if let Some(end) = m.end {
             let len = match grid {
@@ -711,7 +713,7 @@ impl DeckUi {
                 egui::Align2::LEFT_CENTER,
                 len,
                 FontId::proportional(10.0),
-                util::MUTED,
+                THEME.muted,
             );
         }
 
@@ -736,14 +738,14 @@ impl DeckUi {
                 egui::Align2::LEFT_CENTER,
                 label,
                 FontId::proportional(11.0),
-                util::TEXT,
+                THEME.text,
             );
         }
 
         let forget = ui
             .put(
                 Rect::from_center_size(pos2(rect.right() - 8.0, cy), vec2(14.0, CUE_ROW_H)),
-                egui::Label::new(RichText::new("×").color(util::MUTED)).sense(Sense::click()),
+                egui::Label::new(RichText::new("×").color(THEME.muted)).sense(Sense::click()),
             )
             .on_hover_text("Forget this one");
         if forget.clicked() {
@@ -802,27 +804,27 @@ impl DeckUi {
                         key_chip(ui, k);
                     }
                     if let Some(b) = info.tag_bpm {
-                        ui.label(RichText::new(format!("{b:.2}")).color(util::MUTED));
+                        ui.label(RichText::new(format!("{b:.2}")).color(THEME.muted));
                     }
                     match &info.analysing {
                         Some((p, stage)) => {
                             ui.label(
                                 RichText::new(format!("{stage}… {:.0}%", p * 100.0))
                                     .size(11.0)
-                                    .color(util::WARN),
+                                    .color(THEME.warn),
                             );
                         }
                         None if !info.grid_source.is_empty() => {
                             ui.label(
                                 RichText::new(format!("grid: {}", info.grid_source))
                                     .size(11.0)
-                                    .color(util::MUTED),
+                                    .color(THEME.muted),
                             );
                         }
                         None => {}
                     }
                     ui.add(
-                        egui::Label::new(RichText::new(&info.artist).color(util::MUTED)).truncate(),
+                        egui::Label::new(RichText::new(&info.artist).color(THEME.muted)).truncate(),
                     );
                 });
             });
@@ -837,13 +839,13 @@ impl DeckUi {
                     RichText::new(remain)
                         .size(17.0)
                         .monospace()
-                        .color(if ending { util::BAD } else { util::TEXT }),
+                        .color(if ending { THEME.bad } else { THEME.text }),
                 );
                 ui.label(
                     RichText::new(util::fmt_tenths(position))
                         .size(11.0)
                         .monospace()
-                        .color(util::MUTED),
+                        .color(THEME.muted),
                 );
             });
         });
@@ -859,19 +861,10 @@ impl DeckUi {
         let p = ui.painter();
         let c = rect.center();
         let r = JOG / 2.0 - 2.0;
-        p.circle(
-            c,
-            r,
-            Color32::from_rgb(0x0c, 0x0d, 0x10),
-            Stroke::new(3.0_f32, self.colour()),
-        );
+        p.circle(c, r, THEME.jog_face, Stroke::new(3.0_f32, self.colour()));
         if self.pending.is_none() {
             let a = ((self.shown / 1.8).fract() as f32) * TAU - TAU / 4.0;
-            p.circle_filled(
-                c + vec2(a.cos(), a.sin()) * r,
-                3.5,
-                Color32::from_rgb(0xe8, 0x3a, 0x3a),
-            );
+            p.circle_filled(c + vec2(a.cos(), a.sin()) * r, 3.5, THEME.jog_dot);
         }
         let bpm = match &self.pending {
             Some(pl) => pl.bpm.map(|b| b * (1.0 + s.rate)),
@@ -886,18 +879,18 @@ impl DeckUi {
             }
             None => ("-".into(), String::new()),
         };
-        let big = p.layout_no_wrap(whole, FontId::monospace(20.0), util::TEXT);
-        let small = p.layout_no_wrap(frac, FontId::monospace(12.0), util::TEXT);
+        let big = p.layout_no_wrap(whole, FontId::monospace(20.0), THEME.text);
+        let small = p.layout_no_wrap(frac, FontId::monospace(12.0), THEME.text);
         let w = big.size().x + small.size().x;
         let top = c.y - big.size().y + 4.0;
         let left = c.x - w / 2.0;
         let small_top = top + big.size().y - small.size().y - 2.0;
-        p.galley(pos2(left, top), big.clone(), util::TEXT);
-        p.galley(pos2(left + big.size().x, small_top), small, util::TEXT);
+        p.galley(pos2(left, top), big.clone(), THEME.text);
+        p.galley(pos2(left + big.size().x, small_top), small, THEME.text);
         let pct = p.layout_no_wrap(
             format!("{:+.1}%", s.rate * 100.0),
             FontId::monospace(9.5),
-            util::MUTED,
+            THEME.muted,
         );
         let range = p.layout_no_wrap(
             format!(" {}", s.range.label()),
@@ -906,7 +899,7 @@ impl DeckUi {
         );
         let w = pct.size().x + range.size().x;
         let y = c.y + 7.0;
-        p.galley(pos2(c.x - w / 2.0, y), pct.clone(), util::MUTED);
+        p.galley(pos2(c.x - w / 2.0, y), pct.clone(), THEME.muted);
         p.galley(pos2(c.x - w / 2.0 + pct.size().x, y), range, self.colour());
     }
 
@@ -988,7 +981,7 @@ impl DeckUi {
                     GridButton => {
                         let r = ui
                             .add(
-                                HwButton::new("GRID", util::ACCENT, vec2(BTN_W + 4.0, BTN_H))
+                                HwButton::new("GRID", THEME.accent, vec2(BTN_W + 4.0, BTN_H))
                                     .font(10.0)
                                     .lit(self.grid_mode),
                             )
@@ -1022,7 +1015,7 @@ impl DeckUi {
                 && (self.state.position - self.state.cue_point).abs() < 0.01;
             let r = ui
                 .add(
-                    HwButton::new("CUE", CUE_COLOUR, size)
+                    HwButton::new("CUE", THEME.cue_button, size)
                         .round(true)
                         .font(11.0)
                         .tinted(true)
@@ -1035,7 +1028,7 @@ impl DeckUi {
             let playing = self.state.playing;
             let r = ui
                 .add(
-                    HwButton::new("Play", PLAY_COLOUR, size)
+                    HwButton::new("Play", THEME.play_button, size)
                         .round(true)
                         .icon(Icon::PlayPause)
                         .font(12.0)
@@ -1076,7 +1069,7 @@ impl DeckUi {
                         };
                         let r = ui
                             .add(
-                                HwButton::new(&label, util::HOTCUE[i], vec2(BTN_W, BTN_H))
+                                HwButton::new(&label, THEME.hotcue[i], vec2(BTN_W, BTN_H))
                                     .font(12.0)
                                     .caption(name)
                                     .tinted(set.is_some()),
@@ -1085,7 +1078,7 @@ impl DeckUi {
                         let slot = i as u8;
                         r.context_menu(|ui| {
                             if set.is_none() {
-                                ui.label(RichText::new("Set the hot cue first").color(util::MUTED));
+                                ui.label(RichText::new("Set the hot cue first").color(THEME.muted));
                                 return;
                             }
                             if ui.button("Label…").clicked() {
@@ -1130,7 +1123,7 @@ impl DeckUi {
                 ui.label(
                     RichText::new("Enter saves · Esc cancels")
                         .size(10.0)
-                        .color(util::MUTED),
+                        .color(THEME.muted),
                 );
                 end
             },
@@ -1160,7 +1153,7 @@ impl DeckUi {
     ) {
         let r = ui
             .add(
-                HwButton::new(label, LOOP_COLOUR, vec2(w, BTN_H))
+                HwButton::new(label, THEME.loop_button, vec2(w, BTN_H))
                     .font(if label.len() > 4 { 9.0 } else { 10.0 })
                     .lit(lit),
             )
@@ -1186,7 +1179,7 @@ impl DeckUi {
                             .add(
                                 HwButton::new(
                                     &format!("⟲ {size}"),
-                                    LOOP_COLOUR,
+                                    THEME.loop_button,
                                     vec2(BTN_W + 10.0, BTN_H),
                                 )
                                 .font(10.0)
@@ -1205,7 +1198,7 @@ impl DeckUi {
                         "Double"
                     };
                     let r = ui
-                        .add(HwButton::new(label, LOOP_COLOUR, vec2(BTN_W, BTN_H)).font(11.0))
+                        .add(HwButton::new(label, THEME.loop_button, vec2(BTN_W, BTN_H)).font(11.0))
                         .on_hover_text(format!("{tip} the loop (or the next loop's size)"));
                     if held(ui, &r) == Some(true) {
                         self.control(out, control, 1.0);
@@ -1256,7 +1249,7 @@ impl DeckUi {
                     (format!("{n} ▶"), DeckControl::JumpForward, "Jump forward"),
                 ] {
                     let r = ui
-                        .add(HwButton::new(&label, util::TEXT, vec2(BTN_W + 6.0, BTN_H)).font(10.0))
+                        .add(HwButton::new(&label, THEME.text, vec2(BTN_W + 6.0, BTN_H)).font(10.0))
                         .on_hover_text(format!("{tip} {n} beats"));
                     if let Some(d) = held(ui, &r) {
                         self.control(out, control, d as u8 as f64);
@@ -1268,7 +1261,7 @@ impl DeckUi {
                 .add(
                     HwButton::new(
                         &format!("STEP {n}"),
-                        util::TEXT,
+                        THEME.text,
                         vec2(2.0 * (BTN_W + 6.0) + 3.0, BTN_H),
                     )
                     .font(10.0),
@@ -1308,7 +1301,7 @@ impl DeckUi {
         });
         let cur = info.grid.as_ref().map(|g| g.mean_bpm());
         ui.horizontal(|ui| {
-            ui.label(RichText::new("BPM").size(10.0).color(util::MUTED));
+            ui.label(RichText::new("BPM").size(10.0).color(THEME.muted));
             for (label, d) in [("-0.1", -0.1), ("-0.01", -0.01)] {
                 if ui.small_button(label).clicked() {
                     grid(GridOp::SetBpm(
@@ -1354,7 +1347,7 @@ impl DeckUi {
             }
         });
         ui.horizontal(|ui| {
-            ui.label(RichText::new("NUDGE").size(10.0).color(util::MUTED));
+            ui.label(RichText::new("NUDGE").size(10.0).color(THEME.muted));
             for (label, ms) in [
                 ("<< 10 ms", -10.0),
                 ("< 1 ms", -1.0),
@@ -1420,7 +1413,7 @@ impl DeckUi {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let r = ui
                     .add(
-                        HwButton::new("Q", util::ACCENT, vec2(24.0, 18.0))
+                        HwButton::new("Q", THEME.accent, vec2(24.0, 18.0))
                             .font(10.0)
                             .lit(s.quantize),
                     )
@@ -1432,7 +1425,7 @@ impl DeckUi {
                 }
                 let r = ui
                     .add(
-                        HwButton::new("KEY", util::ACCENT, vec2(TEMPO_W - 28.0, 18.0))
+                        HwButton::new("KEY", THEME.accent, vec2(TEMPO_W - 28.0, 18.0))
                             .font(9.0)
                             .lit(s.keylock),
                     )
@@ -1468,7 +1461,7 @@ impl DeckUi {
                         ("+", DeckControl::NudgeUp, "Nudge faster (hold)"),
                     ] {
                         let r = ui
-                            .add(HwButton::new(label, util::TEXT, vec2(24.0, 24.0)).font(14.0))
+                            .add(HwButton::new(label, THEME.text, vec2(24.0, 24.0)).font(14.0))
                             .on_hover_text(tip);
                         if let Some(d) = held(ui, &r) {
                             self.control(out, control, d as u8 as f64);
@@ -1476,7 +1469,7 @@ impl DeckUi {
                     }
                     // The fader's range: click for the next, right-click to pick one.
                     let r = ui
-                        .add(HwButton::new(s.range.label(), util::TEXT, vec2(24.0, 18.0)).font(8.0))
+                        .add(HwButton::new(s.range.label(), THEME.text, vec2(24.0, 18.0)).font(8.0))
                         .on_hover_text("Tempo range: ±6, ±10, ±16 % or WIDE (0 to 256 % speed)");
                     if r.clicked() {
                         self.control(out, DeckControl::TempoRangeNext, 1.0);
@@ -1495,18 +1488,61 @@ impl DeckUi {
     }
 }
 
-pub fn key_chip(ui: &mut Ui, k: Camelot) {
-    let text = util::key_name(k);
-    let galley = ui.painter().layout_no_wrap(
-        text,
-        FontId::proportional(11.0),
-        Color32::from_rgb(0x11, 0x11, 0x11),
-    );
-    let (rect, _) = ui.allocate_exact_size(galley.size() + vec2(10.0, 2.0), Sense::hover());
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(4), util::key_colour(k));
-    ui.painter()
-        .galley(rect.center() - galley.size() / 2.0, galley, Color32::BLACK);
+// ---- panels --------------------------------------------------------------------------
+
+/// A Perform deck, `width` × `height`, on the mixer's `side`.
+pub struct DeckPanel<'a> {
+    pub deck: &'a mut DeckUi,
+    pub width: f32,
+    pub height: f32,
+    pub side: Side,
+}
+
+impl Panel for DeckPanel<'_> {
+    fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let info = cx.engine.deck(self.deck.id);
+        self.deck
+            .show(ui, self.width, self.height, self.side, info, cx.out);
+    }
+}
+
+/// A player's scrolling waveform, `height` tall, at the shared zoom.
+pub struct WavePanel<'a> {
+    pub deck: &'a mut DeckUi,
+    pub height: f32,
+}
+
+impl Panel for WavePanel<'_> {
+    fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let info = cx.engine.deck(self.deck.id);
+        self.deck
+            .show_wave(ui, self.height, info, cx.prefs.wave_zoom, cx.out);
+    }
+}
+
+/// Prepare's player row (the Cues & Grid tool), `width` × `height`.
+pub struct PreparePlayer<'a> {
+    pub deck: &'a mut DeckUi,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Panel for PreparePlayer<'_> {
+    fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let info = cx.engine.deck(self.deck.id);
+        self.deck
+            .show_prepare(ui, self.width, self.height, info, cx.out);
+    }
+}
+
+/// Prepare's cue pane, filling the space it's given.
+pub struct CuePane<'a>(pub &'a mut DeckUi);
+
+impl Panel for CuePane<'_> {
+    fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let info = cx.engine.deck(self.0.id);
+        self.0.cue_pane(ui, info, cx.out);
+    }
 }
 
 #[cfg(test)]

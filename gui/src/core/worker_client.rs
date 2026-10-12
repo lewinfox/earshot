@@ -931,7 +931,7 @@ impl Supervisor {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use super::*;
 
     /// A stand-in worker: answers hello (with protocol argv[1]), then runs jobs one at
@@ -971,7 +971,7 @@ for line in sys.stdin:
         send({"id": i, "type": "done", "seconds": 0.1})
 "#;
 
-    fn fake(protocol: u32, heartbeat: bool) -> WorkerConfig {
+    pub fn fake(protocol: u32, heartbeat: bool) -> WorkerConfig {
         let mut args: Vec<OsString> = vec!["-c".into(), FAKE.into(), protocol.to_string().into()];
         if heartbeat {
             args.push("beat".into());
@@ -988,6 +988,17 @@ for line in sys.stdin:
             keep_alive: false,
         }
     }
+
+    /// A stand-in for the real worker, for tests that start the whole app.
+    pub fn stand_in(_role: Role, _threads: usize) -> WorkerConfig {
+        fake(PROTOCOL, false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::fake;
+    use super::*;
 
     fn req(wav: &str, deadline_ms: u64) -> Request {
         Request {

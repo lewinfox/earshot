@@ -16,10 +16,8 @@ use egui::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::deck::key_chip;
-use super::library_ui::PreviewState;
-use super::tracks::{Media, MenuAt, View, track_menu};
-use super::util;
+use super::library::tracks::{Media, MenuAt, track_menu};
+use super::{CoreView, PreviewState};
 use crate::core::collections::{
     CollectionId, FlowCmd, FlowGraph, FlowNode, GraphOp, NodeId, Spacing,
 };
@@ -29,6 +27,9 @@ use crate::core::index::LibraryCmd;
 use crate::core::query;
 use crate::core::suggest::{Direction, Scored};
 use crate::core::track::{Track, TrackId};
+use crate::ui::theme::THEME;
+use crate::ui::util;
+use crate::ui::widgets::key_chip;
 
 const NODE_W: f32 = 236.0;
 const NODE_H: f32 = 104.0;
@@ -43,10 +44,6 @@ const SPACING: Spacing = Spacing {
 };
 /// Width of the "+" suggestions popup.
 const POP_W: f32 = 600.0;
-const CARD: Color32 = Color32::from_rgb(0x24, 0x26, 0x2d);
-const CARD_LINE: Color32 = Color32::from_rgb(0x35, 0x38, 0x45);
-const CHIPS_BG: Color32 = Color32::from_rgb(0x1a, 0x1b, 0x21);
-const ENERGY_CHIP: Color32 = Color32::from_rgb(0x6f, 0xcf, 0x8e);
 
 fn pos(n: &FlowNode) -> Pos2 {
     pos2(n.x, n.y)
@@ -58,7 +55,7 @@ fn rect(n: &FlowNode) -> Rect {
 
 /// What is kept between runs (with the window's settings). The cards are in the
 /// database.
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Saved {
     /// The saved Flow on the canvas.
     #[serde(default)]
@@ -270,7 +267,7 @@ impl FlowUi {
     pub fn show(
         &mut self,
         ui: &mut Ui,
-        v: &View,
+        v: &CoreView,
         media: &mut Media,
         preview: Option<PreviewState>,
         out: &mut Vec<Command>,
@@ -294,7 +291,7 @@ impl FlowUi {
             let size = (b.size() + vec2(80.0, 80.0)).max(canvas.size());
             self.scene = Rect::from_center_size(b.center(), size);
         }
-        ui.painter().rect_filled(canvas, 0.0, util::BG);
+        ui.painter().rect_filled(canvas, 0.0, THEME.bg);
 
         // The wheel zooms (egui's Scene would pan with it): take the scroll before the
         // Scene sees it, unless a popup or menu is under the pointer.
@@ -341,7 +338,7 @@ impl FlowUi {
                             Port::Out => (pos2(n.x + NODE_W, n.y + NODE_H / 2.0), at),
                             Port::In => (at, pos2(n.x, n.y + NODE_H / 2.0)),
                         };
-                        edge(ui, a, b, Stroke::new(2.0_f32, util::ACCENT));
+                        edge(ui, a, b, Stroke::new(2.0_f32, THEME.accent));
                     }
                 }
                 for n in &self.graph.nodes {
@@ -393,7 +390,7 @@ impl FlowUi {
                 "Add a track to start: Add track above, drag one here from the list,\n\
                  or right-click a track in the list > Add to Flow.",
                 FontId::proportional(13.0),
-                util::MUTED,
+                THEME.muted,
             );
         }
         // A card carries its track too (so it can be dropped on a deck); don't add it again.
@@ -521,15 +518,15 @@ impl FlowUi {
                 p.rect(
                     map,
                     4,
-                    Color32::from_black_alpha(200),
-                    Stroke::new(1.0_f32, CARD_LINE),
+                    THEME.minimap_bg,
+                    Stroke::new(1.0_f32, THEME.card_line),
                     egui::StrokeKind::Outside,
                 );
                 for &(a, b) in &self.graph.edges {
                     if let (Some(a), Some(b)) = (self.graph.node(a), self.graph.node(b)) {
                         let a = to_map(pos2(a.x + NODE_W, a.y + NODE_H / 2.0));
                         let b = to_map(pos2(b.x, b.y + NODE_H / 2.0));
-                        p.line_segment([a, b], Stroke::new(1.0_f32, util::MUTED));
+                        p.line_segment([a, b], Stroke::new(1.0_f32, THEME.muted));
                     }
                 }
                 for n in &self.graph.nodes {
@@ -540,9 +537,9 @@ impl FlowUi {
                         r,
                         1,
                         if lit {
-                            util::ACCENT
+                            THEME.accent
                         } else {
-                            Color32::from_gray(110)
+                            THEME.minimap_card
                         },
                     );
                 }
@@ -551,7 +548,7 @@ impl FlowUi {
                 p.rect_stroke(
                     view,
                     2,
-                    Stroke::new(1.5_f32, Color32::WHITE),
+                    Stroke::new(1.5_f32, THEME.marker),
                     egui::StrokeKind::Inside,
                 );
                 if (resp.clicked() || resp.dragged())
@@ -563,12 +560,12 @@ impl FlowUi {
             });
     }
 
-    fn toolbar(&mut self, ui: &mut Ui, v: &View, out: &mut Vec<Command>) {
+    fn toolbar(&mut self, ui: &mut Ui, v: &CoreView, out: &mut Vec<Command>) {
         ui.horizontal(|ui| {
             if self.flow.is_some() {
                 ui.label(RichText::new(&self.name).strong());
             } else {
-                ui.label(RichText::new("New Flow").color(util::MUTED))
+                ui.label(RichText::new("New Flow").color(THEME.muted))
                     .on_hover_text("Saved when you add a card");
             }
             let ts: Vec<&Track> = self
@@ -591,7 +588,7 @@ impl FlowUi {
                     let hi = bpms.iter().copied().fold(0.0, f64::max);
                     s += &format!(" · {lo:.0}-{hi:.0} BPM");
                 }
-                ui.label(RichText::new(s).color(util::MUTED));
+                ui.label(RichText::new(s).color(THEME.muted));
             }
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                 ui.add_enabled_ui(!self.graph.is_empty(), |ui| {
@@ -647,7 +644,7 @@ impl FlowUi {
     }
 
     fn edges(&self, ui: &Ui) {
-        let stroke = Stroke::new(2.0_f32, Color32::from_rgb(0x5a, 0x5f, 0x73));
+        let stroke = Stroke::new(2.0_f32, THEME.card_hover);
         for &(a, b) in &self.graph.edges {
             let (Some(p), Some(n)) = (self.graph.node(a), self.graph.node(b)) else {
                 continue;
@@ -666,7 +663,7 @@ impl FlowUi {
         (anchor, pivot): (Pos2, Align2),
         node: NodeId,
         track: TrackId,
-        v: &View,
+        v: &CoreView,
         media: &Media,
     ) {
         let Some(t) = v.lib.get(track) else { return };
@@ -717,7 +714,7 @@ impl FlowUi {
                             RichText::new(
                                 "No suggestions: the library needs more tracks with BPM and key.",
                             )
-                            .color(util::MUTED),
+                            .color(THEME.muted),
                         );
                     }
                     let w = (POP_W - 2.0 * 6.0) / 3.0;
@@ -748,7 +745,7 @@ impl FlowUi {
         }
     }
 
-    fn search_pop(&mut self, ui: &Ui, canvas: Rect, at: Pos2, v: &View) {
+    fn search_pop(&mut self, ui: &Ui, canvas: Rect, at: Pos2, v: &CoreView) {
         let mut picked = None;
         egui::Area::new(ui.id().with("flow-search"))
             .order(egui::Order::Foreground)
@@ -769,7 +766,7 @@ impl FlowUi {
                     let q = match query::parse(&self.search) {
                         Ok(q) => q,
                         Err(e) => {
-                            ui.label(RichText::new(e.to_string()).color(util::BAD));
+                            ui.label(RichText::new(e.to_string()).color(THEME.bad));
                             return;
                         }
                     };
@@ -792,7 +789,7 @@ impl FlowUi {
                                     ui.painter().rect_stroke(
                                         row.rect.expand(1.0),
                                         3,
-                                        Stroke::new(1.0_f32, util::ACCENT),
+                                        Stroke::new(1.0_f32, THEME.accent),
                                         egui::StrokeKind::Outside,
                                     );
                                 }
@@ -845,7 +842,7 @@ fn card(
     g: &FlowGraph,
     n: &FlowNode,
     t: &Track,
-    v: &View,
+    v: &CoreView,
     state: CardState,
     acts: &mut Vec<CardAction>,
     out: &mut Vec<Command>,
@@ -911,22 +908,18 @@ fn card(
         }
     });
     let border = if resp.dragged() || state.link_target || state.selected {
-        util::ACCENT
+        THEME.accent
     } else if resp.hovered() {
-        Color32::from_rgb(0x5a, 0x5f, 0x73)
+        THEME.card_hover
     } else {
-        CARD_LINE
+        THEME.card_line
     };
     let p = ui.painter();
-    p.rect_filled(
-        rect.translate(vec2(0.0, 4.0)),
-        8,
-        Color32::from_black_alpha(70),
-    );
+    p.rect_filled(rect.translate(vec2(0.0, 4.0)), 8, THEME.card_shadow);
     p.rect(
         rect,
         8,
-        CARD,
+        THEME.card,
         Stroke::new(if state.selected { 2.0 } else { 1.0_f32 }, border),
         egui::StrokeKind::Inside,
     );
@@ -952,7 +945,7 @@ fn card(
                         .selectable(false),
                 );
                 ui.add(
-                    egui::Label::new(RichText::new(&t.artist).size(11.0).color(util::MUTED))
+                    egui::Label::new(RichText::new(&t.artist).size(11.0).color(THEME.muted))
                         .truncate()
                         .selectable(false),
                 );
@@ -974,7 +967,7 @@ fn card(
         ui.label(
             RichText::new(t.duration.map(util::mmss).unwrap_or_default())
                 .size(11.0)
-                .color(util::MUTED),
+                .color(THEME.muted),
         );
     });
 
@@ -988,9 +981,9 @@ fn card(
                 Sense::click(),
             )
             .on_hover_text("Remove from the Flow (Delete)");
-        let col = if x.hovered() { util::WARN } else { util::MUTED };
+        let col = if x.hovered() { THEME.warn } else { THEME.muted };
         ui.painter()
-            .circle(c, 9.0, util::BG, Stroke::new(1.5_f32, col));
+            .circle(c, 9.0, THEME.bg, Stroke::new(1.5_f32, col));
         for d in [vec2(3.5, 3.5), vec2(3.5, -3.5)] {
             ui.painter()
                 .line_segment([c - d, c + d], Stroke::new(1.5_f32, col));
@@ -1013,12 +1006,12 @@ fn card(
         acts.push(CardAction::StartLink(n.id, Port::In));
     }
     let col = if port_in.hovered() || port_in.dragged() {
-        util::ACCENT
+        THEME.accent
     } else {
-        util::MUTED
+        THEME.muted
     };
     ui.painter()
-        .circle(c_in, 5.0, util::BG, Stroke::new(2.0_f32, col));
+        .circle(c_in, 5.0, THEME.bg, Stroke::new(2.0_f32, col));
 
     // "+" on the right edge: click for suggestions, drag to link to the next card.
     let c = pos2(rect.right(), rect.center().y);
@@ -1033,21 +1026,21 @@ fn card(
         acts.push(CardAction::StartLink(n.id, Port::Out));
     }
     let col = if plus.hovered() {
-        util::ACCENT
+        THEME.accent
     } else {
-        util::MUTED
+        THEME.muted
     };
     ui.painter()
-        .circle(c, 13.0, util::BG, Stroke::new(2.0_f32, col));
+        .circle(c, 13.0, THEME.bg, Stroke::new(2.0_f32, col));
     ui.painter().text(
         c,
         Align2::CENTER_CENTER,
         "+",
         FontId::proportional(17.0),
         if plus.hovered() {
-            util::ACCENT
+            THEME.accent
         } else {
-            Color32::WHITE
+            THEME.marker
         },
     );
     if plus.clicked() {
@@ -1081,11 +1074,11 @@ fn seek_bar(ui: &mut Ui, n: &FlowNode, t: &Track, state: &CardState, out: &mut V
     }
 
     let p = ui.painter();
-    p.rect_filled(bar, 3, CHIPS_BG);
+    p.rect_filled(bar, 3, THEME.chips_bg);
     let tint = if state.preview.is_some() {
-        Color32::WHITE
+        THEME.marker
     } else {
-        Color32::from_gray(150)
+        THEME.thumb_idle
     };
     if let Some(tex) = state.thumb {
         p.image(
@@ -1101,11 +1094,11 @@ fn seek_bar(ui: &mut Ui, n: &FlowNode, t: &Track, state: &CardState, out: &mut V
         p.rect_filled(
             Rect::from_min_max(bar.min, pos2(x, bar.bottom())),
             3,
-            Color32::from_black_alpha(130),
+            THEME.thumb_played,
         );
         p.line_segment(
             [pos2(x, bar.top() - 2.0), pos2(x, bar.bottom() + 2.0)],
-            Stroke::new(2.0_f32, util::ACCENT),
+            Stroke::new(2.0_f32, THEME.accent),
         );
     }
 }
@@ -1113,7 +1106,7 @@ fn seek_bar(ui: &mut Ui, n: &FlowNode, t: &Track, state: &CardState, out: &mut V
 /// BPM, key and energy chips on a dark strip, with `right` added at its right end.
 fn chips_row(ui: &mut Ui, t: &Track, right: impl FnOnce(&mut Ui)) {
     egui::Frame::new()
-        .fill(CHIPS_BG)
+        .fill(THEME.chips_bg)
         .corner_radius(5)
         .inner_margin(egui::Margin::symmetric(5, 3))
         .show(ui, |ui| {
@@ -1123,19 +1116,19 @@ fn chips_row(ui: &mut Ui, t: &Track, right: impl FnOnce(&mut Ui)) {
                 chip(
                     ui,
                     &t.bpm.map_or("-".into(), |b| format!("{:.1}", b)),
-                    util::PANEL_2,
-                    util::TEXT,
+                    THEME.panel_2,
+                    THEME.text,
                 );
                 match t.key {
                     Some(k) => key_chip(ui, k),
                     None => {
-                        chip(ui, "?", util::LINE, util::TEXT);
+                        chip(ui, "?", THEME.line, THEME.text);
                     }
                 }
                 let e = t
                     .energy_level()
                     .map_or("-".into(), |e| format!("{:.0}", e.round()));
-                chip(ui, &e, ENERGY_CHIP, Color32::from_rgb(0x11, 0x11, 0x11)).on_hover_text(
+                chip(ui, &e, THEME.energy_chip, THEME.ink).on_hover_text(
                     "Energy (stand-in: loudness and brightness, ranked across your library)",
                 );
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), right);
@@ -1192,7 +1185,7 @@ fn art(ui: &mut Ui, size: f32, t: &Track, tex: Option<egui::TextureId>) {
         Align2::CENTER_CENTER,
         initials,
         FontId::proportional(size * 0.35),
-        Color32::WHITE,
+        THEME.marker,
     );
 }
 
@@ -1202,9 +1195,9 @@ fn play_button(ui: &mut Ui, playing: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
     let c = rect.center();
     let fill = if resp.hovered() {
-        util::ACCENT
+        THEME.accent
     } else {
-        Color32::WHITE
+        THEME.marker
     };
     ui.painter().circle_filled(c, 14.0, fill);
     if playing {
@@ -1212,7 +1205,7 @@ fn play_button(ui: &mut Ui, playing: bool) -> egui::Response {
             ui.painter().rect_filled(
                 Rect::from_center_size(c + vec2(dx, 0.0), vec2(3.5, 11.0)),
                 1,
-                Color32::from_rgb(0x11, 0x11, 0x11),
+                THEME.ink,
             );
         }
         return resp;
@@ -1223,7 +1216,7 @@ fn play_button(ui: &mut Ui, playing: bool) -> egui::Response {
             c + vec2(6.5, 0.0),
             c + vec2(-3.5, 6.0),
         ],
-        Color32::from_rgb(0x11, 0x11, 0x11),
+        THEME.ink,
         Stroke::NONE,
     ));
     resp
@@ -1244,13 +1237,13 @@ fn pick_tile(
     ui.painter().rect(
         rect,
         7,
-        CARD,
+        THEME.card,
         Stroke::new(
             1.0_f32,
             if resp.hovered() {
-                util::ACCENT
+                THEME.accent
             } else {
-                CARD_LINE
+                THEME.card_line
             },
         ),
         egui::StrokeKind::Inside,
@@ -1271,7 +1264,7 @@ fn pick_tile(
                     .selectable(false),
             );
             ui.add(
-                egui::Label::new(RichText::new(&t.artist).size(11.0).color(util::MUTED))
+                egui::Label::new(RichText::new(&t.artist).size(11.0).color(THEME.muted))
                     .truncate()
                     .selectable(false),
             );
@@ -1282,7 +1275,7 @@ fn pick_tile(
             RichText::new(format!("{:.0}", score * 100.0))
                 .size(11.0)
                 .strong()
-                .color(util::MUTED),
+                .color(THEME.muted),
         )
         .on_hover_text("Match");
     });

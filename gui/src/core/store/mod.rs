@@ -171,7 +171,6 @@ pub enum StoreCmd {
         track: i64,
         jobs: Vec<JobRow>,
     },
-    #[allow(dead_code)] // no settings screen yet (tests use it)
     SetSetting {
         key: String,
         value: String,

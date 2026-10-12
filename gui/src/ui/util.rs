@@ -1,71 +1,7 @@
-//! Small shared pieces: colours, Camelot keys, time formatting.
+//! Small shared pieces: colour maths, waveform and Camelot key colours, time
+//! formatting. The palette itself is in [`super::theme`].
 
 use egui::Color32;
-
-pub const BG: Color32 = Color32::from_rgb(0x0f, 0x10, 0x13);
-pub const PANEL: Color32 = Color32::from_rgb(0x17, 0x18, 0x1d);
-pub const PANEL_2: Color32 = Color32::from_rgb(0x1f, 0x20, 0x27);
-pub const LINE: Color32 = Color32::from_rgb(0x2b, 0x2d, 0x36);
-pub const TEXT: Color32 = Color32::from_rgb(0xe6, 0xe6, 0xea);
-pub const MUTED: Color32 = Color32::from_rgb(0x8a, 0x8c, 0x99);
-pub const ACCENT: Color32 = Color32::from_rgb(0xff, 0x8c, 0x28);
-pub const OK: Color32 = Color32::from_rgb(0x45, 0xd4, 0x83);
-pub const WARN: Color32 = Color32::from_rgb(0xff, 0xcc, 0x4d);
-pub const BAD: Color32 = Color32::from_rgb(0xff, 0x5b, 0x5b);
-pub const WAVE_BG: Color32 = Color32::from_rgb(0x08, 0x09, 0x0b);
-/// Decks A to D.
-pub const DECK: [Color32; earshot_engine::MAX_DECKS] = [
-    Color32::from_rgb(0x3f, 0xa7, 0xff),
-    Color32::from_rgb(0xff, 0x5d, 0x8f),
-    Color32::from_rgb(0x4f, 0xd4, 0x7a),
-    Color32::from_rgb(0xc2, 0x8c, 0xff),
-];
-
-/// A deck's colour; Prepare's player has the accent.
-pub fn deck_colour(deck: earshot_engine::DeckId) -> Color32 {
-    DECK.get(deck.index()).copied().unwrap_or(ACCENT)
-}
-pub const HOTCUE: [Color32; 8] = [
-    Color32::from_rgb(0x3c, 0xd3, 0x6b),
-    Color32::from_rgb(0xff, 0x4f, 0x4f),
-    Color32::from_rgb(0xff, 0xb0, 0x2e),
-    Color32::from_rgb(0x2f, 0x9b, 0xff),
-    Color32::from_rgb(0xc2, 0x5b, 0xff),
-    Color32::from_rgb(0x18, 0xd2, 0xc7),
-    Color32::from_rgb(0xff, 0x74, 0xc8),
-    Color32::from_rgb(0xe6, 0xe0, 0x4a),
-];
-
-/// Memory cues and loops with no colour of their own.
-pub const MEMORY_CUE: Color32 = WARN;
-pub const MEMORY_LOOP: Color32 = Color32::from_rgb(0x3c, 0xd3, 0x6b);
-
-/// The colours a memory cue can be given, as Rekordbox offers them. Saved as 0xRRGGBB,
-/// so a colour from elsewhere (an import) still shows.
-pub const CUE_PALETTE: [(u32, &str); 8] = [
-    (0xde_44_cf, "Pink"),
-    (0xe6_28_28, "Red"),
-    (0xff_8c_00, "Orange"),
-    (0xe0_d2_20, "Yellow"),
-    (0x28_e2_14, "Green"),
-    (0x10_b1_76, "Aqua"),
-    (0x30_5a_ff, "Blue"),
-    (0x8c_32_ff, "Purple"),
-];
-
-/// A saved 0xRRGGBB colour.
-pub fn rgb(c: u32) -> Color32 {
-    Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
-}
-
-/// A memory cue's or loop's colour: its own, or the default for its kind.
-pub fn memory_colour(m: &crate::core::store::Memory) -> Color32 {
-    match (m.color, m.end) {
-        (Some(c), _) => rgb(c),
-        (None, Some(_)) => MEMORY_LOOP,
-        (None, None) => MEMORY_CUE,
-    }
-}
 
 pub fn dim(c: Color32, k: f32) -> Color32 {
     Color32::from_rgb(

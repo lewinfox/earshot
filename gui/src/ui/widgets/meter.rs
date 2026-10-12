@@ -1,10 +1,9 @@
 //! A segmented level meter (VU): green, yellow for the last 6 dB below full scale,
 //! red only above it (over 0 dB: the master limiter is turning it down).
 
-use egui::{Color32, Rect, Response, Sense, Ui, Widget, pos2};
+use egui::{Rect, Response, Sense, Ui, Widget, pos2};
 
-use super::GROOVE;
-use crate::ui::util;
+use crate::ui::theme::THEME;
 
 /// 2 dB a segment from -32 to +4 dB, so 0 dB falls between two segments.
 const SEGMENTS: usize = 18;
@@ -52,36 +51,28 @@ impl Widget for Meter {
             return resp;
         }
         let p = ui.painter();
-        p.rect_filled(rect, 1.0, GROOVE);
+        p.rect_filled(rect, 1.0, THEME.groove);
         let n = lit(level);
         let h = rect.height() / SEGMENTS as f32;
         for i in 0..SEGMENTS {
             let colour = match segment_db(i) {
-                db if db >= 0.0 => util::BAD,
-                db if db >= -6.0 => util::WARN,
-                _ => util::OK,
+                db if db >= 0.0 => THEME.bad,
+                db if db >= -6.0 => THEME.warn,
+                _ => THEME.ok,
             };
             let y = rect.bottom() - (i as f32 + 1.0) * h;
             let seg = Rect::from_min_max(
                 pos2(rect.left() + 1.0, y + 1.0),
                 pos2(rect.right() - 1.0, y + h),
             );
-            p.rect_filled(
-                seg,
-                0.0,
-                if i < n {
-                    colour
-                } else {
-                    Color32::from_rgb(0x1a, 0x1b, 0x20)
-                },
-            );
+            p.rect_filled(seg, 0.0, if i < n { colour } else { THEME.meter_off });
         }
         // A tick at 0 dB (full scale).
         let zero = (0.0 - MIN_DB) / (MAX_DB - MIN_DB);
         let y = rect.bottom() - zero as f32 * rect.height();
         p.line_segment(
             [pos2(rect.left(), y), pos2(rect.right(), y)],
-            egui::Stroke::new(1.0_f32, util::TEXT),
+            egui::Stroke::new(1.0_f32, THEME.text),
         );
         resp
     }

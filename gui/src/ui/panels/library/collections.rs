@@ -3,13 +3,13 @@
 //! Flow that is one chain of cards gets a list, one that branches a fork. Drop
 //! tracks on a crate, playlist or Flow to add them.
 
-use egui::{Color32, RichText, Sense, Stroke, Ui, pos2, vec2};
+use egui::{RichText, Sense, Stroke, Ui, pos2, vec2};
 
-use super::util;
 use crate::core::collections::{
     Collection, CollectionCmd, CollectionId, CollectionKind, Collections,
 };
 use crate::core::track::TrackId;
+use crate::ui::theme::THEME;
 
 /// A collection being dragged round the tree (a track's payload is a bare id).
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -53,8 +53,8 @@ impl CollectionsUi {
     pub fn show(&mut self, ui: &mut Ui, cx: &TreeCtx, out: &mut Vec<CollectionCmd>) {
         let header = ui
             .horizontal(|ui| {
-                ui.label(RichText::new("COLLECTIONS").size(10.0).color(util::MUTED));
-                ui.menu_button(RichText::new("+").color(util::MUTED), |ui| {
+                ui.label(RichText::new("COLLECTIONS").size(10.0).color(THEME.muted));
+                ui.menu_button(RichText::new("+").color(THEME.muted), |ui| {
                     new_menu(ui, None, cx, out)
                 })
                 .response
@@ -67,7 +67,7 @@ impl CollectionsUi {
             ui.label(
                 RichText::new("Flows, crates and playlists you make are kept here.")
                     .size(11.0)
-                    .color(util::MUTED),
+                    .color(THEME.muted),
             );
         }
         self.contents(ui, None, cx, out);
@@ -298,7 +298,7 @@ fn drop_target(
     ui.painter().rect_stroke(
         r.rect,
         3,
-        Stroke::new(1.0_f32, util::ACCENT),
+        Stroke::new(1.0_f32, THEME.accent),
         egui::StrokeKind::Inside,
     );
     if !ui.input(|i| i.pointer.any_released()) {
@@ -332,7 +332,7 @@ fn drop_target(
 fn icon(ui: &mut Ui, c: &Collection) {
     let (rect, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
     let p = ui.painter();
-    let s = Stroke::new(1.3_f32, Color32::from_gray(140));
+    let s = Stroke::new(1.3_f32, THEME.icon);
     let (l, r, m) = (rect.left() + 1.0, rect.right() - 1.0, rect.center());
     match c.kind {
         CollectionKind::Flow if !c.linear => {
@@ -346,7 +346,7 @@ fn icon(ui: &mut Ui, c: &Collection) {
                 p.line_segment([pos2(l, m.y + dy), pos2(r, m.y + dy)], s);
             }
             if c.kind == CollectionKind::Playlist {
-                p.circle_filled(pos2(l, m.y - 3.5), 1.3, Color32::from_gray(140));
+                p.circle_filled(pos2(l, m.y - 3.5), 1.3, THEME.icon);
             }
         }
         CollectionKind::Crate => {
@@ -355,7 +355,7 @@ fn icon(ui: &mut Ui, c: &Collection) {
         }
         CollectionKind::Smart => {
             p.circle_stroke(m, 4.5, s);
-            p.circle_filled(m, 1.5, Color32::from_gray(140));
+            p.circle_filled(m, 1.5, THEME.icon);
         }
         CollectionKind::Folder => {}
     }

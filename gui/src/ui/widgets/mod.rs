@@ -1,5 +1,6 @@
-//! Hardware-style controls, modelled on Mixxx's decks and mixer: knobs, faders, lit
-//! buttons and level meters.
+//! Widgets any panel can use. Hardware-style controls, modelled on Mixxx's decks and
+//! mixer: knobs, faders, lit buttons and level meters. Chips (the Camelot key). The
+//! layout pieces: the vertical icon stack and the horizontal tool tabs.
 //!
 //! Knobs and faders share one behaviour ([`interact`]): drag to change (Shift for fine
 //! adjust), double-click to reset, mouse wheel to nudge, and a tooltip with the exact
@@ -7,32 +8,26 @@
 //! [`Range`]. They edit a plain `f64` and report `changed()`; the caller sends it on.
 
 pub mod button;
+pub mod chips;
 pub mod fader;
+pub mod icon_stack;
 pub mod knob;
 pub mod meter;
+pub mod tool_tabs;
 
 pub use button::{HwButton, Icon, held};
+pub use chips::key_chip;
 pub use fader::Fader;
+pub use icon_stack::{Opens, StackItem, icon_stack};
 pub use knob::Knob;
 pub use meter::Meter;
+pub use tool_tabs::{Tab, tool_tabs};
 
-use egui::{Color32, Response, Ui, Vec2};
+use egui::{Response, Ui, Vec2};
 
-use super::util;
+// ---- shared styling (colours are in the theme) -----------------------------------------
 
-// ---- shared styling --------------------------------------------------------------------
-
-/// Knob bodies and fader caps.
-pub const FACE: Color32 = Color32::from_rgb(0x2a, 0x2c, 0x34);
-pub const FACE_HOVER: Color32 = Color32::from_rgb(0x36, 0x39, 0x44);
-/// Value arcs and the knob pointer.
-pub const ARC: Color32 = util::ACCENT;
-/// Fader grooves and meter backs.
-pub const GROOVE: Color32 = Color32::from_rgb(0x0b, 0x0c, 0x0f);
-/// The unlit part of a knob's arc.
-pub const ARC_TRACK: Color32 = Color32::from_rgb(0x3a, 0x3d, 0x4a);
-/// Unlit buttons.
-pub const BUTTON: Color32 = Color32::from_rgb(0x22, 0x24, 0x2b);
+/// Captions under knobs and faders.
 pub const LABEL_SIZE: f32 = 9.0;
 
 // ---- values -------------------------------------------------------------------------------

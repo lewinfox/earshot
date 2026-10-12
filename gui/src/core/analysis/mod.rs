@@ -122,7 +122,13 @@ struct Shared {
 }
 
 impl Analyser {
-    pub fn start(sink: Sink, player: Player, store: Store) -> Analyser {
+    /// `worker` says how to start a worker process (the real one, or a test's stand-in).
+    pub fn start(
+        sink: Sink,
+        player: Player,
+        store: Store,
+        worker: fn(Role, usize) -> WorkerConfig,
+    ) -> Analyser {
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
         let cap = store
             .reader
@@ -135,12 +141,12 @@ impl Analyser {
         // Started now (importing torch takes a few seconds), so a track loaded onto a
         // deck is analysed straight away. It runs at normal priority, so it gets half
         // the cores: the rest are left for the audio engine and the UI.
-        let deck = WorkerClient::start(WorkerConfig::python(Role::Deck, (cores / 2).max(1)));
+        let deck = WorkerClient::start(worker(Role::Deck, (cores / 2).max(1)));
         deck.warm_up();
         // Background workers share the cores between them.
         let threads = (cores / cap).max(1);
         let background = (0..cap)
-            .map(|_| WorkerClient::start(WorkerConfig::python(Role::Background, threads)))
+            .map(|_| WorkerClient::start(worker(Role::Background, threads)))
             .collect();
         let shared = Arc::new(Shared {
             queue: Mutex::new(JobQueue::new(cap)),

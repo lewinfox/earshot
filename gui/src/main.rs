@@ -20,10 +20,12 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "earshot",
         options,
-        Box::new(|cc| match ui::app::EarshotApp::new(cc) {
-            Ok(app) => Ok(Box::new(app)),
-            Err(e) => Err(e.into()),
-        }),
+        Box::new(
+            |cc| match ui::app::EarshotApp::new(cc, core::services::Services::real()) {
+                Ok(app) => Ok(Box::new(app)),
+                Err(e) => Err(e.into()),
+            },
+        ),
     )
 }
 

@@ -29,6 +29,7 @@ pub enum Command {
     /// The headphone preview of a library track.
     Preview(PreviewCmd),
     View(ViewCmd),
+    App(AppCmd),
     /// Library tracks: load, analyse, library folders. Run by the UI, like `View`.
     Library(LibraryCmd),
     /// Crates, playlists, smart playlists, Flows and their folders.
@@ -104,15 +105,15 @@ pub enum PreviewCmd {
     Stop(i64),
 }
 
-/// Things only the UI can do: they're about what's on screen.
+pub use super::view::ViewCmd;
+
+/// The app's own housekeeping. Run by the UI.
 #[derive(Debug, Clone, Copy)]
-pub enum ViewCmd {
-    /// Move the selection in the focused list (negative is up).
-    Browse(i32),
-    TogglePane,
-    FocusSearch,
-    /// Load the selected track onto this deck.
-    LoadSelected(DeckId),
+pub enum AppCmd {
+    /// Close and reopen every MIDI input, e.g. after plugging the controller in.
+    ReconnectMidi,
+    /// Forget the analysis failures counted so far.
+    DismissFailures,
 }
 
 impl From<(DeckId, EngineCmd)> for Command {
@@ -342,5 +343,17 @@ impl From<FlowCmd> for Command {
 impl From<TempoLockCmd> for Command {
     fn from(c: TempoLockCmd) -> Command {
         Command::TempoLock(c)
+    }
+}
+
+impl From<ViewCmd> for Command {
+    fn from(c: ViewCmd) -> Command {
+        Command::View(c)
+    }
+}
+
+impl From<AppCmd> for Command {
+    fn from(c: AppCmd) -> Command {
+        Command::App(c)
     }
 }

@@ -8,9 +8,7 @@ use std::time::{Duration, Instant};
 use egui::{Align, Color32, CornerRadius, RichText, Sense, Ui, vec2};
 use egui_extras::{Column, TableBuilder};
 
-use super::deck::key_chip;
-use super::tracks::{MenuAt, View, title_cell, track_menu};
-use super::util;
+use super::tracks::{MenuAt, title_cell, track_menu};
 use crate::core::command::Command;
 use crate::core::history::{DeckNow, RefSource, RefTrack};
 use crate::core::index::LibraryCmd;
@@ -18,11 +16,14 @@ use crate::core::keys::{Camelot, key_name};
 use crate::core::selection::{Mods, Selection};
 use crate::core::suggest::{Direction, Scored};
 use crate::core::track::TrackId;
+use crate::ui::panels::CoreView;
+use crate::ui::theme::THEME;
+use crate::ui::widgets::key_chip;
 
 const BARS: [(&str, Color32); 3] = [
-    ("key", Color32::from_rgb(0xc2, 0x5b, 0xff)),
-    ("tempo", Color32::from_rgb(0x3f, 0xa7, 0xff)),
-    ("energy", Color32::from_rgb(0xff, 0xcc, 0x4d)),
+    ("key", THEME.score[0]),
+    ("tempo", THEME.score[1]),
+    ("energy", THEME.score[2]),
 ];
 
 /// Suggestions follow a tempo change once the tempo has held still this long.
@@ -73,7 +74,7 @@ impl SuggestUi {
     /// or `selected`) or the library changed. A tempo change alone waits until the
     /// tempo has held still for a moment, rather than re-ranking on every step of a
     /// fader sweep.
-    pub fn refresh(&mut self, v: &View, decks: &[DeckNow], selected: Option<TrackId>) {
+    pub fn refresh(&mut self, v: &CoreView, decks: &[DeckNow], selected: Option<TrackId>) {
         let Some(r) = v.history.reference(v.lib, self.source, decks, selected) else {
             self.reference = None;
             self.list.clear();
@@ -117,12 +118,18 @@ impl SuggestUi {
     }
 
     /// Returns true when the pane was clicked (so it takes keyboard focus).
-    pub fn show(&mut self, ui: &mut Ui, v: &View, has_focus: bool, out: &mut Vec<Command>) -> bool {
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        v: &CoreView,
+        has_focus: bool,
+        out: &mut Vec<Command>,
+    ) -> bool {
         let mut clicked_pane = false;
         ui.horizontal(|ui| {
             let title = RichText::new("Suggestions").strong();
             ui.label(if has_focus {
-                title.color(util::ACCENT)
+                title.color(THEME.accent)
             } else {
                 title
             })
@@ -145,7 +152,7 @@ impl SuggestUi {
             });
         });
         ui.horizontal(|ui| {
-            ui.label(RichText::new("After").color(util::MUTED));
+            ui.label(RichText::new("After").color(THEME.muted));
             for (src, name, tip) in [
                 (RefSource::Master, "Master", "Whichever deck is playing"),
                 (
@@ -180,7 +187,7 @@ impl SuggestUi {
                     RefSource::Deck(d) => format!("Nothing on deck {}", ["A", "B"][d.min(1)]),
                     RefSource::Selected => "Select a track in the library".to_string(),
                 };
-                ui.label(RichText::new(hint).color(util::MUTED));
+                ui.label(RichText::new(hint).color(THEME.muted));
             }
             Some(r) => {
                 match r.deck {
@@ -190,17 +197,17 @@ impl SuggestUi {
                             if r.playing { "LIVE " } else { "" },
                             ["A", "B"][d.min(1)]
                         ))
-                        .color(util::DECK[d.min(1)]);
+                        .color(THEME.deck[d.min(1)]);
                         ui.label(if r.playing { text.strong() } else { text })
                     }
-                    None => ui.label(RichText::new("Selected").color(util::MUTED)),
+                    None => ui.label(RichText::new("Selected").color(THEME.muted)),
                 };
                 let detail = format!(
                     "{} BPM  {}",
                     r.bpm.map_or("?".into(), |b| format!("{b:.1}")),
                     r.key.map_or("?".into(), key_name)
                 );
-                ui.label(RichText::new(detail).color(util::MUTED));
+                ui.label(RichText::new(detail).color(THEME.muted));
                 if let Some(t) = v.lib.get(r.id) {
                     ui.add(egui::Label::new(&t.title).truncate());
                 }
@@ -241,7 +248,7 @@ impl SuggestUi {
                             })
                             .unwrap_or_default();
                         ui.add(
-                            egui::Label::new(RichText::new(ch).size(11.0).color(util::MUTED))
+                            egui::Label::new(RichText::new(ch).size(11.0).color(THEME.muted))
                                 .selectable(false),
                         )
                         .on_hover_text("Tempo change needed (allowing half or double time)");
@@ -303,7 +310,7 @@ fn bars(ui: &mut Ui, s: &Scored) {
         let y = rect.top() + 2.0 + i as f32 * (h + 1.5);
         let track = egui::Rect::from_min_size(egui::pos2(rect.left(), y), vec2(rect.width(), h));
         ui.painter()
-            .rect_filled(track, CornerRadius::same(2), util::LINE);
+            .rect_filled(track, CornerRadius::same(2), THEME.line);
         let mut fill = track;
         fill.set_width(track.width() * v.unwrap_or(0.0).clamp(0.0, 1.0) as f32);
         ui.painter()

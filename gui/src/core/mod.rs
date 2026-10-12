@@ -1,7 +1,7 @@
 //! Everything that isn't drawing: the database (the Store), the library in memory
 //! (tracks, queries, collections, play history), library scanning, the analysis
 //! queue, the decks (player and their sessions), commands, the control registry,
-//! the keymap and MIDI. The UI talks to it by dispatching commands, calling
+//! the keymap and MIDI, settings, and what's on screen as plain data ([`view`]). The UI talks to it by dispatching commands, calling
 //! functions and sending Store commands, and hears back through [`Event`]s.
 
 pub mod analysis;
@@ -18,11 +18,14 @@ pub mod midi;
 pub mod player;
 pub mod query;
 pub mod selection;
+pub mod services;
 pub mod session;
+pub mod settings;
 pub mod store;
 pub mod suggest;
 pub mod tempo_lock;
 pub mod track;
+pub mod view;
 pub mod worker_client;
 
 use std::sync::Arc;

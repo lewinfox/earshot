@@ -8,15 +8,16 @@ use earshot_engine::output::{DeviceSummary, list_devices};
 use earshot_engine::{Out, OutputInfo, Routing};
 use egui::{RichText, Ui};
 
-use super::util;
 use crate::core::command::{AudioCmd, Command};
 use crate::core::player::AudioSettings;
+use crate::ui::theme::THEME;
 
 const BUFFERS: [u32; 6] = [64, 128, 256, 512, 1024, 2048];
+/// The window's title, which is also its id.
+pub const TITLE: &str = "Audio";
 
 #[derive(Default)]
 pub struct AudioUi {
-    pub open: bool,
     /// Filled by a background thread (listing devices can take a moment).
     devices: Arc<Mutex<Option<Vec<DeviceSummary>>>>,
     listed: bool,
@@ -25,12 +26,10 @@ pub struct AudioUi {
 }
 
 impl AudioUi {
-    pub fn toggle(&mut self) {
-        self.open = !self.open;
-        if self.open {
-            self.listed = false;
-            self.draft = None;
-        }
+    /// Opening the window: list the devices again and drop an old draft.
+    pub fn reset(&mut self) {
+        self.listed = false;
+        self.draft = None;
     }
 
     fn list(&mut self, ctx: &egui::Context) {
@@ -49,17 +48,14 @@ impl AudioUi {
         saved: &AudioSettings,
         info: &Result<OutputInfo, String>,
         routing: Routing,
+        open: &mut bool,
     ) -> Option<Command> {
-        if !self.open {
-            return None;
-        }
         if !self.listed {
             self.list(ctx);
         }
         let mut action = None;
-        let mut open = true;
-        egui::Window::new("Audio")
-            .open(&mut open)
+        egui::Window::new(TITLE)
+            .open(open)
             .resizable(false)
             .collapsible(false)
             .show(ctx, |ui| {
@@ -74,7 +70,6 @@ impl AudioUi {
                     action = Some(Command::Audio(AudioCmd::Route(r)));
                 }
             });
-        self.open = open;
         action
     }
 
@@ -94,9 +89,9 @@ impl AudioUi {
                     i.channels,
                     i.buffer_frames.map_or("default".into(), |b| b.to_string())
                 ))
-                .color(if i.null { util::WARN } else { util::MUTED }),
+                .color(if i.null { THEME.warn } else { THEME.muted }),
             ),
-            Err(e) => ui.label(RichText::new(format!("No audio: {e}")).color(util::BAD)),
+            Err(e) => ui.label(RichText::new(format!("No audio: {e}")).color(THEME.bad)),
         };
         if std::env::var_os("EARSHOT_AUDIO_DEVICE").is_some()
             || std::env::var_os("EARSHOT_BUFFER").is_some()
@@ -104,7 +99,7 @@ impl AudioUi {
             ui.label(
                 RichText::new("EARSHOT_AUDIO_DEVICE / EARSHOT_BUFFER are set and win over these.")
                     .size(11.0)
-                    .color(util::WARN),
+                    .color(THEME.warn),
             );
         }
         let draft = self.draft.get_or_insert_with(|| saved.clone());
@@ -130,7 +125,7 @@ impl AudioUi {
                             match &devices {
                                 None => {
                                     ui.label(
-                                        RichText::new("Looking for devices…").color(util::MUTED),
+                                        RichText::new("Looking for devices…").color(THEME.muted),
                                     );
                                 }
                                 Some(list) => {
@@ -182,7 +177,7 @@ impl AudioUi {
             ui.label(
                 RichText::new("Smaller buffers respond faster but may crackle.")
                     .size(11.0)
-                    .color(util::MUTED),
+                    .color(THEME.muted),
             );
         });
         action
@@ -233,7 +228,7 @@ fn routing_section(ui: &mut Ui, current: Routing, channels: u16) -> Option<Routi
             }
         });
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("Presets:").color(util::MUTED));
+        ui.label(RichText::new("Presets:").color(THEME.muted));
         if channels >= 4
             && ui
                 .button("Controller")
@@ -271,7 +266,7 @@ fn routing_section(ui: &mut Ui, current: Routing, channels: u16) -> Option<Routi
         ui.label(
             RichText::new("Headphones are off, so previews and headphone cue are silent.")
                 .size(11.0)
-                .color(util::WARN),
+                .color(THEME.warn),
         );
     }
     (r != current).then_some(r)

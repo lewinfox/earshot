@@ -5,8 +5,8 @@ use std::f32::consts::PI;
 
 use egui::{Align2, Color32, FontId, Response, Sense, Shape, Stroke, Ui, Widget, pos2, vec2};
 
-use super::{ARC, ARC_TRACK, DRAG_TRAVEL, FACE, FACE_HOVER, LABEL_SIZE, Range, interact};
-use crate::ui::util;
+use super::{DRAG_TRAVEL, LABEL_SIZE, Range, interact};
+use crate::ui::theme::THEME;
 
 /// The arc runs 135° either side of straight up, like most hardware.
 const SWEEP: f32 = 0.75 * PI;
@@ -26,7 +26,7 @@ impl<'a> Knob<'a> {
             value,
             diameter: 26.0,
             label: None,
-            colour: ARC,
+            colour: THEME.accent,
         }
     }
 
@@ -86,7 +86,7 @@ impl Widget for Knob<'_> {
         // Groove, then the lit arc from the origin (the centre for detented knobs).
         p.add(Shape::line(
             arc(c, r, 0.0, 1.0),
-            Stroke::new(3.0_f32, ARC_TRACK),
+            Stroke::new(3.0_f32, THEME.arc_track),
         ));
         let origin = self.range.origin();
         if (pos - origin).abs() > 1e-3 {
@@ -96,16 +96,16 @@ impl Widget for Knob<'_> {
             ));
         }
         let face = if resp.hovered() || resp.dragged() {
-            FACE_HOVER
+            THEME.face_hover
         } else {
-            FACE
+            THEME.face
         };
-        p.circle(c, r - 4.0, face, Stroke::new(1.0_f32, util::LINE));
+        p.circle(c, r - 4.0, face, Stroke::new(1.0_f32, THEME.line));
         let a = angle(pos);
         let dir = vec2(a.cos(), a.sin());
         p.line_segment(
             [c + dir * (r - 12.0).max(1.0), c + dir * (r - 4.5)],
-            Stroke::new(2.0_f32, util::TEXT),
+            Stroke::new(2.0_f32, THEME.text),
         );
         if let Some(label) = self.label {
             p.text(
@@ -113,7 +113,7 @@ impl Widget for Knob<'_> {
                 Align2::CENTER_BOTTOM,
                 label,
                 FontId::proportional(LABEL_SIZE),
-                util::MUTED,
+                THEME.muted,
             );
         }
         resp
