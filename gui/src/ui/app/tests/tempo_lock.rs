@@ -55,6 +55,33 @@ fn normalise_tempo_opens_the_tab_and_analyses() {
 }
 
 #[test]
+fn a_track_dragged_onto_the_tab_is_analysed() {
+    let mut h = start("tempo-drop");
+    let app = h.state_mut();
+    app.dispatch(ViewCmd::SetMode(Mode::Prepare).into());
+    app.dispatch(ViewCmd::Tool(Tool::TempoLock).into());
+    steps(&mut h, 3);
+    let id = h
+        .state()
+        .index
+        .tracks()
+        .iter()
+        .find(|t| t.title == "Low Orbit")
+        .unwrap()
+        .id;
+    let from = at(&h, "Low Orbit").center();
+    let to = h
+        .get_all_by_label_contains("Drag a track here")
+        .next()
+        .expect("the hint")
+        .rect()
+        .center();
+    drag(&mut h, from, to, |_| {});
+    settle_until(&mut h, |a| a.panels.tempo_lock.chart.is_some());
+    assert_eq!(h.state().panels.tempo_lock.track, Some(id));
+}
+
+#[test]
 fn straighten_is_disabled_for_a_bpm_out_of_range() {
     let mut h = start("tempo-range");
     normalise(&mut h, "Glass Steps");

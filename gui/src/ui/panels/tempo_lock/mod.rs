@@ -17,6 +17,7 @@ use std::sync::Arc;
 use egui::{Color32, CornerRadius, Margin, Response, RichText, Stroke, Ui, vec2};
 
 use self::charts::{HistChart, TempoChart, Wave, bpm_range, fmt_time, overview, time_at};
+use super::library::drag;
 use super::{Cx, Panel};
 use crate::core::tempo_lock::{
     BeatLevel, Chart, Engine, ListenCmd, Stage, StraightenOptions, Straightened, TempoAnalysis,
@@ -266,6 +267,26 @@ pub struct TempoLockPanel<'a> {
 
 impl Panel for TempoLockPanel<'_> {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        // A track dropped anywhere on the tab charts it, as "Normalise tempo" does.
+        let area = ui.max_rect();
+        let drop = ui.interact(area, ui.id().with("drop"), egui::Sense::hover());
+        self.body(ui, cx);
+        if drag::hovering_tracks(&drop) {
+            ui.painter().rect_stroke(
+                area,
+                6.0,
+                Stroke::new(2.0_f32, cx.theme.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if let Some(id) = drag::take_track(&drop) {
+            cx.send(TempoLockCmd::Analyse(id));
+        }
+    }
+}
+
+impl TempoLockPanel<'_> {
+    fn body(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let tab = &mut *self.tab;
         // Where the player is: the cursor follows it while the tab's audio plays.
         if let (Some((v, _)), Some(snap)) = (tab.listen.loaded, cx.engine.snap.as_ref()) {
@@ -284,8 +305,8 @@ impl Panel for TempoLockPanel<'_> {
                 ui.add_space(12.0);
                 ui.label(
                     RichText::new(
-                        "Right-click a track in the library and choose \"Normalise tempo\" \
-                         to chart its tempo here. Then pick a BPM and straighten it: every \
+                        "Drag a track here (or right-click it in the library and choose \
+                         \"Normalise tempo\") to chart its tempo. Then pick a BPM and straighten it: every \
                          beat moves onto one steady grid, without changing the pitch.",
                     )
                     .color(cx.theme.muted),
