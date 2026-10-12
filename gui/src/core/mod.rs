@@ -15,6 +15,7 @@ pub mod index;
 pub mod keymap;
 pub mod keys;
 pub mod library;
+pub mod log;
 pub mod midi;
 pub mod player;
 pub mod query;

@@ -111,6 +111,9 @@ pub struct Analyser {
     shared: Arc<Shared>,
 }
 
+/// Tracks longer than this (minutes) aren't analysed: they're mixes, mostly.
+pub const MAX_MINUTES: f64 = 30.0;
+
 /// The CPU cores: the most background workers there can be.
 pub fn cores() -> usize {
     std::thread::available_parallelism().map_or(4, |n| n.get())
@@ -397,8 +400,18 @@ impl Shared {
                 }
             };
             let track = batch.track;
+            let t0 = std::time::Instant::now();
             let result = self.run(lane, player, &batch);
             let superseded = batch.superseded.load(Ordering::Relaxed);
+            crate::core::log::note(&format!(
+                "analysis: {lane:?} ends track {track} after {:.1} s: {}",
+                t0.elapsed().as_secs_f64(),
+                match (&result, superseded) {
+                    (_, true) => "stopped".to_string(),
+                    (Ok(()), _) => "ok".to_string(),
+                    (Err(e), _) => format!("failed: {e}"),
+                }
+            ));
             if let Err(e) = &result
                 && !superseded
             {
@@ -457,11 +470,32 @@ impl Shared {
         }
         let has = |a: AnalyserId| todo.iter().any(|t| t.0 == a);
 
+        // Which track each lane is on, for the log after a crash.
+        let path = store.reader.track_path(id).map_err(|e| e.to_string())?;
+        let minutes = store
+            .reader
+            .track(id)
+            .ok()
+            .and_then(|t| t.duration)
+            .unwrap_or(0.0)
+            / 60.0;
+        crate::core::log::note(&format!(
+            "analysis: {lane:?} starts track {id} ({minutes:.1} min): {}",
+            path.display()
+        ));
+        // A long mix would take gigabytes to decode and analyse, and a single grid
+        // means nothing for it.
+        if minutes > MAX_MINUTES {
+            return Err(format!(
+                "{minutes:.0} minutes long (a mix?): only tracks up to {MAX_MINUTES:.0} \
+                 minutes are analysed"
+            ));
+        }
+
         let audio = match &batch.audio {
             Some(a) => a.clone(),
             None => {
                 progress(0.0, "decoding");
-                let path = store.reader.track_path(id).map_err(|e| e.to_string())?;
                 Arc::new(decode::decode_file(&path)?.0)
             }
         };

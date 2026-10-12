@@ -32,7 +32,7 @@ impl Services {
 
 /// Where earshot keeps its data (the name is the app id it was first released under).
 /// `EARSHOT_DATA_DIR` overrides it (e.g. to try things on a copy).
-fn data_dir() -> PathBuf {
+pub fn data_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("EARSHOT_DATA_DIR") {
         return PathBuf::from(d);
     }

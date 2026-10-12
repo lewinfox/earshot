@@ -1221,6 +1221,7 @@ for line in sys.stdin:
             idle_exit: None,
             keep_alive: false,
             expect: vec![],
+            max_memory: None,
         }
     }
 

@@ -241,6 +241,46 @@ pub struct WorkerConfig {
     /// versions; otherwise it's refused, and so is every job after
     /// ([`WorkerClient::refused`]).
     pub expect: Vec<(String, u32)>,
+    /// Stop the process when it uses more memory than this (bytes), failing its
+    /// jobs, before the system runs out ([`memory_cap`]). `None`: no limit.
+    pub max_memory: Option<u64>,
+}
+
+/// How much memory one worker may use: a fifth of the machine's, between 1.5 and
+/// 4 GB, or `EARSHOT_WORKER_MAX_MB`. A runaway worker (a two-hour mix, say) is
+/// stopped by us instead of the kernel, whose out-of-memory kill can take the
+/// whole desktop session with it.
+pub fn memory_cap() -> u64 {
+    const MB: u64 = 1 << 20;
+    if let Some(mb) = std::env::var("EARSHOT_WORKER_MAX_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        return mb * MB;
+    }
+    let total = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|m| {
+            m.lines()
+                .find_map(|l| l.strip_prefix("MemTotal:"))
+                .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+        })
+        .map_or(8 * 1024 * MB, |kb| kb * 1024);
+    (total / 5).clamp(1536 * MB, 4096 * MB)
+}
+
+/// A process's resident memory (bytes), where the system says (Linux).
+fn resident(pid: u32) -> Option<u64> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let kb = status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmRSS:"))?
+        .trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    Some(kb * 1024)
 }
 
 /// What a worker process is for.
@@ -287,6 +327,7 @@ impl WorkerConfig {
             idle_exit: (role == Role::Background).then_some(IDLE_EXIT),
             keep_alive: role == Role::Deck,
             expect: vec![],
+            max_memory: Some(memory_cap()),
         }
     }
 }
@@ -898,6 +939,21 @@ impl Supervisor {
             }
             return;
         }
+        if let Some(max) = self.config.max_memory
+            && let Some(used) = resident(proc.child.id())
+            && used > max
+        {
+            const GB: f64 = (1u64 << 30) as f64;
+            let why = format!(
+                "the analysis worker used {:.1} GB of memory (the limit is {:.1} GB), \
+                 so it was stopped",
+                used as f64 / GB,
+                max as f64 / GB
+            );
+            eprintln!("analysis worker: {why}");
+            self.lost(&why);
+            return;
+        }
         let busy = self.jobs.values().any(|s| s.sent_to == Some(generation));
         if busy && proc.last_heard.elapsed() > self.config.heartbeat_timeout {
             self.lost("the analysis worker stopped responding, so it was restarted");
@@ -1101,6 +1157,9 @@ for line in sys.stdin:
             sys.exit(1)
         if r["wav"] == "hang":
             time.sleep(1000)
+        if r["wav"] == "hog":
+            hog = b"x" * (400 << 20)
+            time.sleep(1000)
         send({"id": i, "type": "progress", "analyser": "grid", "fraction": 0.5})
         if r["wav"] == "fail":
             send({"id": i, "type": "failed", "analyser": "grid", "error": "no beats"})
@@ -1127,6 +1186,7 @@ for line in sys.stdin:
             idle_exit: None,
             keep_alive: false,
             expect: vec![],
+            max_memory: None,
         }
     }
 
@@ -1288,6 +1348,19 @@ mod tests {
         assert!(t0.elapsed() < Duration::from_secs(10));
         // Sent again to a fresh worker.
         assert!(next.wait(&mut |_| {}).unwrap().grid.unwrap().is_ok());
+    }
+
+    #[test]
+    fn a_worker_over_its_memory_cap_is_stopped() {
+        let mut config = fake(PROTOCOL, true);
+        config.max_memory = Some(200 << 20);
+        let client = WorkerClient::start(config);
+        let e = client
+            .analyse(&req("hog", 60_000), &mut |_| {})
+            .unwrap_err();
+        assert!(e.contains("memory"), "{e}");
+        // The next job gets a fresh worker.
+        assert!(client.analyse(&req("x", 5000), &mut |_| {}).is_ok());
     }
 
     #[test]

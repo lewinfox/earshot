@@ -54,6 +54,7 @@ import itertools  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
 import math  # noqa: E402
+import resource  # noqa: E402
 import signal  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
@@ -323,6 +324,10 @@ def run_job(job: Job) -> None:
     except Exception as e:
         traceback.print_exc(file=sys.stderr)
         send({"id": job.id, "type": "error", "error": str(e) or type(e).__name__})
+    finally:
+        # For the app's log: how long it took and how big the process has got.
+        peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
+        log.info("job %d (%s) took %.1f s; peak memory so far %d MB", job.id, job.kind, time.perf_counter() - t0, peak_mb)
 
 
 def runner(queue: Queue) -> None:

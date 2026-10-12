@@ -5,6 +5,10 @@ mod core;
 mod ui;
 
 fn main() -> eframe::Result {
+    // A log per run in the data folder, for after a crash or freeze.
+    if let Err(e) = core::log::start(&core::services::data_dir()) {
+        eprintln!("not logging to a file: {e}");
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("earshot")
