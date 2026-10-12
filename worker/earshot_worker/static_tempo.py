@@ -174,7 +174,8 @@ def excerpt_starts(t: np.ndarray, env: np.ndarray, low: np.ndarray, sr: int) -> 
         lo = lo0 + int(k * (hi0 - lo0) / MIDDLE_EXCERPTS)
         hi = max(lo + 1, lo0 + int((k + 1) * (hi0 - lo0) / MIDDLE_EXCERPTS))
         frames.append(lo + int(np.argmax(strength[lo:hi])))
-    return sorted(int(t[i] * sr) for i in frames)
+    # The first frames' times are a little before 0 (the envelope is padded).
+    return sorted(max(0, int(t[i] * sr)) for i in frames)
 
 
 # How far (s) a straight grid may miss the excerpts' beats and still be "on the beat",

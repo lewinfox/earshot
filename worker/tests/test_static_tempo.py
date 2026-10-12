@@ -94,6 +94,15 @@ def test_excerpts_skip_intro_breakdown_and_outro():
         assert any(a - 1.5 <= s and s + EXCERPT_S <= b + 1.5 for a, b in sections), s
 
 
+def test_kick_from_the_first_frame_starts_at_sample_zero():
+    # The envelope's first frames sit a little before 0 s (it's padded): an excerpt
+    # from there must still start at the file's start, not a negative sample.
+    t, env, low = envelopes([(0, 300)])
+    t = t - 0.046
+    starts = excerpt_starts(t, env, low, 44100)
+    assert starts[0] == 0 and min(starts) >= 0
+
+
 def test_little_steady_kick_uses_the_whole_music():
     # Breakbeats: hardly any four-to-the-floor kick. Excerpts span the music as before.
     t, env, low = envelopes([(100, 160)])
