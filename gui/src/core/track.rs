@@ -132,6 +132,68 @@ pub enum AnalysisState {
     Failed(String),
 }
 
+/// A track's analysis in one word, as the status column shows it: blank, green,
+/// orange (on its way) or needs attention. Sorts in that order.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub enum Status {
+    /// Not analysed.
+    None,
+    /// Has a beatgrid (analysed, fixed by hand or imported).
+    Done,
+    /// Queued or being analysed.
+    Busy,
+    /// The analysis failed, or the tempo drifts but the grid is a static one.
+    Attention,
+}
+
+impl Status {
+    pub const ALL: [Status; 4] = [Status::None, Status::Done, Status::Busy, Status::Attention];
+
+    /// From the track and where its analysis is (`LibraryIndex::analysis`).
+    pub fn of(t: &Track, state: Option<&AnalysisState>) -> Status {
+        match state {
+            Some(AnalysisState::Failed(_)) => Status::Attention,
+            Some(AnalysisState::Queued | AnalysisState::Running { .. }) => Status::Busy,
+            None if t.drifts && !t.dynamic() => Status::Attention,
+            None if t.analysed() => Status::Done,
+            None => Status::None,
+        }
+    }
+
+    /// As typed after `status:`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Status::None => "none",
+            Status::Done => "done",
+            Status::Busy => "busy",
+            Status::Attention => "attention",
+        }
+    }
+
+    /// For menus and tooltips.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Status::None => "Not analysed",
+            Status::Done => "Analysed",
+            Status::Busy => "Analysing",
+            Status::Attention => "Needs attention",
+        }
+    }
+
+    /// A name, or another spelling of it (the colours the column shows, too).
+    pub fn parse(s: &str) -> Option<Status> {
+        Some(match s.to_lowercase().as_str() {
+            "none" | "blank" | "new" | "unanalysed" | "unanalyzed" => Status::None,
+            "done" | "green" | "analysed" | "analyzed" | "ok" => Status::Done,
+            "busy" | "orange" | "analysing" | "analyzing" | "queued" | "running" => Status::Busy,
+            "attention" | "needs" | "red" | "failed" | "drifting" => Status::Attention,
+            _ => return None,
+        })
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn lib_track(id: TrackId, title: &str, artist: &str) -> LibTrack {
     LibTrack {
@@ -179,5 +241,30 @@ mod tests {
         let t = Track::new(l);
         assert_eq!(t.bpm, Some(125.0), "the grid's BPM wins");
         assert!(t.analysed() && t.dynamic());
+        assert_eq!(Status::of(&t, None), Status::Done);
+        assert_eq!(Status::of(&t, Some(&AnalysisState::Queued)), Status::Busy);
+    }
+
+    #[test]
+    fn status_in_one_word() {
+        let mut l = lib_track(1, "x", "y");
+        let t = Track::new(l.clone());
+        assert_eq!(Status::of(&t, None), Status::None);
+        let failed = AnalysisState::Failed("no".into());
+        assert_eq!(Status::of(&t, Some(&failed)), Status::Attention);
+        l.grid_source = Some(GridSource::Analysis);
+        l.drifts = true;
+        let t = Track::new(l.clone());
+        assert_eq!(
+            Status::of(&t, None),
+            Status::Attention,
+            "drifts on a static grid"
+        );
+        l.grid_source = Some(GridSource::AnalysisDynamic);
+        assert_eq!(Status::of(&Track::new(l), None), Status::Done);
+        for s in Status::ALL {
+            assert_eq!(Status::parse(s.name()), Some(s));
+        }
+        assert_eq!(Status::parse("orange"), Some(Status::Busy));
     }
 }

@@ -273,15 +273,9 @@ pub enum EditCmd {
     },
     /// Add a tag to each track (keeping their others).
     #[allow(dead_code)] // for the library's tag column (step 7, B2); tests use it
-    AddTag {
-        tracks: Vec<TrackId>,
-        tag: String,
-    },
+    AddTag { tracks: Vec<TrackId>, tag: String },
     #[allow(dead_code)] // for the library's tag column (step 7, B2); tests use it
-    RemoveTag {
-        tracks: Vec<TrackId>,
-        tag: String,
-    },
+    RemoveTag { tracks: Vec<TrackId>, tag: String },
     /// Add tracks to a crate (each once), the end of a playlist, or a Flow (as new
     /// starting cards).
     AddTracks {
@@ -294,7 +288,6 @@ pub enum EditCmd {
         tracks: Vec<TrackId>,
     },
     /// A crate's or playlist's whole contents, in this order (e.g. a reorder).
-    #[allow(dead_code)] // for dragging playlist rows (step 7, B2); tests use it
     SetTracks {
         collection: CollectionId,
         tracks: Vec<TrackId>,

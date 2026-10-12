@@ -80,6 +80,60 @@ impl CollectionKind {
             CollectionKind::Crate | CollectionKind::Playlist | CollectionKind::Flow
         )
     }
+
+    /// The tree it lives in. A folder's is its own (see [`Collection::section`]).
+    pub const fn section(self) -> Option<Section> {
+        match self {
+            CollectionKind::Playlist | CollectionKind::Smart => Some(Section::Playlists),
+            CollectionKind::Crate => Some(Section::Crates),
+            CollectionKind::Flow => Some(Section::Flows),
+            CollectionKind::Folder => None,
+        }
+    }
+}
+
+/// The three trees collections live in, each with its own folders: the library's
+/// Playlists, Crates and Flows sources. A folder holds one section's things.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Section {
+    /// Playlists and smart playlists.
+    Playlists,
+    Crates,
+    Flows,
+}
+
+impl Section {
+    pub const ALL: [Section; 3] = [Section::Playlists, Section::Crates, Section::Flows];
+
+    /// As stored in `collections.section`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Section::Playlists => "playlists",
+            Section::Crates => "crates",
+            Section::Flows => "flows",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Section> {
+        Section::ALL.into_iter().find(|x| x.as_str() == s)
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Section::Playlists => "Playlists",
+            Section::Crates => "Crates",
+            Section::Flows => "Flows",
+        }
+    }
+
+    /// What can be made in it (besides folders), in the "New" menu's order.
+    pub const fn kinds(self) -> &'static [CollectionKind] {
+        match self {
+            Section::Playlists => &[CollectionKind::Playlist, CollectionKind::Smart],
+            Section::Crates => &[CollectionKind::Crate],
+            Section::Flows => &[CollectionKind::Flow],
+        }
+    }
 }
 
 /// A collection as the tree lists it.
@@ -89,6 +143,8 @@ pub struct Collection {
     /// The folder it's in; `None`: top level.
     pub parent: Option<CollectionId>,
     pub kind: CollectionKind,
+    /// The tree it's in: its kind's, or for a folder, the one it was made in.
+    pub section: Section,
     pub name: String,
     /// A crate's tracks; a playlist's in order (repeats kept); each Flow card's
     /// track. Empty for folders and smart playlists.
@@ -127,10 +183,6 @@ impl Collections {
         self.rev
     }
 
-    pub fn all(&self) -> &[Collection] {
-        &self.list
-    }
-
     pub fn get(&self, id: CollectionId) -> Option<&Collection> {
         self.by_id.get(&id).map(|&i| &self.list[i])
     }
@@ -152,24 +204,59 @@ impl Collections {
         is_within(id, ancestor, |c| self.parent_of(c))
     }
 
-    /// Folders as the tree shows them, with their depth.
-    pub fn folders_in_order(&self) -> Vec<(&Collection, usize)> {
+    /// What's directly inside `folder` in one section's tree: folders first, then the
+    /// rest, each by name.
+    pub fn children_in(&self, section: Section, folder: Option<CollectionId>) -> Vec<&Collection> {
+        let mut v = self.children(folder);
+        v.retain(|c| c.section == section);
+        v
+    }
+
+    /// A section's folders as its tree shows them, with their depth.
+    pub fn folders_in_order(&self, section: Section) -> Vec<(&Collection, usize)> {
         fn walk<'a>(
             cs: &'a Collections,
+            section: Section,
             parent: Option<CollectionId>,
             depth: usize,
             out: &mut Vec<(&'a Collection, usize)>,
         ) {
-            for c in cs.children(parent) {
+            for c in cs.children_in(section, parent) {
                 if c.kind == CollectionKind::Folder {
                     out.push((c, depth));
-                    walk(cs, Some(c.id), depth + 1, out);
+                    walk(cs, section, Some(c.id), depth + 1, out);
                 }
             }
         }
         let mut out = vec![];
-        walk(self, None, 0, &mut out);
+        walk(self, section, None, 0, &mut out);
         out
+    }
+
+    /// Whether `id` can go into `folder` (`None`: the top level): the same section,
+    /// and not a folder into itself.
+    pub fn can_move(&self, id: CollectionId, folder: Option<CollectionId>) -> bool {
+        let Some(c) = self.get(id) else { return false };
+        match folder.and_then(|f| self.get(f)) {
+            None => folder.is_none(),
+            Some(f) => {
+                f.kind == CollectionKind::Folder
+                    && f.section == c.section
+                    && !self.is_within(f.id, id)
+            }
+        }
+    }
+
+    /// Every track in the collections inside a folder and its subfolders, each once,
+    /// in tree order.
+    pub fn tracks_inside(&self, folder: CollectionId) -> Vec<TrackId> {
+        let mut seen = HashSet::new();
+        self.list
+            .iter()
+            .filter(|c| c.id != folder && c.parent.is_some_and(|p| self.is_within(p, folder)))
+            .flat_map(|c| c.tracks.iter().copied())
+            .filter(|t| seen.insert(*t))
+            .collect()
     }
 
     /// How many collections (not folders) are in a folder and its subfolders.
@@ -180,11 +267,27 @@ impl Collections {
             .filter(|c| c.parent.is_some_and(|p| self.is_within(p, folder)))
             .count()
     }
+}
 
-    /// Crates, playlists and Flows, for "Add to".
-    pub fn takers(&self) -> impl Iterator<Item = &Collection> {
-        self.list.iter().filter(|c| c.kind.takes_tracks())
-    }
+/// `list` with the items at positions `picked` taken out and put back, in their
+/// order, before position `to` of the original list (`list.len()`: the end). How a
+/// playlist's rows are dragged to a new place; positions, not tracks, since a track
+/// can be in a playlist more than once.
+pub fn move_items<T: Copy>(list: &[T], picked: &[usize], to: usize) -> Vec<T> {
+    let picked: HashSet<usize> = picked.iter().copied().filter(|&p| p < list.len()).collect();
+    let moving: Vec<T> = (0..list.len())
+        .filter(|i| picked.contains(i))
+        .map(|i| list[i])
+        .collect();
+    let mut rest: Vec<T> = (0..list.len())
+        .filter(|i| !picked.contains(i))
+        .map(|i| list[i])
+        .collect();
+    let at = (0..to.min(list.len()))
+        .filter(|i| !picked.contains(i))
+        .count();
+    rest.splice(at..at, moving);
+    rest
 }
 
 impl query::Context for Collections {
@@ -635,13 +738,34 @@ impl FlowGraph {
 pub enum CollectionCmd {
     /// Show it: a Flow on the canvas, anything else as the track list.
     Open(CollectionId),
+    /// Show its tracks in the track list (a Flow's too, as a list).
+    Show(CollectionId),
     /// A new one in `parent` (`None`: top level), holding `tracks` (or, for a smart
-    /// playlist, matching `query`).
+    /// playlist, matching `query`). A folder made this way is in its parent's section
+    /// (at the top level, Playlists): [`CollectionCmd::CreateFolder`] says which.
     Create {
         kind: CollectionKind,
         parent: Option<CollectionId>,
         tracks: Vec<TrackId>,
         query: Option<String>,
+    },
+    /// A new folder in a section's tree, in `parent` (`None`: top level).
+    CreateFolder {
+        section: Section,
+        parent: Option<CollectionId>,
+    },
+    /// Move a playlist's entries at positions `from` to before position `to` (see
+    /// [`move_items`]).
+    MoveEntries {
+        playlist: CollectionId,
+        from: Vec<usize>,
+        to: usize,
+    },
+    /// Put tracks into a playlist before position `at` (its length: the end).
+    Insert {
+        playlist: CollectionId,
+        tracks: Vec<TrackId>,
+        at: usize,
     },
     Rename(CollectionId, String),
     /// Into a folder (`None`: top level).
@@ -846,11 +970,13 @@ mod tests {
         assert!(g.is_empty());
     }
 
+    /// A collection; folders are in the Crates section.
     fn coll(id: i64, parent: Option<i64>, kind: CollectionKind, tracks: &[i64]) -> Collection {
         Collection {
             id,
             parent,
             kind,
+            section: kind.section().unwrap_or(Section::Crates),
             name: format!("c{id}"),
             tracks: tracks.to_vec(),
             query: None,
@@ -873,17 +999,56 @@ mod tests {
         assert!(!cs.is_within(1, 2));
         assert_eq!(cs.count_inside(1), 1);
         assert_eq!(
-            cs.folders_in_order()
+            cs.folders_in_order(Section::Crates)
                 .iter()
                 .map(|(c, d)| (c.id, *d))
                 .collect::<Vec<_>>(),
             vec![(1, 0), (2, 1)]
         );
+        assert!(cs.folders_in_order(Section::Playlists).is_empty());
         assert_eq!(
             cs.children(None).iter().map(|c| c.id).collect::<Vec<_>>(),
             vec![1, 4]
         );
+        let ids = |v: Vec<&Collection>| v.iter().map(|c| c.id).collect::<Vec<_>>();
+        assert_eq!(ids(cs.children_in(Section::Crates, None)), vec![1]);
+        assert_eq!(ids(cs.children_in(Section::Playlists, None)), vec![4]);
         assert!(cs.contains(3, 5) && !cs.contains(3, 7) && cs.contains(4, 6));
-        assert_eq!(cs.takers().count(), 2);
+        assert_eq!(cs.children(Some(2)).len(), 1);
+        assert_eq!(cs.tracks_inside(1), vec![5, 6]);
+    }
+
+    #[test]
+    fn folders_take_their_own_section() {
+        let mut cs = Collections::default();
+        cs.set(vec![
+            coll(1, None, CollectionKind::Folder, &[]),
+            coll(2, Some(1), CollectionKind::Folder, &[]),
+            coll(3, None, CollectionKind::Crate, &[]),
+            coll(4, None, CollectionKind::Playlist, &[]),
+        ]);
+        assert!(cs.can_move(3, Some(2)), "a crate into a crate folder");
+        assert!(!cs.can_move(4, Some(1)), "not a playlist");
+        assert!(!cs.can_move(1, Some(2)), "not a folder into itself");
+        assert!(cs.can_move(2, None));
+        assert!(!cs.can_move(3, Some(4)), "only folders hold things");
+        assert!(!cs.can_move(3, Some(99)));
+    }
+
+    #[test]
+    fn moving_rows() {
+        let l = ['a', 'b', 'c', 'd', 'e'];
+        let s = |v: Vec<char>| v.into_iter().collect::<String>();
+        assert_eq!(s(move_items(&l, &[0], 3)), "bcade", "down, before d");
+        assert_eq!(s(move_items(&l, &[4], 0)), "eabcd", "to the top");
+        assert_eq!(s(move_items(&l, &[1, 3], 5)), "acebd", "two, to the end");
+        assert_eq!(s(move_items(&l, &[3, 1], 0)), "bdace", "kept in list order");
+        assert_eq!(s(move_items(&l, &[2], 2)), "abcde", "onto itself");
+        assert_eq!(s(move_items(&l, &[2], 3)), "abcde", "just below itself");
+        assert_eq!(
+            s(move_items(&l, &[0, 9], 99)),
+            "bcdea",
+            "out of range ignored"
+        );
     }
 }

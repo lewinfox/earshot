@@ -23,7 +23,7 @@ use rusqlite::{Connection, OpenFlags};
 pub use read::{JobRow, LibTrack, Memory, Preview, ResultState, TrackCues};
 pub use write::{AnalysisSave, GridSave, ScannedFile, Writer, grid_bpm};
 
-use super::collections::{Collection, CollectionKind, FlowGraph, NodeId};
+use super::collections::{Collection, CollectionKind, FlowGraph, NodeId, Section};
 use super::edit::{Edit, EditCmd};
 
 /// Bump when `engine/src/waveform.rs` changes its output, so cached waveforms are redone.
@@ -38,8 +38,9 @@ pub const FILE_NAME: &str = "library.db";
 const BASELINE: &str = include_str!("../../../migrations/001_baseline.sql");
 
 /// `user_version` of a database made from [`BASELINE`]. Development builds used 1 and
-/// 2 (before beatgrids stored their model); those are refused, not converted.
-pub const SCHEMA_VERSION: i64 = 3;
+/// 2 (before beatgrids stored their model) and 3 (before collections had sections);
+/// those are refused, not converted.
+pub const SCHEMA_VERSION: i64 = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -239,6 +240,13 @@ pub enum StoreCmd {
         name: String,
         /// A smart playlist's query.
         query: Option<String>,
+    },
+    /// A folder in one section's tree.
+    CreateFolder {
+        id: i64,
+        parent: Option<i64>,
+        section: Section,
+        name: String,
     },
     /// The UI sends the undoable form, `EditCmd::Rename`.
     #[allow(dead_code)]

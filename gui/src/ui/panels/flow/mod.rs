@@ -16,6 +16,7 @@ use egui::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::library::drag::{self, DragPayload};
 use super::library::tracks::{Media, MenuAt, track_menu};
 use super::{CoreView, PreviewState};
 use crate::core::collections::{
@@ -421,17 +422,21 @@ impl FlowUi {
                 THEME.muted,
             );
         }
-        // A card carries its track too (so it can be dropped on a deck); don't add it again.
-        if let Some(id) = resp.dnd_release_payload::<TrackId>()
+        // A card carries its track too (so it can be dropped on a deck); don't add it
+        // again. Several tracks: a card each, stacked down from the drop.
+        if let Some((ids, origin)) = drag::take_tracks(&resp)
+            && origin != drag::Origin::Flow
             && self.moving.is_none()
             && let Some(p) = ui.input(|i| i.pointer.interact_pos())
         {
             let at = to_global.inverse() * p - vec2(NODE_W, NODE_H) / 2.0;
-            self.edit(GraphOp::Add {
-                track: *id,
-                x: at.x,
-                y: at.y,
-            });
+            for (i, id) in ids.into_iter().enumerate() {
+                self.edit(GraphOp::Add {
+                    track: id,
+                    x: at.x,
+                    y: at.y + i as f32 * SPACING.row,
+                });
+            }
         }
         if resp.clicked() || resp.drag_started() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.pop = None;
@@ -892,7 +897,7 @@ fn card(
     if resp.drag_stopped() {
         acts.push(CardAction::DragEnd);
     }
-    resp.dnd_set_drag_payload(t.id);
+    resp.dnd_set_drag_payload(DragPayload::track(t.id, drag::Origin::Flow));
     if resp.double_clicked() {
         out.push(LibraryCmd::Load(t.id).into());
     }

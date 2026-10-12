@@ -19,18 +19,20 @@ use egui::Key;
 use super::modals::{ModalEnv, Modals};
 use super::panels::deck::{DeckInfo, PendingLoad};
 use super::panels::flow::FlowUi;
-use super::panels::library::LibraryPane;
 use super::panels::library::browser::Scope;
 use super::panels::library::tracks::take_wanted_art;
+use super::panels::library::{LibraryPane, drag};
 use super::panels::status::{AnalysisSummary, MidiLog, TopBar};
 use super::panels::{CoreView, Cx, EngineFrame, Panel, PreviewState};
 use super::prefs::{self, UiPrefs};
 use super::theme::THEME;
 use super::views::{self, Panels};
 use crate::core::analysis::{Analyser, Mode as AnalysisMode};
-use crate::core::collections::{CollectionCmd, CollectionId, CollectionKind, Collections, FlowCmd};
-use crate::core::edit;
+use crate::core::collections::{
+    CollectionCmd, CollectionId, CollectionKind, Collections, FlowCmd, Section,
+};
 use crate::core::command::{self, AppCmd, AudioCmd, Command, DeckCmd, PreviewCmd, ViewCmd};
+use crate::core::edit;
 use crate::core::history::{DeckNow, History};
 use crate::core::index::{LibraryCmd, LibraryIndex};
 use crate::core::keymap::Keymap;
@@ -189,6 +191,7 @@ impl EarshotApp {
             .unwrap_or_default();
         cc.egui_ctx.set_zoom_factor(prefs.ui_scale);
         let flow = FlowUi::from_saved(prefs.flow.clone());
+        let tables = prefs.tables.clone();
         let mut app = EarshotApp {
             ctx: cc.egui_ctx.clone(),
             player,
@@ -219,7 +222,7 @@ impl EarshotApp {
             hud: Hud::default(),
             prefs,
             modals: Modals::default(),
-            panels: Panels::new(LibraryPane::new(flow)),
+            panels: Panels::new(LibraryPane::new(flow, tables)),
             frame: EngineFrame::default(),
             settle_until: None,
         };
@@ -322,24 +325,17 @@ impl EarshotApp {
     fn view_cmd(&mut self, cmd: ViewCmd) {
         let lib = &mut self.panels.library;
         match cmd {
-            ViewCmd::Browse(n) => match lib.pane {
-                Pane::Library => lib.browser.move_focus(n),
-                Pane::Suggest => lib.suggest.move_focus(n),
-            },
+            ViewCmd::Browse(n) => lib.browse(n),
             ViewCmd::TogglePane => {
-                lib.pane = match lib.pane {
-                    Pane::Library => Pane::Suggest,
+                lib.focused_pane = match lib.focused_pane {
+                    Pane::Library | Pane::Flow => Pane::Suggest,
                     Pane::Suggest => Pane::Library,
                 };
             }
-            ViewCmd::FocusPane(p) => lib.pane = p,
+            ViewCmd::FocusPane(p) => lib.focused_pane = p,
             ViewCmd::FocusSearch => lib.browser.search_focus = true,
             ViewCmd::LoadSelected(deck) => {
-                let id = match lib.pane {
-                    Pane::Library => lib.browser.focused(),
-                    Pane::Suggest => lib.suggest.focused(),
-                };
-                if let Some(id) = id {
+                if let Some(id) = lib.focused_track() {
                     self.load(Some(deck), id);
                 }
             }
@@ -370,29 +366,29 @@ impl EarshotApp {
 
     /// The decks as the play history sees them: track, playing, tempo, key shift.
     fn decks_now(&self) -> Vec<DeckNow> {
-        let inner = self.player.lock().unwrap();
-        DeckId::first(DECKS)
-            .map(|d| {
-                let track = inner.session(d).track_id;
-                match &self.frame.snap {
-                    Some(sh) => {
-                        let sh = sh.deck(d);
-                        DeckNow {
-                            track,
-                            playing: sh.playing,
-                            bpm: sh.bpm,
-                            // How far the key has moved: not at all with keylock.
-                            key_speed: if sh.keylock { 1.0 } else { sh.tempo },
-                        }
-                    }
-                    None => DeckNow {
-                        track,
-                        key_speed: 1.0,
-                        ..Default::default()
-                    },
+        DeckId::first(DECKS).map(|d| self.deck_now(d)).collect()
+    }
+
+    /// A player as the play history sees it.
+    fn deck_now(&self, d: DeckId) -> DeckNow {
+        let track = self.player.lock().unwrap().session(d).track_id;
+        match &self.frame.snap {
+            Some(sh) => {
+                let sh = sh.deck(d);
+                DeckNow {
+                    track,
+                    playing: sh.playing,
+                    bpm: sh.bpm,
+                    // How far the key has moved: not at all with keylock.
+                    key_speed: if sh.keylock { 1.0 } else { sh.tempo },
                 }
-            })
-            .collect()
+            }
+            None => DeckNow {
+                track,
+                key_speed: 1.0,
+                ..Default::default()
+            },
+        }
     }
 
     /// Note which deck started playing last, and mark tracks played after 30 s.
@@ -402,13 +398,16 @@ impl EarshotApp {
     }
 
     /// Suggestions after the source's reference: a deck's track at its actual tempo
-    /// and key, or the selected track (the Flow's selected card, while it's open).
+    /// and key (in Prepare, the player's while it plays), or the focused list's
+    /// selected track.
     fn refresh_suggestions(&mut self) {
         let decks = self.decks_now();
+        let prepare = (self.prefs.mode == Mode::Prepare).then(|| self.deck_now(DeckId::PREPARE));
         let lib = &mut self.panels.library;
-        let selected = match lib.flow.open {
-            true => lib.flow.selected_track().or(lib.browser.focused()),
-            false => lib.browser.focused(),
+        // The suggestions' own selection isn't a reference for themselves.
+        let selected = match lib.focused_pane {
+            Pane::Suggest => lib.browser.focused(),
+            _ => lib.focused_track(),
         };
         let view = CoreView {
             lib: &self.index,
@@ -416,7 +415,8 @@ impl EarshotApp {
             collections: &self.collections,
             open_flow: lib.flow.flow,
         };
-        lib.suggest.refresh(&view, &decks, selected);
+        lib.suggest
+            .refresh(&view, &decks, prepare.as_ref(), selected);
     }
 
     /// Draw the window, collecting what it asks for.
@@ -451,6 +451,7 @@ impl EarshotApp {
             .frame(THEME.bar_frame())
             .show(ctx, |ui| MidiLog(&self.midi_log).ui(ui, &mut cx));
         views::show(ctx, &mut self.panels, &mut cx);
+        drag::paint_ghost(ctx, cx.core.lib);
 
         let routing = player::routing(&self.player, self.audio.as_ref().map_or(2, |i| i.channels));
         let env = ModalEnv {
@@ -468,6 +469,7 @@ impl EarshotApp {
 impl eframe::App for EarshotApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.prefs.flow = self.panels.library.flow.saved();
+        self.prefs.tables = self.panels.library.tables.clone();
         eframe::set_value(storage, prefs::KEY, &self.prefs);
     }
 

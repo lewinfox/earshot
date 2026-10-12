@@ -1,28 +1,16 @@
-//! Collections in the left pane: Flows, crates, playlists and smart playlists, in
-//! folders you can nest, rename and drag between. Each kind has its own icon; a
-//! Flow that is one chain of cards gets a list, one that branches a fork. Drop
-//! tracks on a crate, playlist or Flow to add them.
+//! One section's collections in the left pane (Playlists, Crates or Flows), in
+//! folders and sub-folders you can make, rename, move (drag one onto a folder, or
+//! onto the heading for the top level) and delete. Each kind has its own icon; a
+//! Flow that is one chain of cards gets a list, one that branches a fork. Click one
+//! to list its tracks; drop tracks on a crate, playlist or Flow to add them.
 
 use egui::{RichText, Sense, Stroke, Ui, pos2, vec2};
 
+use super::drag::{self, DragPayload};
 use crate::core::collections::{
-    Collection, CollectionCmd, CollectionId, CollectionKind, Collections,
+    Collection, CollectionCmd, CollectionId, CollectionKind, Collections, Section,
 };
-use crate::core::track::TrackId;
 use crate::ui::theme::THEME;
-
-/// A collection being dragged round the tree (a track's payload is a bare id).
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct Item(pub CollectionId);
-
-/// Kinds the "+" menu makes, in its order.
-const NEW: [CollectionKind; 5] = [
-    CollectionKind::Flow,
-    CollectionKind::Crate,
-    CollectionKind::Playlist,
-    CollectionKind::Smart,
-    CollectionKind::Folder,
-];
 
 #[derive(Default)]
 pub struct CollectionsUi {
@@ -39,8 +27,6 @@ pub struct TreeCtx<'a> {
     pub open: Option<CollectionId>,
     /// The library's search, which a new smart playlist starts from.
     pub search: &'a str,
-    /// The library's selection: dropping one of these tracks adds them all.
-    pub selected: &'a [TrackId],
 }
 
 impl CollectionsUi {
@@ -50,38 +36,64 @@ impl CollectionsUi {
         self.focus = true;
     }
 
-    pub fn show(&mut self, ui: &mut Ui, cx: &TreeCtx, out: &mut Vec<CollectionCmd>) {
-        let header = ui
-            .horizontal(|ui| {
-                ui.label(RichText::new("COLLECTIONS").size(10.0).color(THEME.muted));
-                ui.menu_button(RichText::new("+").color(THEME.muted), |ui| {
-                    new_menu(ui, None, cx, out)
-                })
-                .response
-                .on_hover_text("New Flow, crate, playlist or folder");
-            })
-            .response;
-        // Drop on the heading: move to the top level.
-        drop_target(ui, &header, None, cx, out);
-        if cx.collections.all().is_empty() {
-            ui.label(
-                RichText::new("Flows, crates and playlists you make are kept here.")
-                    .size(11.0)
-                    .color(THEME.muted),
-            );
-        }
-        self.contents(ui, None, cx, out);
+    /// The section's tree.
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        section: Section,
+        cx: &TreeCtx,
+        out: &mut Vec<CollectionCmd>,
+    ) {
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                let header = ui
+                    .horizontal(|ui| {
+                        ui.label(
+                            RichText::new(section.label().to_uppercase())
+                                .size(10.0)
+                                .color(THEME.muted),
+                        );
+                        ui.menu_button(RichText::new("+").color(THEME.muted), |ui| {
+                            new_menu(ui, section, None, cx, out)
+                        })
+                        .response
+                        .on_hover_text(format!("New {} or folder", section.kinds()[0].label()));
+                    })
+                    .response;
+                // Drop on the heading: move to the top level.
+                drop_target(ui, &header, None, cx, out);
+                if cx.collections.children_in(section, None).is_empty() {
+                    ui.label(
+                        RichText::new(match section {
+                            Section::Playlists => "Playlists you make are kept here.",
+                            Section::Crates => "Crates you make are kept here.",
+                            Section::Flows => "Flows you plan are kept here.",
+                        })
+                        .size(11.0)
+                        .color(THEME.muted),
+                    );
+                }
+                self.contents(ui, section, None, cx, out);
+                // The space below: also the top level.
+                let rest = ui.allocate_response(
+                    vec2(ui.available_width(), ui.available_height().max(20.0)),
+                    Sense::hover(),
+                );
+                drop_target(ui, &rest, None, cx, out);
+            });
     }
 
     /// What's directly inside `folder`.
     fn contents(
         &mut self,
         ui: &mut Ui,
+        section: Section,
         folder: Option<CollectionId>,
         cx: &TreeCtx,
         out: &mut Vec<CollectionCmd>,
     ) {
-        for c in cx.collections.children(folder) {
+        for c in cx.collections.children_in(section, folder) {
             if c.kind == CollectionKind::Folder {
                 let id = ui.make_persistent_id(("collection-folder", c.id));
                 let state = egui::collapsing_header::CollapsingState::load_with_default_open(
@@ -90,8 +102,8 @@ impl CollectionsUi {
                     true,
                 );
                 let (_, header, _) = state
-                    .show_header(ui, |ui| self.folder_label(ui, c, cx, out))
-                    .body(|ui| self.contents(ui, Some(c.id), cx, out));
+                    .show_header(ui, |ui| self.folder_label(ui, section, c, cx, out))
+                    .body(|ui| self.contents(ui, section, Some(c.id), cx, out));
                 drop_target(ui, &header.response, Some(c), cx, out);
             } else {
                 let r = ui.horizontal(|ui| {
@@ -107,6 +119,7 @@ impl CollectionsUi {
     fn folder_label(
         &mut self,
         ui: &mut Ui,
+        section: Section,
         f: &Collection,
         cx: &TreeCtx,
         out: &mut Vec<CollectionCmd>,
@@ -116,13 +129,17 @@ impl CollectionsUi {
         }
         let r = ui
             .selectable_label(cx.open == Some(f.id), RichText::new(&f.name).strong())
-            .interact(Sense::click_and_drag());
-        r.dnd_set_drag_payload(Item(f.id));
+            .interact(Sense::click_and_drag())
+            .on_hover_text("Click to list every track in it; drag onto another folder to move");
+        r.dnd_set_drag_payload(DragPayload::Collection(f.id));
         if r.clicked() {
-            out.push(CollectionCmd::Open(f.id));
+            out.push(CollectionCmd::Show(f.id));
+        }
+        if r.double_clicked() {
+            self.start_rename(f);
         }
         r.context_menu(|ui| {
-            ui.menu_button("New here", |ui| new_menu(ui, Some(f.id), cx, out));
+            ui.menu_button("New here", |ui| new_menu(ui, section, Some(f.id), cx, out));
             ui.separator();
             if ui.button("Rename").clicked() {
                 self.start_rename(f);
@@ -151,7 +168,7 @@ impl CollectionsUi {
         let n = c.tracks.len();
         let tip = match c.kind {
             CollectionKind::Flow => format!(
-                "Flow: {n} card{}{}",
+                "Flow: {n} card{}{}. Double-click to open it on the canvas",
                 if n == 1 { "" } else { "s" },
                 if c.linear {
                     " in one chain"
@@ -172,14 +189,22 @@ impl CollectionsUi {
             .selectable_label(cx.open == Some(c.id), &c.name)
             .interact(Sense::click_and_drag())
             .on_hover_text(tip);
-        r.dnd_set_drag_payload(Item(c.id));
+        r.dnd_set_drag_payload(DragPayload::Collection(c.id));
         if r.clicked() {
-            out.push(CollectionCmd::Open(c.id));
+            out.push(CollectionCmd::Show(c.id));
         }
         if r.double_clicked() {
-            self.start_rename(c);
+            if c.kind == CollectionKind::Flow {
+                out.push(CollectionCmd::Open(c.id));
+            } else {
+                self.start_rename(c);
+            }
         }
         r.context_menu(|ui| {
+            if c.kind == CollectionKind::Flow && ui.button("Open on the canvas").clicked() {
+                out.push(CollectionCmd::Open(c.id));
+                ui.close();
+            }
             if ui.button("Rename").clicked() {
                 self.start_rename(c);
                 ui.close();
@@ -233,9 +258,15 @@ impl CollectionsUi {
     }
 }
 
-/// "New Flow", "New crate" … in `parent`.
-fn new_menu(ui: &mut Ui, parent: Option<CollectionId>, cx: &TreeCtx, out: &mut Vec<CollectionCmd>) {
-    for kind in NEW {
+/// "New playlist", "New smart playlist", "New folder" … in `parent`.
+fn new_menu(
+    ui: &mut Ui,
+    section: Section,
+    parent: Option<CollectionId>,
+    cx: &TreeCtx,
+    out: &mut Vec<CollectionCmd>,
+) {
+    for &kind in section.kinds() {
         let label = match kind {
             CollectionKind::Smart if !cx.search.trim().is_empty() => {
                 "New smart playlist from the search".to_string()
@@ -252,21 +283,31 @@ fn new_menu(ui: &mut Ui, parent: Option<CollectionId>, cx: &TreeCtx, out: &mut V
             ui.close();
         }
     }
+    if ui.button("New folder").clicked() {
+        out.push(CollectionCmd::CreateFolder { section, parent });
+        ui.close();
+    }
 }
 
-/// "Move to" with every folder the item can go into.
+/// "Move to" with every folder of its section the item can go into.
 fn move_menu(ui: &mut Ui, c: &Collection, cs: &Collections, out: &mut Vec<CollectionCmd>) {
     ui.menu_button("Move to", |ui| {
-        if ui.button("Top level").clicked() {
+        if ui
+            .add_enabled(c.parent.is_some(), egui::Button::new("Top level"))
+            .clicked()
+        {
             out.push(CollectionCmd::Move(c.id, None));
             ui.close();
         }
-        for (f, depth) in cs.folders_in_order() {
-            if c.kind == CollectionKind::Folder && cs.is_within(f.id, c.id) {
+        for (f, depth) in cs.folders_in_order(c.section) {
+            if !cs.can_move(c.id, Some(f.id)) {
                 continue;
             }
             let label = format!("{}{}", "   ".repeat(depth), f.name);
-            if ui.button(label).clicked() {
+            if ui
+                .add_enabled(c.parent != Some(f.id), egui::Button::new(label))
+                .clicked()
+            {
                 out.push(CollectionCmd::Move(c.id, Some(f.id)));
                 ui.close();
             }
@@ -275,8 +316,8 @@ fn move_menu(ui: &mut Ui, c: &Collection, cs: &Collections, out: &mut Vec<Collec
 }
 
 /// Highlight while something that fits is dragged over `r`. A collection dropped
-/// on a folder (or the heading, `None`) moves there; tracks dropped on a crate,
-/// playlist or Flow are added to it.
+/// on a folder of its section (or the heading, `None`) moves there; tracks dropped
+/// on a crate, playlist or Flow are added to it.
 fn drop_target(
     ui: &Ui,
     r: &egui::Response,
@@ -284,15 +325,24 @@ fn drop_target(
     cx: &TreeCtx,
     out: &mut Vec<CollectionCmd>,
 ) {
-    use egui::DragAndDrop;
     if !ui.rect_contains_pointer(r.rect) {
         return;
     }
-    let folder = target.is_none_or(|t| t.kind == CollectionKind::Folder);
-    let item = folder && DragAndDrop::has_payload_of_type::<Item>(ui.ctx());
-    let tracks = target.is_some_and(|t| t.kind.takes_tracks())
-        && DragAndDrop::has_payload_of_type::<TrackId>(ui.ctx());
-    if !item && !tracks {
+    let Some(p) = drag::payload(ui.ctx()) else {
+        return;
+    };
+    let fits = match p.as_ref() {
+        DragPayload::Collection(id) => {
+            target.is_none_or(|t| t.id != *id)
+                && cx.collections.can_move(*id, target.map(|t| t.id))
+                && cx
+                    .collections
+                    .get(*id)
+                    .is_some_and(|c| c.parent != target.map(|t| t.id))
+        }
+        DragPayload::Tracks { .. } => target.is_some_and(|t| t.kind.takes_tracks()),
+    };
+    if !fits {
         return;
     }
     ui.painter().rect_stroke(
@@ -304,26 +354,17 @@ fn drop_target(
     if !ui.input(|i| i.pointer.any_released()) {
         return;
     }
-    if item
-        && let Some(Item(id)) = DragAndDrop::take_payload::<Item>(ui.ctx())
-            .as_deref()
-            .copied()
-        && target.is_none_or(|t| t.id != id)
-    {
-        out.push(CollectionCmd::Move(id, target.map(|t| t.id)));
-    }
-    if tracks
-        && let Some(t) = target
-        && let Some(id) = DragAndDrop::take_payload::<TrackId>(ui.ctx())
-            .as_deref()
-            .copied()
-    {
-        let tracks = if cx.selected.contains(&id) {
-            cx.selected.to_vec()
-        } else {
-            vec![id]
-        };
-        out.push(CollectionCmd::AddTracks { to: t.id, tracks });
+    egui::DragAndDrop::clear_payload(ui.ctx());
+    match p.as_ref() {
+        DragPayload::Collection(id) => out.push(CollectionCmd::Move(*id, target.map(|t| t.id))),
+        DragPayload::Tracks { ids, .. } => {
+            if let Some(t) = target {
+                out.push(CollectionCmd::AddTracks {
+                    to: t.id,
+                    tracks: ids.clone(),
+                });
+            }
+        }
     }
 }
 

@@ -4,6 +4,8 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use earshot_engine::DeckId;
+
 use super::index::LibraryIndex;
 use super::keys::Camelot;
 use super::suggest::{self, Direction, Reference, Scored};
@@ -139,16 +141,18 @@ impl History {
     }
 
     /// The reference track `source` asks for: a deck's track at its actual tempo and
-    /// key, or `selected` as it is in the library.
+    /// key, or `selected` as it is in the library. `prepare` is Prepare's player, in
+    /// Prepare mode: while it plays, it's the master (its `deck` is
+    /// `DeckId::PREPARE.index()`).
     pub fn reference(
         &self,
         lib: &LibraryIndex,
         source: RefSource,
         decks: &[DeckNow],
+        prepare: Option<&DeckNow>,
         selected: Option<TrackId>,
     ) -> Option<RefTrack> {
-        let on_deck = |d: usize| {
-            let deck = decks.get(d)?;
+        let as_ref = |deck: &DeckNow, d: usize| {
             let t = lib.get(deck.track?)?;
             Some(RefTrack {
                 bpm: deck.bpm.or(t.bpm),
@@ -158,12 +162,17 @@ impl History {
                 ..RefTrack::of(t)
             })
         };
+        let on_deck = |d: usize| as_ref(decks.get(d)?, d);
         match source {
-            RefSource::Master => self
-                .last_started
+            RefSource::Master => prepare
+                .and_then(|p| as_ref(p, DeckId::PREPARE.index()))
                 .into_iter()
-                .chain(0..decks.len())
-                .filter_map(on_deck)
+                .chain(
+                    self.last_started
+                        .into_iter()
+                        .chain(0..decks.len())
+                        .filter_map(on_deck),
+                )
                 .find(|r| r.playing),
             RefSource::Deck(d) => on_deck(d),
             RefSource::Selected => lib.get(selected?).map(RefTrack::of),
@@ -258,26 +267,30 @@ mod tests {
         let mut s = History::default();
         let decks = [deck(1, false), deck(3, true)];
         s.tick(Instant::now(), &decks);
-        let master = s.reference(&ix, RefSource::Master, &decks, None).unwrap();
+        let master = s
+            .reference(&ix, RefSource::Master, &decks, None, None)
+            .unwrap();
         assert_eq!(
             (master.id, master.deck, master.bpm),
             (3, Some(1), Some(126.0))
         );
-        let a = s.reference(&ix, RefSource::Deck(0), &decks, None).unwrap();
+        let a = s
+            .reference(&ix, RefSource::Deck(0), &decks, None, None)
+            .unwrap();
         assert_eq!((a.id, a.playing), (1, false));
         let sel = s
-            .reference(&ix, RefSource::Selected, &decks, Some(2))
+            .reference(&ix, RefSource::Selected, &decks, None, Some(2))
             .unwrap();
         assert_eq!((sel.id, sel.deck, sel.bpm), (2, None, Some(124.0)));
         assert!(
-            s.reference(&ix, RefSource::Selected, &decks, None)
+            s.reference(&ix, RefSource::Selected, &decks, None, None)
                 .is_none()
         );
         // Nothing playing: no master.
         let idle = [deck(1, false), deck(3, false)];
         assert!(
             History::default()
-                .reference(&ix, RefSource::Master, &idle, None)
+                .reference(&ix, RefSource::Master, &idle, None, None)
                 .is_none()
         );
         // Pitched up a semitone without keylock: the key moves.
@@ -285,8 +298,41 @@ mod tests {
             key_speed: 2f64.powf(1.0 / 12.0),
             ..deck(1, true)
         }];
-        let r = s.reference(&ix, RefSource::Deck(0), &up, None).unwrap();
+        let r = s
+            .reference(&ix, RefSource::Deck(0), &up, None, None)
+            .unwrap();
         assert_eq!(r.key, parse_key("3A"));
+    }
+
+    /// The FEATURES.md bug: in Prepare, Master didn't see Prepare's player playing.
+    #[test]
+    fn in_prepare_the_master_is_the_player() {
+        let ix = lib();
+        let s = History::default();
+        let idle = [deck(1, false), deck(3, false)];
+        let player = deck(2, true);
+        let m = s
+            .reference(&ix, RefSource::Master, &idle, Some(&player), None)
+            .unwrap();
+        assert_eq!(
+            (m.id, m.deck, m.playing),
+            (2, Some(DeckId::PREPARE.index()), true)
+        );
+        // It goes first while it plays; paused, a live deck that plays is the master.
+        let live = [deck(1, true), deck(3, false)];
+        let m = s
+            .reference(&ix, RefSource::Master, &live, Some(&player), None)
+            .unwrap();
+        assert_eq!(m.id, 2);
+        let paused = deck(2, false);
+        let m = s
+            .reference(&ix, RefSource::Master, &live, Some(&paused), None)
+            .unwrap();
+        assert_eq!((m.id, m.deck), (1, Some(0)));
+        assert!(
+            s.reference(&ix, RefSource::Master, &idle, Some(&paused), None)
+                .is_none()
+        );
     }
 
     #[test]

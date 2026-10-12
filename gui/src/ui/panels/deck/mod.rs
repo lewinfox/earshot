@@ -30,6 +30,7 @@ use crate::core::command::{Command, DeckCmd, MixerCmd, ViewCmd};
 use crate::core::player::GridOp;
 use crate::core::store::{Memory, TrackCues};
 use crate::core::track::Track;
+use crate::ui::panels::library::drag;
 use crate::ui::panels::{Cx, Panel};
 use crate::ui::theme::{self, THEME};
 use crate::ui::util::{self, Camelot};
@@ -383,8 +384,8 @@ impl DeckUi {
             ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click_and_drag());
         if self.pending.is_some() {
             self.loading(ui, rect);
-            if let Some(id) = resp.dnd_release_payload::<i64>() {
-                self.send(out, DeckCmd::Load(*id));
+            if let Some(id) = drag::take_track(&resp) {
+                self.send(out, DeckCmd::Load(id));
             }
             return;
         }
@@ -445,8 +446,8 @@ impl DeckUi {
                 out.push(ViewCmd::WaveZoom(zoom).into());
             }
         }
-        if let Some(id) = resp.dnd_release_payload::<i64>() {
-            self.send(out, DeckCmd::Load(*id));
+        if let Some(id) = drag::take_track(&resp) {
+            self.send(out, DeckCmd::Load(id));
         }
     }
 
@@ -505,7 +506,7 @@ impl DeckUi {
                 });
             })
             .response;
-        if resp.dnd_hover_payload::<i64>().is_some() {
+        if drag::hovering_tracks(&resp) {
             ui.painter().rect_stroke(
                 resp.rect,
                 8.0,
@@ -513,8 +514,8 @@ impl DeckUi {
                 StrokeKind::Inside,
             );
         }
-        if let Some(id) = resp.dnd_release_payload::<i64>() {
-            self.send(out, DeckCmd::Load(*id));
+        if let Some(id) = drag::take_track(&resp) {
+            self.send(out, DeckCmd::Load(id));
         }
     }
 

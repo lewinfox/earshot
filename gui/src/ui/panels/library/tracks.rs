@@ -7,7 +7,7 @@ use earshot_engine::DeckId;
 use egui::{Color32, RichText, Sense, TextureHandle, TextureId, Ui, vec2};
 
 use crate::core::bus::deck_letter;
-use crate::core::collections::{CollectionCmd, CollectionId, CollectionKind, FlowCmd};
+use crate::core::collections::{CollectionCmd, CollectionId, CollectionKind, FlowCmd, Section};
 use crate::core::command::{Command, DeckCmd, PreviewCmd};
 use crate::core::edit::EditCmd;
 use crate::core::index::LibraryCmd;
@@ -122,7 +122,7 @@ pub fn status_mark(ui: &mut Ui, t: &Track, state: Option<&AnalysisState>) {
             "Analysed (dynamic): the grid follows the tempo".into(),
         ),
         None if t.drifts => (
-            Mark::Text("~".into(), THEME.warn),
+            Mark::Text("~".into(), THEME.bad),
             "The tempo seems to drift: right-click, Analyse (dynamic)".into(),
         ),
         None if t.analysed() => (
@@ -165,88 +165,32 @@ pub struct MenuAt {
 }
 
 /// The one right-click menu for tracks, in every list: `sel` is what it acts on
-/// (the selection, or just the row clicked outside it).
+/// (the selection, or just the row clicked outside it). Its parts, in order:
+/// loading, adding to collections ([`add_to_menus`]), removing, editing the
+/// metadata, then analysis. Tools (the tempo lock) go after analysis.
 pub fn track_menu(ui: &mut Ui, sel: &[TrackId], v: &CoreView, at: MenuAt, out: &mut Vec<Command>) {
     let Some(&first) = sel.first() else { return };
     let n = sel.len();
-    let mut push = |ui: &mut Ui, c: Command| {
-        out.push(c);
-        ui.close();
-    };
     if n == 1 {
-        let players = DeckId::first(DECKS).chain([DeckId::PREPARE]);
-        for deck in players {
-            let label = match deck_letter(deck) {
-                Some(l) => format!("Load to deck {l}"),
-                None => "Load to Prepare's player".to_string(),
-            };
-            if ui.button(label).clicked() {
-                push(ui, Command::Deck(deck, DeckCmd::Load(first)));
-            }
-        }
-        if ui.button("Preview in headphones").clicked() {
-            push(ui, Command::Preview(PreviewCmd::Toggle(first)));
-        }
+        load_items(ui, first, out);
         ui.separator();
     }
-    let count = |s: &str| {
-        if n == 1 {
-            s.to_string()
-        } else {
-            format!("{s} {n}")
-        }
-    };
-    if ui.button(format!("{} to Flow", count("Add"))).clicked() {
-        push(ui, FlowCmd::AddTracks(sel.to_vec()).into());
-    }
-    ui.menu_button(format!("{} to", count("Add")), |ui| {
-        for kind in [CollectionKind::Crate, CollectionKind::Playlist] {
-            if ui.button(format!("New {}", kind.label())).clicked() {
-                let c = CollectionCmd::Create {
-                    kind,
-                    parent: None,
-                    tracks: sel.to_vec(),
-                    query: None,
-                };
-                push(ui, c.into());
-            }
-        }
-        let takers: Vec<_> = v.collections.takers().collect();
-        if !takers.is_empty() {
-            ui.separator();
-        }
-        for c in takers {
-            let label = format!("{}  ({})", c.name, c.kind.label());
-            if ui.button(label).clicked() {
-                let to = c.id;
-                let cmd = match v.open_flow {
-                    // The canvas has the open Flow; add there so it isn't overwritten.
-                    Some(f) if f == to => FlowCmd::AddTracks(sel.to_vec()).into(),
-                    _ => CollectionCmd::AddTracks {
-                        to,
-                        tracks: sel.to_vec(),
-                    }
-                    .into(),
-                };
-                push(ui, cmd);
-            }
-        }
-    });
+    add_to_menus(ui, sel, v, out);
     if let Some(c) = at.viewing.and_then(|id| v.collections.get(id))
-        && matches!(c.kind, CollectionKind::Crate | CollectionKind::Playlist)
+        && c.kind.takes_tracks()
+        && v.open_flow != Some(c.id)
         && ui
-            .button(format!("{} from \"{}\"", count("Remove"), c.name))
+            .button(format!("{} from \"{}\"", count("Remove", n), c.name))
             .clicked()
     {
-        let from = c.id;
-        push(
-            ui,
+        out.push(
             CollectionCmd::RemoveTracks {
-                from,
+                from: c.id,
                 tracks: sel.to_vec(),
             }
             .into(),
         );
+        ui.close();
     }
     let edit = if n == 1 {
         "Edit…".to_string()
@@ -254,11 +198,144 @@ pub fn track_menu(ui: &mut Ui, sel: &[TrackId], v: &CoreView, at: MenuAt, out: &
         format!("Edit {n} tracks…")
     };
     if ui.button(edit).clicked() {
-        push(ui, EditCmd::Editor(sel.to_vec()).into());
+        out.push(EditCmd::Editor(sel.to_vec()).into());
+        ui.close();
     }
     ui.separator();
-    let analyse = |tracks: Vec<TrackId>, dynamic| LibraryCmd::Analyse { tracks, dynamic }.into();
+    analyse_items(ui, sel, v, out);
+}
+
+/// "Add" or "Add 3".
+fn count(verb: &str, n: usize) -> String {
     if n == 1 {
+        verb.to_string()
+    } else {
+        format!("{verb} {n}")
+    }
+}
+
+/// Load onto a deck or Prepare's player, or preview in the headphones.
+fn load_items(ui: &mut Ui, id: TrackId, out: &mut Vec<Command>) {
+    let players = DeckId::first(DECKS).chain([DeckId::PREPARE]);
+    for deck in players {
+        let label = match deck_letter(deck) {
+            Some(l) => format!("Load to deck {l}"),
+            None => "Load to Prepare's player".to_string(),
+        };
+        if ui.button(label).clicked() {
+            out.push(Command::Deck(deck, DeckCmd::Load(id)));
+            ui.close();
+        }
+    }
+    if ui.button("Preview in headphones").clicked() {
+        out.push(Command::Preview(PreviewCmd::Toggle(id)));
+        ui.close();
+    }
+}
+
+/// "Add to Playlist ▸", "Add to Crate ▸", "Add to Flow ▸": each lists that tree, its
+/// folders as submenus, with "New …" at the top. Added to a Flow, tracks are new
+/// cards not linked to any other.
+pub fn add_to_menus(ui: &mut Ui, sel: &[TrackId], v: &CoreView, out: &mut Vec<Command>) {
+    let n = sel.len();
+    for (section, kind) in [
+        (Section::Playlists, CollectionKind::Playlist),
+        (Section::Crates, CollectionKind::Crate),
+        (Section::Flows, CollectionKind::Flow),
+    ] {
+        let title = format!("{} to {}", count("Add", n), title_case(kind.label()));
+        ui.menu_button(title, |ui| {
+            if ui.button(format!("New {}", kind.label())).clicked() {
+                out.push(
+                    CollectionCmd::Create {
+                        kind,
+                        parent: None,
+                        tracks: sel.to_vec(),
+                        query: None,
+                    }
+                    .into(),
+                );
+                ui.close();
+            }
+            if kind == CollectionKind::Flow && ui.button("The canvas").clicked() {
+                // Whatever is on the canvas, opening it (a new Flow if it's empty).
+                out.push(FlowCmd::AddTracks(sel.to_vec()).into());
+                ui.close();
+            }
+            let any = v
+                .collections
+                .children_in(section, None)
+                .iter()
+                .any(|c| c.kind == kind || c.kind == CollectionKind::Folder);
+            if any {
+                ui.separator();
+            }
+            add_to_tree(ui, section, kind, None, sel, v, out);
+        });
+    }
+}
+
+/// One folder's level of an "Add to" menu: subfolders as submenus, then `kind`'s
+/// collections.
+fn add_to_tree(
+    ui: &mut Ui,
+    section: Section,
+    kind: CollectionKind,
+    folder: Option<CollectionId>,
+    sel: &[TrackId],
+    v: &CoreView,
+    out: &mut Vec<Command>,
+) {
+    for c in v.collections.children_in(section, folder) {
+        if c.kind == CollectionKind::Folder {
+            ui.menu_button(&c.name, |ui| {
+                add_to_tree(ui, section, kind, Some(c.id), sel, v, out);
+                if !v
+                    .collections
+                    .children_in(section, Some(c.id))
+                    .iter()
+                    .any(|i| i.kind == kind || i.kind == CollectionKind::Folder)
+                {
+                    ui.label(RichText::new("(empty)").color(THEME.muted));
+                }
+            });
+        } else if c.kind == kind {
+            let label = if v.open_flow == Some(c.id) {
+                format!("{}  (open)", c.name)
+            } else {
+                c.name.clone()
+            };
+            if ui.button(label).clicked() {
+                // The app adds to the open Flow on its canvas, so it isn't overwritten.
+                out.push(
+                    CollectionCmd::AddTracks {
+                        to: c.id,
+                        tracks: sel.to_vec(),
+                    }
+                    .into(),
+                );
+                ui.close();
+            }
+        }
+    }
+}
+
+/// "playlist" → "Playlist".
+fn title_case(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
+}
+
+/// Analyse, again, dynamically; for several, the unanalysed ones.
+fn analyse_items(ui: &mut Ui, sel: &[TrackId], v: &CoreView, out: &mut Vec<Command>) {
+    let n = sel.len();
+    let mut push = |ui: &mut Ui, tracks: Vec<TrackId>, dynamic| {
+        out.push(LibraryCmd::Analyse { tracks, dynamic }.into());
+        ui.close();
+    };
+    if let [first] = *sel {
         let t = v.lib.get(first);
         let label = if t.is_some_and(|t| t.analysed()) {
             "Analyse again"
@@ -266,7 +343,7 @@ pub fn track_menu(ui: &mut Ui, sel: &[TrackId], v: &CoreView, at: MenuAt, out: &
             "Analyse"
         };
         if ui.button(label).clicked() {
-            push(ui, analyse(vec![first], false));
+            push(ui, vec![first], false);
         }
         let hint = if t.is_some_and(|t| t.drifts) {
             "  (suggested)"
@@ -274,7 +351,7 @@ pub fn track_menu(ui: &mut Ui, sel: &[TrackId], v: &CoreView, at: MenuAt, out: &
             ""
         };
         if ui.button(format!("Analyse (dynamic){hint}")).clicked() {
-            push(ui, analyse(vec![first], true));
+            push(ui, vec![first], true);
         }
         return;
     }
@@ -284,7 +361,7 @@ pub fn track_menu(ui: &mut Ui, sel: &[TrackId], v: &CoreView, at: MenuAt, out: &
         .filter(|i| v.lib.get(*i).is_some_and(|t| !t.analysed()))
         .collect();
     if ui.button(format!("Analyse {n} tracks")).clicked() {
-        push(ui, analyse(sel.to_vec(), false));
+        push(ui, sel.to_vec(), false);
     }
     if ui
         .add_enabled(
@@ -293,9 +370,9 @@ pub fn track_menu(ui: &mut Ui, sel: &[TrackId], v: &CoreView, at: MenuAt, out: &
         )
         .clicked()
     {
-        push(ui, analyse(fresh, false));
+        push(ui, fresh, false);
     }
     if ui.button(format!("Analyse {n} tracks (dynamic)")).clicked() {
-        push(ui, analyse(sel.to_vec(), true));
+        push(ui, sel.to_vec(), true);
     }
 }

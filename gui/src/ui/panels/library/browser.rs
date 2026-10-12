@@ -1,27 +1,25 @@
-//! The library browser: the folder tree on the left (collections, then the
-//! filesystem Explorer, like Rekordbox's) and the track list. Tracks can be
-//! multi-selected (Ctrl/Shift-click, Ctrl+A), dragged onto a deck or a collection,
-//! double-clicked to load, and right-clicked for the track menu. The list shows the
-//! whole library, an Explorer folder, or a collection, filtered by the search box
-//! (`core::query`) and sorted by a column or the search's `sort:`.
+//! The library's track list and what it shows: every track, a folder on disk (the
+//! Explorer tree, a source of its own), or a collection. Filtered by the search box
+//! (`core::query`) and the columns' filters, sorted by a column or the search's
+//! `sort:`. Drawn by the one [`TrackTable`], so it multi-selects, drags, reorders a
+//! playlist's rows and has the track menu.
 
 use std::collections::HashMap;
 
-use egui::{Align, RichText, Sense, Ui, vec2};
-use egui_extras::{Column, TableBuilder};
+use egui::{Align, RichText, Ui};
 
-use super::tracks::{Media, MenuAt, status_mark, title_cell, track_menu};
+use super::drag::Origin;
+use super::table::{ColumnId, Filter, TableState, TableView, TrackTable};
+use super::tracks::{Media, MenuAt};
 use crate::core::collections::{CollectionCmd, CollectionId, CollectionKind};
 use crate::core::command::Command;
 use crate::core::index::LibraryCmd;
 use crate::core::library::{self, Subdir};
-use crate::core::query::{self, Dir, Expr, Field, Query, Sort};
-use crate::core::selection::{Mods, Selection};
-use crate::core::track::TrackId;
+use crate::core::query::{self, Expr, Query, Sort};
+use crate::core::selection::Selection;
+use crate::core::track::{Status, TrackId};
 use crate::ui::panels::CoreView;
 use crate::ui::theme::THEME;
-use crate::ui::util;
-use crate::ui::widgets::key_chip;
 
 /// What the track list shows.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -45,13 +43,12 @@ pub struct LibraryUi {
     query: Query,
     /// What's wrong with the search as typed.
     error: Option<String>,
-    /// From the column headers; the search's `sort:` wins over it.
-    sort: Sort,
     /// The rows shown, in order.
     shown: Vec<TrackId>,
-    /// (library, collections, this pane) revisions `shown` was worked out for.
-    built_for: Option<(u64, u64, u64)>,
-    /// Bumped when the search, scope or sort change.
+    /// What `shown` was worked out for: (library, collections, this pane) revisions,
+    /// and the table's sort and filters.
+    built_for: Option<((u64, u64, u64), Sort, Result<Expr, String>)>,
+    /// Bumped when the search or scope change.
     rev: u64,
     /// Unanalysed tracks among `shown`, for the header button.
     unanalysed: Vec<TrackId>,
@@ -78,11 +75,6 @@ impl LibraryUi {
         self.sel.focused()
     }
 
-    /// The selected tracks, in list order.
-    pub fn selected(&self) -> Vec<TrackId> {
-        self.sel.in_order(&self.shown)
-    }
-
     pub fn move_focus(&mut self, delta: i32) {
         self.scroll_to = self.sel.move_focus(delta, &self.shown);
     }
@@ -98,18 +90,48 @@ impl LibraryUi {
         self.rev += 1;
     }
 
+    /// The kind of list the scope is, for its table's columns and sort.
+    pub fn view(&self, v: &CoreView) -> TableView {
+        match &self.scope {
+            Scope::All => TableView::Library,
+            Scope::Folder(_) => TableView::Explorer,
+            Scope::Collection(id) => match v.collections.get(*id).map(|c| c.kind) {
+                Some(CollectionKind::Playlist) => TableView::Playlist,
+                Some(CollectionKind::Smart) => TableView::Smart,
+                Some(CollectionKind::Crate) => TableView::Crate,
+                Some(CollectionKind::Flow) => TableView::Flow,
+                Some(CollectionKind::Folder) | None => TableView::Folder,
+            },
+        }
+    }
+
+    fn collection(&self) -> Option<CollectionId> {
+        match self.scope {
+            Scope::Collection(id) => Some(id),
+            _ => None,
+        }
+    }
+
     /// Work the rows out again if the library, the collections, the search, the
-    /// scope or the sort changed.
-    pub fn refresh(&mut self, v: &CoreView) {
+    /// scope or the table's sort and filters changed.
+    pub fn refresh(&mut self, v: &CoreView, table: &TableState) {
         let stamp = (v.lib.rev(), v.collections.rev(), self.rev);
-        if self.built_for == Some(stamp) {
+        let (sort, filter) = (table.sort(), table.filter());
+        if self
+            .built_for
+            .as_ref()
+            .is_some_and(|b| b.0 == stamp && b.1 == sort && b.2 == filter)
+        {
             return;
         }
-        self.built_for = Some(stamp);
         let mut q = self.query.clone();
-        if q.sort.0.is_empty() {
-            q.sort = self.sort.clone();
+        if let Ok(f) = &filter {
+            q.expr = Expr::And(vec![q.expr, f.clone()]);
         }
+        if q.sort.0.is_empty() {
+            q.sort = sort.clone();
+        }
+        self.built_for = Some((stamp, sort, filter));
         let within: Option<Vec<TrackId>> = match &self.scope {
             Scope::All => None,
             Scope::Folder(f) => {
@@ -138,19 +160,7 @@ impl LibraryUi {
                     }
                 }
                 Some(c) if c.kind == CollectionKind::Folder => {
-                    let mut seen = std::collections::HashSet::new();
-                    Some(
-                        v.collections
-                            .all()
-                            .iter()
-                            .filter(|i| {
-                                i.id != c.id
-                                    && i.parent.is_some_and(|p| v.collections.is_within(p, c.id))
-                            })
-                            .flat_map(|i| i.tracks.iter().copied())
-                            .filter(|t| seen.insert(*t))
-                            .collect(),
-                    )
+                    Some(v.collections.tracks_inside(c.id))
                 }
                 Some(c) => Some(c.tracks.clone()),
             },
@@ -165,29 +175,29 @@ impl LibraryUi {
             .collect();
     }
 
-    // ---- folder tree ----------------------------------------------------------------------
+    /// The list is a playlist in its own order, so its rows are its entries and can
+    /// be dragged to a new place.
+    fn reorderable(&self, v: &CoreView, table: &TableState) -> bool {
+        self.collection()
+            .and_then(|id| v.collections.get(id))
+            .is_some_and(|c| c.kind == CollectionKind::Playlist)
+            && self.query == Query::default()
+            && table.sort.is_none()
+            && !table.has_filters()
+    }
 
-    /// `collections` draws the collections between *All tracks* and the Explorer.
-    pub fn tree(
-        &mut self,
-        ui: &mut Ui,
-        v: &CoreView,
-        out: &mut Vec<Command>,
-        collections: impl FnOnce(&mut Ui),
-    ) {
+    // ---- the Explorer -------------------------------------------------------------------
+
+    /// The library folders on disk, as a tree.
+    pub fn explorer(&mut self, ui: &mut Ui, v: &CoreView, out: &mut Vec<Command>) {
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
-                if ui
-                    .selectable_label(self.scope == Scope::All, "All tracks")
-                    .clicked()
-                {
-                    self.set_scope(Scope::All);
-                }
-                ui.add_space(6.0);
-                collections(ui);
-                ui.add_space(6.0);
-                ui.label(RichText::new("EXPLORER").size(10.0).color(THEME.muted));
+                ui.label(
+                    RichText::new("FOLDERS ON DISK")
+                        .size(10.0)
+                        .color(THEME.muted),
+                );
                 if self.folders.is_empty() {
                     ui.label(
                         RichText::new("No folders yet. Menu > Import > Folder...")
@@ -208,6 +218,10 @@ impl LibraryUi {
                         v,
                         out,
                     );
+                }
+                ui.add_space(6.0);
+                if ui.button("Add a folder...").clicked() {
+                    out.push(LibraryCmd::PickRoots.into());
                 }
             });
     }
@@ -250,7 +264,54 @@ impl LibraryUi {
         });
     }
 
-    // ---- track list -----------------------------------------------------------------------
+    // ---- all tracks ------------------------------------------------------------------------
+
+    /// The All tracks source: every track, or only those with an analysis status
+    /// (it sets the status column's filter). True when one was clicked.
+    pub fn all_tracks(&mut self, ui: &mut Ui, v: &CoreView, table: &mut TableState) -> bool {
+        let mut clicked = false;
+        let mut count = [0usize; 4];
+        for t in v.lib.tracks() {
+            count[v.lib.status(t) as usize] += 1;
+        }
+        let only = match table.filters.iter().find(|(c, _)| *c == ColumnId::Status) {
+            Some((_, Filter::Status(s))) if s.len() == 1 => s.first().copied(),
+            _ => None,
+        };
+        let all = self.scope == Scope::All;
+        if ui
+            .selectable_label(
+                all && only.is_none(),
+                format!("All tracks  ({})", v.lib.tracks().len()),
+            )
+            .clicked()
+        {
+            self.set_scope(Scope::All);
+            table.filters.retain(|(c, _)| *c != ColumnId::Status);
+            clicked = true;
+        }
+        ui.add_space(4.0);
+        ui.label(RichText::new("BY ANALYSIS").size(10.0).color(THEME.muted));
+        for s in [Status::None, Status::Busy, Status::Attention, Status::Done] {
+            let text = format!("{}  ({})", s.label(), count[s as usize]);
+            if ui
+                .selectable_label(all && only == Some(s), text)
+                .on_hover_text(format!(
+                    "Only tracks whose status is \"{}\" (in a search: status:{})",
+                    s.label(),
+                    s.name()
+                ))
+                .clicked()
+            {
+                self.set_scope(Scope::All);
+                *table.filter_mut(ColumnId::Status) = Filter::Status([s].into());
+                clicked = true;
+            }
+        }
+        clicked
+    }
+
+    // ---- the track list ---------------------------------------------------------------------
 
     fn title(&self, v: &CoreView) -> String {
         match &self.scope {
@@ -269,9 +330,10 @@ impl LibraryUi {
         ui: &mut Ui,
         v: &CoreView,
         media: &mut Media,
+        table: &mut TableState,
         out: &mut Vec<Command>,
     ) -> bool {
-        self.refresh(v);
+        self.refresh(v, table);
         ui.horizontal(|ui| {
             ui.label(RichText::new(self.title(v)).strong());
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
@@ -343,7 +405,7 @@ impl LibraryUi {
                 }
             });
         }
-        self.refresh(v);
+        self.refresh(v, table);
         if self.folders.is_empty() && !self.scanning {
             ui.add_space(40.0);
             ui.vertical_centered(|ui| {
@@ -359,170 +421,58 @@ impl LibraryUi {
         if ctrl && ui.input(|i| i.key_pressed(egui::Key::A)) && !ui.ctx().wants_keyboard_input() {
             self.sel.select_all(&self.shown);
         }
-        let mut table = TableBuilder::new(ui)
-            .striped(true)
-            .sense(Sense::click_and_drag())
-            .cell_layout(egui::Layout::left_to_right(Align::Center))
-            .column(Column::exact(34.0))
-            .column(Column::exact(100.0))
-            .column(Column::remainder().at_least(160.0).clip(true))
-            .column(
-                Column::initial(200.0)
-                    .at_least(80.0)
-                    .resizable(true)
-                    .clip(true),
-            )
-            .column(Column::exact(56.0))
-            .column(Column::exact(40.0))
-            .column(Column::exact(44.0));
-        if let Some(r) = self.scroll_to.take() {
-            table = table.scroll_to_row(r, Some(Align::Center));
-        }
+        let viewing = self.collection();
+        let reorder = self.reorderable(v, table);
+        let takes_drops = viewing
+            .and_then(|id| v.collections.get(id))
+            .is_some_and(|c| c.kind.takes_tracks());
         let shown = std::mem::take(&mut self.shown);
-        let mut clicked: Option<(TrackId, egui::Modifiers)> = None;
-        let mut right_clicked: Option<TrackId> = None;
-        let mut sort_by: Option<Field> = None;
-        let at = MenuAt {
-            viewing: match self.scope {
-                Scope::Collection(id) => Some(id),
-                _ => None,
-            },
-        };
-        let effective = if self.query.sort.0.is_empty() {
-            &self.sort
-        } else {
-            &self.query.sort
-        };
-        table
-            .header(20.0, |mut h| {
-                for (name, field) in [
-                    ("", None),
-                    ("", None),
-                    ("Title", Some(Field::Title)),
-                    ("Artist", Some(Field::Artist)),
-                    ("BPM", Some(Field::Bpm)),
-                    ("Key", Some(Field::Key)),
-                    ("Time", Some(Field::Duration)),
-                ] {
-                    h.col(|ui| {
-                        let arrow = match effective.0.first() {
-                            Some((f, d)) if Some(*f) == field => match d {
-                                Dir::Asc => " ^",
-                                Dir::Desc => " v",
-                            },
-                            _ => "",
-                        };
-                        let text = RichText::new(format!("{name}{arrow}"))
-                            .size(11.0)
-                            .color(THEME.muted);
-                        match field {
-                            Some(f) => {
-                                if ui
-                                    .add(egui::Label::new(text).sense(Sense::click()))
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                    .clicked()
-                                {
-                                    sort_by = Some(f);
-                                }
-                            }
-                            None => {
-                                ui.label(text);
-                            }
-                        }
-                    });
-                }
-            })
-            .body(|body| {
-                body.rows(26.0, shown.len(), |mut row| {
-                    let id = shown[row.index()];
-                    let Some(t) = v.lib.get(id) else { return };
-                    row.set_selected(self.sel.contains(id));
-                    row.col(|ui| status_mark(ui, t, v.lib.analysis(id)));
-                    row.col(|ui| {
-                        if let Some(tex) = media.thumb(ui.ctx(), id) {
-                            ui.add(egui::Image::new((tex, vec2(96.0, 18.0))));
-                        }
-                    });
-                    row.col(|ui| title_cell(ui, t, v.history.was_played(id), false));
-                    row.col(|ui| {
-                        ui.add(
-                            egui::Label::new(RichText::new(&t.artist).color(THEME.muted))
-                                .truncate()
-                                .selectable(false),
-                        );
-                    });
-                    row.col(|ui| {
-                        let bpm = t
-                            .bpm
-                            .map(|b| format!("{b:.2}"))
-                            .unwrap_or_else(|| "-".into());
-                        let text = RichText::new(bpm).color(THEME.muted);
-                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                            ui.add(
-                                egui::Label::new(if t.analysed() { text } else { text.italics() })
-                                    .selectable(false),
-                            )
-                            .on_hover_text(if t.analysed() {
-                                "Analysed"
-                            } else {
-                                "From the file's tag (not analysed)"
-                            });
-                        });
-                    });
-                    row.col(|ui| {
-                        if let Some(k) = t.key {
-                            key_chip(ui, k);
-                        }
-                    });
-                    row.col(|ui| {
-                        ui.label(
-                            RichText::new(t.duration.map(util::mmss).unwrap_or_default())
-                                .color(THEME.muted),
-                        );
-                    });
-                    let resp = row.response();
-                    if resp.clicked() {
-                        clicked = Some((id, resp.ctx.input(|i| i.modifiers)));
-                    }
-                    if resp.double_clicked() {
-                        out.push(LibraryCmd::Load(id).into());
-                    }
-                    if resp.secondary_clicked() {
-                        right_clicked = Some(id);
-                    }
-                    resp.dnd_set_drag_payload(id);
-                    resp.context_menu(|ui| {
-                        let sel = if self.sel.contains(id) {
-                            self.sel.in_order(&shown)
-                        } else {
-                            vec![id]
-                        };
-                        track_menu(ui, &sel, v, at, out);
-                    });
-                });
-            });
+        let res = TrackTable {
+            id: "library",
+            rows: &shown,
+            state: table,
+            available: self.view(v).available(),
+            sel: &mut self.sel,
+            origin: viewing.map_or(Origin::Library, Origin::Collection),
+            menu: MenuAt { viewing },
+            row_height: 26.0,
+            reorder,
+            takes_drops,
+            scores: None,
+            scroll_to: self.scroll_to.take(),
+            show_selection: true,
+        }
+        .show(ui, v, media, out);
         self.shown = shown;
-        if let Some(id) = right_clicked {
-            self.sel.right_click(id);
+        if let (Some((from, to)), Some(playlist)) = (res.moved, viewing) {
+            out.push(CollectionCmd::MoveEntries { playlist, from, to }.into());
         }
-        if let Some((id, m)) = clicked {
-            let mods = Mods {
-                shift: m.shift,
-                command: m.command,
-            };
-            self.sel.click(id, &self.shown, mods);
+        if let (Some((tracks, at)), Some(to)) = (res.dropped, viewing) {
+            drop_into(to, tracks, at.filter(|_| reorder), v, out);
         }
-        if let Some(f) = sort_by {
-            // Up, down, then back to the list's own order.
-            self.sort = match self.sort.0.first() {
-                Some(&(g, Dir::Asc)) if g == f => Sort(vec![(f, Dir::Desc)]),
-                Some(&(g, Dir::Desc)) if g == f => Sort::default(),
-                _ => Sort(vec![(f, Dir::Asc)]),
-            };
-            self.rev += 1;
-        }
-        clicked.is_some() || right_clicked.is_some()
+        res.clicked
     }
+}
+
+/// Tracks dropped on a collection's list: added, and in a playlist shown in its own
+/// order, moved to where they were dropped.
+fn drop_into(
+    to: CollectionId,
+    tracks: Vec<TrackId>,
+    at: Option<usize>,
+    v: &CoreView,
+    out: &mut Vec<Command>,
+) {
+    let end = v.collections.get(to).map_or(0, |c| c.tracks.len());
+    let cmd = match at.filter(|&a| a < end) {
+        Some(at) => CollectionCmd::Insert {
+            playlist: to,
+            tracks,
+            at,
+        },
+        None => CollectionCmd::AddTracks { to, tracks },
+    };
+    out.push(cmd.into());
 }
 
 /// Right-click on an Explorer folder: analyse what's in it, or stop scanning it.

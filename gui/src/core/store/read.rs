@@ -9,7 +9,7 @@ use earshot_engine::loudness::Loudness;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::{CueKind, GridSource, Result, StoreError, WAVEFORM_VERSION, bytes_path};
-use crate::core::collections::{Collection, CollectionKind, FlowGraph, FlowNode, NodeId};
+use crate::core::collections::{Collection, CollectionKind, FlowGraph, FlowNode, NodeId, Section};
 use crate::core::query;
 
 /// A library track as the UI sees it: metadata resolved (user > import > tag), and
@@ -511,7 +511,7 @@ pub fn collections(c: &Connection) -> Result<Vec<Collection>> {
             .push((r.get::<_, i64>(1)? as NodeId, r.get::<_, i64>(2)? as NodeId));
     }
     let mut st = c.prepare(
-        "SELECT id, parent_id, kind, name, query, source_flow_id FROM collections
+        "SELECT id, parent_id, kind, name, query, source_flow_id, section FROM collections
          ORDER BY name COLLATE NOCASE, id",
     )?;
     let rows = st
@@ -523,13 +523,15 @@ pub fn collections(c: &Connection) -> Result<Vec<Collection>> {
                 r.get(3)?,
                 r.get(4)?,
                 r.get(5)?,
+                r.get::<_, String>(6)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows
         .into_iter()
-        .filter_map(|(id, parent, kind, name, query, source_flow)| {
+        .filter_map(|(id, parent, kind, name, query, source_flow, section)| {
             let kind = CollectionKind::parse(&kind)?;
+            let section = Section::parse(&section)?;
             let linear = kind == CollectionKind::Flow
                 && graphs
                     .remove(&id)
@@ -538,6 +540,7 @@ pub fn collections(c: &Connection) -> Result<Vec<Collection>> {
                 id,
                 parent,
                 kind,
+                section,
                 name,
                 tracks: tracks.remove(&id).unwrap_or_default(),
                 query,
@@ -555,6 +558,18 @@ pub fn kind(c: &Connection, id: i64) -> Result<Option<CollectionKind>> {
         })
         .optional()?;
     Ok(k.as_deref().and_then(CollectionKind::parse))
+}
+
+/// A collection's kind and the tree it's in.
+pub fn kind_and_section(c: &Connection, id: i64) -> Result<Option<(CollectionKind, Section)>> {
+    let k: Option<(String, String)> = c
+        .query_row(
+            "SELECT kind, section FROM collections WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(k.and_then(|(k, s)| Some((CollectionKind::parse(&k)?, Section::parse(&s)?))))
 }
 
 pub fn flow_graph(c: &Connection, id: i64) -> Result<FlowGraph> {

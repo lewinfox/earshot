@@ -1,7 +1,16 @@
-//! The library: the same in both modes. An icon stack on the left picks the source
-//! (what we're operating on), shown in the pane beside it; the track list (or the
-//! Flow canvas) fills the middle; an icon stack on the right opens side panes such
-//! as the suggestions.
+//! The library: one component, the same in both modes. An icon stack on the left
+//! picks the source (what we're operating on: all tracks, playlists, crates, Flows,
+//! folders on disk, other libraries), shown in the pane beside it; the track table
+//! (or the Flow canvas) fills the middle; an icon stack on the right opens side
+//! panes such as the suggestions.
+//!
+//! One list has focus at a time ([`LibraryPane::focused_pane`]), each with its own
+//! selection: the keyboard and the controller's browse knob move through it, "load
+//! selected" loads from it, and the suggestions' *Selected* follows it.
+//!
+//! Shared pieces for other panels: [`table::TrackTable`] (any list of tracks),
+//! [`drag::DragPayload`] (dragging tracks and collections, with a ghost),
+//! [`tracks::track_menu`] (the one right-click menu).
 //!
 //! To add a source: a variant of `core::view::Source`, an item in [`SOURCES`], and an
 //! arm in [`LibraryPane::source`]. A side pane: a variant of `core::view::Aside`, an
@@ -9,28 +18,52 @@
 
 pub mod browser;
 pub mod collections;
+pub mod drag;
 pub mod suggest;
+pub mod table;
 pub mod tracks;
 
-use egui::Ui;
+use egui::{RichText, Ui};
 
 use self::browser::{LibraryUi, Scope};
 use self::collections::{CollectionsUi, TreeCtx};
 use self::suggest::SuggestUi;
+use self::table::{TableView, Tables};
 use self::tracks::Media;
 use super::flow::FlowUi;
 use super::{Cx, Panel, resized};
 use crate::core::collections::CollectionCmd;
 use crate::core::command::{Command, ViewCmd};
+use crate::core::track::TrackId;
 use crate::core::view::{Aside, Mode, Pane, Region, Source};
 use crate::ui::widgets::{Opens, StackItem, icon_stack, icon_stack::WIDTH};
 
+/// A placeholder (greyed out) in the left stack.
+const fn later(id: Source, icon: &'static str, tip: &'static str) -> StackItem<Source> {
+    StackItem {
+        id,
+        icon,
+        tip,
+        enabled: false,
+    }
+}
+
 /// The left icon stack.
-const SOURCES: [StackItem<Source>; 1] = [StackItem::new(
-    Source::Browser,
-    "🎵",
-    "Library: all tracks, collections and folders",
-)];
+const SOURCES: [StackItem<Source>; 9] = [
+    StackItem::new(Source::AllTracks, "🎵", "All tracks"),
+    StackItem::new(Source::Playlists, "☰", "Playlists and smart playlists"),
+    StackItem::new(Source::Crates, "📦", "Crates"),
+    StackItem::new(Source::Flows, "🔀", "Flows: sets planned on a canvas"),
+    StackItem::new(Source::Explorer, "📁", "Folders on disk"),
+    StackItem::new(
+        Source::External,
+        "🖴",
+        "Other libraries: Rekordbox, Mixxx, drives (coming)",
+    ),
+    later(Source::SoundCloud, "☁", "SoundCloud (coming)"),
+    later(Source::Beatport, "🛒", "Beatport (coming)"),
+    later(Source::Spotify, "🎧", "Spotify (coming)"),
+];
 
 /// The right icon stack.
 const ASIDES: [StackItem<Aside>; 1] = [StackItem::new(
@@ -40,26 +73,29 @@ const ASIDES: [StackItem<Aside>; 1] = [StackItem::new(
 )];
 
 pub struct LibraryPane {
-    /// The folder tree and the track list.
+    /// The track list and the Explorer tree.
     pub browser: LibraryUi,
     pub collections: CollectionsUi,
     pub suggest: SuggestUi,
     pub flow: FlowUi,
     /// Waveform thumbnails and cover art for every list.
     pub media: Media,
-    /// Which list the keyboard and the controller's browse knob move through.
-    pub pane: Pane,
+    /// Every table's columns and sort, by view (saved in `UiPrefs`).
+    pub tables: Tables,
+    /// The list with focus.
+    pub focused_pane: Pane,
 }
 
 impl LibraryPane {
-    pub fn new(flow: FlowUi) -> LibraryPane {
+    pub fn new(flow: FlowUi, tables: Tables) -> LibraryPane {
         LibraryPane {
             browser: LibraryUi::default(),
             collections: CollectionsUi::default(),
             suggest: SuggestUi::default(),
             flow,
             media: Media::default(),
-            pane: Pane::Library,
+            tables,
+            focused_pane: Pane::Library,
         }
     }
 
@@ -68,34 +104,66 @@ impl LibraryPane {
         self.flow.open && self.flow.full
     }
 
+    /// The focused list's focused track: what "load selected" loads and the
+    /// suggestions' *Selected* is.
+    pub fn focused_track(&self) -> Option<TrackId> {
+        match self.focused_pane {
+            Pane::Library => self.browser.focused(),
+            Pane::Suggest => self.suggest.focused(),
+            Pane::Flow => self.flow.selected_track().or(self.browser.focused()),
+        }
+    }
+
+    /// Move the focused list's selection (the keyboard, the browse knob).
+    pub fn browse(&mut self, delta: i32) {
+        match self.focused_pane {
+            Pane::Library | Pane::Flow => self.browser.move_focus(delta),
+            Pane::Suggest => self.suggest.move_focus(delta),
+        }
+    }
+
     /// The left pane: the source picked in the icon stack.
     fn source(&mut self, ui: &mut Ui, source: Source, cx: &mut Cx) {
+        if let Some(section) = source.section() {
+            let open = if self.flow.open {
+                self.flow.flow
+            } else {
+                match self.browser.scope() {
+                    Scope::Collection(id) => Some(*id),
+                    _ => None,
+                }
+            };
+            let search = self.browser.search.clone();
+            let tree = TreeCtx {
+                collections: cx.core.collections,
+                open,
+                search: &search,
+            };
+            let mut cmds: Vec<CollectionCmd> = vec![];
+            self.collections.show(ui, section, &tree, &mut cmds);
+            cx.out.extend(cmds.into_iter().map(Command::Collection));
+            return;
+        }
         match source {
-            Source::Browser => {
-                // What the collection tree needs from the track list, read before it's
-                // borrowed for drawing.
-                let (search, selected) = (self.browser.search.clone(), self.browser.selected());
-                let open = if self.flow.open {
-                    self.flow.flow
-                } else {
-                    match self.browser.scope() {
-                        Scope::Collection(id) => Some(*id),
-                        _ => None,
-                    }
-                };
-                let tree = TreeCtx {
-                    collections: cx.core.collections,
-                    open,
-                    search: &search,
-                    selected: &selected,
-                };
-                let colls = &mut self.collections;
-                let mut coll_cmds: Vec<CollectionCmd> = vec![];
-                self.browser.tree(ui, &cx.core, cx.out, |ui| {
-                    colls.show(ui, &tree, &mut coll_cmds)
-                });
-                cx.out
-                    .extend(coll_cmds.into_iter().map(Command::Collection));
+            Source::AllTracks => {
+                let table = self.tables.get_mut(TableView::Library);
+                if self.browser.all_tracks(ui, &cx.core, table) {
+                    cx.send(ViewCmd::ShowFlow(false));
+                }
+            }
+            Source::Explorer => self.browser.explorer(ui, &cx.core, cx.out),
+            Source::External => placeholder(
+                ui,
+                cx,
+                "Other libraries",
+                "Rekordbox and Mixxx libraries, and drives, will show here once \
+                 earshot can read them (through cratelib).",
+            ),
+            Source::SoundCloud | Source::Beatport | Source::Spotify => {
+                placeholder(ui, cx, "Streaming", "Coming later.")
+            }
+            Source::Playlists | Source::Crates | Source::Flows => {
+                unreachable!("sections are drawn above")
             }
         }
     }
@@ -104,8 +172,12 @@ impl LibraryPane {
     fn aside(&mut self, ui: &mut Ui, aside: Aside, cx: &mut Cx) {
         match aside {
             Aside::Suggestions => {
-                let focus = self.pane == Pane::Suggest;
-                if self.suggest.show(ui, &cx.core, focus, cx.out) {
+                let focus = self.focused_pane == Pane::Suggest;
+                let table = self.tables.get_mut(TableView::Suggest);
+                if self
+                    .suggest
+                    .show(ui, &cx.core, focus, &mut self.media, table, cx.out)
+                {
                     cx.send(ViewCmd::FocusPane(Pane::Suggest));
                 }
             }
@@ -129,12 +201,40 @@ impl LibraryPane {
         ui.separator();
         if self.flow.open {
             let preview = cx.engine.preview;
+            let area = ui.available_rect_before_wrap();
             self.flow
                 .show(ui, &cx.core, &mut self.media, preview, cx.out);
-        } else if self.browser.list(ui, &cx.core, &mut self.media, cx.out) {
-            cx.send(ViewCmd::FocusPane(Pane::Library));
+            // A click on the canvas gives it focus (its selected card is "Selected").
+            if ui.input(|i| i.pointer.any_pressed())
+                && ui
+                    .ctx()
+                    .pointer_interact_pos()
+                    .is_some_and(|p| area.contains(p))
+                && self.focused_pane != Pane::Flow
+            {
+                cx.send(ViewCmd::FocusPane(Pane::Flow));
+            }
+        } else {
+            let table = self.tables.get_mut(self.browser.view(&cx.core));
+            if self
+                .browser
+                .list(ui, &cx.core, &mut self.media, table, cx.out)
+            {
+                cx.send(ViewCmd::FocusPane(Pane::Library));
+            }
         }
     }
+}
+
+/// A source that isn't built yet.
+fn placeholder(ui: &mut Ui, cx: &Cx, title: &str, text: &str) {
+    ui.label(
+        RichText::new(title.to_uppercase())
+            .size(10.0)
+            .color(cx.theme.muted),
+    );
+    ui.add_space(4.0);
+    ui.label(RichText::new(text).color(cx.theme.muted));
 }
 
 impl Panel for LibraryPane {

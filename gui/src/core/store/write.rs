@@ -15,8 +15,10 @@ use super::{
     now, path_bytes,
 };
 use crate::core::analysis::registry::{self, AnalyserId};
+use crate::core::collections::{
+    self, CollectionKind, FlowGraph, FlowNode, NodeId, Section, Spacing,
+};
 use crate::core::edit::Edit;
-use crate::core::collections::{self, CollectionKind, FlowGraph, FlowNode, NodeId, Spacing};
 use crate::core::hash::Hash;
 use crate::core::query;
 
@@ -156,6 +158,12 @@ impl Writer {
                 name,
                 query,
             } => self.create_collection(id, parent, kind, &name, query.as_deref()),
+            StoreCmd::CreateFolder {
+                id,
+                parent,
+                section,
+                name,
+            } => self.create_folder(id, parent, section, &name),
             StoreCmd::Rename { id, name } => self.rename(id, &name),
             StoreCmd::Move { id, parent } => self.move_to(id, parent),
             StoreCmd::Delete(id) => self.delete(id),
@@ -628,10 +636,16 @@ impl Writer {
         Ok(())
     }
 
-    fn check_folder(&self, parent: Option<i64>) -> Result<()> {
+    /// `parent` is a folder that holds `section`'s things (or the top level).
+    fn check_folder(&self, parent: Option<i64>, section: Section) -> Result<()> {
         if let Some(p) = parent {
-            match read::kind(&self.conn, p)? {
-                Some(CollectionKind::Folder) => {}
+            match read::kind_and_section(&self.conn, p)? {
+                Some((CollectionKind::Folder, s)) if s == section => {}
+                Some((CollectionKind::Folder, _)) => {
+                    return Err(StoreError::Refused(
+                        "that folder holds another kind of thing",
+                    ));
+                }
                 Some(_) => return Err(StoreError::Refused("only folders can hold things")),
                 None => return Err(StoreError::NoCollection(p)),
             }
@@ -639,6 +653,9 @@ impl Writer {
         Ok(())
     }
 
+    /// A crate, playlist, smart playlist or Flow, in its kind's section. A folder
+    /// made here is in its parent's section, or at the top level, Playlists' (see
+    /// [`Writer::create_folder`]).
     pub fn create_collection(
         &mut self,
         id: i64,
@@ -647,11 +664,43 @@ impl Writer {
         name: &str,
         query: Option<&str>,
     ) -> Result<()> {
-        self.check_folder(parent)?;
+        let section = match (kind.section(), parent) {
+            (Some(s), _) => s,
+            (None, Some(p)) => {
+                read::kind_and_section(&self.conn, p)?
+                    .ok_or(StoreError::NoCollection(p))?
+                    .1
+            }
+            (None, None) => Section::Playlists,
+        };
+        self.insert_collection(id, parent, kind, section, name, query)
+    }
+
+    /// A folder in a section's tree.
+    pub fn create_folder(
+        &mut self,
+        id: i64,
+        parent: Option<i64>,
+        section: Section,
+        name: &str,
+    ) -> Result<()> {
+        self.insert_collection(id, parent, CollectionKind::Folder, section, name, None)
+    }
+
+    fn insert_collection(
+        &mut self,
+        id: i64,
+        parent: Option<i64>,
+        kind: CollectionKind,
+        section: Section,
+        name: &str,
+        query: Option<&str>,
+    ) -> Result<()> {
+        self.check_folder(parent, section)?;
         self.conn.execute(
-            "INSERT INTO collections(id, parent_id, kind, name, query, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-            params![id, parent, kind.as_str(), name, query, now()],
+            "INSERT INTO collections(id, parent_id, kind, section, name, query, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            params![id, parent, kind.as_str(), section.as_str(), name, query, now()],
         )?;
         self.emit_collections()
     }
@@ -667,9 +716,12 @@ impl Writer {
         self.emit_collections()
     }
 
-    /// Into a folder, or to the top level. Refused if `parent` is inside `id`.
+    /// Into a folder of its section, or to the top level. Refused if `parent` is
+    /// inside `id`.
     pub fn move_to(&mut self, id: i64, parent: Option<i64>) -> Result<()> {
-        self.check_folder(parent)?;
+        let (_, section) =
+            read::kind_and_section(&self.conn, id)?.ok_or(StoreError::NoCollection(id))?;
+        self.check_folder(parent, section)?;
         if let Some(p) = parent {
             let parents: HashMap<i64, Option<i64>> = self
                 .conn
@@ -711,8 +763,8 @@ impl Writer {
     pub fn duplicate(&mut self, from: i64, to: i64) -> Result<()> {
         let tx = self.conn.transaction()?;
         let n = tx.execute(
-            "INSERT INTO collections(id, parent_id, kind, name, query, source_flow_id, created_at, updated_at)
-             SELECT ?2, parent_id, kind, name || ' copy', query, source_flow_id, ?3, ?3
+            "INSERT INTO collections(id, parent_id, kind, section, name, query, source_flow_id, created_at, updated_at)
+             SELECT ?2, parent_id, kind, section, name || ' copy', query, source_flow_id, ?3, ?3
              FROM collections WHERE id = ?1 AND kind <> 'folder'",
             params![from, to, now()],
         )?;
@@ -751,8 +803,9 @@ impl Writer {
         self.emit_collections()
     }
 
-    /// Save one path through a Flow (card ids, in order) as a new playlist beside it.
-    /// The playlist is a snapshot: later changes to the Flow don't change it.
+    /// Save one path through a Flow (card ids, in order) as a new playlist, at the top
+    /// of the Playlists tree (the Flow's folder only holds Flows). The playlist is a
+    /// snapshot: later changes to the Flow don't change it.
     pub fn export_path(
         &mut self,
         flow: i64,
@@ -766,12 +819,7 @@ impl Writer {
                 "those cards aren't a path through the Flow",
             ));
         };
-        let parent: Option<i64> = self.conn.query_row(
-            "SELECT parent_id FROM collections WHERE id = ?1",
-            [flow],
-            |r| r.get(0),
-        )?;
-        self.create_playlist(playlist, parent, name, &tracks, Some(flow))
+        self.create_playlist(playlist, None, name, &tracks, Some(flow))
     }
 
     /// A playlist of these tracks, in order (a track may repeat).
@@ -783,12 +831,12 @@ impl Writer {
         tracks: &[i64],
         source_flow: Option<i64>,
     ) -> Result<()> {
-        self.check_folder(parent)?;
+        self.check_folder(parent, Section::Playlists)?;
         let tx = self.conn.transaction()?;
         let t = now();
         tx.execute(
-            "INSERT INTO collections(id, parent_id, kind, name, source_flow_id, created_at, updated_at)
-             VALUES (?1, ?2, 'playlist', ?3, ?4, ?5, ?5)",
+            "INSERT INTO collections(id, parent_id, kind, section, name, source_flow_id, created_at, updated_at)
+             VALUES (?1, ?2, 'playlist', 'playlists', ?3, ?4, ?5, ?5)",
             params![id, parent, name, source_flow, t],
         )?;
         for (i, track) in tracks.iter().enumerate() {

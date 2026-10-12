@@ -48,6 +48,33 @@ impl EarshotApp {
                 }
                 None => {}
             },
+            CollectionCmd::Show(id) => {
+                if self.collections.get(id).is_some() {
+                    lib.browser.set_scope(Scope::Collection(id));
+                    lib.flow.open = false;
+                }
+            }
+            CollectionCmd::Create {
+                kind: CollectionKind::Folder,
+                parent,
+                ..
+            } => {
+                // In its parent's section; at the top level, Playlists'.
+                let section = parent
+                    .and_then(|p| self.collections.get(p))
+                    .map_or(Section::Playlists, |p| p.section);
+                self.collection_cmd(CollectionCmd::CreateFolder { section, parent });
+            }
+            CollectionCmd::CreateFolder { section, parent } => {
+                let id = store.new_collection_id();
+                store.send(StoreCmd::CreateFolder {
+                    id,
+                    parent,
+                    section,
+                    name: CollectionKind::Folder.untitled().to_string(),
+                });
+                self.pending_rename = Some(id);
+            }
             CollectionCmd::Create {
                 kind,
                 parent,
@@ -63,21 +90,47 @@ impl EarshotApp {
                     name: name.clone(),
                     query,
                 });
-                if !tracks.is_empty() {
-                    store.send(StoreCmd::AddTracks { id, tracks });
-                }
-                match kind {
-                    CollectionKind::Flow => {
-                        lib.flow.load(Some((id, name, Default::default())));
-                        lib.flow.open = true;
+                if kind == CollectionKind::Flow {
+                    // The canvas holds it from now on: its tracks go there (as
+                    // starting cards), or its first save would drop them.
+                    lib.flow.load(Some((id, name, Default::default())));
+                    lib.flow.add_tracks(&tracks);
+                    lib.flow.open = true;
+                } else {
+                    if !tracks.is_empty() {
+                        store.send(StoreCmd::AddTracks { id, tracks });
                     }
-                    CollectionKind::Folder => {}
-                    _ => {
-                        lib.browser.set_scope(Scope::Collection(id));
-                        lib.flow.open = false;
-                    }
+                    lib.browser.set_scope(Scope::Collection(id));
+                    lib.flow.open = false;
                 }
                 self.pending_rename = Some(id);
+            }
+            // As the playlist's whole new order, so it's one undo step.
+            CollectionCmd::MoveEntries { playlist, from, to } => {
+                if let Some(c) = self.collections.get(playlist) {
+                    let tracks = crate::core::collections::move_items(&c.tracks, &from, to);
+                    if tracks != c.tracks {
+                        store.send(StoreCmd::Edit(EditCmd::SetTracks {
+                            collection: playlist,
+                            tracks,
+                        }));
+                    }
+                }
+            }
+            CollectionCmd::Insert {
+                playlist,
+                tracks,
+                at,
+            } => {
+                if let Some(c) = self.collections.get(playlist) {
+                    let mut all = c.tracks.clone();
+                    let at = at.min(all.len());
+                    all.splice(at..at, tracks);
+                    store.send(StoreCmd::Edit(EditCmd::SetTracks {
+                        collection: playlist,
+                        tracks: all,
+                    }));
+                }
             }
             CollectionCmd::Rename(id, name) => {
                 if lib.flow.flow == Some(id) {

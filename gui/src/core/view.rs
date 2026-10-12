@@ -5,6 +5,8 @@
 use earshot_engine::DeckId;
 use serde::{Deserialize, Serialize};
 
+use super::collections::Section;
+
 /// The two halves of the app, like Rekordbox's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Mode {
@@ -18,8 +20,35 @@ pub enum Mode {
 /// What the library's left icon stack shows: what we're operating on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Source {
-    /// All tracks, the collections and the Explorer folders, in one tree.
-    Browser,
+    /// Every track, with quick filters by analysis status.
+    #[serde(alias = "Browser")]
+    AllTracks,
+    /// Playlists and smart playlists, in folders.
+    Playlists,
+    /// Crates, in folders.
+    Crates,
+    /// Flows, in folders.
+    Flows,
+    /// The library folders on disk.
+    Explorer,
+    /// Other DJ software's libraries and drives, through cratelib (to come).
+    External,
+    /// Streaming services (to come: greyed out).
+    SoundCloud,
+    Beatport,
+    Spotify,
+}
+
+impl Source {
+    /// The collections tree it shows, if it shows one.
+    pub const fn section(self) -> Option<Section> {
+        match self {
+            Source::Playlists => Some(Section::Playlists),
+            Source::Crates => Some(Section::Crates),
+            Source::Flows => Some(Section::Flows),
+            _ => None,
+        }
+    }
 }
 
 /// The panes the library's right icon stack opens.
@@ -48,12 +77,17 @@ pub enum Modal {
     Metadata,
 }
 
-/// Which list the keyboard and the controller's browse knob move through.
+/// Which list has focus: the keyboard and the controller's browse knob move through
+/// it, "load selected" loads from it, and the suggestions' *Selected* reference is
+/// its selected track. Each keeps its own selection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Pane {
+    /// The library's track table.
     #[default]
     Library,
     Suggest,
+    /// The Flow canvas (its selected card).
+    Flow,
 }
 
 /// Things only the UI can do: they're about what's on screen.

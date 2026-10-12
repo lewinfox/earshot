@@ -12,6 +12,7 @@
 //! energy:7-10  rating>=4    energy is 1-10, ranked across the library
 //! tag:vocal  in:12          a tag; in collection 12
 //! is:analysed  is:dynamic  is:drifting  is:missing
+//! status:busy               analysis: none, done, busy (queued or running), attention
 //! -tag:vocal  NOT x         leave out
 //! a OR b  a | b  (a b) c    either; grouping. Terms side by side all have to match.
 //! sort:bpm  sort:-energy    order (`-`: highest first); the first one wins ties last
@@ -23,10 +24,10 @@ use std::fmt;
 use rusqlite::types::Value as SqlValue;
 
 use super::keys::{Camelot, key_name, parse_key};
-use super::track::{TextField, Track, TrackId};
+use super::track::{Status, TextField, Track, TrackId};
 
 /// What a query can look at.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Field {
     Title,
     Artist,
@@ -46,6 +47,9 @@ pub enum Field {
     Analysed,
     Dynamic,
     Drifts,
+    /// The analysis in one word ([`Status`]): it depends on the analysis queue too,
+    /// which [`Context::status`] knows.
+    Status,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +58,7 @@ enum Kind {
     Num,
     Key,
     Bool,
+    Status,
 }
 
 impl Field {
@@ -64,6 +69,7 @@ impl Field {
             Bpm | Energy | Rating | Colour | Duration => Kind::Num,
             Key => Kind::Key,
             Analysed | Dynamic | Drifts => Kind::Bool,
+            Status => Kind::Status,
         }
     }
 
@@ -84,6 +90,7 @@ impl Field {
             "rating" | "stars" => Rating,
             "colour" | "color" => Colour,
             "time" | "length" | "duration" => Duration,
+            "status" | "analysis" => Status,
             _ => return None,
         })
     }
@@ -107,6 +114,7 @@ impl Field {
             Analysed => "analysed",
             Dynamic => "dynamic",
             Drifts => "drifting",
+            Status => "status",
         }
     }
 }
@@ -129,6 +137,7 @@ pub enum Value {
     Num(f64),
     Key(Camelot),
     Bool(bool),
+    Status(Status),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -153,7 +162,7 @@ impl Expr {
     pub const ALL: Expr = Expr::And(vec![]);
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Dir {
     Asc,
     Desc,
@@ -489,6 +498,17 @@ impl Parser {
                     op => Expr::Cmp(f, op, Value::Num(n)),
                 })
             }
+            Kind::Status => {
+                if !matches!(op, Op::Contains | Op::Eq) {
+                    return err("use status:done (or none, busy, attention)");
+                }
+                match Status::parse(value) {
+                    Some(s) => Ok(Expr::Cmp(f, Op::Eq, Value::Status(s))),
+                    None => err(format!(
+                        "status:{value}? Try status:none, done, busy or attention"
+                    )),
+                }
+            }
             Kind::Bool => unreachable!("is: handles these"),
         }
     }
@@ -529,6 +549,12 @@ pub fn parse(s: &str) -> Result<Query, ParseError> {
 pub trait Context {
     /// Is the track in this crate, playlist or Flow?
     fn contains(&self, collection: i64, track: TrackId) -> bool;
+
+    /// The track's analysis status. Without the analysis queue (the default), a
+    /// track is never busy.
+    fn status(&self, t: &Track) -> Status {
+        Status::of(t, None)
+    }
 }
 
 /// No collections.
@@ -599,6 +625,7 @@ pub fn eval(e: &Expr, t: &Track, cx: &dyn Context) -> bool {
             Value::Num(n) => num_field(t, *f).is_some_and(|have| cmp(have, *op, *n)),
             Value::Key(k) => t.key == Some(*k),
             Value::Bool(b) => bool_field(t, *f) == *b,
+            Value::Status(s) => cx.status(t) == *s,
         },
     }
 }
@@ -615,7 +642,7 @@ fn cmp(a: f64, op: Op, b: f64) -> bool {
 
 /// Order two tracks by the sort keys. Tracks without a value go last, whichever
 /// way the sort runs.
-pub fn compare(sort: &Sort, a: &Track, b: &Track) -> Ordering {
+pub fn compare(sort: &Sort, a: &Track, b: &Track, cx: &dyn Context) -> Ordering {
     for &(f, dir) in &sort.0 {
         let o = match f.kind() {
             Kind::Text if f == Field::Tag => a.text(TextField::Tags).cmp(b.text(TextField::Tags)),
@@ -641,6 +668,7 @@ pub fn compare(sort: &Sort, a: &Track, b: &Track) -> Ordering {
                 }
             },
             Kind::Bool => bool_field(a, f).cmp(&bool_field(b, f)),
+            Kind::Status => cx.status(a).cmp(&cx.status(b)),
         };
         let o = if dir == Dir::Desc { o.reverse() } else { o };
         if o != Ordering::Equal {
@@ -745,6 +773,24 @@ fn sql_field(f: Field) -> String {
         Field::Drifts => "EXISTS (SELECT 1 FROM track_features x WHERE x.track_id = t.id
                           AND x.name = 'drifts' AND x.value <> 0)"
             .into(),
+        // As `Status`'s order: none 0, done 1, busy 2, attention 3. A failed analysis
+        // is the stored error (in memory it lasts until the app restarts), and busy
+        // is a queued job.
+        Field::Status => format!(
+            "CASE WHEN EXISTS (SELECT 1 FROM analysis_results r WHERE r.track_id = t.id
+                               AND r.error IS NOT NULL) THEN {attention}
+                  WHEN EXISTS (SELECT 1 FROM jobs j WHERE j.track_id = t.id
+                               AND j.kind LIKE 'analyse:%') THEN {busy}
+                  WHEN {drifts} AND NOT {dynamic} THEN {attention}
+                  WHEN {analysed} THEN {done} ELSE {none} END",
+            drifts = sql_field(Field::Drifts),
+            dynamic = sql_field(Field::Dynamic),
+            analysed = sql_field(Field::Analysed),
+            none = Status::None as i32,
+            done = Status::Done as i32,
+            busy = Status::Busy as i32,
+            attention = Status::Attention as i32,
+        ),
     }
 }
 
@@ -885,6 +931,7 @@ fn sql(e: &Expr, args: &mut Vec<SqlValue>) -> String {
                     format!("coalesce({col} IN ({}), 0)", list.join(", "))
                 }
                 Value::Bool(b) => format!("({col}) = {}", *b as i32),
+                Value::Status(s) => format!("({col}) = {}", *s as i32),
             }
         }
     }
@@ -1051,13 +1098,13 @@ mod tests {
         let c = track(3, "C", "x", Some(120.0), "8A");
         let mut v = [&a, &b, &c];
         let s = parse("sort:bpm").unwrap().sort;
-        v.sort_by(|x, y| compare(&s, x, y));
+        v.sort_by(|x, y| compare(&s, x, y, &()));
         assert_eq!(v.map(|t| t.id), [3, 1, 2]);
         let s = parse("sort:-bpm").unwrap().sort;
-        v.sort_by(|x, y| compare(&s, x, y));
+        v.sort_by(|x, y| compare(&s, x, y, &()));
         assert_eq!(v.map(|t| t.id), [1, 3, 2]);
         let s = parse("sort:-title").unwrap().sort;
-        v.sort_by(|x, y| compare(&s, x, y));
+        v.sort_by(|x, y| compare(&s, x, y, &()));
         assert_eq!(v.map(|t| t.id), [3, 2, 1]);
     }
 

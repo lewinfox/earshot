@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::panels::flow;
+use super::panels::library::table::Tables;
 use crate::core::view::{Aside, Mode, Source, Tool};
 
 /// Where they're kept in eframe's storage.
@@ -24,6 +25,8 @@ pub struct UiPrefs {
     pub four_decks: bool,
     /// The Flow canvas: the Flow that was open and where it was looking.
     pub flow: flow::Saved,
+    /// Each kind of track list's columns, widths and sort.
+    pub tables: Tables,
 }
 
 impl Default for UiPrefs {
@@ -36,6 +39,7 @@ impl Default for UiPrefs {
             ui_scale: 1.0,
             four_decks: false,
             flow: flow::Saved::default(),
+            tables: Tables::default(),
         }
     }
 }
@@ -72,7 +76,7 @@ pub struct Layout {
 impl Default for Layout {
     fn default() -> Layout {
         Layout {
-            source: Some(Source::Browser),
+            source: Some(Source::AllTracks),
             aside: Some(Aside::Suggestions),
             tool: Tool::default(),
             sizes: Sizes::default(),

@@ -315,3 +315,229 @@ fn edits_undo_and_redo() {
     settle_until(&mut h, |a| bpm(a) == analysed && on_deck(a) != Some(140.0));
     assert_eq!(on_deck(h.state()), analysed.map(f64::round));
 }
+
+// ---- the library --------------------------------------------------------------------------
+
+use egui::Pos2;
+use egui_kittest::kittest::Queryable;
+
+use crate::core::collections::Section;
+use crate::core::view::Source;
+use crate::ui::panels::library::drag::DragPayload;
+
+/// A collection made straight in the Store (so nothing starts renaming it), once
+/// the app has it.
+fn make(h: &mut H, kind: CollectionKind, name: &str, tracks: Vec<i64>) -> i64 {
+    let store = h.state().lib.store.clone();
+    let id = store.new_collection_id();
+    store.send(StoreCmd::Create {
+        id,
+        parent: None,
+        kind,
+        name: name.into(),
+        query: None,
+    });
+    let n = tracks.len();
+    if n > 0 {
+        store.send(StoreCmd::AddTracks { id, tracks });
+    }
+    settle_until(h, |a| {
+        a.collections.get(id).is_some_and(|c| c.tracks.len() == n)
+    });
+    id
+}
+
+fn title(h: &H, id: i64) -> String {
+    h.state().index.get(id).unwrap().title.clone()
+}
+
+/// Where a label is drawn.
+fn at(h: &H, label: &str) -> egui::Rect {
+    h.get_by_label(label).rect()
+}
+
+/// Press at `from`, move to `to` in a few steps (calling `mid` on the way, the
+/// button still down), and let go.
+fn drag(h: &mut H, from: Pos2, to: Pos2, mid: impl FnOnce(&mut H)) {
+    h.hover_at(from);
+    h.step();
+    h.drag_at(from);
+    h.step();
+    for i in 1..=6 {
+        h.hover_at(from + (to - from) * (i as f32 / 6.0));
+        h.step();
+    }
+    mid(h);
+    h.drop_at(to);
+    h.step();
+    h.step();
+}
+
+/// Select two tracks in the library, drag them onto a crate in the Crates source
+/// (with the ghost along the way), then drag a playlist's last row to its top.
+#[test]
+fn tracks_drag_into_collections_and_playlist_rows_reorder() {
+    let mut h = start("library-drag");
+    let ids = ids(&h);
+    h.state_mut().dispatch(ViewCmd::Aside(None).into());
+    let crate_id = make(&mut h, CollectionKind::Crate, "Disco", vec![]);
+    h.state_mut()
+        .dispatch(ViewCmd::Source(Some(Source::Crates)).into());
+    steps(&mut h, 3);
+
+    // Click one, Shift-click another: both are selected.
+    let (a, b) = (title(&h, ids[0]), title(&h, ids[1]));
+    h.get_by_label(&a).click();
+    steps(&mut h, 2);
+    h.get_by_label(&b).click_modifiers(egui::Modifiers::SHIFT);
+    steps(&mut h, 2);
+    assert_eq!(h.state().panels.library.focused_pane, Pane::Library);
+
+    let (from, to) = (at(&h, &a).center(), at(&h, "Disco").center());
+    drag(&mut h, from, to, |h| {
+        let p = drag::payload(&h.ctx).expect("dragging");
+        assert!(
+            matches!(p.as_ref(), DragPayload::Tracks { ids: d, .. } if d.len() == 2),
+            "the whole selection"
+        );
+        render(h, "library-drag");
+    });
+    settle_until(&mut h, |a| {
+        a.collections
+            .get(crate_id)
+            .is_some_and(|c| c.tracks.len() == 2)
+    });
+
+    // A playlist in its own order: drag the last row above the first.
+    let list = make(&mut h, CollectionKind::Playlist, "Gig", ids[..3].to_vec());
+    h.state_mut().dispatch(CollectionCmd::Show(list).into());
+    steps(&mut h, 3);
+    let last = at(&h, &title(&h, ids[2])).center();
+    let first = at(&h, &title(&h, ids[0]));
+    drag(
+        &mut h,
+        last,
+        Pos2::new(first.center().x, first.top()),
+        |_| {},
+    );
+    settle_until(&mut h, |a| {
+        a.collections.get(list).unwrap().tracks == vec![ids[2], ids[0], ids[1]]
+    });
+    // One undo step puts the old order back.
+    h.state_mut().dispatch(Command::Undo);
+    settle_until(&mut h, |a| {
+        a.collections.get(list).unwrap().tracks == ids[..3].to_vec()
+    });
+}
+
+/// Folders in a section: made, nested and their contents listed; a playlist can't
+/// go in a crate folder.
+#[test]
+fn folders_in_each_section() {
+    let mut h = start("folders");
+    let ids = ids(&h);
+    h.state_mut().dispatch(
+        CollectionCmd::CreateFolder {
+            section: Section::Crates,
+            parent: None,
+        }
+        .into(),
+    );
+    settle_until(&mut h, |a| a.collections.children(None).len() == 1);
+    let folder = h.state().collections.children(None)[0].id;
+    assert_eq!(
+        h.state().collections.get(folder).unwrap().section,
+        Section::Crates
+    );
+    let inner = make(&mut h, CollectionKind::Crate, "Inner", ids[..2].to_vec());
+    h.state_mut()
+        .dispatch(CollectionCmd::Move(inner, Some(folder)).into());
+    settle_until(&mut h, |a| {
+        a.collections.get(inner).unwrap().parent == Some(folder)
+    });
+    let list = make(&mut h, CollectionKind::Playlist, "P", vec![]);
+    assert!(!h.state().collections.can_move(list, Some(folder)));
+    // A folder lists everything inside it.
+    h.state_mut()
+        .dispatch(ViewCmd::Source(Some(Source::Crates)).into());
+    h.state_mut().dispatch(CollectionCmd::Show(folder).into());
+    steps(&mut h, 3);
+    for id in &ids[..2] {
+        h.get_by_label(&title(&h, *id));
+    }
+    assert!(h.query_by_label(&title(&h, ids[2])).is_none());
+    // A column filter shows as a chip; the rating and colour columns can be added.
+    {
+        use crate::ui::panels::library::table::{ColumnId, Filter, TableView};
+        let t = h
+            .state_mut()
+            .panels
+            .library
+            .tables
+            .get_mut(TableView::Folder);
+        *t.filter_mut(ColumnId::Bpm) = Filter::Text(">=100".into());
+        t.toggle_column(ColumnId::Rating);
+        t.toggle_column(ColumnId::Colour);
+    }
+    steps(&mut h, 3);
+    render(&mut h, "folders");
+}
+
+/// "Add to Flow ▸ <Flow>" in the track menu adds a card that follows nothing.
+#[test]
+fn add_to_flow_from_the_track_menu() {
+    let mut h = start("add-to-flow");
+    let ids = ids(&h);
+    h.state_mut().dispatch(ViewCmd::Aside(None).into());
+    let flow = make(&mut h, CollectionKind::Flow, "Warm-up", vec![ids[0]]);
+    steps(&mut h, 2);
+    h.get_by_label(&title(&h, ids[3])).click_secondary();
+    steps(&mut h, 2);
+    h.get_by_label("Add to Flow ⏵").click();
+    steps(&mut h, 2);
+    h.get_by_label("Warm-up").click();
+    settle_until(&mut h, |a| {
+        a.collections.get(flow).unwrap().tracks.len() == 2
+    });
+    let c = h.state().collections.get(flow).unwrap();
+    assert!(c.tracks.contains(&ids[3]));
+    assert!(!c.linear, "two starting cards: not linked");
+}
+
+/// The FEATURES.md bug: in Prepare, the suggestions' Master is Prepare's player while
+/// it plays. Then the suggestions take focus: browsing and "load selected" use them.
+#[test]
+fn master_in_prepare_is_the_player() {
+    let mut h = start("prepare-master");
+    let id = ids(&h)[1];
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
+    h.state_mut().dispatch(LibraryCmd::Load(id).into());
+    let prep = DeckId::PREPARE;
+    settle_until(&mut h, |a| a.panels.decks[prep.index()].wave.is_some());
+    h.state_mut().dispatch(Command::from((
+        prep,
+        EngineCmd::Play(earshot_engine::Set::On),
+    )));
+    settle_until(&mut h, |a| {
+        a.panels
+            .library
+            .suggest
+            .reference
+            .is_some_and(|r| r.id == id && r.deck == Some(prep.index()) && r.playing)
+    });
+    render(&mut h, "prepare-master");
+
+    let app = h.state_mut();
+    app.dispatch(ViewCmd::FocusPane(Pane::Suggest).into());
+    app.dispatch(ViewCmd::Browse(1).into());
+    let pick = app.panels.library.suggest.focused().expect("a suggestion");
+    assert_eq!(app.panels.library.focused_track(), Some(pick));
+    let a = DeckId::new(0).unwrap();
+    app.dispatch(ViewCmd::LoadSelected(a).into());
+    settle_until(&mut h, |app| app.panels.decks[a.index()].wave.is_some());
+    assert_eq!(
+        h.state().player.lock().unwrap().session(a).track_id,
+        Some(pick)
+    );
+}

@@ -194,10 +194,14 @@ CREATE TABLE track_tags (
 --             remembers which Flow in `source_flow_id`.
 --   smart:    `query`
 --   flow:     flow_nodes + flow_edges (a DAG; a track may appear on several nodes)
+-- Each is in one of three trees (`section`: the library's Playlists, Crates and Flows
+-- sources): its kind's, or for a folder, the one it was made in. A folder only holds
+-- things of its own section (core/collections.rs `Section`; the Store checks).
 CREATE TABLE collections (
   id              INTEGER PRIMARY KEY,
   parent_id       INTEGER REFERENCES collections(id) ON DELETE CASCADE,  -- a folder; NULL: top level
   kind            TEXT NOT NULL CHECK (kind IN ('folder', 'crate', 'playlist', 'smart', 'flow')),
+  section         TEXT NOT NULL CHECK (section IN ('playlists', 'crates', 'flows')),
   name            TEXT NOT NULL,
   query           TEXT,
   sort_order      INTEGER,

@@ -6,7 +6,7 @@ use earshot_engine::decode::TrackTags;
 
 use super::*;
 use crate::core::collections::CollectionKind::{Crate, Flow, Folder, Playlist, Smart};
-use crate::core::collections::{FlowGraph, FlowNode};
+use crate::core::collections::{FlowGraph, FlowNode, Section};
 use write::save_features;
 
 /// A fresh database in its own folder, which also serves as the library root.
@@ -649,7 +649,7 @@ fn memory_labels_and_colours_round_trip() {
 #[test]
 fn flows_save_load_move_and_delete() {
     let (_dir, mut w, t) = one_track("flows");
-    w.create_collection(1, None, Folder, "Sets", None).unwrap();
+    w.create_folder(1, None, Section::Flows, "Sets").unwrap();
     w.create_collection(2, Some(1), Folder, "Summer", None)
         .unwrap();
     assert!(
@@ -729,7 +729,7 @@ fn a_path_through_a_flow_exports_as_a_playlist() {
     let (dir, mut w, a) = one_track("export");
     scan(&mut w, &dir, &[file(&dir.join("music/b.mp3"), "B", None)]);
     let b = library(&mut w).iter().find(|t| t.id != a).unwrap().id;
-    w.create_collection(1, None, Folder, "Sets", None).unwrap();
+    w.create_folder(1, None, Section::Flows, "Sets").unwrap();
     w.create_collection(2, Some(1), Flow, "F", None).unwrap();
     // a → b → a, and a branch a → a.
     let g = graph(&[(1, a), (2, b), (3, a), (4, a)], &[(1, 2), (2, 3), (1, 4)]);
@@ -748,7 +748,8 @@ fn a_path_through_a_flow_exports_as_a_playlist() {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    assert_eq!((parent, source), (Some(1), Some(2)));
+    // At the top of Playlists: the Flow's folder only holds Flows.
+    assert_eq!((parent, source), (None, Some(2)));
     // A snapshot: deleting the Flow keeps the playlist, without its source.
     w.delete(2).unwrap();
     assert_eq!(read::collection_tracks(w.conn(), 3).unwrap(), vec![a, b, a]);
@@ -784,6 +785,46 @@ fn playlists_keep_order_and_repeats() {
     assert_eq!(read::collection_tracks(w.conn(), 1).unwrap(), vec![b, a]);
     let listed = read::collections(w.conn()).unwrap();
     assert_eq!(listed[0].tracks, vec![b, a]);
+}
+
+#[test]
+fn each_section_has_its_own_folders() {
+    let (_dir, mut w, _) = one_track("sections");
+    let (crates, lists) = (Section::Crates, Section::Playlists);
+    w.create_folder(1, None, crates, "Disco").unwrap();
+    w.create_folder(2, Some(1), crates, "Italo").unwrap();
+    w.create_folder(3, None, lists, "Gigs").unwrap();
+    w.create_collection(4, Some(2), Crate, "A", None).unwrap();
+    // A folder made with `create_collection` takes its parent's section.
+    w.create_collection(5, Some(1), Folder, "B", None).unwrap();
+    assert!(
+        matches!(
+            w.create_collection(6, Some(1), Playlist, "P", None),
+            Err(StoreError::Refused(_))
+        ),
+        "a playlist in a crate folder"
+    );
+    w.create_collection(6, Some(3), Smart, "S", None).unwrap();
+    assert!(matches!(w.move_to(6, Some(2)), Err(StoreError::Refused(_))));
+    assert!(matches!(
+        w.create_folder(7, Some(3), Section::Flows, "x"),
+        Err(StoreError::Refused(_))
+    ));
+    w.move_to(4, Some(5)).unwrap();
+    w.move_to(2, Some(5)).unwrap();
+    w.rename(5, "Mixed").unwrap();
+    let all = read::collections(w.conn()).unwrap();
+    let get = |id| all.iter().find(|c| c.id == id).unwrap();
+    assert_eq!(get(5).section, Section::Crates);
+    assert_eq!((get(5).name.as_str(), get(2).parent), ("Mixed", Some(5)));
+    assert_eq!(get(6).section, Section::Playlists);
+    w.delete(1).unwrap();
+    let left: Vec<i64> = read::collections(w.conn())
+        .unwrap()
+        .iter()
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(left, vec![3, 6], "the folder took everything in it");
 }
 
 #[test]
