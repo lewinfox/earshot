@@ -28,7 +28,7 @@ JSON lines. stdin: one request per line. stdout: one message per line, nothing e
 
 **Handshake.** The app sends `{"type": "hello", "protocol": 2}`. Once torch is
 imported the worker answers
-`{"type": "hello", "protocol": 2, "analysers": {"grid": 2}, "detector": "beat_this", "models_loaded": [...]}`.
+`{"type": "hello", "protocol": 2, "analysers": {"grid": 3}, "detector": "beat_this", "models_loaded": [...]}`.
 `analysers` maps each analyser to its version, bumped whenever its results change. A
 hello with another protocol gets an `error` (id null) instead.
 
@@ -42,7 +42,7 @@ sends each process one job at a time anyway, and deck loads go to their own proc
    "analysers": {"grid": {"mode": "static"}}, "deadline_s": 900}
 ← {"id": 7, "type": "started"}                         // left the queue; deadline starts
 ← {"id": 7, "type": "progress", "analyser": "grid", "fraction": 0.42}   // rising, 0..1
-← {"id": 7, "type": "result", "analyser": "grid", "version": 2, "data": {...}}
+← {"id": 7, "type": "result", "analyser": "grid", "version": 3, "data": {...}}
 ←   or {"id": 7, "type": "failed", "analyser": "grid", "error": "..."}  // one per analyser
 ← {"id": 7, "type": "done", "seconds": 3.1}
 → {"type": "cancel", "id": 7}
@@ -75,8 +75,8 @@ kicks start (`snap.kick_shifts`): Beat This! puts its beats 20-40 ms late.
 
 | mode | `data` |
 |---|---|
-| `static` | `{"detector": "static", "kick_shift_ms": f, "grid": {"kind": "constant", "bpm": f, "downbeat": s, "steady": bool, "spread_ms": f, "drift_pct": f}}` |
-| `dynamic` | `{"detector": "beat_this", "kick_shift_ms": f, "grid": {"kind": "markers", "beats": [s...], "beat_index": [int...], "is_downbeat": [bool...], "median_bpm": f, "min_bpm": f, "max_bpm": f}}` |
+| `static` | `{"detector": "static", "kick_shift_ms": f, "first_beat": s, "grid": {"kind": "constant", "bpm": f, "downbeat": s, "steady": bool, "spread_ms": f, "drift_pct": f}}` |
+| `dynamic` | `{"detector": "beat_this", "kick_shift_ms": f, "first_beat": s, "grid": {"kind": "markers", "beats": [s...], "beat_index": [int...], "is_downbeat": [bool...], "median_bpm": f, "min_bpm": f, "max_bpm": f}}` |
 
 - `static` (see `static_tempo.py`): one tempo for the whole track, in a few seconds.
   `downbeat` is the time of a 1 on that grid. `steady` is false when the tempo seems to
@@ -89,6 +89,12 @@ kicks start (`snap.kick_shifts`): Beat This! puts its beats 20-40 ms late.
   of about 32 beats is moved onto the kicks by its own amount.
 - `kick_shift_ms`: how far the kick snap moved the grid (the median, negative is
   earlier).
+- `first_beat`: where the music's beats start, after the kick snap. A straight grid
+  runs back to the start of the file, over any silent or beatless intro; this is
+  where beats were actually found. `static`: the grid line at the model's first beat
+  on the grid, walked back over any beats it missed (`static_tempo.first_beat`).
+  `dynamic`: the first of `beats`. The app puts a track's initial cue on the grid line
+  nearest it. (Added in grid version 3.)
 
 **Processes and priority.** The process puts itself in the idle CPU class (nice 19 off
 Linux) unless `EARSHOT_WORKER_PRIORITY=inherit`; an unprivileged process can't leave

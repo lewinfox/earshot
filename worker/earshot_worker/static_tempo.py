@@ -22,7 +22,10 @@ running Beat This! over the whole track (about 3 s instead of 11 s on 4 laptop c
    through them gives the tempo, then the roundest BPM (to 0.1 at the finest) whose
    grid still lands on every excerpt's beats (choose_tempo).
 4. Beat This! puts beats 20-40 ms after the start of the kick, so the grid is then
-   moved to where the kicks start (snap.snap_to_kicks).
+   moved to where the kicks start (snap.snap_to_kicks). The grid runs back to the
+   start of the file, over any silent or beatless intro; first_beat is the grid line
+   where the beats really start (the model's first beat on the grid, walked back over
+   any it missed).
 5. The track is flagged as not steady, so the app can suggest dynamic analysis, if
    the excerpts still disagree with the grid by more than STEADY_MS, two or more of
    them don't line up with its tempo at all, or one's own tempo is more than
@@ -315,6 +318,7 @@ def analyse_static(y: np.ndarray, sr: int, progress=None) -> dict:
     # Beat This! is late: move the grid to where the kicks start. Beat and downbeat
     # by the same amount, so the downbeat stays on the same beat.
     shift = snap_to_kicks(mono, sr, bpm, phase)
+    first = first_beat(found, phase, period, t, env)
     report(1.0)
     return {
         "bpm": float(bpm),
@@ -325,7 +329,41 @@ def analyse_static(y: np.ndarray, sr: int, progress=None) -> dict:
         "drift_pct": float(drift_pct),
         "steady": is_steady(spread_ms, lined, len(found), drift_pct),
         "kick_shift": float(shift),
+        "first_beat": float(first + shift),
     }
+
+
+def first_beat(found, phase: float, period: float, t: np.ndarray, env: np.ndarray) -> float:
+    """The grid line where the beats start, before the kick snap.
+
+    1. The earliest beat the model found within a quarter beat of a grid line (not an
+       off-beat it counted when it doubled) and not in near-silence (onsets within
+       60 ms before to 20 ms after under a tenth of those beats' median), taken to
+       its grid line.
+    2. The model often misses an excerpt's first beat or two, and a short track is
+       one excerpt: walk back a line at a time while there's still a hit there (over
+       a third of that median).
+    No such beat: the grid's first line in the track."""
+    before, after = int(0.06 * SR / HOP), int(0.02 * SR / HOP)
+
+    def strength(times: np.ndarray) -> np.ndarray:
+        # From 60 ms before (the model's beats are late) to 20 ms after.
+        idx = np.clip(np.searchsorted(t, times), 0, len(t) - 1)
+        return np.array([env[max(0, i - before) : i + after + 1].max() for i in idx])
+
+    beats = np.sort(np.concatenate([b for _, b, _ in found])) if found else np.array([])
+    beats = beats[np.abs(wrap(beats - phase, period)) < period / 4]
+    if not len(beats):
+        return float(phase % period)
+    level = strength(beats)
+    typical = float(np.median(level))
+    beats = beats[level > 0.1 * typical]
+    if not len(beats):
+        return float(phase % period)
+    line = phase + np.round((beats[0] - phase) / period) * period
+    while line - period >= 0 and strength(np.array([line - period]))[0] > typical / 3:
+        line -= period
+    return float(line)
 
 
 def excerpt_tempos(found) -> list[float]:

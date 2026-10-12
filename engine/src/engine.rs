@@ -218,6 +218,9 @@ struct Deck {
     tempo: f64,
     /// Playing at the last publish, to send Started/Stopped.
     was_playing: bool,
+    /// Nothing has played it, moved the playhead or set the cue since the track was
+    /// loaded, so [`Command::InitialCue`] may still move both.
+    untouched: bool,
 }
 
 /// Sync follows the leader's tempo averaged over this many beats either side, so
@@ -259,6 +262,7 @@ impl Deck {
             following: None,
             tempo: 1.0,
             was_playing: false,
+            untouched: false,
         }
     }
 
@@ -274,7 +278,10 @@ impl Deck {
         self.player.transport.playing
     }
 
+    /// Move the playhead. Loading and [`Command::InitialCue`] go to the transport
+    /// directly; anything through here counts as the deck being moved.
     fn jump(&mut self, to: f64, why: JumpReason) {
+        self.untouched = false;
         self.player.transport.jump(to, why);
     }
 
@@ -331,18 +338,21 @@ impl Deck {
         (1.0 + self.rate) * (1.0 + self.nudge)
     }
 
-    /// Put `track` on the deck, stopped at its first beat. Tempo, sync, quantize and
-    /// keylock stay as they were. Returns what it replaced, for the garbage ring.
+    /// Put `track` on the deck, stopped at its cue point (the grid's first beat if it
+    /// has none). Tempo, sync, quantize and keylock stay as they were. Returns what it
+    /// replaced, for the garbage ring.
     fn load(&mut self, track: Arc<LoadedTrack>) -> (Option<Arc<LoadedTrack>>, Option<Arc<Beatgrid>>) {
         let old_grid = std::mem::replace(&mut self.grid, track.grid.clone());
         let first_beat = self.grid.as_ref().map_or(0.0, |g| g.time_at(0.0).max(0.0));
+        let cue = track.cues.main.unwrap_or(first_beat);
         let t = &mut self.player.transport;
         t.set_duration(track.audio.duration());
         t.playing = false;
         t.loop_ = LoopState::default();
-        t.jump(first_beat, JumpReason::Load);
+        t.jump(cue, JumpReason::Load);
         self.player.speed = 1.0;
-        self.cue_point = track.cues.main.unwrap_or(first_beat);
+        self.cue_point = cue;
+        self.untouched = true;
         self.hotcues = track.cues.hot;
         self.nudge = 0.0;
         self.preview = Preview::None;
@@ -372,6 +382,21 @@ impl Deck {
         self.quantize = s.quantize;
     }
 
+    /// [`Command::InitialCue`]: the cue point and the playhead to `at`, if the deck is
+    /// still as it was loaded.
+    fn initial_cue(&mut self, at: f64, out: &mut Outbox) {
+        if !self.untouched || self.playing() || self.track.is_none() {
+            return;
+        }
+        self.cue_point = at.max(-LEAD_IN);
+        self.player.transport.jump(self.cue_point, JumpReason::Load);
+        out.send(EngineEvent::CueSet {
+            deck: self.id,
+            generation: self.generation(),
+            position: self.cue_point,
+        });
+    }
+
     fn event_loop(&mut self, out: &mut Outbox) {
         out.send(EngineEvent::LoopSet {
             deck: self.id,
@@ -389,6 +414,8 @@ impl Deck {
                 if self.track.is_none() {
                     return;
                 }
+                // Every press sets the cue, plays or moves the playhead.
+                self.untouched = false;
                 let playing = self.playing();
                 match press {
                     Press::Down if playing && self.preview == Preview::None => {
@@ -419,6 +446,7 @@ impl Deck {
             }
             DeckCmd::Seek(t) => self.jump(t, JumpReason::Seek),
             DeckCmd::SetCue(at) => {
+                self.untouched = false;
                 self.cue_point = at.unwrap_or_else(|| self.snap(self.pos())).max(-LEAD_IN);
                 out.send(EngineEvent::CueSet {
                     deck: self.id,
@@ -1083,6 +1111,17 @@ impl Renderer {
                     self.trash(Garbage::Grid(g));
                 }
             }
+            Command::InitialCue {
+                deck,
+                generation,
+                at,
+            } => {
+                if let Some(d) = self.live(deck)
+                    && self.decks[d].generation() == generation
+                {
+                    self.decks[d].initial_cue(at, &mut self.outbox);
+                }
+            }
             Command::SetSyncLeader(l) => {
                 self.sync_leader = l.filter(|l| l.index() < self.live);
             }
@@ -1104,6 +1143,9 @@ impl Renderer {
                 let was = dk.playing();
                 let on = set.apply(was);
                 dk.player.transport.playing = on;
+                if on {
+                    dk.untouched = false;
+                }
                 if on && !was && dk.sync {
                     self.snap_phase(d);
                 }
@@ -1763,6 +1805,80 @@ mod tests {
         rig.run(0.01);
         assert!(!rig.snap().decks[0].playing);
         assert!((rig.pos(0) - 5.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_track_loads_at_its_cue() {
+        let mut rig = Rig::new();
+        let (audio, grid) = demo(120.0, 120.0, 60.0, 3);
+        rig.send(Command::Load {
+            deck: id(0),
+            track: Arc::new(LoadedTrack {
+                track_id: 1,
+                generation: 1,
+                audio: Arc::new(audio),
+                grid: Some(Arc::new(grid)),
+                cues: CueSet {
+                    main: Some(8.0),
+                    hot: [None; HOTCUES],
+                },
+                auto_gain: 1.0,
+            }),
+        });
+        rig.run(0.01);
+        let s = rig.snap().decks[0];
+        assert_eq!((s.cue_point, s.position), (8.0, 8.0));
+        // No cue: the grid's first beat, as before.
+        let first = rig.load(1, 120.0, 120.0).time_at(0.0);
+        rig.run(0.01);
+        let s = rig.snap().decks[1];
+        assert_eq!((s.cue_point, s.position), (first, first));
+    }
+
+    #[test]
+    fn initial_cue_moves_only_a_deck_as_it_was_loaded() {
+        let mut rig = Rig::new();
+        rig.load(0, 120.0, 120.0);
+        rig.load(1, 120.0, 120.0);
+        rig.deck(1, DeckCmd::Play(Set::On));
+        rig.run(0.1);
+        rig.deck(1, DeckCmd::Play(Set::Off));
+        rig.run(0.01);
+        let (played_at, played_cue) = (rig.pos(1), rig.snap().decks[1].cue_point);
+        rig.events();
+        let initial = |deck, generation, at| Command::InitialCue {
+            deck: id(deck),
+            generation,
+            at,
+        };
+        // For a track the deck no longer has: ignored.
+        rig.send(initial(0, 7, 4.0));
+        rig.run(0.01);
+        assert_ne!(rig.snap().decks[0].cue_point, 4.0);
+        rig.send(initial(0, 1, 4.0));
+        rig.send(initial(1, 1, 4.0));
+        rig.run(0.01);
+        let s = rig.snap();
+        assert_eq!((s.decks[0].cue_point, s.decks[0].position), (4.0, 4.0));
+        assert!(rig.events().iter().any(|e| matches!(e,
+            EngineEvent::CueSet { deck, position, .. } if *deck == id(0) && *position == 4.0)));
+        // Played since it was loaded: left alone.
+        assert_eq!(
+            (s.decks[1].cue_point, s.decks[1].position),
+            (played_cue, played_at)
+        );
+        // A cue set by hand is never moved.
+        rig.deck(0, DeckCmd::SetCue(Some(6.0)));
+        rig.send(initial(0, 1, 2.0));
+        rig.run(0.01);
+        assert_eq!(rig.snap().decks[0].cue_point, 6.0);
+        // Nor is a deck that was only moved.
+        rig.load(1, 120.0, 120.0);
+        rig.deck(1, DeckCmd::Seek(20.0));
+        rig.send(initial(1, 1, 2.0));
+        rig.run(0.01);
+        let s = rig.snap().decks[1];
+        assert!(s.cue_point != 2.0 && (s.position - 20.0).abs() < 1e-9);
     }
 
     #[test]

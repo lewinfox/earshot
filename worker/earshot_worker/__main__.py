@@ -70,8 +70,9 @@ log = logging.getLogger("earshot_worker")
 
 PROTOCOL = 2
 # Each analyser's version: bump it when its results change, so the app can find
-# results made by an older one. grid 2: dynamic grids snapped to the kicks.
-ANALYSERS = {"grid": 2}
+# results made by an older one. grid 2: dynamic grids snapped to the kicks. grid 3:
+# first_beat.
+ANALYSERS = {"grid": 3}
 # Lower runs first; equal priorities run in the order they arrived.
 PRIORITIES = {"deck": 0, "preview": 1, "background": 2}
 HEARTBEAT_S = float(os.environ.get("EARSHOT_WORKER_HEARTBEAT_S", "2"))
@@ -177,14 +178,16 @@ def _finite(name: str, values: list[float]) -> None:
 
 def grid(y: np.ndarray, sr: int, params: dict, progress) -> dict:
     """The `grid` analyser: a straight grid (mode static) or one line per detected
-    beat (mode dynamic), both snapped to the kicks."""
+    beat (mode dynamic), both snapped to the kicks, and where the detected beats
+    start (`first_beat`)."""
     mode = params["mode"]
     if mode == "static":
         r = analyse_static(y, sr, progress=progress)
-        _finite("result", [r["bpm"], r["downbeat"], r["spread_ms"], r["drift_pct"], r["kick_shift"]])
+        _finite("result", [r["bpm"], r["downbeat"], r["spread_ms"], r["drift_pct"], r["kick_shift"], r["first_beat"]])
         return {
             "detector": "static",
             "kick_shift_ms": r["kick_shift"] * 1000,
+            "first_beat": r["first_beat"],
             "grid": {
                 "kind": "constant",
                 "bpm": r["bpm"],
@@ -197,11 +200,14 @@ def grid(y: np.ndarray, sr: int, params: dict, progress) -> dict:
     a = analyse(y, sr, progress=progress)
     beats = [float(b) for b in a.beats]
     stats = {"median_bpm": float(a.median_bpm), "min_bpm": float(a.min_bpm), "max_bpm": float(a.max_bpm)}
+    if not beats:
+        raise ValueError("no beats found")
     _finite("beat time", beats)
     _finite("bpm", [*stats.values(), a.kick_shift])
     return {
         "detector": a.detector,
         "kick_shift_ms": float(a.kick_shift) * 1000,
+        "first_beat": beats[0],
         "grid": {
             "kind": "markers",
             "beats": beats,

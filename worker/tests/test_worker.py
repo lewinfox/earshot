@@ -168,6 +168,7 @@ def test_dynamic_grid_is_on_the_kicks(worker, kick_wav):
     assert data["detector"] == "beat_this"
     g = data["grid"]
     assert set(g) == {"kind", "beats", "beat_index", "is_downbeat", "median_bpm", "min_bpm", "max_bpm"}
+    assert data["first_beat"] == g["beats"][0]
     assert g["kind"] == "markers"
     beats = g["beats"]
     assert len(beats) == len(g["beat_index"]) == len(g["is_downbeat"]) > 100
@@ -189,9 +190,32 @@ def test_static_grid_is_on_the_kicks(worker, click_wav):
     g = data["grid"]
     assert data["detector"] == "static" and g["kind"] == "constant"
     assert set(g) == {"kind", "bpm", "downbeat", "steady", "spread_ms", "drift_pct"}
+    assert abs(data["first_beat"] - LEAD_IN) < 0.005, data  # the first kick
     assert g["bpm"] == BPM
     assert g["steady"] is True
     assert kick_error([g["downbeat"]])[0] < 0.005, g
+
+
+@pytest.fixture(scope="module")
+def intro_wav(tmp_path_factory):
+    """Silence, then kicks from INTRO s."""
+    wav = tmp_path_factory.mktemp("audio") / "intro.wav"
+    sf.write(wav, click_track(seconds=60.0, lead_in=INTRO, hats=False), SR, subtype="FLOAT")
+    return wav
+
+
+INTRO = 12.3
+
+
+@pytest.mark.parametrize("job_id, mode", [(4, "static"), (5, "dynamic")])
+def test_first_beat_is_where_the_beats_start(worker, intro_wav, job_id, mode):
+    # A straight grid runs back to the start of the file, over the silence; the first
+    # beat is the first kick.
+    worker.analyse(job_id, intro_wav, mode)
+    data = result(worker.job(job_id))
+    assert abs(data["first_beat"] - INTRO) < 0.005, data["first_beat"]
+    if mode == "static":
+        assert data["grid"]["downbeat"] < INTRO - 1
 
 
 def started(worker, ids):

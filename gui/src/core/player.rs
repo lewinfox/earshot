@@ -308,6 +308,7 @@ pub fn load_track(player: &Player, lib: &Library, deck: DeckId, id: i64) -> Resu
         }
     };
     let analysed = stored.is_some();
+    let first_beat = reader.first_beat(id).map_err(|e| e.to_string())?;
     let (grid, source) = match stored {
         Some((g, src)) => (Some(g), src.label().to_string()),
         None => grid_for_file(&path, &tags, audio.duration()),
@@ -336,6 +337,7 @@ pub fn load_track(player: &Player, lib: &Library, deck: DeckId, id: i64) -> Resu
             .queue(id, Some(audio.clone()), false, Mode::Static);
     }
     let hotcues = reader.hotcues(id).map_err(|e| e.to_string())?;
+    let main = initial_cue(grid.as_ref(), first_beat);
 
     let mut inner = player.lock().unwrap();
     inner.generation += 1;
@@ -344,10 +346,7 @@ pub fn load_track(player: &Player, lib: &Library, deck: DeckId, id: i64) -> Resu
         generation: inner.generation,
         audio,
         grid: grid.map(Arc::new),
-        cues: CueSet {
-            main: None,
-            hot: hotcues,
-        },
+        cues: CueSet { main, hot: hotcues },
         auto_gain: level.auto_gain(),
     });
     // The session first: with no audio running, it's still there for a restart.
@@ -359,6 +358,22 @@ pub fn load_track(player: &Player, lib: &Library, deck: DeckId, id: i64) -> Resu
     session.waveform = Arc::new(wave);
     session.detail = Arc::new(detail);
     inner.send(Command::Load { deck, track })
+}
+
+/// Where a track's cue starts: the grid line nearest where analysis found the beats
+/// start (`first_beat`), so a grid moved by hand still gets its cue on one of its lines,
+/// and a straight grid that runs back over a silent intro doesn't put it there. `None`
+/// (no grid, or analysed before first_beat): the engine's default, the grid's first
+/// line. The playhead starts here too.
+pub fn initial_cue(grid: Option<&Beatgrid>, first_beat: Option<f64>) -> Option<f64> {
+    let (grid, first_beat) = (grid?, first_beat?);
+    let at = grid.quantize(first_beat);
+    // The nearest line can be one before the start of the file.
+    Some(if at >= 0.0 {
+        at
+    } else {
+        grid.time_at(0.0).max(0.0)
+    })
 }
 
 /// Whole-grid edits from the grid editor.
@@ -617,6 +632,31 @@ mod tests {
         assert_eq!(now.crossfader, was.crossfader);
         assert_eq!(after.decks[1].crossfader, before.decks[1].crossfader);
         assert_eq!(p.lock().unwrap().session(a).jump_size, 16.0);
+    }
+
+    #[test]
+    fn the_cue_starts_where_the_beats_do() {
+        let near = |a: Option<f64>, b: f64| a.is_some_and(|a| (a - b).abs() < 1e-9);
+        // A straight grid runs back over a 12 s silent intro, to 0.25 s.
+        let constant = Beatgrid::constant(120.0, 12.25, 60.0).unwrap();
+        assert!((constant.time_at(0.0) - 0.25).abs() < 1e-9);
+        assert!(near(initial_cue(Some(&constant), Some(12.26)), 12.25));
+        // A grid of detected beats, extended back to the start at their tempo.
+        let beats: Vec<f64> = (0..40).map(|i| 4.02 + i as f64 * 0.48).collect();
+        let index: Vec<i64> = (0..40).collect();
+        let markers = Beatgrid::from_indexed(&beats, &index, &[false; 40])
+            .and_then(|g| g.refit(60.0))
+            .unwrap();
+        assert!(markers.time_at(0.0) < 0.5);
+        assert!(near(initial_cue(Some(&markers), Some(4.02)), 4.02));
+        // Moved by hand 100 ms later: the cue is on one of its lines.
+        let nudged = constant.nudged(0.1, 60.0).unwrap();
+        assert!(near(initial_cue(Some(&nudged), Some(12.26)), 12.35));
+        // Beats start before the grid's first line: that line, not one before 0.
+        assert!(near(initial_cue(Some(&nudged), Some(0.01)), 0.35));
+        // Unknown (no grid, or analysed before first_beat): the engine's default.
+        assert_eq!(initial_cue(Some(&constant), None), None);
+        assert_eq!(initial_cue(None, Some(12.26)), None);
     }
 
     #[test]

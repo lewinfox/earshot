@@ -490,6 +490,12 @@ impl Reader {
         self.with(|c| read::loudness(c, id))
     }
 
+    /// Where analysis found the track's beats start (s): the initial cue goes on the
+    /// grid line nearest it. `None` if it hasn't (or analysed it before grid 3).
+    pub fn first_beat(&self, id: i64) -> Result<Option<f64>> {
+        self.with(|c| read::first_beat(c, id))
+    }
+
     /// A track's saved hot cues, by pad.
     pub fn hotcues(&self, id: i64) -> Result<[Option<f64>; HOTCUES]> {
         self.with(|c| read::hotcues(c, id))

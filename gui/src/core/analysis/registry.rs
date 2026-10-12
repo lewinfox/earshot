@@ -15,7 +15,8 @@ pub enum AnalyserId {
     Loudness,
     /// The placeholder energy (`track_features` energy): suggestions.
     Energy,
-    /// The beatgrid (a `beatgrids` row) and the tempo range (bpm_min, bpm_max, drifts).
+    /// The beatgrid (a `beatgrids` row), the tempo range (bpm_min, bpm_max, drifts)
+    /// and where the beats start (first_beat: the initial cue).
     Grid,
 }
 
@@ -88,14 +89,14 @@ pub const REGISTRY: &[AnalyserSpec] = &[
     AnalyserSpec {
         id: AnalyserId::Grid,
         // As `ANALYSERS["grid"]` in worker/earshot_worker/__main__.py.
-        version: 2,
+        version: 3,
         runs_in: RunsIn::Worker,
         needs: AudioNeeds {
             rate: None,
             channels: 1,
         },
         depends_on: &[],
-        features: &["bpm_min", "bpm_max", "drifts"],
+        features: &["bpm_min", "bpm_max", "drifts", "first_beat"],
     },
 ];
 

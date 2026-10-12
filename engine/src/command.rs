@@ -189,7 +189,7 @@ pub enum ParamId {
 /// Cue points that travel with a track: the main cue and the hot cues, in seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct CueSet {
-    /// `None`: the first beat (or the start).
+    /// `None`: the grid's first beat (or the start). The playhead starts here on load.
     pub main: Option<f64>,
     pub hot: [Option<f64>; HOTCUES],
 }
@@ -351,6 +351,16 @@ pub enum Command {
         deck: DeckId,
         generation: u64,
         grid: Option<Arc<Beatgrid>>,
+    },
+    /// Move the cue point and the playhead to `at` (seconds) on the track loaded as
+    /// `generation`, but only if nothing has played it, moved the playhead or set the
+    /// cue since it was loaded (ignored otherwise, or if the deck has moved on to
+    /// another track): the initial cue, once analysis finds where the beats start.
+    /// Sends [`crate::EngineEvent::CueSet`] when it moves it.
+    InitialCue {
+        deck: DeckId,
+        generation: u64,
+        at: f64,
     },
     /// The deck synced decks follow. `None`: each synced deck picks one (a playing
     /// deck that isn't synced itself, if there is one).

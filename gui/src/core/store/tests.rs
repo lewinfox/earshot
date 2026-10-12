@@ -326,6 +326,21 @@ fn one_track(name: &str) -> (PathBuf, Writer, i64) {
 }
 
 #[test]
+fn the_first_beat_is_kept_with_the_track() {
+    let (dir, mut w, id) = one_track("first-beat");
+    // Not analysed yet, or by a grid analyser from before first_beat.
+    w.save_analysis(analysis(id, 125.0, None, false)).unwrap();
+    assert_eq!(read::first_beat(w.conn(), id).unwrap(), None);
+    let mut s = analysis(id, 125.0, None, false);
+    s.features.push(("first_beat", 12.3));
+    w.save_analysis(s).unwrap();
+    drop(w);
+    // Read back after a restart, with no analysis.
+    let c = open_writer(&dir.join(FILE_NAME)).unwrap();
+    assert_eq!(read::first_beat(&c, id).unwrap(), Some(12.3));
+}
+
+#[test]
 fn stale_analyser_results_are_one_query() {
     let (dir, mut w) = setup("stale");
     w.add_roots(&[dir.join("music")]).unwrap();

@@ -163,6 +163,9 @@ pub struct GridResult {
     pub detector: String,
     /// How far the grid was moved onto the kicks (median, ms; negative is earlier).
     pub kick_shift_ms: f64,
+    /// Where the music's beats start (s, after the kick snap): where beats were found,
+    /// not where a straight grid runs back to.
+    pub first_beat: f64,
     pub grid: GridData,
     /// The analyser's version, from the result message.
     #[serde(skip)]
@@ -889,7 +892,7 @@ if len(sys.argv) > 2 and sys.argv[2] == "beat":
 for line in sys.stdin:
     r = json.loads(line)
     if r["type"] == "hello":
-        send({"type": "hello", "protocol": int(sys.argv[1]), "analysers": {"grid": 2},
+        send({"type": "hello", "protocol": int(sys.argv[1]), "analysers": {"grid": 3},
               "detector": "fake", "models_loaded": []})
     elif r["type"] == "analyse":
         i = r["id"]
@@ -902,8 +905,8 @@ for line in sys.stdin:
         if r["wav"] == "fail":
             send({"id": i, "type": "failed", "analyser": "grid", "error": "no beats"})
         else:
-            send({"id": i, "type": "result", "analyser": "grid", "version": 2, "data": {
-                "detector": "fake", "kick_shift_ms": -20.0, "grid": {"kind": "constant",
+            send({"id": i, "type": "result", "analyser": "grid", "version": 3, "data": {
+                "detector": "fake", "kick_shift_ms": -20.0, "first_beat": 0.5, "grid": {"kind": "constant",
                 "bpm": 124.0, "downbeat": 0.5, "steady": True, "spread_ms": 1.0, "drift_pct": 0.1}}})
         send({"id": i, "type": "done", "seconds": 0.1})
 "#;
@@ -943,7 +946,7 @@ for line in sys.stdin:
         assert!(serde_json::from_str::<Reply>(r#"{"type": "ready"}"#).is_err());
         assert!(serde_json::from_str::<Reply>(r#"{"type": "hello", "protocol": 2}"#).is_err());
         // A grid missing a field is an error, not a zero.
-        let g = r#"{"detector": "static", "kick_shift_ms": -20.0,
+        let g = r#"{"detector": "static", "kick_shift_ms": -20.0, "first_beat": 0.5,
                     "grid": {"kind": "constant", "bpm": 124.0, "steady": true,
                              "spread_ms": 1.0, "drift_pct": 0.1}}"#;
         assert!(serde_json::from_str::<GridResult>(g).is_err());
@@ -962,7 +965,8 @@ for line in sys.stdin:
         assert_eq!(updates[0], Update::Started);
         assert!(matches!(&updates[1], Update::Progress { fraction, .. } if *fraction == 0.5));
         let grid = out.grid.unwrap().unwrap();
-        assert_eq!(grid.version, 2);
+        assert_eq!(grid.version, 3);
+        assert_eq!(grid.first_beat, 0.5);
         assert!(matches!(
             grid.grid,
             GridData::Constant { downbeat: 0.5, .. }

@@ -296,6 +296,11 @@ pub fn feature(c: &Connection, id: i64, name: &str) -> Result<Option<f64>> {
     .optional()?)
 }
 
+/// Where analysis found the track's beats start (s), if it has (grid analyser 3 on).
+pub fn first_beat(c: &Connection, id: i64) -> Result<Option<f64>> {
+    feature(c, id, "first_beat")
+}
+
 pub fn loudness(c: &Connection, id: i64) -> Result<Option<Loudness>> {
     Ok(match (feature(c, id, "lufs")?, feature(c, id, "peak")?) {
         (Some(lufs), Some(peak)) => Some(Loudness { lufs, peak }),

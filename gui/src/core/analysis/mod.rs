@@ -535,6 +535,7 @@ impl Shared {
             ("bpm_min", min),
             ("bpm_max", max),
             ("drifts", drifts as u8 as f64),
+            ("first_beat", reply.first_beat),
         ]);
         done.push((AnalyserId::Grid.as_str(), reply.version, None));
         // The Store makes it the active grid only if the grid hasn't changed since the
@@ -551,8 +552,13 @@ impl Shared {
             }),
             done,
         )?;
-        if out.is_some_and(|o| o.switched) {
-            update_decks(player, id, grid, source);
+        if let Some(o) = out {
+            update_decks(
+                player,
+                id,
+                o.switched.then_some((grid, source)),
+                reply.first_beat,
+            );
         }
         let detail = match &reply.grid {
             GridData::Constant { spread_ms, .. } => format!("phase spread {spread_ms:.0} ms"),
@@ -627,9 +633,18 @@ impl Priority {
     }
 }
 
-/// Give the new grid to any deck that has this track loaded.
-fn update_decks(player: &Player, track_id: i64, grid: Beatgrid, source: GridSource) {
-    let grid = Some(Arc::new(grid));
+/// Give a finished grid analysis to every player that has this track loaded (Prepare's
+/// too): the new grid, if it's now the active one, then the initial cue on the grid
+/// line nearest `first_beat`. The engine moves the cue and the playhead there only if
+/// nothing has played, moved or cued that player since the load (`InitialCue`), so a
+/// cue set by hand is never overridden.
+fn update_decks(
+    player: &Player,
+    track_id: i64,
+    grid: Option<(Beatgrid, GridSource)>,
+    first_beat: f64,
+) {
+    let grid = grid.map(|(g, source)| (Some(Arc::new(g)), source));
     let mut inner = player.lock().unwrap();
     for deck in 0..inner.decks.len() {
         if inner.decks[deck].track_id != Some(track_id) {
@@ -639,18 +654,28 @@ fn update_decks(player: &Player, track_id: i64, grid: Beatgrid, source: GridSour
             continue;
         };
         let generation = inner.decks[deck].generation;
-        if inner
-            .send(Command::SetGrid {
+        if let Some((grid, source)) = &grid {
+            if inner
+                .send(Command::SetGrid {
+                    deck: id,
+                    generation,
+                    grid: grid.clone(),
+                })
+                .is_err()
+            {
+                continue;
+            }
+            inner.decks[deck].grid = grid.clone();
+            inner.decks[deck].grid_source = source.label().into();
+        }
+        let at = super::player::initial_cue(inner.decks[deck].grid.as_deref(), Some(first_beat));
+        if let Some(at) = at {
+            let _ = inner.send(Command::InitialCue {
                 deck: id,
                 generation,
-                grid: grid.clone(),
-            })
-            .is_err()
-        {
-            continue;
+                at,
+            });
         }
-        inner.decks[deck].grid = grid.clone();
-        inner.decks[deck].grid_source = source.label().into();
     }
 }
 
@@ -688,6 +713,51 @@ mod tests {
             failed,
             same_audio,
         }
+    }
+
+    #[test]
+    fn a_finished_analysis_cues_only_untouched_players() {
+        use crate::core::player::testing::{put_on, running, wait};
+        use earshot_engine::{DeckCmd, DeckId, Set};
+
+        let p = running();
+        let (played, cued, untouched) = (
+            DeckId::new(0).unwrap(),
+            DeckId::new(1).unwrap(),
+            DeckId::PREPARE,
+        );
+        for deck in [played, cued, untouched] {
+            put_on(&p, deck, 11);
+        }
+        p.lock()
+            .unwrap()
+            .send(Command::Deck(played, DeckCmd::Play(Set::On)))
+            .unwrap();
+        wait(&p, |s| s.decks[0].playing);
+        {
+            let mut inner = p.lock().unwrap();
+            inner
+                .send(Command::Deck(played, DeckCmd::Play(Set::Off)))
+                .unwrap();
+            inner
+                .send(Command::Deck(cued, DeckCmd::SetCue(Some(3.0))))
+                .unwrap();
+        }
+        let before = wait(&p, |s| !s.decks[0].playing && s.decks[1].cue_point == 3.0);
+
+        // Silence until 12 s, then beats: the straight grid runs back to 0.25 s.
+        let grid = Beatgrid::constant(120.0, 12.25, 30.0).unwrap();
+        update_decks(&p, 11, Some((grid, GridSource::Analysis)), 12.26);
+        // Prepare's player goes last, so the decks have had theirs by then.
+        let after = wait(&p, |s| s.prepare.cue_point == 12.25);
+        assert_eq!(after.prepare.position, 12.25, "the playhead goes with it");
+        assert_eq!(after.decks[0].cue_point, before.decks[0].cue_point);
+        assert_eq!(after.decks[0].position, before.decks[0].position);
+        assert_eq!(after.decks[1].cue_point, 3.0);
+        let inner = p.lock().unwrap();
+        assert_eq!(inner.session(untouched).state.cues.main, Some(12.25));
+        // Every player got the grid, touched or not.
+        assert!(inner.decks[..2].iter().all(|d| d.grid.is_some()));
     }
 
     #[test]
