@@ -440,6 +440,54 @@ fn the_analysis_queue_and_settings_are_saved() {
     );
 }
 
+/// Plays are saved in the session open at the time; a new session closes an old one
+/// left open at its last play.
+#[test]
+fn plays_are_saved_per_session() {
+    let (_dir, mut w, id) = one_track("plays");
+    // Before any session, the first play opens one.
+    w.apply(StoreCmd::SavePlay {
+        track: id,
+        deck: 1,
+        started_at: 100,
+    })
+    .unwrap();
+    w.end_play(1, 300).unwrap();
+    let first = read::plays(w.conn()).unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        (first[0].track, first[0].deck, first[0].started_at, first[0].ended_at),
+        (id, 1, 100, Some(300))
+    );
+    // Ending again changes nothing: that play is over.
+    w.end_play(1, 400).unwrap();
+    assert_eq!(read::plays(w.conn()).unwrap()[0].ended_at, Some(300));
+
+    let session = w.start_session().unwrap();
+    assert_ne!(session, first[0].session);
+    // (At its start, here: the plays above are dated before it.)
+    let ended: Option<i64> = w
+        .conn()
+        .query_row(
+            "SELECT ended_at FROM sessions WHERE id = ?1",
+            [first[0].session],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(ended.is_some());
+    w.apply(StoreCmd::SavePlay {
+        track: id,
+        deck: 0,
+        started_at: 500,
+    })
+    .unwrap();
+    // A track gone meanwhile isn't recorded.
+    w.save_play(9999, 0, 600).unwrap();
+    let plays = read::plays(w.conn()).unwrap();
+    assert_eq!(plays.len(), 2);
+    assert_eq!((plays[1].session, plays[1].ended_at), (session, None));
+}
+
 /// Bug 1: a grid fixed by hand while analysis ran isn't overwritten.
 /// Bug 4: and analysis doesn't change the BPM that came with it.
 #[test]

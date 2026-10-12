@@ -193,6 +193,48 @@ fn perform() {
     render(&mut h, "perform");
 }
 
+/// A track played for 30 s is saved in the play history, in the session the app
+/// opened, and stopping the deck ends the play.
+#[test]
+fn plays_are_saved() {
+    let mut h = start("plays");
+    let id = ids(&h)[0];
+    let deck = DeckId::new(0).unwrap();
+    h.state_mut().load(Some(deck), id);
+    settle_until(&mut h, |a| a.panels.decks[0].wave.is_some());
+    h.state_mut()
+        .dispatch((deck, EngineCmd::Play(earshot_engine::Set::On)).into());
+    settle_until(&mut h, |a| a.deck_now(deck).playing);
+    // As if it started playing 31 s ago.
+    let decks = h.state().decks_now();
+    let ago = Instant::now() - crate::core::history::PLAYED_AFTER - Duration::from_secs(1);
+    // (The frames so far saw it start just now: start it again, back then.)
+    let stopped: Vec<DeckNow> = decks
+        .iter()
+        .map(|d| DeckNow {
+            playing: false,
+            ..*d
+        })
+        .collect();
+    h.state_mut().history.tick(ago, &stopped);
+    h.state_mut().history.tick(ago, &decks);
+    h.state_mut().track_plays();
+    assert!(h.state().history.was_played(id));
+    let plays = |a: &EarshotApp| a.lib.store.reader.plays().unwrap();
+    settle_until(&mut h, |a| plays(a).len() == 1);
+    let p = &plays(h.state())[0];
+    assert_eq!((p.track, p.deck, p.ended_at), (id, 0, None));
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        - p.started_at;
+    assert!((30..=40).contains(&since), "{since}");
+    h.state_mut()
+        .dispatch((deck, EngineCmd::Play(earshot_engine::Set::Off)).into());
+    settle_until(&mut h, |a| plays(a)[0].ended_at.is_some());
+}
+
 /// Prepare mode with a track on its player, a memory cue saved and the keys help
 /// open.
 #[test]

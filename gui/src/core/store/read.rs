@@ -745,6 +745,41 @@ pub fn queued_jobs(c: &Connection) -> Result<Vec<JobRow>> {
         .collect::<rusqlite::Result<_>>()?)
 }
 
+/// One saved play (a `plays` row): a track that played for at least
+/// `history::PLAYED_AFTER` on a deck.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Play {
+    pub session: i64,
+    pub track: i64,
+    /// The deck, 0-based.
+    pub deck: usize,
+    /// Unix seconds.
+    pub started_at: i64,
+    /// When it stopped, if it's known to have.
+    pub ended_at: Option<i64>,
+}
+
+/// Every saved play, oldest first.
+#[cfg_attr(not(test), allow(dead_code))] // nothing shows the history yet
+pub fn plays(c: &Connection) -> Result<Vec<Play>> {
+    let mut st = c.prepare(
+        "SELECT session_id, track_id, deck, started_at, ended_at FROM plays
+         ORDER BY started_at, rowid",
+    )?;
+    Ok(st
+        .query_map([], |r| {
+            Ok(Play {
+                session: r.get(0)?,
+                track: r.get(1)?,
+                deck: r.get::<_, i64>(2)? as usize,
+                started_at: r.get(3)?,
+                ended_at: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
 pub fn setting(c: &Connection, key: &str) -> Result<Option<String>> {
     Ok(c
         .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {

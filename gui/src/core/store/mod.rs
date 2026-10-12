@@ -228,6 +228,21 @@ pub enum StoreCmd {
         id: i64,
         color: Option<u32>,
     },
+    /// A new play session (one run of the app): the plays saved from now on are
+    /// its. An earlier session left open (the app didn't get to end it) is closed at
+    /// its last play.
+    StartSession,
+    /// A track counted as played (`history::PLAYED_AFTER`) on deck `deck` (0-based),
+    /// playing since `started_at` (unix seconds). Starts a session if none is open.
+    SavePlay {
+        track: i64,
+        deck: usize,
+        started_at: i64,
+    },
+    /// That deck's play ended (it stopped, or another track went on it).
+    EndPlay {
+        deck: usize,
+    },
     ListCollections,
     /// Answered with [`StoreEvent::FlowLoaded`].
     LoadFlow(i64),
@@ -567,6 +582,12 @@ impl Reader {
 
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
         self.with(|c| read::setting(c, key))
+    }
+
+    /// Every saved play, oldest first.
+    #[cfg(test)]
+    pub fn plays(&self) -> Result<Vec<read::Play>> {
+        self.with(read::plays)
     }
 
     /// Files whose audio hash hasn't been worked out: (file id, path).

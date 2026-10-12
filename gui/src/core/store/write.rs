@@ -80,6 +80,8 @@ pub struct SaveOutcome {
 pub struct Writer {
     conn: Connection,
     events: Vec<StoreEvent>,
+    /// The play session plays are saved in (`StoreCmd::StartSession`).
+    session: Option<i64>,
 }
 
 impl Writer {
@@ -87,6 +89,7 @@ impl Writer {
         Writer {
             conn,
             events: vec![],
+            session: None,
         }
     }
 
@@ -122,6 +125,13 @@ impl Writer {
             }
             StoreCmd::SaveJobs { track, jobs } => self.save_jobs(track, &jobs),
             StoreCmd::SetSetting { key, value } => self.set_setting(&key, &value),
+            StoreCmd::StartSession => self.start_session().map(|_| ()),
+            StoreCmd::SavePlay {
+                track,
+                deck,
+                started_at,
+            } => self.save_play(track, deck, started_at),
+            StoreCmd::EndPlay { deck } => self.end_play(deck, now()),
             StoreCmd::SetMeta {
                 track,
                 field,
@@ -517,6 +527,52 @@ impl Writer {
             "INSERT INTO settings(key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![key, value],
+        )?;
+        Ok(())
+    }
+
+    // ---- play history -------------------------------------------------------------------
+
+    /// Close any session left open at its last play (or its start), and open a new
+    /// one. Returns its id.
+    pub fn start_session(&mut self) -> Result<i64> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE sessions SET ended_at = max(started_at, coalesce(
+                 (SELECT max(coalesce(ended_at, started_at)) FROM plays
+                  WHERE session_id = sessions.id), started_at))
+             WHERE ended_at IS NULL",
+            [],
+        )?;
+        tx.execute("INSERT INTO sessions(started_at) VALUES (?1)", [now()])?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        self.session = Some(id);
+        Ok(id)
+    }
+
+    pub fn save_play(&mut self, track: i64, deck: usize, started_at: i64) -> Result<()> {
+        let session = match self.session {
+            Some(s) => s,
+            None => self.start_session()?,
+        };
+        // A track removed meanwhile has nothing to record against.
+        self.conn.execute(
+            "INSERT INTO plays(session_id, track_id, deck, started_at, counted)
+             SELECT ?1, id, ?3, ?4, 1 FROM tracks WHERE id = ?2",
+            params![session, track, deck as i64, started_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn end_play(&mut self, deck: usize, at: i64) -> Result<()> {
+        let Some(session) = self.session else {
+            return Ok(());
+        };
+        self.conn.execute(
+            "UPDATE plays SET ended_at = ?3
+             WHERE session_id = ?1 AND deck = ?2 AND ended_at IS NULL",
+            params![session, deck as i64, at],
         )?;
         Ok(())
     }

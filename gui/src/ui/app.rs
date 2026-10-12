@@ -34,7 +34,7 @@ use crate::core::collections::{
 };
 use crate::core::command::{self, AppCmd, AudioCmd, Command, DeckCmd, PreviewCmd, ViewCmd};
 use crate::core::edit;
-use crate::core::history::{DeckNow, History};
+use crate::core::history::{DeckNow, History, PlayEvent};
 use crate::core::index::{LibraryCmd, LibraryIndex};
 use crate::core::keymap::{self, Keymap};
 use crate::core::library::{self, Library};
@@ -242,6 +242,7 @@ impl EarshotApp {
             settle_until: None,
         };
         app.lib.store.send(StoreCmd::ListRoots);
+        app.lib.store.send(StoreCmd::StartSession);
         let ranges = app.settings.tempo_ranges.clone();
         for (deck, range) in DeckId::first(DECKS).zip(ranges) {
             app.dispatch((deck, EngineCmd::TempoRange(range)).into());
@@ -471,10 +472,22 @@ impl EarshotApp {
         }
     }
 
-    /// Note which deck started playing last, and mark tracks played after 30 s.
+    /// Note which deck started playing last, and mark tracks played after 30 s. Each
+    /// play is saved (the `plays` table), with when it ended.
     fn track_plays(&mut self) {
         let decks = self.decks_now();
-        self.history.tick(Instant::now(), &decks);
+        let now = Instant::now();
+        for e in self.history.tick(now, &decks) {
+            let cmd = match e {
+                PlayEvent::Counted { track, deck, since } => StoreCmd::SavePlay {
+                    track,
+                    deck,
+                    started_at: unix_seconds_at(now, since),
+                },
+                PlayEvent::Ended { deck } => StoreCmd::EndPlay { deck },
+            };
+            self.lib.store.send(cmd);
+        }
     }
 
     /// Suggestions after the source's reference: a deck's track at its actual tempo
@@ -602,6 +615,13 @@ impl eframe::App for EarshotApp {
         self.save_flow_view(ctx);
         self.schedule_repaint(ctx);
     }
+}
+
+/// `then` (before `now`) in unix seconds.
+fn unix_seconds_at(now: Instant, then: Instant) -> i64 {
+    let at = std::time::SystemTime::now() - now.saturating_duration_since(then);
+    at.duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 /// The UI's name for a key the keymap file names (`;` → `Semicolon`).

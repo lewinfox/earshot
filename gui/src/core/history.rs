@@ -1,5 +1,8 @@
 //! Play history for this session: which tracks have been played, which deck started most
-//! recently, and what the suggestions are measured from.
+//! recently, and what the suggestions are measured from. A session is one run of the
+//! app; the plays themselves are saved (the `plays` table) as [`History::tick`]
+//! reports them, but "played" means played in this run.
+
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -82,17 +85,36 @@ impl RefTrack {
     }
 }
 
+/// What [`History::tick`] saw happen, for saving.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PlayEvent {
+    /// A track counted as played on a deck (by index), playing since `since`.
+    Counted {
+        track: TrackId,
+        deck: usize,
+        since: Instant,
+    },
+    /// That deck's counted play ended: it stopped, or another track went on it.
+    Ended { deck: usize },
+}
+
+/// A deck playing: since when, what, and whether it has counted as played yet.
+#[derive(Clone, Copy, Debug)]
+struct DeckPlay {
+    since: Instant,
+    track: Option<TrackId>,
+    counted: bool,
+}
+
 #[derive(Default)]
 pub struct History {
     played: HashSet<TrackId>,
-    /// In the order they counted as played. (Not saved yet: the `plays` table
-    /// will take it.)
-    #[allow(dead_code)]
+    /// In the order they counted as played.
     history: Vec<TrackId>,
     /// The deck that most recently started playing (the live reference).
     last_started: Option<usize>,
-    /// When each deck started playing.
-    started: Vec<Option<Instant>>,
+    /// Each deck's play under way.
+    playing: Vec<Option<DeckPlay>>,
     rev: u64,
 }
 
@@ -116,28 +138,48 @@ impl History {
     }
 
     /// Note which deck started playing last, and count a track as played once its
-    /// deck has been playing for [`PLAYED_AFTER`]. Returns the newly played tracks.
-    pub fn tick(&mut self, now: Instant, decks: &[DeckNow]) -> Vec<TrackId> {
-        self.started.resize(decks.len(), None);
-        let mut newly = vec![];
+    /// deck has been playing it for [`PLAYED_AFTER`]. Returns the plays that counted
+    /// and the counted plays that ended (each play counts, even of a track played
+    /// before).
+    pub fn tick(&mut self, now: Instant, decks: &[DeckNow]) -> Vec<PlayEvent> {
+        self.playing.resize(decks.len(), None);
+        let mut events = vec![];
         for (d, deck) in decks.iter().enumerate() {
-            match (deck.playing, self.started[d]) {
-                (true, None) => {
-                    self.started[d] = Some(now);
-                    self.last_started = Some(d);
+            // Stopped, or another track on it: that play is over.
+            if let Some(p) = self.playing[d]
+                && (!deck.playing || p.track != deck.track)
+            {
+                if p.counted {
+                    events.push(PlayEvent::Ended { deck: d });
                 }
-                (false, Some(_)) => self.started[d] = None,
-                (true, Some(t)) if now.duration_since(t) >= PLAYED_AFTER => {
-                    if let Some(id) = deck.track
-                        && self.mark_played(id)
-                    {
-                        newly.push(id);
-                    }
+                self.playing[d] = None;
+            }
+            if !deck.playing {
+                continue;
+            }
+            let p = self.playing[d].get_or_insert_with(|| {
+                self.last_started = Some(d);
+                DeckPlay {
+                    since: now,
+                    track: deck.track,
+                    counted: false,
                 }
-                _ => {}
+            });
+            if let Some(track) = p.track
+                && !p.counted
+                && now.duration_since(p.since) >= PLAYED_AFTER
+            {
+                p.counted = true;
+                let since = p.since;
+                self.mark_played(track);
+                events.push(PlayEvent::Counted {
+                    track,
+                    deck: d,
+                    since,
+                });
             }
         }
-        newly
+        events
     }
 
     /// The reference track `source` asks for: a deck's track at its actual tempo and
@@ -224,6 +266,17 @@ mod tests {
         }
     }
 
+    /// The tracks that counted as played.
+    fn counted(events: Vec<PlayEvent>) -> Vec<TrackId> {
+        events
+            .into_iter()
+            .filter_map(|e| match e {
+                PlayEvent::Counted { track, .. } => Some(track),
+                PlayEvent::Ended { .. } => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn a_track_counts_as_played_after_thirty_seconds() {
         let mut s = History::default();
@@ -239,7 +292,11 @@ mod tests {
         );
         assert_eq!(
             s.tick(t0 + PLAYED_AFTER, &[deck(1, true), deck(2, true)]),
-            vec![1]
+            vec![PlayEvent::Counted {
+                track: 1,
+                deck: 0,
+                since: t0
+            }]
         );
         assert_eq!(s.last_started, Some(1));
         assert!(s.was_played(1) && !s.was_played(2));
@@ -249,9 +306,12 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(s.history, vec![1]);
-        // Stopping resets the clock.
+        // Stopping ends the play and resets the clock.
         let t1 = t0 + PLAYED_AFTER * 3;
-        s.tick(t1, &[deck(1, false), deck(2, true)]);
+        assert_eq!(
+            s.tick(t1, &[deck(1, false), deck(2, true)]),
+            vec![PlayEvent::Ended { deck: 0 }]
+        );
         assert!(
             s.tick(
                 t1 + Duration::from_secs(10),
@@ -259,6 +319,30 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    /// Another track on a playing deck ends the play and starts a new one; playing a
+    /// track again counts again (for the saved history), though it was played already.
+    #[test]
+    fn each_play_counts_and_ends() {
+        let mut s = History::default();
+        let t0 = Instant::now();
+        s.tick(t0, &[deck(1, true)]);
+        assert_eq!(counted(s.tick(t0 + PLAYED_AFTER, &[deck(1, true)])), vec![1]);
+        let t1 = t0 + PLAYED_AFTER * 2;
+        assert_eq!(
+            s.tick(t1, &[deck(2, true)]),
+            vec![PlayEvent::Ended { deck: 0 }]
+        );
+        assert!(s.tick(t1 + PLAYED_AFTER / 2, &[deck(2, true)]).is_empty());
+        let t2 = t1 + PLAYED_AFTER;
+        assert_eq!(counted(s.tick(t2, &[deck(2, true)])), vec![2]);
+        s.tick(t2, &[deck(1, true)]);
+        assert_eq!(
+            counted(s.tick(t2 + PLAYED_AFTER, &[deck(1, true)])),
+            vec![1]
+        );
+        assert_eq!(s.history, vec![1, 2]);
     }
 
     #[test]
