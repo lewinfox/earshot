@@ -17,8 +17,8 @@ CREATE TABLE tracks (
   active_grid_id  INTEGER REFERENCES beatgrids(id) ON DELETE SET NULL,
   -- Effective values, copied from the active grid (and, later, key analysis).
   bpm             REAL,
-  key_pc          INTEGER,            -- pitch class 0-11 (not filled in yet)
-  key_minor       INTEGER,
+  key_pc          INTEGER,            -- the tonic's pitch class 0-11 (C = 0), from the
+  key_minor       INTEGER,            -- resolved `key` field (core/keys.rs `pitch_class`)
   rating          INTEGER,
   color           INTEGER,
   deleted_at      INTEGER

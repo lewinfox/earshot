@@ -20,6 +20,7 @@ use crate::core::collections::{
 };
 use crate::core::edit::Edit;
 use crate::core::hash::Hash;
+use crate::core::keys::{parse_key, pitch_class};
 use crate::core::query;
 
 mod edits;
@@ -1229,6 +1230,44 @@ fn put_meta(
             )?
             .execute(params![track, field, source])?,
     };
+    if field == "key" {
+        refresh_key(c, track)?;
+    }
+    Ok(())
+}
+
+/// Copy the track's key (the resolved `key` field, if it reads as one) into
+/// `tracks.key_pc` and `key_minor`, so queries can test it without parsing text.
+fn refresh_key(c: &Connection, track: i64) -> Result<()> {
+    let text: Option<String> = c
+        .prepare_cached(
+            "SELECT value FROM track_meta_resolved WHERE track_id = ?1 AND field = 'key'",
+        )?
+        .query_row([track], |r| r.get(0))
+        .optional()?;
+    let key = text.as_deref().and_then(parse_key);
+    c.prepare_cached("UPDATE tracks SET key_pc = ?2, key_minor = ?3 WHERE id = ?1")?
+        .execute(params![
+            track,
+            key.map(pitch_class),
+            key.map(|k| k.minor as i64)
+        ])?;
+    Ok(())
+}
+
+/// Fill `key_pc` / `key_minor` for tracks that have a key but not those columns (a
+/// database from before they were kept). Run when the database is opened.
+pub(super) fn fill_keys(c: &Connection) -> Result<()> {
+    let ids: Vec<i64> = c
+        .prepare(
+            "SELECT t.id FROM tracks t WHERE t.key_pc IS NULL AND EXISTS
+               (SELECT 1 FROM track_meta m WHERE m.track_id = t.id AND m.field = 'key')",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for id in ids {
+        refresh_key(c, id)?;
+    }
     Ok(())
 }
 
@@ -1369,5 +1408,6 @@ fn merge(c: &Connection, from: i64, into: i64) -> Result<()> {
     )?;
     c.execute("DELETE FROM track_search WHERE rowid = ?1", [from])?;
     c.execute("DELETE FROM tracks WHERE id = ?1", [from])?;
+    refresh_key(c, into)?;
     reindex(c, into)
 }

@@ -463,6 +463,7 @@ fn open_writer(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     migrate(&mut conn)?;
+    write::fill_keys(&conn)?;
     Ok(conn)
 }
 

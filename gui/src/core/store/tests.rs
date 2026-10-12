@@ -1014,7 +1014,12 @@ fn smart_playlists_run_their_query_in_sql_like_in_memory() {
         "bpm:141",
         "key:8A",
         "key:C",
+        "key:Cmaj",
+        "key:9a",
         "-key:Am",
+        "key:8B OR key:9A",
+        "sort:key",
+        "sort:-key",
         "is:analysed",
         "-is:analysed",
         "in:9",
@@ -1263,6 +1268,50 @@ fn a_metadata_edit_undoes_back_to_the_tag_and_redoes() {
             .iter()
             .any(|e| matches!(e, StoreEvent::Edited(_)))
     );
+}
+
+fn key_cols(w: &Writer, id: i64) -> (Option<i64>, Option<i64>) {
+    w.conn()
+        .query_row(
+            "SELECT key_pc, key_minor FROM tracks WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+}
+
+/// `key_pc` / `key_minor` follow the key that wins: the tag's, the user's over it,
+/// the tag's again when the user's is cleared; nothing for a key that doesn't read.
+#[test]
+fn the_key_columns_follow_the_resolved_key() {
+    let (dir, mut w, a) = one_track("key-cols");
+    assert_eq!(key_cols(&w, a), (Some(9), Some(1)), "the tag's 8A: A minor");
+    w.edit(EditCmd::Set {
+        tracks: vec![a],
+        values: vec![(Field::Key, text("F#"))],
+    })
+    .unwrap();
+    let e = edited(&mut w);
+    assert_eq!(key_cols(&w, a), (Some(6), Some(0)));
+    w.apply_edit(&e.inverse()).unwrap();
+    assert_eq!(key_cols(&w, a), (Some(9), Some(1)), "undo: the tag's again");
+    w.set_meta(a, "key", "user", Some("not a key")).unwrap();
+    assert_eq!(key_cols(&w, a), (None, None));
+    w.set_meta(a, "key", "user", None).unwrap();
+    // A rescan with a new tag.
+    let mut f = file(&dir.join("music/a.mp3"), "A", None);
+    f.size = 2000;
+    f.tags.key = Some("Ebm".into());
+    scan(&mut w, &dir, &[f]);
+    assert_eq!(key_cols(&w, a), (Some(3), Some(1)));
+
+    // A database from before the columns were kept gets them on opening.
+    w.conn()
+        .execute("UPDATE tracks SET key_pc = NULL, key_minor = NULL", [])
+        .unwrap();
+    drop(w);
+    let w = Writer::new(open_writer(&dir.join(FILE_NAME)).unwrap());
+    assert_eq!(key_cols(&w, a), (Some(3), Some(1)));
 }
 
 /// A bulk edit only changes the fields it lists: tracks keep their own (mixed)

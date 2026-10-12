@@ -54,6 +54,27 @@ pub fn parse_key(raw: &str) -> Option<Camelot> {
     Some(Camelot { n, minor })
 }
 
+/// The tonic's pitch class, 0 (C) to 11 (B): what `tracks.key_pc` holds, with
+/// `minor` in `tracks.key_minor`.
+pub fn pitch_class(k: Camelot) -> u8 {
+    let major = MAJOR_BY_PITCH
+        .iter()
+        .position(|&n| n == k.n)
+        .expect("a Camelot number is 1..12") as u8;
+    // A minor key's tonic is 3 semitones below its relative major's.
+    if k.minor { (major + 9) % 12 } else { major }
+}
+
+/// The key with this tonic (pitch class 0-11) and mode.
+#[cfg(test)]
+pub fn from_pitch_class(pc: u8, minor: bool) -> Camelot {
+    let pc = pc % 12 + if minor { 3 } else { 0 };
+    Camelot {
+        n: MAJOR_BY_PITCH[(pc % 12) as usize],
+        minor,
+    }
+}
+
 pub fn key_name(k: Camelot) -> String {
     format!("{}{}", k.n, if k.minor { "A" } else { "B" })
 }
@@ -83,6 +104,21 @@ mod tests {
         assert_eq!(parse_key("C"), Some(Camelot { n: 8, minor: false }));
         assert_eq!(parse_key("F#m"), Some(Camelot { n: 11, minor: true }));
         assert_eq!(parse_key("Ebmin"), Some(Camelot { n: 2, minor: true }));
+    }
+
+    #[test]
+    fn pitch_classes() {
+        let k = |s| parse_key(s).unwrap();
+        assert_eq!(pitch_class(k("C")), 0);
+        assert_eq!(pitch_class(k("Am")), 9);
+        assert_eq!(pitch_class(k("F#m")), 6);
+        assert_eq!(pitch_class(k("Bb")), 10);
+        for n in 1..=12 {
+            for minor in [false, true] {
+                let c = Camelot { n, minor };
+                assert_eq!(from_pitch_class(pitch_class(c), minor), c);
+            }
+        }
     }
 
     #[test]
