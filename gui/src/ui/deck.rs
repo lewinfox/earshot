@@ -19,13 +19,13 @@ use egui::{
 };
 
 use super::controls::{Fader, HwButton, Icon, Range, held};
-use super::library_ui::Track;
 use super::util::{self, Camelot};
 use super::wave::{self, DeckWave, Marks};
 use crate::core::bus::{Control, DeckControl, JUMP_STEPS, deck_letter};
 use crate::core::command::{Command, DeckCmd, MixerCmd};
 use crate::core::player::GridOp;
 use crate::core::store::Memory;
+use crate::core::track::Track;
 
 /// Which side of the mixer a deck sits on. Its tempo fader goes on the outside edge
 /// and its controls run outwards from the mixer.
@@ -72,11 +72,11 @@ impl PendingLoad {
     pub fn new(track_id: i64, t: Option<&Track>) -> PendingLoad {
         PendingLoad {
             track_id,
-            title: t.map(|t| t.lib.title.clone()).unwrap_or_default(),
-            artist: t.map(|t| t.lib.artist.clone()).unwrap_or_default(),
-            bpm: t.and_then(|t| t.lib.bpm.or(t.lib.tag_bpm)),
+            title: t.map(|t| t.title.clone()).unwrap_or_default(),
+            artist: t.map(|t| t.artist.clone()).unwrap_or_default(),
+            bpm: t.and_then(|t| t.bpm),
             key: t.and_then(|t| t.key),
-            duration: t.and_then(|t| t.lib.duration),
+            duration: t.and_then(|t| t.duration),
         }
     }
 

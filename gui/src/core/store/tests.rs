@@ -5,7 +5,9 @@ use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::decode::TrackTags;
 
 use super::*;
-use crate::core::flows::Card;
+use crate::core::collections::CollectionKind::{Crate, Flow, Folder, Playlist, Smart};
+use crate::core::collections::{FlowGraph, FlowNode};
+use write::save_features;
 
 /// A fresh database in its own folder, which also serves as the library root.
 fn setup(name: &str) -> (PathBuf, Writer) {
@@ -182,19 +184,25 @@ fn curated_track(w: &mut Writer, dir: &Path, path: &Path, hash: Option<u8>) -> i
     scan(w, dir, &[file(path, "Moved", hash)]);
     let id = library(w)[0].id;
     w.save_user_grid(id, &grid(128.0)).unwrap();
-    w.create_collection(500, None, "flow", "Set", None).unwrap();
-    w.save_flow(500, &[card(1, id, None)]).unwrap();
+    w.create_collection(500, None, Flow, "Set", None).unwrap();
+    w.save_flow(500, &graph(&[(1, id)], &[])).unwrap();
     id
 }
 
-fn card(id: u64, track_id: i64, parent: Option<u64>) -> Card {
-    Card {
-        id,
-        track_id,
-        parent,
-        x: id as f32,
-        y: 0.0,
-    }
+/// A Flow of (card, track) with these links.
+fn graph(nodes: &[(u64, i64)], edges: &[(u64, u64)]) -> FlowGraph {
+    FlowGraph::new(
+        nodes
+            .iter()
+            .map(|&(id, track)| FlowNode {
+                id,
+                track,
+                x: id as f32,
+                y: 0.0,
+            })
+            .collect(),
+        edges.to_vec(),
+    )
 }
 
 #[test]
@@ -223,7 +231,7 @@ fn a_moved_file_with_a_stamped_hash_keeps_its_track() {
         .unwrap();
     assert!(missing.is_some(), "the old location is marked missing");
     assert_eq!(
-        read::flow(w.conn(), 500).unwrap().unwrap().2[0].track_id,
+        read::flow(w.conn(), 500).unwrap().unwrap().2.nodes[0].track,
         id
     );
 }
@@ -255,7 +263,7 @@ fn a_moved_file_hashed_later_is_merged_back() {
     assert_eq!((lib[0].id, lib[0].bpm), (id, Some(128.0)));
     assert_eq!(read::track_path(w.conn(), id).unwrap(), new_path);
     assert_eq!(
-        read::flow(w.conn(), 500).unwrap().unwrap().2[0].track_id,
+        read::flow(w.conn(), 500).unwrap().unwrap().2.nodes[0].track,
         id
     );
     assert!(
@@ -522,38 +530,38 @@ fn hot_cues_and_memories_save_and_load() {
 #[test]
 fn flows_save_load_move_and_delete() {
     let (_dir, mut w, t) = one_track("flows");
-    w.create_collection(1, None, "folder", "Sets", None)
-        .unwrap();
-    w.create_collection(2, Some(1), "folder", "Summer", None)
+    w.create_collection(1, None, Folder, "Sets", None).unwrap();
+    w.create_collection(2, Some(1), Folder, "Summer", None)
         .unwrap();
     assert!(
         matches!(w.move_to(1, Some(2)), Err(StoreError::Refused(_))),
         "no loops"
     );
 
-    w.create_collection(3, Some(2), "flow", "Warm-up", None)
+    w.create_collection(3, Some(2), Flow, "Warm-up", None)
         .unwrap();
     // The same track twice is fine in a Flow.
-    let cards = vec![card(1, t, None), card(2, t, Some(1))];
-    w.save_flow(3, &cards).unwrap();
-    assert_eq!(read::flow(w.conn(), 3).unwrap().unwrap().2, cards);
+    let g = graph(&[(1, t), (2, t)], &[(1, 2)]);
+    w.save_flow(3, &g).unwrap();
+    assert_eq!(read::flow(w.conn(), 3).unwrap().unwrap().2, g);
     // Saving again with one card moved writes only that (and still loads back).
-    let mut moved = cards.clone();
-    moved[1].x = 50.0;
+    let mut moved = g.clone();
+    moved.nodes[1].x = 50.0;
     w.save_flow(3, &moved).unwrap();
     assert_eq!(read::flow(w.conn(), 3).unwrap().unwrap().2, moved);
 
-    w.duplicate_flow(3, 4).unwrap();
+    w.duplicate(3, 4).unwrap();
     w.rename(4, "Peak").unwrap();
     w.move_to(4, None).unwrap();
-    let (folders, flows) = read::flows(w.conn()).unwrap();
-    assert_eq!(folders.len(), 2);
-    let peak = flows.iter().find(|e| e.id == 4).unwrap();
+    let all = read::collections(w.conn()).unwrap();
+    assert_eq!(all.iter().filter(|c| c.kind == Folder).count(), 2);
+    let peak = all.iter().find(|e| e.id == 4).unwrap();
     assert_eq!(
-        (peak.name.as_str(), peak.folder, peak.cards),
+        (peak.name.as_str(), peak.parent, peak.tracks.len()),
         ("Peak", None, 2)
     );
     assert!(peak.linear);
+    assert_eq!(read::flow(w.conn(), 4).unwrap().unwrap().2, moved, "copied");
 
     // Deleting a folder takes its subfolders and Flows with it; others stay.
     w.take_events();
@@ -568,27 +576,31 @@ fn flows_save_load_move_and_delete() {
         .unwrap();
     gone.sort();
     assert_eq!(gone, vec![1, 2, 3]);
-    let (folders, flows) = read::flows(w.conn()).unwrap();
-    assert!(folders.is_empty());
-    assert_eq!(flows.iter().map(|e| e.id).collect::<Vec<_>>(), vec![4]);
+    let all = read::collections(w.conn()).unwrap();
+    assert_eq!(all.iter().map(|e| e.id).collect::<Vec<_>>(), vec![4]);
     assert!(read::flow(w.conn(), 3).unwrap().is_none());
 }
 
 #[test]
-fn a_flow_can_branch_but_not_loop() {
+fn a_flow_card_can_follow_several_but_not_loop() {
     let (_dir, mut w, t) = one_track("dag");
-    w.create_collection(1, None, "flow", "F", None).unwrap();
-    let branch = vec![card(1, t, None), card(2, t, Some(1)), card(3, t, Some(1))];
-    w.save_flow(1, &branch).unwrap();
-    assert!(!read::flows(w.conn()).unwrap().1[0].linear);
-    let looped = vec![card(1, t, Some(2)), card(2, t, Some(1))];
+    w.create_collection(1, None, Flow, "F", None).unwrap();
+    // 1 → 3 and 2 → 3: a join, which the old canvas couldn't keep.
+    let join = graph(&[(1, t), (2, t), (3, t)], &[(1, 3), (2, 3)]);
+    w.save_flow(1, &join).unwrap();
+    assert_eq!(
+        read::flow(w.conn(), 1).unwrap().unwrap().2.edges,
+        join.edges
+    );
+    assert!(!read::collections(w.conn()).unwrap()[0].linear);
+    let looped = graph(&[(1, t), (2, t)], &[(1, 2), (2, 1)]);
     assert!(matches!(
         w.save_flow(1, &looped),
         Err(StoreError::Refused(_))
     ));
     assert_eq!(
         read::flow(w.conn(), 1).unwrap().unwrap().2,
-        branch,
+        join,
         "unchanged"
     );
 }
@@ -598,23 +610,17 @@ fn a_path_through_a_flow_exports_as_a_playlist() {
     let (dir, mut w, a) = one_track("export");
     scan(&mut w, &dir, &[file(&dir.join("music/b.mp3"), "B", None)]);
     let b = library(&mut w).iter().find(|t| t.id != a).unwrap().id;
-    w.create_collection(1, None, "folder", "Sets", None)
-        .unwrap();
-    w.create_collection(2, Some(1), "flow", "F", None).unwrap();
+    w.create_collection(1, None, Folder, "Sets", None).unwrap();
+    w.create_collection(2, Some(1), Flow, "F", None).unwrap();
     // a → b → a, and a branch a → a.
-    let cards = vec![
-        card(1, a, None),
-        card(2, b, Some(1)),
-        card(3, a, Some(2)),
-        card(4, a, Some(1)),
-    ];
-    w.save_flow(2, &cards).unwrap();
+    let g = graph(&[(1, a), (2, b), (3, a), (4, a)], &[(1, 2), (2, 3), (1, 4)]);
+    w.save_flow(2, &g).unwrap();
     assert!(matches!(
         w.export_path(2, &[1, 3], 3, "Not a path"),
         Err(StoreError::Refused(_))
     ));
     w.export_path(2, &[1, 2, 3], 3, "Set A").unwrap();
-    assert_eq!(read::playlist(w.conn(), 3).unwrap(), vec![a, b, a]);
+    assert_eq!(read::collection_tracks(w.conn(), 3).unwrap(), vec![a, b, a]);
     let (parent, source): (Option<i64>, Option<i64>) = w
         .conn()
         .query_row(
@@ -626,21 +632,147 @@ fn a_path_through_a_flow_exports_as_a_playlist() {
     assert_eq!((parent, source), (Some(1), Some(2)));
     // A snapshot: deleting the Flow keeps the playlist, without its source.
     w.delete(2).unwrap();
-    assert_eq!(read::playlist(w.conn(), 3).unwrap(), vec![a, b, a]);
+    assert_eq!(read::collection_tracks(w.conn(), 3).unwrap(), vec![a, b, a]);
 }
 
 #[test]
 fn a_crate_holds_each_track_once() {
     let (_dir, mut w, t) = one_track("crate");
-    w.create_collection(1, None, "crate", "Disco", None)
+    w.create_collection(1, None, Crate, "Disco", None).unwrap();
+    w.add_tracks(1, &[t, t]).unwrap();
+    w.add_tracks(1, &[t]).unwrap();
+    assert_eq!(read::collection_tracks(w.conn(), 1).unwrap(), vec![t]);
+    w.remove_tracks(1, &[t]).unwrap();
+    assert!(read::collection_tracks(w.conn(), 1).unwrap().is_empty());
+    assert!(matches!(
+        w.add_tracks(99, &[t]),
+        Err(StoreError::NoCollection(99))
+    ));
+}
+
+#[test]
+fn playlists_keep_order_and_repeats() {
+    let (dir, mut w, a) = one_track("playlist");
+    scan(&mut w, &dir, &[file(&dir.join("music/b.mp3"), "B", None)]);
+    let b = library(&mut w).iter().find(|t| t.id != a).unwrap().id;
+    w.create_collection(1, None, Playlist, "P", None).unwrap();
+    w.add_tracks(1, &[a, b]).unwrap();
+    w.add_tracks(1, &[a]).unwrap();
+    assert_eq!(read::collection_tracks(w.conn(), 1).unwrap(), vec![a, b, a]);
+    w.remove_tracks(1, &[a]).unwrap();
+    assert_eq!(read::collection_tracks(w.conn(), 1).unwrap(), vec![b]);
+    w.add_tracks(1, &[a]).unwrap();
+    assert_eq!(read::collection_tracks(w.conn(), 1).unwrap(), vec![b, a]);
+    let listed = read::collections(w.conn()).unwrap();
+    assert_eq!(listed[0].tracks, vec![b, a]);
+}
+
+#[test]
+fn adding_to_a_flow_makes_starting_cards_and_removing_rejoins() {
+    let (dir, mut w, a) = one_track("flow-add");
+    scan(&mut w, &dir, &[file(&dir.join("music/b.mp3"), "B", None)]);
+    let b = library(&mut w).iter().find(|t| t.id != a).unwrap().id;
+    w.create_collection(1, None, Flow, "F", None).unwrap();
+    // a → b → a
+    w.save_flow(1, &graph(&[(1, a), (2, b), (3, a)], &[(1, 2), (2, 3)]))
         .unwrap();
-    w.add_to_crate(1, &[t, t]).unwrap();
-    w.add_to_crate(1, &[t]).unwrap();
-    let n: i64 = w
-        .conn()
-        .query_row("SELECT count(*) FROM crate_tracks", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(n, 1);
+    w.add_tracks(1, &[b]).unwrap();
+    let g = read::flow_graph(w.conn(), 1).unwrap();
+    assert_eq!(g.nodes.len(), 4);
+    assert_eq!(g.parents(4).count(), 0, "a new starting card");
+    // Taking b out removes both its cards; a → a is joined up.
+    w.remove_tracks(1, &[b]).unwrap();
+    let g = read::flow_graph(w.conn(), 1).unwrap();
+    assert_eq!(g.nodes.iter().map(|n| n.id).collect::<Vec<_>>(), vec![1, 3]);
+    assert_eq!(g.edges, vec![(1, 3)]);
+}
+
+#[test]
+fn smart_playlists_run_their_query_in_sql_like_in_memory() {
+    use crate::core::index::LibraryIndex;
+    use crate::core::query;
+
+    let (dir, mut w) = setup("smart");
+    w.add_roots(&[dir.join("music")]).unwrap();
+    let mut files = vec![];
+    for (name, artist, bpm, key) in [
+        ("Deep Space", "Daft", 124.0, "Am"),
+        ("Shallow", "Daft", 128.0, "8A"),
+        ("Other", "Someone", 140.0, "C"),
+        ("Warm Up", "Someone", 122.0, "9A"),
+    ] {
+        let mut f = file(&dir.join(format!("music/{name}.mp3")), name, None);
+        f.tags.artist = Some(artist.into());
+        f.tags.bpm = Some(bpm);
+        f.tags.key = Some(key.into());
+        files.push(f);
+    }
+    scan(&mut w, &dir, &files);
+    let lib = library(&mut w);
+    let id = |title: &str| lib.iter().find(|t| t.title == title).unwrap().id;
+    // A grid for one of them (so is:analysed and the grid's BPM count).
+    w.save_user_grid(id("Other"), &grid(141.0)).unwrap();
+    w.create_collection(9, None, Crate, "C", None).unwrap();
+    w.add_tracks(9, &[id("Shallow"), id("Warm Up")]).unwrap();
+    // Energy: Deep Space lowest, Warm Up highest.
+    for (t, e) in [
+        ("Deep Space", 1.0),
+        ("Shallow", 2.0),
+        ("Other", 3.0),
+        ("Warm Up", 4.0),
+    ] {
+        save_features(w.conn(), id(t), &[("energy", e)], None).unwrap();
+    }
+    let mut ix = LibraryIndex::default();
+    ix.replace(library(&mut w));
+    let mut colls = crate::core::collections::Collections::default();
+    colls.set(read::collections(w.conn()).unwrap());
+
+    w.create_collection(1, None, Smart, "S", Some("")).unwrap();
+    for q in [
+        "",
+        "daft",
+        "\"deep space\"",
+        "artist:someone",
+        "title=shallow",
+        "bpm:120-126",
+        "bpm>=128",
+        "bpm:141",
+        "key:8A",
+        "key:C",
+        "-key:Am",
+        "is:analysed",
+        "-is:analysed",
+        "in:9",
+        "-in:9 daft",
+        "energy>=7",
+        "rating>=1",
+        "-rating>=1",
+        "daft OR warm",
+        "(daft | someone) bpm<130",
+        "time:300",
+        "path:shallow",
+        "sort:-bpm",
+        "sort:title",
+        "daft sort:-energy",
+    ] {
+        w.set_query(1, q).unwrap();
+        let parsed = query::parse(q).unwrap();
+        let sql = read::collection_tracks(w.conn(), 1).unwrap();
+        let mem = ix.query(&parsed, &colls, None);
+        if parsed.sort.0.is_empty() {
+            let (mut a, mut b) = (sql.clone(), mem.clone());
+            a.sort();
+            b.sort();
+            assert_eq!(a, b, "{q}");
+        } else {
+            assert_eq!(sql, mem, "{q}");
+        }
+    }
+    assert!(matches!(
+        w.set_query(1, "bpm:"),
+        Err(StoreError::BadQuery(_))
+    ));
 }
 
 /// The actor end to end: commands from "the UI", answers on the read pool and
@@ -669,14 +801,16 @@ fn the_store_thread_writes_and_reports() {
     assert_eq!(store.reader.track(id).unwrap().title, "A");
 
     let flow = store.new_collection_id();
-    store.send(StoreCmd::CreateFlow {
+    store.send(StoreCmd::Create {
         id: flow,
-        folder: None,
+        parent: None,
+        kind: Flow,
         name: "F".into(),
+        query: None,
     });
     store.send(StoreCmd::SaveFlow {
         id: flow,
-        cards: vec![card(1, id, None)],
+        graph: graph(&[(1, id)], &[]),
     });
     store.send(StoreCmd::LoadFlow(flow));
     store.send(StoreCmd::Rename {
@@ -696,7 +830,7 @@ fn the_store_thread_writes_and_reports() {
             .any(|e| matches!(e, StoreEvent::Library(l) if l.len() == 1))
     );
     assert!(events.iter().any(
-        |e| matches!(e, StoreEvent::FlowLoaded(Some((f, _, cards))) if *f == flow && cards.len() == 1)
+        |e| matches!(e, StoreEvent::FlowLoaded(Some((f, _, g))) if *f == flow && g.nodes.len() == 1)
     ));
     assert!(
         events

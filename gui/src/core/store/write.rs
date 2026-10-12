@@ -15,8 +15,9 @@ use super::{
     now, path_bytes,
 };
 use crate::core::analysis::registry::{self, AnalyserId};
-use crate::core::flows::{self, Card};
+use crate::core::collections::{self, CollectionKind, FlowGraph, FlowNode, NodeId, Spacing};
 use crate::core::hash::Hash;
+use crate::core::query;
 
 /// A file the scan found that is new, or whose size or modified time changed.
 #[derive(Debug, Clone)]
@@ -127,23 +128,27 @@ impl Writer {
             StoreCmd::SaveHotcues { track, cues } => self.save_hotcues(track, &cues),
             StoreCmd::AddMemory { track, start, end } => self.add_memory(track, start, end),
             StoreCmd::DeleteMemory { track, id } => self.delete_memory(track, id),
-            StoreCmd::ListFlows => self.emit_flows(),
+            StoreCmd::ListCollections => self.emit_collections(),
             StoreCmd::LoadFlow(id) => {
                 let f = read::flow(&self.conn, id)?;
                 self.emit(StoreEvent::FlowLoaded(f));
                 Ok(())
             }
-            StoreCmd::CreateFolder { id, parent, name } => {
-                self.create_collection(id, parent, "folder", &name, None)
-            }
-            StoreCmd::CreateFlow { id, folder, name } => {
-                self.create_collection(id, folder, "flow", &name, None)
-            }
+            StoreCmd::Create {
+                id,
+                parent,
+                kind,
+                name,
+                query,
+            } => self.create_collection(id, parent, kind, &name, query.as_deref()),
             StoreCmd::Rename { id, name } => self.rename(id, &name),
             StoreCmd::Move { id, parent } => self.move_to(id, parent),
             StoreCmd::Delete(id) => self.delete(id),
-            StoreCmd::DuplicateFlow { from, to } => self.duplicate_flow(from, to),
-            StoreCmd::SaveFlow { id, cards } => self.save_flow(id, &cards),
+            StoreCmd::Duplicate { from, to } => self.duplicate(from, to),
+            StoreCmd::SaveFlow { id, graph } => self.save_flow(id, &graph),
+            StoreCmd::AddTracks { id, tracks } => self.add_tracks(id, &tracks),
+            StoreCmd::RemoveTracks { id, tracks } => self.remove_tracks(id, &tracks),
+            StoreCmd::SetQuery { id, query } => self.set_query(id, &query),
             StoreCmd::ExportPath {
                 flow,
                 nodes,
@@ -346,6 +351,7 @@ impl Writer {
         tx.commit()?;
         if merged.is_some() {
             self.emit_library()?;
+            self.emit_collections()?;
         }
         Ok(merged)
     }
@@ -379,7 +385,14 @@ impl Writer {
         let run = tx.last_insert_rowid();
         save_features(&tx, s.track, &s.features, Some(run))?;
         for (analyser, version, error) in &s.results {
-            put_result(&tx, s.track, analyser, *version, Some(run), error.as_deref())?;
+            put_result(
+                &tx,
+                s.track,
+                analyser,
+                *version,
+                Some(run),
+                error.as_deref(),
+            )?;
         }
         let preview = match &s.waveform {
             Some(w) => Some(put_waveform(&tx, s.track, w)?),
@@ -537,24 +550,18 @@ impl Writer {
         Ok(())
     }
 
-    // ---- Flows and other collections ---------------------------------------------------
+    // ---- collections ----------------------------------------------------------------------
 
-    fn emit_flows(&mut self) -> Result<()> {
-        let (folders, flows) = read::flows(&self.conn)?;
-        self.emit(StoreEvent::Flows(folders, flows));
+    fn emit_collections(&mut self) -> Result<()> {
+        let c = read::collections(&self.conn)?;
+        self.emit(StoreEvent::Collections(c));
         Ok(())
     }
 
     fn check_folder(&self, parent: Option<i64>) -> Result<()> {
         if let Some(p) = parent {
-            let kind: Option<String> = self
-                .conn
-                .query_row("SELECT kind FROM collections WHERE id = ?1", [p], |r| {
-                    r.get(0)
-                })
-                .optional()?;
-            match kind.as_deref() {
-                Some("folder") => {}
+            match read::kind(&self.conn, p)? {
+                Some(CollectionKind::Folder) => {}
                 Some(_) => return Err(StoreError::Refused("only folders can hold things")),
                 None => return Err(StoreError::NoCollection(p)),
             }
@@ -566,17 +573,17 @@ impl Writer {
         &mut self,
         id: i64,
         parent: Option<i64>,
-        kind: &str,
+        kind: CollectionKind,
         name: &str,
-        source_flow: Option<i64>,
+        query: Option<&str>,
     ) -> Result<()> {
         self.check_folder(parent)?;
         self.conn.execute(
-            "INSERT INTO collections(id, parent_id, kind, name, source_flow_id, created_at, updated_at)
+            "INSERT INTO collections(id, parent_id, kind, name, query, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-            params![id, parent, kind, name, source_flow, now()],
+            params![id, parent, kind.as_str(), name, query, now()],
         )?;
-        self.emit_flows()
+        self.emit_collections()
     }
 
     pub fn rename(&mut self, id: i64, name: &str) -> Result<()> {
@@ -587,28 +594,27 @@ impl Writer {
         if n == 0 {
             return Err(StoreError::NoCollection(id));
         }
-        self.emit_flows()
+        self.emit_collections()
     }
 
     /// Into a folder, or to the top level. Refused if `parent` is inside `id`.
     pub fn move_to(&mut self, id: i64, parent: Option<i64>) -> Result<()> {
         self.check_folder(parent)?;
-        let mut at = parent;
-        while let Some(p) = at {
-            if p == id {
+        if let Some(p) = parent {
+            let parents: HashMap<i64, Option<i64>> = self
+                .conn
+                .prepare("SELECT id, parent_id FROM collections WHERE kind = 'folder'")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            if collections::is_within(p, id, |f| parents.get(&f).copied().flatten()) {
                 return Err(StoreError::Refused("can't move a folder into itself"));
             }
-            at = self.conn.query_row(
-                "SELECT parent_id FROM collections WHERE id = ?1",
-                [p],
-                |r| r.get(0),
-            )?;
         }
         self.conn.execute(
             "UPDATE collections SET parent_id = ?2 WHERE id = ?1",
             params![id, parent],
         )?;
-        self.emit_flows()
+        self.emit_collections()
     }
 
     /// Delete a collection and, for a folder, everything in it.
@@ -627,103 +633,52 @@ impl Writer {
         tx.execute("DELETE FROM collections WHERE id = ?1", [id])?;
         tx.commit()?;
         self.emit(StoreEvent::Deleted(gone));
-        self.emit_flows()
+        self.emit_collections()
     }
 
-    /// A copy of a Flow beside it, named "<name> copy".
-    pub fn duplicate_flow(&mut self, from: i64, to: i64) -> Result<()> {
+    /// A copy of a crate, playlist, smart playlist or Flow beside it, named
+    /// "<name> copy". (Not folders.)
+    pub fn duplicate(&mut self, from: i64, to: i64) -> Result<()> {
         let tx = self.conn.transaction()?;
-        let (parent, name): (Option<i64>, String) = tx
-            .query_row(
-                "SELECT parent_id, name FROM collections WHERE id = ?1 AND kind = 'flow'",
-                [from],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?
-            .ok_or(StoreError::NoCollection(from))?;
-        let t = now();
-        tx.execute(
-            "INSERT INTO collections(id, parent_id, kind, name, created_at, updated_at)
-             VALUES (?1, ?2, 'flow', ?3, ?4, ?4)",
-            params![to, parent, format!("{name} copy"), t],
+        let n = tx.execute(
+            "INSERT INTO collections(id, parent_id, kind, name, query, source_flow_id, created_at, updated_at)
+             SELECT ?2, parent_id, kind, name || ' copy', query, source_flow_id, ?3, ?3
+             FROM collections WHERE id = ?1 AND kind <> 'folder'",
+            params![from, to, now()],
         )?;
-        tx.execute(
+        if n == 0 {
+            return Err(StoreError::NoCollection(from));
+        }
+        for sql in [
+            "INSERT INTO crate_tracks(collection_id, track_id, added_at)
+             SELECT ?2, track_id, added_at FROM crate_tracks WHERE collection_id = ?1",
+            "INSERT INTO playlist_entries(collection_id, position, track_id)
+             SELECT ?2, position, track_id FROM playlist_entries WHERE collection_id = ?1",
             "INSERT INTO flow_nodes(collection_id, id, track_id, x, y)
              SELECT ?2, id, track_id, x, y FROM flow_nodes WHERE collection_id = ?1",
-            params![from, to],
-        )?;
-        tx.execute(
             "INSERT INTO flow_edges(collection_id, from_node, to_node)
              SELECT ?2, from_node, to_node FROM flow_edges WHERE collection_id = ?1",
-            params![from, to],
-        )?;
+        ] {
+            tx.execute(sql, params![from, to])?;
+        }
         tx.commit()?;
-        self.emit_flows()
+        self.emit_collections()
     }
 
-    /// Save a Flow's cards, writing only what changed. Refused if the links loop.
-    pub fn save_flow(&mut self, id: i64, cards: &[Card]) -> Result<()> {
-        let ids: HashSet<u64> = cards.iter().map(|c| c.id).collect();
-        // Links to cards that aren't there count as no link.
-        let edges: HashSet<(u64, u64)> = flows::edges(cards)
-            .into_iter()
-            .filter(|(a, _)| ids.contains(a))
-            .collect();
-        if flows::check_acyclic(&edges.iter().copied().collect::<Vec<_>>()).is_err() {
+    /// Save a Flow, writing only what changed. Refused if the links loop.
+    pub fn save_flow(&mut self, id: i64, graph: &FlowGraph) -> Result<()> {
+        // `new` drops links to cards that aren't there.
+        let graph = FlowGraph::new(graph.nodes.clone(), graph.edges.clone());
+        if collections::check_acyclic(&graph.edges).is_err() {
             return Err(StoreError::Refused("a Flow can't loop back on itself"));
         }
         let tx = self.conn.transaction()?;
-        let kind: Option<String> = tx
-            .query_row("SELECT kind FROM collections WHERE id = ?1", [id], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        if kind.as_deref() != Some("flow") {
+        if read::kind(&tx, id)? != Some(CollectionKind::Flow) {
             return Err(StoreError::NoCollection(id));
         }
-        let (old_nodes, old_edges) = read::flow_graph(&tx, id)?;
-        let old: HashMap<u64, (i64, f32, f32)> = old_nodes
-            .into_iter()
-            .map(|(n, t, x, y)| (n, (t, x, y)))
-            .collect();
-        for &(a, b) in &old_edges {
-            if !edges.contains(&(a, b)) {
-                tx.execute(
-                    "DELETE FROM flow_edges WHERE collection_id = ?1 AND from_node = ?2 AND to_node = ?3",
-                    params![id, a as i64, b as i64],
-                )?;
-            }
-        }
-        for n in old.keys().filter(|n| !ids.contains(n)) {
-            tx.execute(
-                "DELETE FROM flow_nodes WHERE collection_id = ?1 AND id = ?2",
-                params![id, *n as i64],
-            )?;
-        }
-        for c in cards {
-            if old.get(&c.id) != Some(&(c.track_id, c.x, c.y)) {
-                tx.execute(
-                    "INSERT INTO flow_nodes(collection_id, id, track_id, x, y)
-                     VALUES (?1, ?2, ?3, ?4, ?5)
-                     ON CONFLICT(collection_id, id) DO UPDATE SET
-                       track_id = excluded.track_id, x = excluded.x, y = excluded.y",
-                    params![id, c.id as i64, c.track_id, c.x as f64, c.y as f64],
-                )?;
-            }
-        }
-        let old_edges: HashSet<(u64, u64)> = old_edges.into_iter().collect();
-        for &(a, b) in edges.difference(&old_edges) {
-            tx.execute(
-                "INSERT INTO flow_edges(collection_id, from_node, to_node) VALUES (?1, ?2, ?3)",
-                params![id, a as i64, b as i64],
-            )?;
-        }
-        tx.execute(
-            "UPDATE collections SET updated_at = ?2 WHERE id = ?1",
-            params![id, now()],
-        )?;
+        write_graph(&tx, id, &graph)?;
         tx.commit()?;
-        self.emit_flows()
+        self.emit_collections()
     }
 
     /// Save one path through a Flow (card ids, in order) as a new playlist beside it.
@@ -731,26 +686,16 @@ impl Writer {
     pub fn export_path(
         &mut self,
         flow: i64,
-        nodes: &[u64],
+        nodes: &[NodeId],
         playlist: i64,
         name: &str,
     ) -> Result<()> {
-        let (graph, edges) = read::flow_graph(&self.conn, flow)?;
-        if !flows::is_path(&edges, nodes) {
+        let graph = read::flow_graph(&self.conn, flow)?;
+        let Some(tracks) = graph.bake(nodes) else {
             return Err(StoreError::Refused(
                 "those cards aren't a path through the Flow",
             ));
-        }
-        let track: HashMap<u64, i64> = graph.into_iter().map(|(n, t, _, _)| (n, t)).collect();
-        let tracks: Vec<i64> = nodes
-            .iter()
-            .map(|n| {
-                track
-                    .get(n)
-                    .copied()
-                    .ok_or(StoreError::Refused("no such card"))
-            })
-            .collect::<Result<_>>()?;
+        };
         let parent: Option<i64> = self.conn.query_row(
             "SELECT parent_id FROM collections WHERE id = ?1",
             [flow],
@@ -783,29 +728,176 @@ impl Writer {
             )?;
         }
         tx.commit()?;
-        self.emit_flows()
+        self.emit_collections()
     }
 
-    /// Add tracks to a crate (a set: a track already in it is left as it is).
-    #[allow(dead_code)] // library management API, not wired to the UI yet (tests use it)
-    pub fn add_to_crate(&mut self, id: i64, tracks: &[i64]) -> Result<()> {
+    /// Add tracks: to a crate (a track already in it is left as it is), the end of a
+    /// playlist, or a Flow as new starting cards.
+    pub fn add_tracks(&mut self, id: i64, tracks: &[i64]) -> Result<()> {
         let tx = self.conn.transaction()?;
         let t = now();
-        for track in tracks {
-            tx.execute(
-                "INSERT OR IGNORE INTO crate_tracks(collection_id, track_id, added_at)
-                 VALUES (?1, ?2, ?3)",
-                params![id, track, t],
-            )?;
+        match read::kind(&tx, id)? {
+            Some(CollectionKind::Crate) => {
+                for track in tracks {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO crate_tracks(collection_id, track_id, added_at)
+                         VALUES (?1, ?2, ?3)",
+                        params![id, track, t],
+                    )?;
+                }
+            }
+            Some(CollectionKind::Playlist) => {
+                let end: i64 = tx.query_row(
+                    "SELECT coalesce(max(position) + 1, 0) FROM playlist_entries
+                     WHERE collection_id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )?;
+                for (i, track) in tracks.iter().enumerate() {
+                    tx.execute(
+                        "INSERT INTO playlist_entries(collection_id, position, track_id)
+                         VALUES (?1, ?2, ?3)",
+                        params![id, end + i as i64, track],
+                    )?;
+                }
+            }
+            Some(CollectionKind::Flow) => {
+                let mut graph = read::flow_graph(&tx, id)?;
+                for &track in tracks {
+                    graph.add_root(track, FLOW_SPACING);
+                }
+                write_graph(&tx, id, &graph)?;
+            }
+            Some(_) => return Err(StoreError::Refused("tracks can't be added to that")),
+            None => return Err(StoreError::NoCollection(id)),
+        }
+        tx.execute(
+            "UPDATE collections SET updated_at = ?2 WHERE id = ?1",
+            params![id, t],
+        )?;
+        tx.commit()?;
+        self.emit_collections()
+    }
+
+    /// Take tracks out of a crate, playlist (every place they're at, closing the
+    /// gaps) or Flow (every card of theirs; what followed a card follows what it
+    /// followed).
+    pub fn remove_tracks(&mut self, id: i64, tracks: &[i64]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        match read::kind(&tx, id)? {
+            Some(CollectionKind::Crate) => {
+                for track in tracks {
+                    tx.execute(
+                        "DELETE FROM crate_tracks WHERE collection_id = ?1 AND track_id = ?2",
+                        params![id, track],
+                    )?;
+                }
+            }
+            Some(CollectionKind::Playlist) => {
+                let kept: Vec<i64> = read::collection_tracks(&tx, id)?
+                    .into_iter()
+                    .filter(|t| !tracks.contains(t))
+                    .collect();
+                tx.execute(
+                    "DELETE FROM playlist_entries WHERE collection_id = ?1",
+                    [id],
+                )?;
+                for (i, track) in kept.iter().enumerate() {
+                    tx.execute(
+                        "INSERT INTO playlist_entries(collection_id, position, track_id)
+                         VALUES (?1, ?2, ?3)",
+                        params![id, i as i64, track],
+                    )?;
+                }
+            }
+            Some(CollectionKind::Flow) => {
+                let mut graph = read::flow_graph(&tx, id)?;
+                let gone: Vec<NodeId> = graph
+                    .nodes
+                    .iter()
+                    .filter(|n| tracks.contains(&n.track))
+                    .map(|n| n.id)
+                    .collect();
+                for n in gone {
+                    graph.remove(n);
+                }
+                write_graph(&tx, id, &graph)?;
+            }
+            Some(_) => return Err(StoreError::Refused("tracks can't be removed from that")),
+            None => return Err(StoreError::NoCollection(id)),
         }
         tx.commit()?;
-        Ok(())
+        self.emit_collections()
     }
+
+    /// A smart playlist's query. Refused if it doesn't parse.
+    pub fn set_query(&mut self, id: i64, q: &str) -> Result<()> {
+        query::parse(q).map_err(|e| StoreError::BadQuery(e.to_string()))?;
+        let n = self.conn.execute(
+            "UPDATE collections SET query = ?2, updated_at = ?3 WHERE id = ?1 AND kind = 'smart'",
+            params![id, q, now()],
+        )?;
+        if n == 0 {
+            return Err(StoreError::NoCollection(id));
+        }
+        self.emit_collections()
+    }
+}
+
+/// Where the Store puts cards it adds to a Flow (the canvas's card size plus gaps).
+const FLOW_SPACING: Spacing = Spacing {
+    col: 326.0,
+    row: 126.0,
+};
+
+/// Make the stored Flow match `graph`, writing only what changed.
+fn write_graph(tx: &Connection, id: i64, graph: &FlowGraph) -> Result<()> {
+    let old = read::flow_graph(tx, id)?;
+    let new_edges: HashSet<(NodeId, NodeId)> = graph.edges.iter().copied().collect();
+    for &(a, b) in &old.edges {
+        if !new_edges.contains(&(a, b)) {
+            tx.execute(
+                "DELETE FROM flow_edges WHERE collection_id = ?1 AND from_node = ?2 AND to_node = ?3",
+                params![id, a as i64, b as i64],
+            )?;
+        }
+    }
+    let ids: HashSet<NodeId> = graph.nodes.iter().map(|n| n.id).collect();
+    for n in old.nodes.iter().filter(|n| !ids.contains(&n.id)) {
+        tx.execute(
+            "DELETE FROM flow_nodes WHERE collection_id = ?1 AND id = ?2",
+            params![id, n.id as i64],
+        )?;
+    }
+    let old_nodes: HashMap<NodeId, &FlowNode> = old.nodes.iter().map(|n| (n.id, n)).collect();
+    for n in &graph.nodes {
+        if old_nodes.get(&n.id) != Some(&n) {
+            tx.execute(
+                "INSERT INTO flow_nodes(collection_id, id, track_id, x, y)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(collection_id, id) DO UPDATE SET
+                   track_id = excluded.track_id, x = excluded.x, y = excluded.y",
+                params![id, n.id as i64, n.track, n.x as f64, n.y as f64],
+            )?;
+        }
+    }
+    let old_edges: HashSet<(NodeId, NodeId)> = old.edges.into_iter().collect();
+    for &(a, b) in new_edges.difference(&old_edges) {
+        tx.execute(
+            "INSERT INTO flow_edges(collection_id, from_node, to_node) VALUES (?1, ?2, ?3)",
+            params![id, a as i64, b as i64],
+        )?;
+    }
+    tx.execute(
+        "UPDATE collections SET updated_at = ?2 WHERE id = ?1",
+        params![id, now()],
+    )?;
+    Ok(())
 }
 
 // ---- helpers (inside a transaction) ---------------------------------------------------
 
-fn save_features(
+pub(super) fn save_features(
     c: &Connection,
     track: i64,
     features: &[(&'static str, f64)],

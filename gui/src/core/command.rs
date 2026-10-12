@@ -13,6 +13,8 @@ use earshot_engine::{
 };
 
 use super::bus::step_size;
+use super::collections::{CollectionCmd, FlowCmd};
+use super::index::LibraryCmd;
 use super::player::{self, AudioSettings, GridOp, Player};
 use super::store::{Memory, Store, StoreCmd};
 
@@ -26,8 +28,12 @@ pub enum Command {
     /// The headphone preview of a library track.
     Preview(PreviewCmd),
     View(ViewCmd),
-    // TODO(library merge): Library(LibraryCmd), Collection(CollectionCmd), Flow(FlowCmd)
-    // from the library work go here, dispatched by the UI like `View`.
+    /// Library tracks: load, analyse, library folders. Run by the UI, like `View`.
+    Library(LibraryCmd),
+    /// Crates, playlists, smart playlists, Flows and their folders.
+    Collection(CollectionCmd),
+    /// The Flow on the canvas.
+    Flow(FlowCmd),
     /// Placeholders until there is an edit history.
     #[allow(dead_code)]
     Undo,
@@ -286,5 +292,23 @@ mod tests {
         let toggle = Command::from((a, EngineCmd::Keylock(Set::Toggle)));
         assert!(dispatch(&p, &store, toggle).unwrap().is_none());
         wait(&p, |s| s.decks[1].keylock);
+    }
+}
+
+impl From<LibraryCmd> for Command {
+    fn from(c: LibraryCmd) -> Command {
+        Command::Library(c)
+    }
+}
+
+impl From<CollectionCmd> for Command {
+    fn from(c: CollectionCmd) -> Command {
+        Command::Collection(c)
+    }
+}
+
+impl From<FlowCmd> for Command {
+    fn from(c: FlowCmd) -> Command {
+        Command::Flow(c)
     }
 }

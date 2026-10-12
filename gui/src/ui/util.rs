@@ -1,4 +1,4 @@
-//! Small shared pieces: colours, Camelot keys, time formatting, library search.
+//! Small shared pieces: colours, Camelot keys, time formatting.
 
 use egui::Color32;
 
@@ -84,7 +84,7 @@ pub fn band_colour(low: u8, mid: u8, high: u8) -> Color32 {
 
 // ---- Camelot keys ---------------------------------------------------------------------
 
-pub use crate::core::keys::{Camelot, key_name, parse_key};
+pub use crate::core::keys::{Camelot, key_name};
 
 /// Key colour round the Camelot wheel; B (major) lighter.
 pub fn key_colour(k: Camelot) -> Color32 {
@@ -116,77 +116,9 @@ pub fn mmss(s: f64) -> String {
     format!("{}:{:02}", (s / 60.0) as u64, (s % 60.0) as u64)
 }
 
-// ---- search ------------------------------------------------------------------------------
-
-/// A parsed search box: free words, `bpm:120-126` / `bpm:124`, `key:8A` (or `key:Am`).
-pub struct Query {
-    words: Vec<String>,
-    bpm: Option<(f64, f64)>,
-    key: Option<Camelot>,
-}
-
-impl Query {
-    pub fn parse(q: &str) -> Query {
-        let mut out = Query {
-            words: vec![],
-            bpm: None,
-            key: None,
-        };
-        for tok in q.split_whitespace() {
-            let lower = tok.to_lowercase();
-            if let Some(b) = lower.strip_prefix("bpm:") {
-                let r = match b.split_once('-') {
-                    Some((a, c)) => a.parse().ok().zip(c.parse().ok()),
-                    None => b.parse::<f64>().ok().map(|v| (v - 0.5, v + 0.5)),
-                };
-                if r.is_some() {
-                    out.bpm = r;
-                    continue;
-                }
-            }
-            if let Some(k) = lower.strip_prefix("key:").and_then(|k| parse_key(k)) {
-                out.key = Some(k);
-                continue;
-            }
-            out.words.push(lower);
-        }
-        out
-    }
-
-    pub fn matches(
-        &self,
-        title: &str,
-        artist: &str,
-        bpm: Option<f64>,
-        key: Option<Camelot>,
-    ) -> bool {
-        if self.key.is_some() && key != self.key {
-            return false;
-        }
-        if let Some((lo, hi)) = self.bpm
-            && !bpm.is_some_and(|b| b >= lo && b <= hi)
-        {
-            return false;
-        }
-        if self.words.is_empty() {
-            return true;
-        }
-        let hay = format!("{title} {artist}").to_lowercase();
-        self.words.iter().all(|w| hay.contains(w))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn query() {
-        let q = Query::parse("deep bpm:120-126 key:Am");
-        assert!(q.matches("Deep Space", "x", Some(124.0), parse_key("8A")));
-        assert!(!q.matches("Deep Space", "x", Some(128.0), parse_key("8A")));
-        assert!(!q.matches("Shallow", "x", Some(124.0), parse_key("8A")));
-    }
 
     #[test]
     fn tenths() {

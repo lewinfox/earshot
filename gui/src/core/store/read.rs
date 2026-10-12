@@ -9,7 +9,8 @@ use earshot_engine::loudness::Loudness;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::{CueKind, GridSource, Result, StoreError, WAVEFORM_VERSION, bytes_path};
-use crate::core::flows::{self, Card, FlowEntry, Folder};
+use crate::core::collections::{Collection, CollectionKind, FlowGraph, FlowNode, NodeId};
+use crate::core::query;
 
 /// A library track as the UI sees it: metadata resolved (user > import > tag), and
 /// the effective BPM (from the active grid).
@@ -27,18 +28,26 @@ pub struct LibTrack {
     /// The BPM in the metadata (tag, or what the user typed).
     pub tag_bpm: Option<f64>,
     pub key: Option<String>,
+    pub album: String,
+    pub genre: String,
+    pub comment: String,
     pub grid_source: Option<GridSource>,
     /// Stand-in energy (engine/src/energy.rs); only its order means anything.
     pub energy: Option<f64>,
     /// A static analysis found the tempo seems to drift.
     pub drifts: bool,
+    /// 0-5 stars.
+    pub rating: Option<u8>,
+    pub colour: Option<u32>,
+    /// Tag names, sorted.
+    pub tags: Vec<String>,
 }
 
 /// (track id, waveform thumbnail)
 pub type Preview = (i64, Vec<u8>);
 
 /// Metadata fields the track list needs.
-const LIST_FIELDS: &str = "('title', 'artist', 'bpm', 'key')";
+const LIST_FIELDS: &str = "('title', 'artist', 'album', 'genre', 'comment', 'bpm', 'key')";
 
 /// Lower is stronger: user > import > tag.
 pub(super) fn source_rank(source: &str) -> u8 {
@@ -52,21 +61,39 @@ pub(super) fn source_rank(source: &str) -> u8 {
 /// Tracks with a file that's present: all of them under the library roots (`None`),
 /// or just these ids (wherever they are).
 pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
-    let base = "SELECT t.id, f.path, t.duration_s, t.bpm, g.source
+    let base = "SELECT t.id, f.path, t.duration_s, t.bpm, g.source, t.rating, t.color
          FROM tracks t
          JOIN files f ON f.id = (SELECT id FROM files
                                  WHERE track_id = t.id AND missing_since IS NULL
                                  ORDER BY id LIMIT 1)
          LEFT JOIN beatgrids g ON g.id = t.active_grid_id
          WHERE t.deleted_at IS NULL";
-    type Row = (i64, Vec<u8>, Option<f64>, Option<f64>, Option<String>);
+    type Row = (
+        i64,
+        Vec<u8>,
+        Option<f64>,
+        Option<f64>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+    );
     let map = |r: &rusqlite::Row| -> rusqlite::Result<Row> {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+            r.get(6)?,
+        ))
     };
     let mut rows: Vec<Row> = vec![];
     // Metadata and features: (track, name) → (rank, value)
     let mut meta: HashMap<(i64, String), (u8, String)> = HashMap::new();
     let mut feats: HashMap<(i64, String), f64> = HashMap::new();
+    let mut tags: HashMap<i64, Vec<String>> = HashMap::new();
+    let tag_sql = "SELECT tt.track_id, g.name FROM track_tags tt JOIN tags g ON g.id = tt.tag_id";
     let mut add_meta = |id: i64, field: String, source: String, value: String| {
         let rank = source_rank(&source);
         let e = meta.entry((id, field)).or_insert((u8::MAX, String::new()));
@@ -99,11 +126,17 @@ pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
             while let Some(r) = q.next()? {
                 feats.insert((r.get(0)?, r.get(1)?), r.get(2)?);
             }
+            let mut st = c.prepare(tag_sql)?;
+            let mut q = st.query([])?;
+            while let Some(r) = q.next()? {
+                tags.entry(r.get(0)?).or_default().push(r.get(1)?);
+            }
         }
         Some(ids) => {
             let mut st = c.prepare_cached(&format!("{base} AND t.id = ?1"))?;
             let mut st_meta = c.prepare_cached(&format!("{meta_sql} AND track_id = ?1"))?;
             let mut st_feat = c.prepare_cached(&format!("{feat_sql} AND track_id = ?1"))?;
+            let mut st_tag = c.prepare_cached(&format!("{tag_sql} WHERE tt.track_id = ?1"))?;
             for &id in ids {
                 rows.extend(st.query_row([id], map).optional()?);
                 let mut q = st_meta.query([id])?;
@@ -114,12 +147,16 @@ pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
                 while let Some(r) = q.next()? {
                     feats.insert((r.get(0)?, r.get(1)?), r.get(2)?);
                 }
+                let mut q = st_tag.query([id])?;
+                while let Some(r) = q.next()? {
+                    tags.entry(r.get(0)?).or_default().push(r.get(1)?);
+                }
             }
         }
     }
     Ok(rows
         .into_iter()
-        .map(|(id, path, duration, bpm, source)| {
+        .map(|(id, path, duration, bpm, source, rating, colour)| {
             let path = bytes_path(path);
             let mut take = |f: &str| {
                 meta.remove(&(id, f.to_string()))
@@ -136,6 +173,16 @@ pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
                 artist: take("artist").unwrap_or_default(),
                 tag_bpm: take("bpm").and_then(|b| b.trim().parse().ok()),
                 key: take("key"),
+                album: take("album").unwrap_or_default(),
+                genre: take("genre").unwrap_or_default(),
+                comment: take("comment").unwrap_or_default(),
+                rating: rating.and_then(|r| u8::try_from(r).ok()),
+                colour: colour.and_then(|c| u32::try_from(c).ok()),
+                tags: {
+                    let mut t = tags.remove(&id).unwrap_or_default();
+                    t.sort();
+                    t
+                },
                 duration,
                 bpm,
                 grid_source: source.as_deref().and_then(GridSource::parse),
@@ -348,82 +395,102 @@ pub fn duplicates(c: &Connection) -> Result<Vec<Vec<i64>>> {
         .collect())
 }
 
-// ---- Flows ----------------------------------------------------------------------------
+// ---- collections ----------------------------------------------------------------------
 
-/// Every folder and Flow, sorted by name.
-pub fn flows(c: &Connection) -> Result<(Vec<Folder>, Vec<FlowEntry>)> {
-    let mut st = c.prepare(
-        "SELECT id, parent_id, name FROM collections WHERE kind = 'folder'
-         ORDER BY name COLLATE NOCASE",
-    )?;
-    let folders = st
-        .query_map([], |r| {
-            Ok(Folder {
-                id: r.get(0)?,
-                parent: r.get(1)?,
-                name: r.get(2)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    // All nodes and edges at once, rather than a query per Flow.
-    let mut nodes: HashMap<i64, Vec<(u64, i64, f32, f32)>> = HashMap::new();
+/// Every collection, sorted by name, with its tracks (see [`Collection::tracks`]).
+pub fn collections(c: &Connection) -> Result<Vec<Collection>> {
+    // All members at once, rather than a query per collection.
+    let mut tracks: HashMap<i64, Vec<i64>> = HashMap::new();
+    for sql in [
+        "SELECT collection_id, track_id FROM crate_tracks ORDER BY collection_id, added_at, track_id",
+        "SELECT collection_id, track_id FROM playlist_entries ORDER BY collection_id, position",
+        "SELECT collection_id, track_id FROM flow_nodes ORDER BY collection_id, id",
+    ] {
+        let mut st = c.prepare(sql)?;
+        let mut q = st.query([])?;
+        while let Some(r) = q.next()? {
+            tracks.entry(r.get(0)?).or_default().push(r.get(1)?);
+        }
+    }
+    let mut graphs: HashMap<i64, (Vec<FlowNode>, Vec<(NodeId, NodeId)>)> = HashMap::new();
     let mut st = c.prepare("SELECT collection_id, id, track_id FROM flow_nodes")?;
     let mut q = st.query([])?;
     while let Some(r) = q.next()? {
-        nodes
-            .entry(r.get(0)?)
-            .or_default()
-            .push((r.get::<_, i64>(1)? as u64, r.get(2)?, 0.0, 0.0));
+        graphs.entry(r.get(0)?).or_default().0.push(FlowNode {
+            id: r.get::<_, i64>(1)? as NodeId,
+            track: r.get(2)?,
+            x: 0.0,
+            y: 0.0,
+        });
     }
-    let mut edges: HashMap<i64, Vec<(u64, u64)>> = HashMap::new();
     let mut st = c.prepare("SELECT collection_id, from_node, to_node FROM flow_edges")?;
     let mut q = st.query([])?;
     while let Some(r) = q.next()? {
-        edges
+        graphs
             .entry(r.get(0)?)
             .or_default()
-            .push((r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64));
+            .1
+            .push((r.get::<_, i64>(1)? as NodeId, r.get::<_, i64>(2)? as NodeId));
     }
     let mut st = c.prepare(
-        "SELECT id, parent_id, name FROM collections WHERE kind = 'flow'
-         ORDER BY name COLLATE NOCASE",
+        "SELECT id, parent_id, kind, name, query, source_flow_id FROM collections
+         ORDER BY name COLLATE NOCASE, id",
     )?;
     let rows = st
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<rusqlite::Result<Vec<(i64, Option<i64>, String)>>>()?;
-    Ok((
-        folders,
-        rows.into_iter()
-            .map(|(id, folder, name)| {
-                let n = nodes.remove(&id).unwrap_or_default();
-                let e = edges.remove(&id).unwrap_or_default();
-                let count = n.len();
-                let linear = e.len() + 1 == count.max(1)
-                    && flows::playlist_order(&flows::cards_from(n, &e)).is_some();
-                FlowEntry {
-                    id,
-                    folder,
-                    name,
-                    cards: count,
-                    linear,
-                }
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get(1)?,
+                r.get::<_, String>(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, parent, kind, name, query, source_flow)| {
+            let kind = CollectionKind::parse(&kind)?;
+            let linear = kind == CollectionKind::Flow
+                && graphs
+                    .remove(&id)
+                    .is_none_or(|(n, e)| FlowGraph::new(n, e).linear_order().is_some());
+            Some(Collection {
+                id,
+                parent,
+                kind,
+                name,
+                tracks: tracks.remove(&id).unwrap_or_default(),
+                query,
+                source_flow,
+                linear,
             })
-            .collect(),
-    ))
+        })
+        .collect())
 }
 
-pub fn flow_graph(c: &Connection, id: i64) -> Result<(Vec<(u64, i64, f32, f32)>, Vec<(u64, u64)>)> {
+pub fn kind(c: &Connection, id: i64) -> Result<Option<CollectionKind>> {
+    let k: Option<String> = c
+        .query_row("SELECT kind FROM collections WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok(k.as_deref().and_then(CollectionKind::parse))
+}
+
+pub fn flow_graph(c: &Connection, id: i64) -> Result<FlowGraph> {
     let mut st = c.prepare_cached(
         "SELECT id, track_id, x, y FROM flow_nodes WHERE collection_id = ?1 ORDER BY id",
     )?;
     let nodes = st
         .query_map([id], |r| {
-            Ok((
-                r.get::<_, i64>(0)? as u64,
-                r.get(1)?,
-                r.get::<_, f64>(2)? as f32,
-                r.get::<_, f64>(3)? as f32,
-            ))
+            Ok(FlowNode {
+                id: r.get::<_, i64>(0)? as NodeId,
+                track: r.get(1)?,
+                x: r.get::<_, f64>(2)? as f32,
+                y: r.get::<_, f64>(3)? as f32,
+            })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut st = c.prepare_cached(
@@ -432,14 +499,14 @@ pub fn flow_graph(c: &Connection, id: i64) -> Result<(Vec<(u64, i64, f32, f32)>,
     )?;
     let edges = st
         .query_map([id], |r| {
-            Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+            Ok((r.get::<_, i64>(0)? as NodeId, r.get::<_, i64>(1)? as NodeId))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok((nodes, edges))
+    Ok(FlowGraph::new(nodes, edges))
 }
 
-/// A Flow's name and cards, or `None` if there's no such Flow.
-pub fn flow(c: &Connection, id: i64) -> Result<Option<(i64, String, Vec<Card>)>> {
+/// A Flow's name and graph, or `None` if there's no such Flow.
+pub fn flow(c: &Connection, id: i64) -> Result<Option<(i64, String, FlowGraph)>> {
     let name: Option<String> = c
         .query_row(
             "SELECT name FROM collections WHERE id = ?1 AND kind = 'flow'",
@@ -448,16 +515,45 @@ pub fn flow(c: &Connection, id: i64) -> Result<Option<(i64, String, Vec<Card>)>>
         )
         .optional()?;
     let Some(name) = name else { return Ok(None) };
-    let (nodes, edges) = flow_graph(c, id)?;
-    Ok(Some((id, name, flows::cards_from(nodes, &edges))))
+    Ok(Some((id, name, flow_graph(c, id)?)))
 }
 
-/// A playlist's tracks in order.
-#[allow(dead_code)] // library management API, not wired to the UI yet (tests use it)
-pub fn playlist(c: &Connection, id: i64) -> Result<Vec<i64>> {
-    let mut st = c.prepare_cached(
-        "SELECT track_id FROM playlist_entries WHERE collection_id = ?1 ORDER BY position",
-    )?;
+/// The tracks of any collection: a crate's, a playlist's in order, a Flow's cards'
+/// (in card order), or what a smart playlist's query finds (in the database, by
+/// `query::to_sql`).
+pub fn collection_tracks(c: &Connection, id: i64) -> Result<Vec<i64>> {
+    let row: Option<(String, Option<String>)> = c
+        .query_row(
+            "SELECT kind, query FROM collections WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((kind, q)) = row else {
+        return Err(StoreError::NoCollection(id));
+    };
+    let sql = match CollectionKind::parse(&kind) {
+        Some(CollectionKind::Smart) => {
+            let q = query::parse(q.as_deref().unwrap_or(""))
+                .map_err(|e| StoreError::BadQuery(e.to_string()))?;
+            let (sql, args) = query::to_sql(&q);
+            let mut st = c.prepare(&sql)?;
+            return Ok(st
+                .query_map(rusqlite::params_from_iter(args), |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?);
+        }
+        Some(CollectionKind::Crate) => {
+            "SELECT track_id FROM crate_tracks WHERE collection_id = ?1 ORDER BY added_at, track_id"
+        }
+        Some(CollectionKind::Playlist) => {
+            "SELECT track_id FROM playlist_entries WHERE collection_id = ?1 ORDER BY position"
+        }
+        Some(CollectionKind::Flow) => {
+            "SELECT track_id FROM flow_nodes WHERE collection_id = ?1 ORDER BY id"
+        }
+        _ => return Ok(vec![]),
+    };
+    let mut st = c.prepare_cached(sql)?;
     Ok(st
         .query_map([id], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?)

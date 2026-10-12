@@ -2,13 +2,14 @@
 
 pub mod app;
 pub mod audio_ui;
+pub mod collections_ui;
 pub mod controls;
 pub mod deck;
 pub mod flow;
-pub mod flows_ui;
 pub mod library_ui;
 pub mod mixer;
 pub mod suggest_ui;
+pub mod tracks;
 pub mod util;
 pub mod wave;
 
@@ -25,7 +26,8 @@ pub fn theme(ctx: &egui::Context) {
     v.widgets.inactive.bg_fill = egui::Color32::from_rgb(0x34, 0x37, 0x44);
     v.slider_trailing_fill = true;
     v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, util::LINE);
-    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x44, 0x47, 0x56));
+    v.widgets.hovered.bg_stroke =
+        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x44, 0x47, 0x56));
     v.widgets.noninteractive.fg_stroke.color = util::TEXT;
     v.widgets.inactive.fg_stroke.color = util::TEXT;
     ctx.set_visuals(v);

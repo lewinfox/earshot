@@ -1,15 +1,23 @@
 //! The Suggestions pane: what to play after the reference track, ranked, with each
 //! part of the score shown as a small bar. Master / A / B / Selected picks the
-//! reference; Drop / Hold / Build picks the energy direction.
+//! reference (`core::history` works it out); Drop / Hold / Build picks the energy
+//! direction.
+
+use std::time::{Duration, Instant};
 
 use egui::{Align, Color32, CornerRadius, RichText, Sense, Ui, vec2};
 use egui_extras::{Column, TableBuilder};
 
 use super::deck::key_chip;
-use super::library_ui::{LibAction, LibraryUi};
+use super::tracks::{MenuAt, View, title_cell, track_menu};
 use super::util;
+use crate::core::command::Command;
+use crate::core::history::{DeckNow, RefSource, RefTrack};
+use crate::core::index::LibraryCmd;
 use crate::core::keys::{Camelot, key_name};
+use crate::core::selection::{Mods, Selection};
 use crate::core::suggest::{Direction, Scored};
+use crate::core::track::TrackId;
 
 const BARS: [(&str, Color32); 3] = [
     ("key", Color32::from_rgb(0xc2, 0x5b, 0xff)),
@@ -17,74 +25,99 @@ const BARS: [(&str, Color32); 3] = [
     ("energy", Color32::from_rgb(0xff, 0xcc, 0x4d)),
 ];
 
-/// Where the reference track comes from.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub enum Source {
-    /// Whichever deck is playing (the one started most recently, if both are).
-    #[default]
-    Master,
-    /// What's loaded on deck A (0) or B (1), playing or not.
-    Deck(usize),
-    /// The track highlighted in the library.
-    Selected,
+/// Suggestions follow a tempo change once the tempo has held still this long.
+const SETTLE: Duration = Duration::from_secs(1);
+
+/// What the list was worked out for, apart from the tempo and key.
+#[derive(Clone, Copy, PartialEq)]
+struct Stamp {
+    track: TrackId,
+    deck: Option<usize>,
+    playing: bool,
+    direction: Direction,
+    played: u64,
+    lib: u64,
 }
 
-/// What the suggestions are measured from, for the pane's header.
-pub struct RefInfo {
-    pub title: String,
-    pub bpm: Option<f64>,
-    pub key: Option<Camelot>,
-    /// The deck it's on, if it's from a deck, and whether that deck is playing.
-    pub deck: Option<usize>,
-    pub playing: bool,
-}
+/// The tempo (to 0.1 BPM) and key the list was worked out for.
+type Tempo = (i64, Option<Camelot>);
 
 #[derive(Default)]
 pub struct SuggestUi {
-    pub source: Source,
+    pub source: RefSource,
     pub direction: Direction,
     pub list: Vec<Scored>,
-    pub reference: Option<RefInfo>,
-    /// Inputs the list was computed from; recomputed when they change.
-    pub computed_for: String,
+    /// What the suggestions are measured from.
+    pub reference: Option<RefTrack>,
+    computed_for: Option<(Stamp, Tempo)>,
     /// A new tempo waiting to hold still before the list follows it, and since when.
-    pub settling: Option<(String, std::time::Instant)>,
-    /// Row with keyboard focus.
-    focus: Option<usize>,
+    settling: Option<(Tempo, Instant)>,
+    sel: Selection,
     scroll_to: Option<usize>,
 }
 
 impl SuggestUi {
-    pub fn focused(&self) -> Option<i64> {
-        self.focus.and_then(|f| self.list.get(f)).map(|s| s.id)
+    pub fn focused(&self) -> Option<TrackId> {
+        self.sel.focused()
+    }
+
+    fn ids(&self) -> Vec<TrackId> {
+        self.list.iter().map(|s| s.id).collect()
     }
 
     pub fn move_focus(&mut self, delta: i32) {
-        if self.list.is_empty() {
-            return;
-        }
-        let f = self.focus.map_or(0, |f| {
-            (f as i32 + delta).clamp(0, self.list.len() as i32 - 1) as usize
-        });
-        self.focus = Some(f);
-        self.scroll_to = Some(f);
+        self.scroll_to = self.sel.move_focus(delta, &self.ids());
     }
 
-    /// Replace the list, keeping focus on the same track if it's still there.
-    pub fn set(&mut self, list: Vec<Scored>) {
-        let id = self.focused();
-        self.focus = id.and_then(|id| list.iter().position(|s| s.id == id));
-        self.list = list;
+    /// Work the list out again if the reference (as `source` picks it from the decks,
+    /// or `selected`) or the library changed. A tempo change alone waits until the
+    /// tempo has held still for a moment, rather than re-ranking on every step of a
+    /// fader sweep.
+    pub fn refresh(&mut self, v: &View, decks: &[DeckNow], selected: Option<TrackId>) {
+        let Some(r) = v.history.reference(v.lib, self.source, decks, selected) else {
+            self.reference = None;
+            self.list.clear();
+            self.computed_for = None;
+            return;
+        };
+        let stamp = Stamp {
+            track: r.id,
+            deck: r.deck,
+            playing: r.playing,
+            direction: self.direction,
+            played: v.history.rev(),
+            lib: v.lib.rev(),
+        };
+        let tempo: Tempo = ((r.bpm.unwrap_or(0.0) * 10.0).round() as i64, r.key);
+        match self.computed_for {
+            Some(c) if c == (stamp, tempo) => {
+                self.settling = None;
+                return;
+            }
+            Some((s, _)) if s == stamp => match self.settling {
+                Some((t, since)) if t == tempo => {
+                    if since.elapsed() < SETTLE {
+                        return;
+                    }
+                }
+                _ => {
+                    self.settling = Some((tempo, Instant::now()));
+                    return;
+                }
+            },
+            _ => {}
+        }
+        self.settling = None;
+        self.list = v
+            .history
+            .suggest(v.lib, &r, self.direction, &Default::default(), 80);
+        self.sel.retain(&self.ids());
+        self.reference = Some(r);
+        self.computed_for = Some((stamp, tempo));
     }
 
     /// Returns true when the pane was clicked (so it takes keyboard focus).
-    pub fn show(
-        &mut self,
-        ui: &mut Ui,
-        lib: &LibraryUi,
-        has_focus: bool,
-        actions: &mut Vec<LibAction>,
-    ) -> bool {
+    pub fn show(&mut self, ui: &mut Ui, v: &View, has_focus: bool, out: &mut Vec<Command>) -> bool {
         let mut clicked_pane = false;
         ui.horizontal(|ui| {
             let title = RichText::new("Suggestions").strong();
@@ -114,10 +147,22 @@ impl SuggestUi {
         ui.horizontal(|ui| {
             ui.label(RichText::new("After").color(util::MUTED));
             for (src, name, tip) in [
-                (Source::Master, "Master", "Whichever deck is playing"),
-                (Source::Deck(0), "A", "The track on deck A, playing or not"),
-                (Source::Deck(1), "B", "The track on deck B, playing or not"),
-                (Source::Selected, "Selected", "The track highlighted in the library"),
+                (RefSource::Master, "Master", "Whichever deck is playing"),
+                (
+                    RefSource::Deck(0),
+                    "A",
+                    "The track on deck A, playing or not",
+                ),
+                (
+                    RefSource::Deck(1),
+                    "B",
+                    "The track on deck B, playing or not",
+                ),
+                (
+                    RefSource::Selected,
+                    "Selected",
+                    "The track highlighted in the library, or the selected Flow card",
+                ),
             ] {
                 if ui
                     .selectable_label(self.source == src, name)
@@ -131,9 +176,9 @@ impl SuggestUi {
         ui.horizontal(|ui| match &self.reference {
             None => {
                 let hint = match self.source {
-                    Source::Master => "No deck is playing".to_string(),
-                    Source::Deck(d) => format!("Nothing on deck {}", ["A", "B"][d]),
-                    Source::Selected => "Select a track in the library".to_string(),
+                    RefSource::Master => "No deck is playing".to_string(),
+                    RefSource::Deck(d) => format!("Nothing on deck {}", ["A", "B"][d.min(1)]),
+                    RefSource::Selected => "Select a track in the library".to_string(),
                 };
                 ui.label(RichText::new(hint).color(util::MUTED));
             }
@@ -143,9 +188,9 @@ impl SuggestUi {
                         let text = RichText::new(format!(
                             "{}deck {}",
                             if r.playing { "LIVE " } else { "" },
-                            ["A", "B"][d]
+                            ["A", "B"][d.min(1)]
                         ))
-                        .color(util::DECK[d]);
+                        .color(util::DECK[d.min(1)]);
                         ui.label(if r.playing { text.strong() } else { text })
                     }
                     None => ui.label(RichText::new("Selected").color(util::MUTED)),
@@ -156,7 +201,9 @@ impl SuggestUi {
                     r.key.map_or("?".into(), key_name)
                 );
                 ui.label(RichText::new(detail).color(util::MUTED));
-                ui.add(egui::Label::new(&r.title).truncate());
+                if let Some(t) = v.lib.get(r.id) {
+                    ui.add(egui::Label::new(&t.title).truncate());
+                }
             }
         });
         ui.add_space(2.0);
@@ -174,36 +221,15 @@ impl SuggestUi {
         if let Some(r) = self.scroll_to.take() {
             table = table.scroll_to_row(r, Some(Align::Center));
         }
-        let mut clicked: Option<usize> = None;
+        let ids = self.ids();
+        let mut clicked: Option<(TrackId, egui::Modifiers)> = None;
+        let mut right_clicked: Option<TrackId> = None;
         table.body(|body| {
             body.rows(34.0, self.list.len(), |mut row| {
-                let r = row.index();
-                let s = &self.list[r];
-                let Some(t) = lib.track(s.id) else { return };
-                row.set_selected(has_focus && self.focus == Some(r));
-                let played = lib.played.contains(&s.id);
-                row.col(|ui| {
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        let title = RichText::new(&t.lib.title);
-                        ui.add(
-                            egui::Label::new(if played {
-                                title.color(util::MUTED)
-                            } else {
-                                title
-                            })
-                            .truncate()
-                            .selectable(false),
-                        );
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(&t.lib.artist).size(11.0).color(util::MUTED),
-                            )
-                            .truncate()
-                            .selectable(false),
-                        );
-                    });
-                });
+                let s = &self.list[row.index()];
+                let Some(t) = v.lib.get(s.id) else { return };
+                row.set_selected(has_focus && self.sel.contains(s.id));
+                row.col(|ui| title_cell(ui, t, v.history.was_played(s.id), true));
                 row.col(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                         let ch = s
@@ -231,35 +257,36 @@ impl SuggestUi {
                 });
                 row.col(|ui| bars(ui, s));
                 let resp = row.response();
-                if resp.clicked() || resp.secondary_clicked() {
-                    clicked = Some(r);
+                if resp.clicked() {
+                    clicked = Some((s.id, resp.ctx.input(|i| i.modifiers)));
+                }
+                if resp.secondary_clicked() {
+                    right_clicked = Some(s.id);
                 }
                 if resp.double_clicked() {
-                    actions.push(LibAction::Load {
-                        deck: None,
-                        track_id: s.id,
-                    });
+                    out.push(LibraryCmd::Load(s.id).into());
                 }
                 resp.dnd_set_drag_payload(s.id);
                 resp.context_menu(|ui| {
-                    if ui.button("Preview in headphones").clicked() {
-                        actions.push(LibAction::Preview(s.id));
-                        ui.close();
-                    }
-                    for (deck, label) in [(0, "Load to deck A"), (1, "Load to deck B")] {
-                        if ui.button(label).clicked() {
-                            actions.push(LibAction::Load {
-                                deck: Some(deck),
-                                track_id: s.id,
-                            });
-                            ui.close();
-                        }
-                    }
+                    let sel = if self.sel.contains(s.id) {
+                        self.sel.in_order(&ids)
+                    } else {
+                        vec![s.id]
+                    };
+                    track_menu(ui, &sel, v, MenuAt::default(), out);
                 });
             });
         });
-        if let Some(r) = clicked {
-            self.focus = Some(r);
+        if let Some(id) = right_clicked {
+            self.sel.right_click(id);
+            clicked_pane = true;
+        }
+        if let Some((id, m)) = clicked {
+            let mods = Mods {
+                shift: m.shift,
+                command: m.command,
+            };
+            self.sel.click(id, &ids, mods);
             clicked_pane = true;
         }
         clicked_pane

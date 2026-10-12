@@ -6,31 +6,34 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use earshot_engine::{
-    DeckCmd as EngineCmd, DeckId, EngineSnapshot, MAX_DECKS, Monitor, OutputInfo, OutputOptions,
-    TempoRange,
+    DeckCmd as EngineCmd, DeckId, EngineSnapshot, Monitor, OutputInfo, OutputOptions, TempoRange,
 };
 use egui::{Key, RichText, Stroke, Ui, vec2};
 
 use super::audio_ui::AudioUi;
+use super::collections_ui::{CollectionsUi, TreeCtx};
 use super::deck::{DeckInfo, DeckUi, PendingLoad, Side};
 use super::flow::FlowUi;
-use super::flows_ui::{FlowsAction, FlowsUi, Item};
-use super::library_ui::{LibAction, LibraryUi, PreviewState, take_wanted_art};
+use super::library_ui::{LibraryUi, PreviewState, Scope};
 use super::mixer;
-use super::suggest_ui::{RefInfo, Source, SuggestUi};
+use super::suggest_ui::SuggestUi;
+use super::tracks::{Media, View, take_wanted_art};
 use super::util;
 use crate::core::analysis::{Analyser, Mode};
+use crate::core::collections::{CollectionCmd, CollectionId, CollectionKind, Collections, FlowCmd};
 use crate::core::command::{self, AudioCmd, Command, DeckCmd, PreviewCmd, ViewCmd};
+use crate::core::history::{DeckNow, History};
+use crate::core::index::{LibraryCmd, LibraryIndex};
 use crate::core::keymap::{self, Keymap};
 use crate::core::library::{self, Library};
 use crate::core::midi::{self, Midi};
 use crate::core::player::{self, AudioSettings, DECKS, Player};
 use crate::core::session::{self, SLOTS};
 use crate::core::store::{self, EventSink, Store, StoreCmd, StoreEvent};
-use crate::core::suggest::{self, Reference};
+use crate::core::track::AnalysisState;
 use crate::core::{Event, Sink};
 
 pub struct EarshotApp {
@@ -53,22 +56,24 @@ pub struct EarshotApp {
     memories: Vec<store::Memory>,
     /// Real seconds of waveform either side of the playhead, shared by both decks.
     half_window: f64,
+    /// The library, collections and play history: the domain state the panes read.
+    index: LibraryIndex,
+    collections: Collections,
+    history: History,
+    /// Waveform thumbnails and cover art for every list.
+    media: Media,
     library: LibraryUi,
     suggest: SuggestUi,
     flow: FlowUi,
-    flows: FlowsUi,
+    colls: CollectionsUi,
     /// Send track ids here to load their cover art.
     art_loader: std::sync::mpsc::Sender<i64>,
     /// Nudge after a scan: works out audio hashes the files' tags didn't have.
     hasher: std::sync::mpsc::Sender<()>,
-    /// A Flow or folder just made, to rename once the Store's list has it.
-    pending_rename: Option<Item>,
+    /// A collection just made, to rename once the Store's list has it.
+    pending_rename: Option<CollectionId>,
     /// Which list the keyboard and the controller's browse knob move through.
     pane: Pane,
-    /// The deck that most recently started playing (the live reference).
-    last_started: Option<usize>,
-    /// When each deck started playing, to count a track as played after 30 s.
-    play_started: [Option<Instant>; MAX_DECKS],
     analysis: AnalysisSummary,
     hud: Hud,
     show_keys: bool,
@@ -116,8 +121,6 @@ impl UiMode {
         }
     }
 }
-/// The name a new Flow gets until it's renamed.
-const UNTITLED: &str = "Untitled Flow";
 
 /// Start audio on the chosen device; failing that the default one, then the null
 /// output (so the app still runs without a sound card).
@@ -142,12 +145,6 @@ fn start_audio(player: &Player, settings: &AudioSettings) -> Result<OutputInfo, 
             player::start_engine(player, &OutputOptions { null: true, ..opts })
         })
 }
-
-/// Suggestions follow a tempo change once the tempo has held still this long.
-const SUGGEST_SETTLE: Duration = Duration::from_secs(1);
-
-/// A track counts as played once it has been playing this long.
-const PLAYED_AFTER_SECS: f32 = 30.0;
 
 #[derive(Default)]
 struct AnalysisSummary {
@@ -232,6 +229,10 @@ impl EarshotApp {
                 .storage
                 .and_then(|s| eframe::get_value(s, WAVE_ZOOM_KEY))
                 .unwrap_or(4.0),
+            index: LibraryIndex::default(),
+            collections: Collections::default(),
+            history: History::default(),
+            media: Media::default(),
             library: LibraryUi::default(),
             suggest: SuggestUi::default(),
             flow: FlowUi::from_saved(
@@ -239,13 +240,11 @@ impl EarshotApp {
                     .and_then(|s| eframe::get_value(s, FLOW_KEY))
                     .unwrap_or_default(),
             ),
-            flows: FlowsUi::default(),
+            colls: CollectionsUi::default(),
             art_loader,
             hasher,
             pending_rename: None,
             pane: Pane::Library,
-            last_started: None,
-            play_started: [None; MAX_DECKS],
             analysis: AnalysisSummary::default(),
             hud: Hud::default(),
             show_keys: false,
@@ -307,94 +306,145 @@ impl EarshotApp {
         }
     }
 
-    // ---- saved Flows ------------------------------------------------------------------
+    // ---- collections ------------------------------------------------------------------
 
-    /// Ask for the Flow list and the Flow that was open last time. Cards kept from
-    /// before Flows were saved in the database are still on the canvas with no Flow,
-    /// so the first save makes them an "Untitled Flow".
+    /// Ask for the collections and the Flow that was open last time.
     fn restore_flow(&mut self) {
-        self.lib.store.send(StoreCmd::ListFlows);
+        self.lib.store.send(StoreCmd::ListCollections);
         if let Some(id) = self.flow.flow {
             self.lib.store.send(StoreCmd::LoadFlow(id));
         }
     }
 
-    /// Save the canvas if its cards changed, making a new Flow for the first card.
+    /// Save the canvas if it changed, making a new Flow for the first card.
     fn save_flow(&mut self) {
-        let Some(cards) = self.flow.changed_cards() else {
+        let Some(graph) = self.flow.changed_graph() else {
             return;
         };
         let store = &self.lib.store;
         let id = match self.flow.flow {
             Some(id) => id,
-            None if cards.is_empty() => return,
+            None if graph.is_empty() => return,
             None => {
                 let id = store.new_collection_id();
-                store.send(StoreCmd::CreateFlow {
+                let name = CollectionKind::Flow.untitled().to_string();
+                store.send(StoreCmd::Create {
                     id,
-                    folder: None,
-                    name: UNTITLED.into(),
+                    parent: None,
+                    kind: CollectionKind::Flow,
+                    name: name.clone(),
+                    query: None,
                 });
-                self.flow.name = UNTITLED.to_string();
+                self.flow.name = name;
                 self.flow.flow = Some(id);
                 id
             }
         };
-        store.send(StoreCmd::SaveFlow { id, cards });
+        store.send(StoreCmd::SaveFlow { id, graph });
     }
 
-    /// The tree's actions become Store commands; the new list comes back as an event.
-    fn flows_action(&mut self, a: FlowsAction) {
+    /// The collection tree's and track menus' actions become Store commands; the
+    /// new list comes back as an event.
+    fn collection_cmd(&mut self, c: CollectionCmd) {
         let store = &self.lib.store;
-        match a {
-            FlowsAction::Open(id) => {
-                store.send(StoreCmd::LoadFlow(id));
-                self.flow.open = true;
-            }
-            FlowsAction::New(folder) => {
+        match c {
+            CollectionCmd::Open(id) => match self.collections.get(id).map(|c| c.kind) {
+                Some(CollectionKind::Flow) => {
+                    store.send(StoreCmd::LoadFlow(id));
+                    self.flow.open = true;
+                }
+                Some(_) => {
+                    self.library.set_scope(Scope::Collection(id));
+                    self.flow.open = false;
+                }
+                None => {}
+            },
+            CollectionCmd::Create {
+                kind,
+                parent,
+                tracks,
+                query,
+            } => {
                 let id = store.new_collection_id();
-                store.send(StoreCmd::CreateFlow {
-                    id,
-                    folder,
-                    name: UNTITLED.into(),
-                });
-                self.flow.load(Some((id, UNTITLED.to_string(), vec![])));
-                self.flow.open = true;
-                self.pending_rename = Some(Item::Flow(id));
-            }
-            FlowsAction::NewFolder(parent) => {
-                let id = store.new_collection_id();
-                store.send(StoreCmd::CreateFolder {
+                let name = kind.untitled().to_string();
+                store.send(StoreCmd::Create {
                     id,
                     parent,
-                    name: "New folder".into(),
+                    kind,
+                    name: name.clone(),
+                    query,
                 });
-                self.pending_rename = Some(Item::Folder(id));
-            }
-            FlowsAction::Rename(item, name) => {
-                let id = match item {
-                    Item::Flow(id) => {
-                        if self.flow.flow == Some(id) {
-                            self.flow.name = name.clone();
-                        }
-                        id
+                if !tracks.is_empty() {
+                    store.send(StoreCmd::AddTracks { id, tracks });
+                }
+                match kind {
+                    CollectionKind::Flow => {
+                        self.flow.load(Some((id, name, Default::default())));
+                        self.flow.open = true;
                     }
-                    Item::Folder(id) => id,
-                };
+                    CollectionKind::Folder => {}
+                    _ => {
+                        self.library.set_scope(Scope::Collection(id));
+                        self.flow.open = false;
+                    }
+                }
+                self.pending_rename = Some(id);
+            }
+            CollectionCmd::Rename(id, name) => {
+                if self.flow.flow == Some(id) {
+                    self.flow.name = name.clone();
+                }
                 store.send(StoreCmd::Rename { id, name });
             }
-            FlowsAction::Move(Item::Flow(id) | Item::Folder(id), parent) => {
-                store.send(StoreCmd::Move { id, parent })
-            }
-            FlowsAction::Duplicate(from) => {
+            CollectionCmd::Move(id, parent) => store.send(StoreCmd::Move { id, parent }),
+            CollectionCmd::Duplicate(from) => {
                 let to = store.new_collection_id();
-                store.send(StoreCmd::DuplicateFlow { from, to });
-                self.pending_rename = Some(Item::Flow(to));
+                store.send(StoreCmd::Duplicate { from, to });
+                self.pending_rename = Some(to);
             }
             // The open Flow may go with it: see `StoreEvent::Deleted`.
-            FlowsAction::Delete(Item::Flow(id) | Item::Folder(id)) => {
-                store.send(StoreCmd::Delete(id))
+            CollectionCmd::Delete(id) => store.send(StoreCmd::Delete(id)),
+            CollectionCmd::AddTracks { to, tracks } => {
+                if self.flow.flow == Some(to) {
+                    // The canvas has it: add there, or its next save would undo this.
+                    self.flow.add_tracks(&tracks);
+                } else {
+                    store.send(StoreCmd::AddTracks { id: to, tracks });
+                }
             }
+            CollectionCmd::RemoveTracks { from, tracks } => {
+                store.send(StoreCmd::RemoveTracks { id: from, tracks })
+            }
+            CollectionCmd::SetQuery(id, query) => store.send(StoreCmd::SetQuery { id, query }),
+        }
+    }
+
+    fn flow_cmd(&mut self, c: FlowCmd) {
+        match c {
+            FlowCmd::AddTracks(tracks) => {
+                self.flow.open = true;
+                self.flow.add_tracks(&tracks);
+            }
+            FlowCmd::BakePath { flow, nodes, name } => {
+                // The Store bakes from what it has: save the canvas first.
+                self.save_flow();
+                let playlist = self.lib.store.new_collection_id();
+                self.lib.store.send(StoreCmd::ExportPath {
+                    flow,
+                    nodes,
+                    playlist,
+                    name,
+                });
+                self.pending_rename = Some(playlist);
+            }
+        }
+    }
+
+    fn library_cmd(&mut self, c: LibraryCmd) {
+        match c {
+            LibraryCmd::Load(track) => self.load(None, track),
+            LibraryCmd::Analyse { tracks, dynamic } => self.analyse(tracks, dynamic),
+            LibraryCmd::RemoveRoot(path) => self.lib.store.send(StoreCmd::RemoveRoot(path)),
         }
     }
 
@@ -420,8 +470,7 @@ impl EarshotApp {
                 .unwrap_or(DeckId::new(0).expect("deck 1")),
         });
         // Show the track's details at once; the audio follows when it has decoded.
-        self.decks[deck.index()]
-            .start_load(PendingLoad::new(track_id, self.library.track(track_id)));
+        self.decks[deck.index()].start_load(PendingLoad::new(track_id, self.index.get(track_id)));
         let (player, lib, sink) = (self.player.clone(), self.lib.clone(), self.sink.clone());
         std::thread::spawn(move || {
             let result = player::load_track(&player, &lib, deck, track_id);
@@ -467,6 +516,9 @@ impl EarshotApp {
                 }
             }
             Command::Deck(deck, DeckCmd::Load(id)) => self.load(Some(deck), id),
+            Command::Library(c) => self.library_cmd(c),
+            Command::Collection(c) => self.collection_cmd(c),
+            Command::Flow(c) => self.flow_cmd(c),
             Command::Preview(PreviewCmd::Toggle(id)) => self.toggle_preview(id),
             Command::Preview(PreviewCmd::Seek(id, at)) => self.seek_preview(id, at),
             Command::Preview(PreviewCmd::Stop(id)) => self.stop_preview(id),
@@ -481,122 +533,60 @@ impl EarshotApp {
         }
     }
 
-    /// Note which deck started playing last, and mark tracks played after 30 s.
-    fn track_plays(&mut self) {
-        let Some(sh) = &self.snap else { return };
-        let now = Instant::now();
-        for (d, deck) in sh.live().iter().enumerate() {
-            let playing = deck.playing;
-            match (playing, self.play_started[d]) {
-                (true, None) => {
-                    self.play_started[d] = Some(now);
-                    self.last_started = Some(d);
-                }
-                (false, Some(_)) => self.play_started[d] = None,
-                (true, Some(t)) if now.duration_since(t).as_secs_f32() > PLAYED_AFTER_SECS => {
-                    if let Some(id) = self.player.lock().unwrap().decks[d].track_id {
-                        self.library.played.insert(id);
+    /// The decks as the play history sees them: track, playing, tempo, key shift.
+    fn decks_now(&self) -> Vec<DeckNow> {
+        let inner = self.player.lock().unwrap();
+        DeckId::first(DECKS)
+            .map(|d| {
+                let track = inner.session(d).track_id;
+                match &self.snap {
+                    Some(sh) => {
+                        let sh = sh.deck(d);
+                        DeckNow {
+                            track,
+                            playing: sh.playing,
+                            bpm: sh.bpm,
+                            // How far the key has moved: not at all with keylock.
+                            key_speed: if sh.keylock { 1.0 } else { sh.tempo },
+                        }
                     }
+                    None => DeckNow {
+                        track,
+                        key_speed: 1.0,
+                        ..Default::default()
+                    },
                 }
-                _ => {}
-            }
-        }
+            })
+            .collect()
     }
 
-    /// The reference track the Suggestions pane's source asks for: a deck's track at
-    /// its actual tempo and key, or the track selected in the library.
+    /// Note which deck started playing last, and mark tracks played after 30 s.
+    fn track_plays(&mut self) {
+        let decks = self.decks_now();
+        self.history.tick(Instant::now(), &decks);
+    }
+
+    /// Suggestions after the source's reference: a deck's track at its actual tempo
+    /// and key, or the selected track (the Flow's selected card, while it's open).
     fn refresh_suggestions(&mut self) {
-        // (deck, track, BPM as playing, how far the key has moved, playing)
-        let on_deck = |d: usize| {
-            let sh = &self.snap.as_ref()?.decks[d];
-            let id = self.player.lock().unwrap().decks[d].track_id?;
-            // How far the key has moved: not at all with keylock.
-            let speed = if sh.keylock { 1.0 } else { sh.tempo };
-            Some((d, id, sh.bpm, speed, sh.playing))
+        let decks = self.decks_now();
+        let selected = match self.flow.open {
+            true => self.flow.selected_track().or(self.library.focused()),
+            false => self.library.focused(),
         };
-        let source = match self.suggest.source {
-            Source::Master => self
-                .last_started
-                .into_iter()
-                .chain(0..DECKS)
-                .filter_map(on_deck)
-                .find(|r| r.4),
-            Source::Deck(d) => on_deck(d),
-            Source::Selected => self.library.focused().map(|id| (0, id, None, 1.0, false)),
+        let view = View {
+            lib: &self.index,
+            history: &self.history,
+            collections: &self.collections,
+            open_flow: self.flow.flow,
         };
-        let deck = match self.suggest.source {
-            Source::Selected => None,
-            _ => source.map(|r| r.0),
-        };
-        let Some((_, id, bpm, speed, playing)) = source else {
-            self.suggest.reference = None;
-            self.suggest.set(vec![]);
-            self.suggest.computed_for.clear();
-            return;
-        };
-        let Some(t) = self.library.track(id) else {
-            return;
-        };
-        let bpm = bpm.or(t.bpm());
-        let key = suggest::effective_key(t.key, speed);
-        let what = format!(
-            "{id}|{deck:?}|{playing}|{:?}|{}|{}|",
-            self.suggest.direction,
-            self.library.played.len(),
-            self.library.version,
-        );
-        let tempo = format!("{:.1}|{key:?}", bpm.unwrap_or(0.0));
-        let stamp = format!("{what}{tempo}");
-        if stamp == self.suggest.computed_for {
-            self.suggest.settling = None;
-            return;
-        }
-        // Only the tempo moved (someone's on the tempo fader): wait until it has held
-        // still for a moment rather than re-ranking on every step of the sweep.
-        if self.suggest.computed_for.starts_with(&what) {
-            match &self.suggest.settling {
-                Some((t, since)) if *t == tempo => {
-                    if since.elapsed() < SUGGEST_SETTLE {
-                        return;
-                    }
-                }
-                _ => {
-                    self.suggest.settling = Some((tempo, Instant::now()));
-                    return;
-                }
-            }
-        }
-        self.suggest.settling = None;
-        let candidates = self.library.candidates();
-        let reference = Reference {
-            id,
-            bpm,
-            key,
-            energy: t.energy,
-            direction: self.suggest.direction,
-            played: &self.library.played,
-            exclude: &HashSet::new(),
-        };
-        let list = suggest::suggest(&reference, &candidates, 80);
-        self.suggest.reference = Some(RefInfo {
-            title: t.lib.title.clone(),
-            bpm,
-            key,
-            deck,
-            playing,
-        });
-        self.suggest.set(list);
-        self.suggest.computed_for = stamp;
+        self.suggest.refresh(&view, &decks, selected);
     }
 
     /// Play a track in the headphones from `start` (0..1), decoding it first. A track
     /// with no beatgrid yet is queued for analysis too.
     fn start_preview(&mut self, id: i64, start: f32) {
-        if self
-            .library
-            .track(id)
-            .is_some_and(|t| !t.analysed && !t.queued && t.running.is_none() && t.error.is_none())
-        {
+        if self.index.get(id).is_some_and(|t| !t.analysed()) && self.index.analysis(id).is_none() {
             self.lib.analyser.queue(id, None, false, Mode::Static);
         }
         let decoding = Arc::new(AtomicBool::new(true));
@@ -699,24 +689,23 @@ impl EarshotApp {
         match e {
             StoreEvent::Roots(roots) => self.library.folders = roots,
             StoreEvent::Library(tracks) => {
-                self.library.set_tracks(tracks);
+                self.index.replace(tracks);
                 self.refresh_previews(None);
             }
-            StoreEvent::TracksChanged(tracks) => self.library.update_tracks(tracks),
+            StoreEvent::TracksChanged(tracks) => self.index.patch(tracks),
             StoreEvent::Previews(p) => {
                 for (id, bytes) in p {
-                    self.library.invalidate_thumb(id);
-                    self.library.previews.insert(id, bytes);
+                    self.media.set_preview(id, bytes);
                 }
             }
-            StoreEvent::Flows(folders, flows) => {
-                self.flows.set((folders, flows));
-                let listed = |item: &Item| match *item {
-                    Item::Flow(id) => self.flows.flows.iter().any(|f| f.id == id),
-                    Item::Folder(id) => self.flows.folders.iter().any(|f| f.id == id),
-                };
-                if let Some(item) = self.pending_rename.take_if(|i| listed(i)) {
-                    self.flows.start_rename(item);
+            StoreEvent::Collections(list) => {
+                self.collections.set(list);
+                let collections = &self.collections;
+                if let Some(id) = self
+                    .pending_rename
+                    .take_if(|id| collections.get(*id).is_some())
+                {
+                    self.colls.start_rename(collections.get(id).unwrap());
                 }
             }
             StoreEvent::Memories { track, memories } => {
@@ -737,6 +726,9 @@ impl EarshotApp {
                 if self.flow.flow.is_some_and(|id| ids.contains(&id)) {
                     self.flow.load(None);
                 }
+                if matches!(self.library.scope(), Scope::Collection(id) if ids.contains(id)) {
+                    self.library.set_scope(Scope::All);
+                }
             }
             StoreEvent::Error(e) => eprintln!("library: {e}"),
         }
@@ -753,7 +745,7 @@ impl EarshotApp {
                         let img = egui::ColorImage::from_rgba_unmultiplied([s, s], &px);
                         ctx.load_texture(format!("art-{id}"), img, egui::TextureOptions::LINEAR)
                     });
-                    self.library.art.insert(id, tex);
+                    self.media.art.insert(id, tex);
                 }
                 Event::Scanned(Ok(())) => self.library.scanning = false,
                 Event::Store(e) => self.store_event(e),
@@ -791,26 +783,18 @@ impl EarshotApp {
                         a.running.remove(&ev.track_id);
                     }
                     let title = self
-                        .library
-                        .track(ev.track_id)
-                        .map(|t| t.lib.title.clone())
+                        .index
+                        .get(ev.track_id)
+                        .map(|t| t.title.clone())
                         .unwrap_or_default();
                     if let Some(e) = &ev.error {
                         a.failed += 1;
                         a.last_error = format!("{title}: {e}");
                     }
-                    if let Some(t) = self.library.track_mut(ev.track_id) {
-                        t.queued = ev.state == "queued";
-                        t.running = (ev.state == "running").then(|| {
-                            (
-                                ev.progress.unwrap_or(0.0),
-                                ev.stage.unwrap_or("analysing").to_string(),
-                            )
-                        });
-                        // The results themselves (BPM, grid, thumbnail) come from the
-                        // Store as `TracksChanged` and `Previews`.
-                        t.error = ev.error.clone();
-                    }
+                    // The results themselves (BPM, grid, thumbnail) come from the
+                    // Store as `TracksChanged` and `Previews`.
+                    self.index
+                        .set_analysis(ev.track_id, AnalysisState::from_event(&ev));
                 }
                 Event::Midi {
                     port,
@@ -1026,8 +1010,8 @@ impl EarshotApp {
         let running: Vec<String> = a
             .running
             .keys()
-            .filter_map(|id| self.library.track(*id))
-            .map(|t| format!("Now: {}", t.lib.title))
+            .filter_map(|id| self.index.get(*id))
+            .map(|t| format!("Now: {}", t.title))
             .collect();
         let failures = if a.last_error.is_empty() {
             "Click to dismiss failures".to_string()
@@ -1044,7 +1028,7 @@ impl EarshotApp {
     fn deck_info(&self, deck: DeckId) -> DeckInfo {
         let inner = self.player.lock().unwrap();
         let s = inner.session(deck);
-        let t = s.track_id.and_then(|id| self.library.track(id));
+        let t = s.track_id.and_then(|id| self.index.get(id));
         DeckInfo {
             title: s.title.clone(),
             artist: s.artist.clone(),
@@ -1053,11 +1037,12 @@ impl EarshotApp {
             generation: s.generation,
             waveform: s.waveform.clone(),
             detail: s.detail.clone(),
-            tag_bpm: t.and_then(|t| t.lib.tag_bpm),
+            tag_bpm: t.and_then(|t| t.tag_bpm),
             key: t.and_then(|t| t.key),
-            analysing: t.and_then(|t| t.running.clone()).or_else(|| {
-                t.filter(|t| t.queued)
-                    .map(|_| (0.0, "waiting to analyse".into()))
+            analysing: s.track_id.and_then(|id| match self.index.analysis(id)? {
+                AnalysisState::Running { progress, stage } => Some((*progress, stage.to_string())),
+                AnalysisState::Queued => Some((0.0, "waiting to analyse".into())),
+                AnalysisState::Failed(_) => None,
             }),
             jump_size: s.jump_size,
             loop_size: s.loop_size,
@@ -1150,8 +1135,19 @@ impl eframe::App for EarshotApp {
         let info = |id: DeckId| infos[id.index()].as_ref().expect("a player's info");
         let prep = DeckId::PREPARE.index();
         let mut out: Vec<Command> = vec![];
-        let mut lib_actions: Vec<LibAction> = vec![];
-        let mut flows_actions: Vec<FlowsAction> = vec![];
+        let mut coll_cmds: Vec<CollectionCmd> = vec![];
+        let preview = self.preview_state();
+        // What the collection tree needs from the library pane, read before it's
+        // borrowed for drawing.
+        let (search, selected) = (self.library.search.clone(), self.library.selected());
+        let open = if self.flow.open {
+            self.flow.flow
+        } else {
+            match self.library.scope() {
+                Scope::Collection(id) => Some(*id),
+                _ => None,
+            }
+        };
 
         egui::TopBottomPanel::top("top")
             .frame(bar_frame())
@@ -1249,9 +1245,21 @@ impl eframe::App for EarshotApp {
             .default_width(250.0)
             .width_range(140.0..=600.0)
             .show_animated(ctx, !planning, |ui| {
-                let (flows, open) = (&mut self.flows, self.flow.flow);
-                self.library.tree(ui, &mut lib_actions, |ui| {
-                    flows.show(ui, open, &mut flows_actions)
+                let view = View {
+                    lib: &self.index,
+                    history: &self.history,
+                    collections: &self.collections,
+                    open_flow: self.flow.flow,
+                };
+                let tree = TreeCtx {
+                    collections: &self.collections,
+                    open,
+                    search: &search,
+                    selected: &selected,
+                };
+                let colls = &mut self.colls;
+                self.library.tree(ui, &view, &mut out, |ui| {
+                    colls.show(ui, &tree, &mut coll_cmds)
                 });
             });
         egui::SidePanel::right("suggest")
@@ -1260,10 +1268,13 @@ impl eframe::App for EarshotApp {
             .width_range(240.0..=700.0)
             .show_animated(ctx, !planning, |ui| {
                 let focus = self.pane == Pane::Suggest;
-                if self
-                    .suggest
-                    .show(ui, &self.library, focus, &mut lib_actions)
-                {
+                let view = View {
+                    lib: &self.index,
+                    history: &self.history,
+                    collections: &self.collections,
+                    open_flow: self.flow.flow,
+                };
+                if self.suggest.show(ui, &view, focus, &mut out) {
                     self.pane = Pane::Suggest;
                 }
             });
@@ -1281,10 +1292,16 @@ impl eframe::App for EarshotApp {
                 }
             });
             ui.separator();
+            let view = View {
+                lib: &self.index,
+                history: &self.history,
+                collections: &self.collections,
+                open_flow: self.flow.flow,
+            };
             if self.flow.open {
-                let preview = self.preview_state();
-                self.flow.show(ui, &self.library, preview, &mut lib_actions);
-            } else if self.library.list(ui, &mut lib_actions) {
+                self.flow
+                    .show(ui, &view, &mut self.media, preview, &mut out);
+            } else if self.library.list(ui, &view, &mut self.media, &mut out) {
                 self.pane = Pane::Library;
             }
         });
@@ -1308,39 +1325,17 @@ impl eframe::App for EarshotApp {
                 .show(ctx, |ui| keys_help(ui, keymap, mode));
         }
 
+        out.extend(coll_cmds.into_iter().map(Command::Collection));
         for c in out {
             self.dispatch(c);
-        }
-        for a in lib_actions {
-            match a {
-                LibAction::Load { deck, track_id } => {
-                    self.load(deck.and_then(DeckId::new), track_id)
-                }
-                LibAction::Analyse { ids, dynamic } => self.analyse(ids, dynamic),
-                LibAction::Preview(id) => self.dispatch(Command::Preview(PreviewCmd::Toggle(id))),
-                LibAction::PreviewSeek(id, at) => {
-                    self.dispatch(Command::Preview(PreviewCmd::Seek(id, at)))
-                }
-                LibAction::PreviewStop(id) => self.dispatch(Command::Preview(PreviewCmd::Stop(id))),
-                LibAction::AddToFlow(ids) => {
-                    self.flow.open = true;
-                    for id in ids {
-                        self.flow.add_root(id);
-                    }
-                }
-                LibAction::RemoveFolder(path) => self.lib.store.send(StoreCmd::RemoveRoot(path)),
-            }
         }
         // Save first, so opening another Flow doesn't lose the last change.
         self.save_flow();
         for id in take_wanted_art(ctx) {
-            if !self.library.art.contains_key(&id) {
-                self.library.art.insert(id, None);
+            if !self.media.art.contains_key(&id) {
+                self.media.art.insert(id, None);
                 let _ = self.art_loader.send(id);
             }
-        }
-        for a in flows_actions {
-            self.flows_action(a);
         }
         self.save_flow();
         // Waveforms move every frame.
@@ -1435,12 +1430,12 @@ mod tests {
         }
         let ids: Vec<i64> = h
             .state()
-            .library
-            .tracks
+            .index
+            .tracks()
             .iter()
-            .filter(|t| t.analysed)
+            .filter(|t| t.analysed())
             .take(2)
-            .map(|t| t.lib.id)
+            .map(|t| t.id)
             .collect();
         let decks: Vec<DeckId> = DeckId::first(DECKS).collect();
         for (deck, id) in decks.iter().zip(&ids) {
@@ -1489,11 +1484,11 @@ mod tests {
         }
         let id = h
             .state()
-            .library
-            .tracks
+            .index
+            .tracks()
             .iter()
-            .find(|t| t.analysed)
-            .map(|t| t.lib.id)
+            .find(|t| t.analysed())
+            .map(|t| t.id)
             .expect("an analysed track");
         h.state_mut().mode = UiMode::Prepare;
         h.state_mut().load(Some(DeckId::PREPARE), id);
@@ -1527,19 +1522,17 @@ mod tests {
         }
         let ids: Vec<i64> = h
             .state()
-            .library
-            .tracks
+            .index
+            .tracks()
             .iter()
-            .filter(|t| t.analysed && t.key.is_some())
+            .filter(|t| t.analysed() && t.key.is_some())
             .take(2)
-            .map(|t| t.lib.id)
+            .map(|t| t.id)
             .collect();
         let app = h.state_mut();
         app.flow = FlowUi::from_saved(Default::default());
         app.flow.open = true;
-        for id in ids {
-            app.flow.add_root(id);
-        }
+        app.flow.add_tracks(&ids);
         app.flow.fit();
         // Give the cover art a moment to load.
         for _ in 0..30 {

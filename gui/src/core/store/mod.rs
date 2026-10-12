@@ -23,7 +23,7 @@ use rusqlite::{Connection, OpenFlags};
 pub use read::{JobRow, LibTrack, Memory, Preview, ResultState};
 pub use write::{AnalysisSave, GridSave, ScannedFile, Writer};
 
-use super::flows::{Card, FlowEntry, Folder};
+use super::collections::{Collection, CollectionKind, FlowGraph, NodeId};
 
 /// Bump when `engine/src/waveform.rs` changes its output, so cached waveforms are redone.
 pub const WAVEFORM_VERSION: i64 = 1;
@@ -61,6 +61,8 @@ pub enum StoreError {
     BadGrid { track: i64, reason: String },
     #[error("{0}")]
     Refused(&'static str),
+    #[error("smart playlist: {0}")]
+    BadQuery(String),
     #[error("the database thread has stopped")]
     Closed,
 }
@@ -198,44 +200,59 @@ pub enum StoreCmd {
         track: i64,
         id: i64,
     },
-    ListFlows,
+    ListCollections,
     /// Answered with [`StoreEvent::FlowLoaded`].
     LoadFlow(i64),
-    /// Ids come from [`Store::new_collection_id`], so the caller knows them at once.
-    CreateFolder {
+    /// A folder, crate, playlist, smart playlist or Flow. Ids come from
+    /// [`Store::new_collection_id`], so the caller knows them at once.
+    Create {
         id: i64,
         parent: Option<i64>,
+        kind: CollectionKind,
         name: String,
-    },
-    CreateFlow {
-        id: i64,
-        folder: Option<i64>,
-        name: String,
+        /// A smart playlist's query.
+        query: Option<String>,
     },
     Rename {
         id: i64,
         name: String,
     },
-    /// Move a Flow or folder into a folder (`None`: top level).
+    /// Move a collection into a folder (`None`: top level).
     Move {
         id: i64,
         parent: Option<i64>,
     },
-    /// A Flow or folder, with everything in it.
+    /// A collection, with everything in it.
     Delete(i64),
-    DuplicateFlow {
+    /// A copy beside it, named "<name> copy".
+    Duplicate {
         from: i64,
         to: i64,
     },
     SaveFlow {
         id: i64,
-        cards: Vec<Card>,
+        graph: FlowGraph,
+    },
+    /// Add tracks to a crate (each once), the end of a playlist, or a Flow (as
+    /// new starting cards).
+    AddTracks {
+        id: i64,
+        tracks: Vec<i64>,
+    },
+    /// Take these tracks out of a crate, playlist or Flow, wherever they are in it.
+    RemoveTracks {
+        id: i64,
+        tracks: Vec<i64>,
+    },
+    /// A smart playlist's query.
+    SetQuery {
+        id: i64,
+        query: String,
     },
     /// Save one path through a Flow (card ids in order) as a new playlist.
-    #[allow(dead_code)] // library management API, not wired to the UI yet (tests use it)
     ExportPath {
         flow: i64,
-        nodes: Vec<u64>,
+        nodes: Vec<NodeId>,
         playlist: i64,
         name: String,
     },
@@ -256,10 +273,11 @@ pub enum StoreEvent {
         track: i64,
         memories: Vec<Memory>,
     },
-    Flows(Vec<Folder>, Vec<FlowEntry>),
-    /// (id, name, cards), or `None` if there's no such Flow.
-    FlowLoaded(Option<(i64, String, Vec<Card>)>),
-    /// Flows and folders that no longer exist.
+    /// Every collection (after any of them changes).
+    Collections(Vec<Collection>),
+    /// (id, name, graph), or `None` if there's no such Flow.
+    FlowLoaded(Option<(i64, String, FlowGraph)>),
+    /// Collections that no longer exist.
     Deleted(Vec<i64>),
     Error(StoreError),
 }
@@ -333,7 +351,7 @@ impl Store {
         rx.recv().map_err(|_| StoreError::Closed)?
     }
 
-    /// An id for a new Flow, folder or playlist. Only the writer inserts collections,
+    /// An id for a new collection. Only the writer inserts collections,
     /// so handing ids out here can't clash, and the caller can use the id straight away.
     pub fn new_collection_id(&self) -> i64 {
         self.next_collection.fetch_add(1, Ordering::Relaxed)
@@ -511,6 +529,12 @@ impl Reader {
     #[allow(dead_code)] // library management API, not wired to the UI yet (tests use it)
     pub fn search(&self, query: &str) -> Result<Vec<i64>> {
         self.with(|c| read::search(c, query))
+    }
+
+    /// A collection's tracks (a smart playlist's found by its query).
+    #[allow(dead_code)] // for export and sync; the UI evaluates queries in memory
+    pub fn collection_tracks(&self, id: i64) -> Result<Vec<i64>> {
+        self.with(|c| read::collection_tracks(c, id))
     }
 
     /// Groups of tracks with the same audio, each sorted, for "find duplicates".
