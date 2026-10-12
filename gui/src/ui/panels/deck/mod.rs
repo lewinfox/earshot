@@ -31,7 +31,7 @@ mod waveform;
 pub use self::cue_pane::{CUE_PANE_W, CuePane};
 pub use self::waveform::WavePanel;
 
-use self::wave::{DeckWave, Marks};
+use self::wave::{DeckWave, Grid, Marks};
 use crate::core::bus::{Control, DeckControl};
 use crate::core::command::{Command, DeckCmd};
 use crate::core::store::TrackCues;
@@ -341,13 +341,14 @@ impl DeckUi {
 
     fn marks<'a>(&self, info: &'a DeckInfo, hotcues: &'a [Option<f64>]) -> Marks<'a> {
         Marks {
-            grid: info.grid.as_deref(),
-            cue: self.state.cue_point,
+            grid: info.grid.as_deref().map_or(Grid::None, Grid::Beatgrid),
+            cue: Some(self.state.cue_point),
             hotcues,
             hot_labels: &info.cues.hot_labels,
             memories: &info.cues.memories,
             loop_range: self.state.loop_in.zip(self.state.loop_out),
             loop_active: self.state.loop_active,
+            ..Marks::default()
         }
     }
 

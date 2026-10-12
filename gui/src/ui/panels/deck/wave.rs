@@ -114,15 +114,58 @@ impl DeckWave {
 }
 
 /// Everything drawn on top of the waveform, in track seconds.
+#[derive(Default)]
 pub struct Marks<'a> {
-    pub grid: Option<&'a Beatgrid>,
-    pub cue: f64,
+    pub grid: Grid<'a>,
+    pub cue: Option<f64>,
     pub hotcues: &'a [Option<f64>],
     /// By pad, like `hotcues`.
     pub hot_labels: &'a [Option<String>],
     pub memories: &'a [Memory],
     pub loop_range: Option<(f64, f64)>,
     pub loop_active: bool,
+    /// The stretch a separate detail view shows, outlined on the overview (Tempo lock's).
+    pub window: Option<(f64, f64)>,
+    /// The playhead is for audio that isn't the one playing (Tempo lock's other
+    /// version): drawn faint.
+    pub idle: bool,
+}
+
+/// The beats drawn over a waveform.
+#[derive(Clone, Copy, Default)]
+pub enum Grid<'a> {
+    #[default]
+    None,
+    /// A deck's grid.
+    Beatgrid(&'a Beatgrid),
+    /// Beats as found (Tempo lock's), each a bar's 1 or not. Bars count from 1 at the
+    /// first.
+    Beats {
+        times: &'a [f64],
+        downbeats: &'a [bool],
+    },
+}
+
+impl Grid<'_> {
+    /// Every beat from `t_lo` to `t_hi`: its time, and its bar number if it's a bar's 1.
+    fn beats(&self, t_lo: f64, t_hi: f64) -> Vec<(f64, Option<i64>)> {
+        match *self {
+            Grid::None => Vec::new(),
+            Grid::Beatgrid(g) => beats(g, t_lo, t_hi).collect(),
+            Grid::Beats { times, downbeats } => listed_beats(times, downbeats, t_lo, t_hi),
+        }
+    }
+
+    /// Seconds per beat, near `beats` (some of this grid's).
+    fn beat_secs(&self, beats: &[(f64, Option<i64>)]) -> f64 {
+        match *self {
+            Grid::Beatgrid(g) => 60.0 / g.mean_bpm(),
+            _ if beats.len() > 1 => {
+                (beats[beats.len() - 1].0 - beats[0].0) / (beats.len() - 1) as f64
+            }
+            _ => f64::INFINITY,
+        }
+    }
 }
 
 /// Every beat from `t_lo` to `t_hi`, carried on past both ends of the track (into the
@@ -142,6 +185,30 @@ fn beats(g: &Beatgrid, t_lo: f64, t_hi: f64) -> impl Iterator<Item = (f64, Optio
     })
 }
 
+/// The beats in `times` from `t_lo` to `t_hi`, numbered as [`Grid::Beats`] numbers bars.
+fn listed_beats(
+    times: &[f64],
+    downbeats: &[bool],
+    t_lo: f64,
+    t_hi: f64,
+) -> Vec<(f64, Option<i64>)> {
+    let (i0, i1) = (
+        times.partition_point(|&t| t < t_lo),
+        times.partition_point(|&t| t <= t_hi),
+    );
+    let down = |i: usize| downbeats.get(i).copied().unwrap_or(false);
+    let mut bar = (0..i0).filter(|&i| down(i)).count() as i64;
+    (i0..i1)
+        .map(|i| {
+            let n = down(i).then(|| {
+                bar += 1;
+                bar
+            });
+            (times[i], n)
+        })
+        .collect()
+}
+
 /// Draw the scrolling waveform: `pos` at the centre, `half` track seconds each side.
 pub fn scrolling(
     painter: &Painter,
@@ -151,12 +218,26 @@ pub fn scrolling(
     half: f64,
     marks: &Marks,
 ) {
+    window(painter, rect, wave, (pos - half, pos + half), pos, marks);
+}
+
+/// Draw the waveform from `view.0` to `view.1` (track seconds) across `rect`, with the
+/// playhead at `pos` (anywhere, even off either edge): what's before it is dimmed as
+/// played.
+pub fn window(
+    painter: &Painter,
+    rect: Rect,
+    wave: Option<&DeckWave>,
+    view: (f64, f64),
+    pos: f64,
+    marks: &Marks,
+) {
     painter.rect_filled(rect, 4.0, THEME.wave_bg);
     let w = rect.width();
-    let cx = rect.center().x;
-    let spp = 2.0 * half / w as f64; // track seconds per point
-    let x_of = |t: f64| cx + ((t - pos) / spp) as f32;
-    let (t_lo, t_hi) = (pos - half, pos + half);
+    let (t_lo, t_hi) = view;
+    let spp = (t_hi - t_lo) / w as f64; // track seconds per point
+    let x_of = |t: f64| rect.left() + ((t - t_lo) / spp) as f32;
+    let cx = x_of(pos);
 
     if let Some((a, b)) = marks.loop_range {
         let r = Rect::from_x_y_ranges(
@@ -186,7 +267,7 @@ pub fn scrolling(
         let cols = w.floor() as usize;
         for c in 0..cols {
             let x = rect.left() + c as f32;
-            let t0 = pos + (x - cx) as f64 * spp;
+            let t0 = t_lo + (x - rect.left()) as f64 * spp;
             let t1 = t0 + spp;
             if t1 <= 0.0 || t0 >= end {
                 continue;
@@ -232,10 +313,11 @@ pub fn scrolling(
         painter.add(Shape::mesh(mesh));
     }
 
-    if let Some(g) = marks.grid {
+    let beats = marks.grid.beats(t_lo, t_hi);
+    if !beats.is_empty() {
         // Each bar's 1 gets its number while there's room for it.
-        let bar_w = (4.0 * 60.0 / g.mean_bpm() / spp) as f32;
-        for (t, bar) in beats(g, t_lo, t_hi) {
+        let bar_w = (4.0 * marks.grid.beat_secs(&beats) / spp) as f32;
+        for (t, bar) in beats {
             let x = x_of(t);
             if let Some(bar) = bar {
                 painter.line_segment(
@@ -315,7 +397,9 @@ pub fn scrolling(
             ));
         }
     }
-    marker(marks.cue, THEME.accent, "");
+    if let Some(cue) = marks.cue {
+        marker(cue, THEME.accent, "");
+    }
     for (i, h) in marks.hotcues.iter().enumerate() {
         if let Some(t) = h {
             let letter = &"ABCDEFGH"[i..i + 1];
@@ -326,10 +410,20 @@ pub fn scrolling(
             marker(*t, THEME.hotcue_colour(i), &label);
         }
     }
-    painter.line_segment(
-        [pos2(cx, rect.top()), pos2(cx, rect.bottom())],
-        Stroke::new(2.0_f32, THEME.marker),
-    );
+    if (t_lo..=t_hi).contains(&pos) {
+        painter.line_segment(
+            [pos2(cx, rect.top()), pos2(cx, rect.bottom())],
+            Stroke::new(2.0_f32, playhead_colour(marks)),
+        );
+    }
+}
+
+fn playhead_colour(marks: &Marks) -> Color32 {
+    if marks.idle {
+        THEME.marker.gamma_multiply(0.45)
+    } else {
+        THEME.marker
+    }
 }
 
 fn overview_image(bands: &[u8], w: usize, h: usize) -> ColorImage {
@@ -390,6 +484,17 @@ pub fn overview(
         0.0,
         THEME.played_shade,
     );
+    if let Some((a, b)) = marks.window {
+        let a = x_of(a.max(0.0));
+        let r = Rect::from_x_y_ranges(a..=x_of(b.min(duration)).max(a + 2.0), rect.y_range());
+        painter.rect_filled(r, 0.0, THEME.selection.gamma_multiply(0.25));
+        painter.rect_stroke(
+            r,
+            0.0,
+            Stroke::new(1.0_f32, THEME.selection),
+            egui::StrokeKind::Inside,
+        );
+    }
     let tri = |t: f64, c: Color32| {
         let x = x_of(t);
         painter.add(Shape::convex_polygon(
@@ -414,7 +519,9 @@ pub fn overview(
             Stroke::NONE,
         ));
     }
-    tri(marks.cue, THEME.accent);
+    if let Some(cue) = marks.cue {
+        tri(cue, THEME.accent);
+    }
     for (i, h) in marks.hotcues.iter().enumerate() {
         if let Some(t) = h {
             tri(*t, THEME.hotcue_colour(i));
@@ -422,7 +529,7 @@ pub fn overview(
     }
     painter.line_segment(
         [pos2(x_of(pos), rect.top()), pos2(x_of(pos), rect.bottom())],
-        Stroke::new(2.0_f32, THEME.marker),
+        Stroke::new(2.0_f32, playhead_colour(marks)),
     );
     if let Some(p) = analysing {
         let r = Rect::from_min_size(
@@ -451,6 +558,20 @@ pub fn thumbnail(ctx: &egui::Context, id: i64, preview: &[u8]) -> TextureHandle 
 mod tests {
     use super::*;
     use earshot_engine::beatgrid::{Constant, GridModel};
+
+    /// A list of beats: only those in the window, bars counted from the first 1 in the
+    /// list (not the window).
+    #[test]
+    fn listed_beats_count_bars_from_the_first() {
+        let times = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0];
+        let downs = [true, false, true, false, true, false];
+        assert_eq!(
+            listed_beats(&times, &downs, 1.2, 2.5),
+            [(1.5, Some(2)), (2.0, None), (2.5, Some(3))]
+        );
+        // Fewer downbeat flags than beats: the rest are plain beats.
+        assert_eq!(listed_beats(&times, &downs[..1], 0.0, 1.0).len(), 2);
+    }
 
     /// The grid carries on into the lead-in and past the end, bars numbered as the
     /// deck counts them: 0, -1, … before the first 1.

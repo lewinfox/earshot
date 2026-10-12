@@ -103,7 +103,6 @@ def test_chart_has_what_the_charts_draw(chart):
     assert len(a["bpm_times"]) == len(a["bpm_curve"])
     assert abs(a["median_bpm"] - 120) < 2 and a["suggested_bpm"] == 120
     assert a["max_bpm"] - a["min_bpm"] > 5
-    assert len(chart["peaks"]["min"]) == len(chart["peaks"]["max"]) > 0
 
 
 def straighten(worker, job_id, drums, chart, out_dir, **extra):
@@ -135,7 +134,7 @@ def test_straighten_writes_the_named_tagged_mp3_then_measures_it(worker, drums, 
     assert len(s["grid"]["source_beats"]) == len(s["grid"]["target_beats"]) == len(chart["analysis"]["beats"])
     assert np.allclose(np.diff(s["grid"]["target_beats"]) / np.diff(chart["analysis"]["beat_index"]), 0.5)
     assert 120 <= s["bitrate_kbps"] <= 136
-    assert s["duration"] > 25 and s["peaks"]["min"]
+    assert s["duration"] > 25
 
     info = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format_tags", "-of", "default=nw=1", str(out)],

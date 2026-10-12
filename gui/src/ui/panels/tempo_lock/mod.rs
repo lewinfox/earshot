@@ -14,21 +14,23 @@ mod charts;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use egui::{Color32, CornerRadius, Margin, Response, RichText, Stroke, Ui, vec2};
+use egui::{Color32, CornerRadius, Margin, Response, RichText, Sense, Stroke, Ui, vec2};
 
-use self::charts::{HistChart, TempoChart, Wave, bpm_range, fmt_time, overview, time_at};
+use self::charts::{HistChart, TempoChart, bpm_range, fmt_time, ruler, time_at};
+use super::deck::wave::{self, DeckWave, Grid, Marks};
 use super::library::drag;
 use super::{Cx, Panel};
 use crate::core::tempo_lock::{
     BeatLevel, Chart, Engine, ListenCmd, Stage, StraightenOptions, Straightened, TempoAnalysis,
-    TempoLockCmd, TempoLockEvent, Version, histogram_range, version_beats,
+    TempoLockCmd, TempoLockEvent, Version, Waveform, histogram_range, version_beats,
 };
 use crate::core::track::TrackId;
 use crate::ui::theme::Theme;
 
-/// The shortest stretch the waveforms zoom in to, s (the waveform has 4000 slices).
+/// The shortest stretch the waveforms zoom in to, s.
 const MIN_SPAN: f64 = 1.0;
 const WAVE_H: f32 = 140.0;
+const OVERVIEW_H: f32 = 24.0;
 const CHART_H: f32 = 120.0;
 
 /// What the tab has heard from the tool, its controls, and its view.
@@ -60,6 +62,9 @@ pub struct TempoLockUi {
     view: (f64, f64),
     /// Where playback is (or will start), in the original's time.
     cursor: f64,
+    /// The original's and the straightened version's waveforms, as the decks have
+    /// theirs: made from the tool's [`Waveform`]s when first drawn.
+    waves: [Option<DeckWave>; 2],
     /// The preview player, as the shell last saw it.
     pub listen: ListenStatus,
 }
@@ -100,6 +105,7 @@ impl Default for TempoLockUi {
             follow: true,
             view: (0.0, 30.0),
             cursor: 0.0,
+            waves: [None, None],
             listen: ListenStatus::default(),
         }
     }
@@ -163,11 +169,13 @@ impl TempoLockUi {
                 self.level = BeatLevel::Beat;
                 self.view = (0.0, a.duration.min(30.0));
                 self.cursor = 0.0;
+                self.waves = [None, None];
                 self.chart = Some(chart);
                 self.busy = None;
             }
             TempoLockEvent::Straightened { result, .. } => {
                 self.straightened = Some(result);
+                self.waves[1] = None;
                 self.measured = None;
                 if self.version == Version::Straightened {
                     self.version = Version::Original;
@@ -269,7 +277,7 @@ impl Panel for TempoLockPanel<'_> {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         // A track dropped anywhere on the tab charts it, as "Normalise tempo" does.
         let area = ui.max_rect();
-        let drop = ui.interact(area, ui.id().with("drop"), egui::Sense::hover());
+        let drop = ui.interact(area, ui.id().with("drop"), Sense::hover());
         self.body(ui, cx);
         if drag::hovering_tracks(&drop) {
             ui.painter().rect_stroke(
@@ -574,14 +582,14 @@ fn body(ui: &mut Ui, tab: &mut TempoLockUi, chart: &Chart, cx: &mut Cx) {
         ui,
         theme,
         "Original",
-        "grid = detected beats · thick lines are downbeats · click to seek · wheel to zoom · drag to pan",
+        "grid = detected beats · red lines are downbeats · click to seek · wheel to zoom · drag to pan",
     );
     let (beats, downs) = version_beats(Version::Original, chart, None);
     wave(
         ui,
         tab,
         Version::Original,
-        &chart.peaks,
+        &chart.wave,
         a.duration,
         beats,
         downs,
@@ -614,7 +622,7 @@ fn body(ui: &mut Ui, tab: &mut TempoLockUi, chart: &Chart, cx: &mut Cx) {
         ui,
         tab,
         Version::Straightened,
-        &s.peaks,
+        &s.wave,
         s.duration,
         beats,
         downs,
@@ -731,38 +739,62 @@ fn charts_row(
     });
 }
 
-/// A version's waveform and its overview, with seeking, panning and zooming.
+/// A version's waveform and its overview, drawn as a deck's are, with seeking, panning
+/// and zooming.
 #[allow(clippy::too_many_arguments)]
 fn wave(
     ui: &mut Ui,
     tab: &mut TempoLockUi,
     version: Version,
-    peaks: &crate::core::tempo_lock::Peaks,
+    data: &Waveform,
     duration: f64,
     beats: &[f64],
     downbeats: &[bool],
     dropped: &[f64],
     cx: &mut Cx,
 ) {
-    let theme = cx.theme;
+    let i = match version {
+        Version::Original => 0,
+        Version::Straightened => 1,
+    };
+    if tab.waves[i].is_none() && !data.detail.is_empty() {
+        tab.waves[i] = Some(DeckWave::new(
+            ui.ctx(),
+            &format!("tempo-lock-overview-{i}"),
+            data.bands.clone(),
+            data.detail.clone(),
+        ));
+    }
     let view = (
         tab.from_original(tab.view.0, version),
         tab.from_original(tab.view.1, version),
     );
-    let active = tab.version == version;
-    let r = Wave {
-        peaks,
-        duration,
-        beats,
-        downbeats,
-        dropped,
-        view,
-        playhead: Some((tab.from_original(tab.cursor, version), active)),
-        colour: version_colour(theme, version),
-    }
-    .show(ui, theme, WAVE_H);
+    let at = tab.from_original(tab.cursor, version);
+    // The other version's playhead is faint.
+    let idle = tab.version != version;
+    let width = ui.available_width();
+    let (rect, r) = ui.allocate_exact_size(vec2(width, WAVE_H), Sense::click_and_drag());
+    let marks = Marks {
+        grid: Grid::Beats {
+            times: beats,
+            downbeats,
+        },
+        idle,
+        ..Marks::default()
+    };
+    let painter = ui.painter_at(rect);
+    wave::window(&painter, rect, tab.waves[i].as_ref(), view, at, &marks);
+    ruler(&painter, cx.theme, rect, view, dropped);
     wave_input(ui, tab, &r, version, view, cx);
-    let o = overview(ui, theme, peaks, duration, view);
+
+    let (rect, o) = ui.allocate_exact_size(vec2(width, OVERVIEW_H), Sense::click_and_drag());
+    let marks = Marks {
+        window: Some(view),
+        idle,
+        ..Marks::default()
+    };
+    let wv = tab.waves[i].as_ref();
+    wave::overview(&ui.painter_at(rect), rect, wv, at, duration, &marks, None);
     if (o.clicked() || o.dragged())
         && let Some(pos) = o.interact_pointer_pos()
     {

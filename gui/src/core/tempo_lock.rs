@@ -8,7 +8,7 @@
 //! 1. [`TempoLockCmd::Analyse`]: decode the track (our own decoder, so the charts line
 //!    up with what the decks play), and have the worker find its beats: a
 //!    [`TempoLockEvent::Analysed`] with the [`Chart`] (tempo over time, histogram data,
-//!    sections, stats, waveform).
+//!    sections, stats), and the waveform the decks would draw, from our decode.
 //! 2. [`TempoLockCmd::Straighten`] at a BPM: Rubber Band stretches it onto the grid and
 //!    ffmpeg writes an MP3 named and tagged as tempo-lock names its downloads:
 //!    [`TempoLockEvent::Straightened`]. Then the worker finds the beats in the output
@@ -33,6 +33,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use earshot_engine::decode::{self, TrackAudio};
+use earshot_engine::waveform;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -205,7 +206,9 @@ pub type TempoLockSink = Arc<dyn Fn(TempoLockEvent) + Send + Sync>;
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Chart {
     pub analysis: TempoAnalysis,
-    pub peaks: Peaks,
+    /// Ours, not the worker's.
+    #[serde(skip)]
+    pub wave: Waveform,
 }
 
 /// The beats and the tempo they make (tempo-lock's `Analysis`). Times in seconds from
@@ -273,11 +276,40 @@ pub enum ChangeKind {
     DoubleTime,
 }
 
-/// The waveform: min and max of each of (up to) 4000 equal slices, -127..=127.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-pub struct Peaks {
-    pub min: Vec<i8>,
-    pub max: Vec<i8>,
+/// A version's waveform as the decks have theirs, from our own decode of it (empty if
+/// it wouldn't decode).
+#[derive(Clone, Default, PartialEq)]
+pub struct Waveform {
+    /// 4 bytes per 1/150 s: peak, low, mid, high (`waveform::summarise`).
+    pub bands: Arc<Vec<u8>>,
+    /// Min/max per 1/2000 s (`waveform::detail`).
+    pub detail: Arc<Vec<u8>>,
+}
+
+impl Waveform {
+    pub fn of(audio: &TrackAudio) -> Waveform {
+        Waveform {
+            bands: Arc::new(waveform::summarise(audio)),
+            detail: Arc::new(waveform::detail(audio)),
+        }
+    }
+
+    /// The waveform of the audio file at `path`.
+    fn of_file(path: &Path) -> Result<Waveform, String> {
+        let (audio, _) = decode::decode_file(path)?;
+        Ok(Waveform::of(&audio))
+    }
+}
+
+impl std::fmt::Debug for Waveform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Waveform({} band bytes, {} detail bytes)",
+            self.bands.len(),
+            self.detail.len()
+        )
+    }
 }
 
 /// A straightened track.
@@ -290,7 +322,9 @@ pub struct Straightened {
     pub level: f64,
     pub engine: String,
     pub grid: StraightGrid,
-    pub peaks: Peaks,
+    /// Ours, from decoding `output`, not the worker's.
+    #[serde(skip)]
+    pub wave: Waveform,
     pub duration: f64,
     pub bitrate_kbps: u32,
 }
@@ -893,6 +927,7 @@ impl Shared {
         std::fs::create_dir_all(&dir)
             .and_then(|_| write_stereo_wav(&wav, &audio))
             .map_err(|e| format!("{}: {e}", wav.display()))?;
+        let wave = Waveform::of(&audio);
         self.progress(op, track, Stage::Analyse, DECODED);
         let duration = audio.duration();
         drop(audio);
@@ -933,7 +968,7 @@ impl Shared {
             _ => {}
         })?;
         let chart = match chart {
-            Some(Ok(c)) => Arc::new(c),
+            Some(Ok(c)) => Arc::new(Chart { wave, ..c }),
             Some(Err(e)) => return Err(format!("the worker sent an unusable chart: {e}")),
             None => return Err("the worker sent no chart".into()),
         };
@@ -965,7 +1000,12 @@ impl Shared {
             JobEvent::Update(Update::Started) => {}
             JobEvent::Result { step, data, .. } if step == "straighten" => {
                 match serde_json::from_value::<Straightened>(data) {
-                    Ok(r) => {
+                    Ok(mut r) => {
+                        // Not worth failing for: the tab just has no waveform for it.
+                        r.wave = Waveform::of_file(&r.output).unwrap_or_else(|e| {
+                            eprintln!("tempo lock: {}: {e}", r.output.display());
+                            Waveform::default()
+                        });
                         let r = Arc::new(r);
                         let event = TempoLockEvent::Straightened {
                             track,
@@ -1124,7 +1164,7 @@ def run(r):
         assert os.path.getsize(r["wav"]) > 44
         send({"id": i, "type": "progress", "analyser": "tempo_lock", "fraction": 0.5})
         send({"id": i, "type": "result", "analyser": "tempo_lock", "version": 1,
-              "data": {"analysis": analysis, "peaks": {"min": [-3, -127], "max": [5, 127]}}})
+              "data": {"analysis": analysis}})
     else:
         steps = 100 if r["target_bpm"] == 121 else 2
         for k in range(steps):
@@ -1141,7 +1181,7 @@ def run(r):
                 "target_beats": [r["beats"][0] + k * p for k in r["beat_index"]]}
         send({"id": i, "type": "result", "analyser": "straighten", "version": 1, "data": {
             "output": out, "bpm": r["target_bpm"], "level": r["level"], "engine": r["engine"],
-            "grid": grid, "peaks": {"min": [0], "max": [0]}, "duration": 3.0, "bitrate_kbps": 128}})
+            "grid": grid, "duration": 3.0, "bitrate_kbps": 128}})
         send({"id": i, "type": "progress", "analyser": "measure", "fraction": 0.5})
         send({"id": i, "type": "result", "analyser": "measure", "version": 1,
               "data": {"analysis": dict(analysis, beats=grid["target_beats"])}})
@@ -1330,7 +1370,8 @@ for line in sys.stdin:
             chart.analysis.bpm_curve.len(),
             chart.analysis.bpm_times.len()
         );
-        assert_eq!(chart.peaks.max, vec![5, 127]);
+        // The waveform is ours, from the decode: 3 s at 2000 min/max pairs a second.
+        assert!((chart.wave.detail.len() / 2).abs_diff(3 * 2000) <= 1);
         assert_eq!(s.tool.current().chart.as_deref(), Some(&**chart));
 
         s.tool
@@ -1588,10 +1629,7 @@ for line in sys.stdin:
                 source_beats: vec![1.0, 1.6, 2.0],
                 target_beats: vec![1.0, 1.5, 2.0],
             },
-            peaks: Peaks {
-                min: vec![],
-                max: vec![],
-            },
+            wave: Waveform::default(),
             duration: 3.0,
             bitrate_kbps: 128,
         };
@@ -1630,9 +1668,6 @@ for line in sys.stdin:
 
     #[test]
     fn chart_json_has_no_defaults() {
-        let ok = r#"{"min": [1], "max": [2]}"#;
-        assert!(serde_json::from_str::<Peaks>(ok).is_ok());
-        assert!(serde_json::from_str::<Peaks>(r#"{"min": [1]}"#).is_err());
         let change = r#"{"beat": 3, "time": 1.0, "from_bpm": 120, "to_bpm": 60, "ratio": 0.5,
                          "kind": "half-time"}"#;
         let c: TempoChange = serde_json::from_str(change).unwrap();

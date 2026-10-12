@@ -1,11 +1,11 @@
-//! tempo-lock's pictures, painted: the waveform with its beat grid and the overview
-//! under it, tempo over time, and the histogram of beat intervals. Each takes the
-//! space it's given and returns its response; the tab turns clicks and drags into
-//! seeks and zooms.
+//! tempo-lock's pictures, painted: tempo over time, the histogram of beat intervals,
+//! and what's added over the waveforms (drawn as the decks draw theirs). Each chart
+//! takes the space it's given and returns its response; the tab turns clicks and drags
+//! into seeks and zooms.
 
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Response, Sense, Shape, Stroke, Ui};
 
-use crate::core::tempo_lock::{Peaks, TempoAnalysis, nice_step};
+use crate::core::tempo_lock::{TempoAnalysis, nice_step};
 use crate::ui::theme::Theme;
 
 /// "1:23.456".
@@ -45,212 +45,45 @@ fn dashed(p: &egui::Painter, a: Pos2, b: Pos2, c: Color32) {
     ));
 }
 
-/// The min and max of the peaks between times `t0` and `t1`, -1..1.
-fn peak_range(peaks: &Peaks, duration: f64, t0: f64, t1: f64) -> Option<(f32, f32)> {
-    let n = peaks.min.len().min(peaks.max.len());
-    if n == 0 || duration <= 0.0 {
-        return None;
-    }
-    let b0 = ((t0 / duration) * n as f64).floor().max(0.0) as usize;
-    let b1 = (((t1 / duration) * n as f64).floor() as usize)
-        .max(b0 + 1)
-        .min(n);
-    if b0 >= n {
-        return None;
-    }
-    let (mut lo, mut hi) = (i8::MAX, i8::MIN);
-    for b in b0..b1 {
-        lo = lo.min(peaks.min[b]);
-        hi = hi.max(peaks.max[b]);
-    }
-    (lo <= hi).then(|| (lo as f32 / 127.0, hi as f32 / 127.0))
-}
+// ---- over the waveform -------------------------------------------------------------------
 
-// ---- the waveform ------------------------------------------------------------------------
-
-/// A version's waveform and beat grid, between two times.
-pub struct Wave<'a> {
-    pub peaks: &'a Peaks,
-    pub duration: f64,
-    pub beats: &'a [f64],
-    pub downbeats: &'a [bool],
-    /// Detections thrown away: small red ticks at the bottom.
-    pub dropped: &'a [f64],
-    /// What's shown, in this version's time.
-    pub view: (f64, f64),
-    /// Where the player is in this version's time, and whether it's this one playing.
-    pub playhead: Option<(f64, bool)>,
-    pub colour: Color32,
-}
-
-impl Wave<'_> {
-    pub fn show(self, ui: &mut Ui, theme: &Theme, height: f32) -> Response {
-        let (rect, resp) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), height),
-            Sense::click_and_drag(),
+/// Over a version's waveform (`rect`, showing `view`): the detections thrown away as
+/// small red ticks, and a time ruler, along the bottom.
+pub fn ruler(p: &egui::Painter, theme: &Theme, rect: Rect, view: (f64, f64), dropped: &[f64]) {
+    let (v0, v1) = view;
+    for &d in dropped {
+        if d >= v0 && d <= v1 {
+            let x = x_of(rect, view, d);
+            vline(p, x, rect.bottom() - 8.0, rect.bottom(), 1.0, theme.bad);
+        }
+    }
+    let step = nice_step((v1 - v0) / (rect.width().max(1.0) as f64 / 90.0));
+    let mut t = (v0 / step).ceil() * step;
+    while t < v1 {
+        let x = x_of(rect, view, t);
+        vline(
+            p,
+            x,
+            rect.bottom() - 14.0,
+            rect.bottom() - 10.0,
+            1.0,
+            theme.muted,
         );
-        let p = ui.painter_at(rect);
-        p.rect_filled(rect, CornerRadius::same(4), theme.wave_bg);
-        let (v0, v1) = self.view;
-        let mid = rect.center().y;
-        let half = rect.height() / 2.0 * 0.95;
-        let w = rect.width().max(1.0);
-        let span = v1 - v0;
-        // One bar per point across.
-        let mut x = 0.0;
-        while x < w {
-            let t0 = v0 + (x / w) as f64 * span;
-            let t1 = v0 + ((x + 1.0) / w) as f64 * span;
-            if let Some((lo, hi)) = peak_range(self.peaks, self.duration, t0, t1) {
-                let top = mid - hi * half;
-                let bottom = (mid - lo * half).max(top + 1.0);
-                p.rect_filled(
-                    Rect::from_min_max(
-                        Pos2::new(rect.left() + x, top),
-                        Pos2::new(rect.left() + x + 1.0, bottom),
-                    ),
-                    CornerRadius::ZERO,
-                    self.colour,
-                );
-            }
-            x += 1.0;
-        }
-
-        // The grid: thick lines on downbeats, with bar numbers when there's room.
-        let i0 = self.beats.partition_point(|&b| b < v0);
-        let i1 = self.beats.partition_point(|&b| b < v1);
-        let numbers = ((i1 - i0) as f32) < w / 28.0;
-        let mut bar = self.downbeats[..i0.min(self.downbeats.len())]
-            .iter()
-            .filter(|d| **d)
-            .count();
-        let beat_c = theme.accent.gamma_multiply(0.55);
-        for i in i0..i1 {
-            let x = x_of(rect, self.view, self.beats[i]);
-            let down = self.downbeats.get(i).copied().unwrap_or(false);
-            if down {
-                bar += 1;
-                vline(&p, x, rect.top(), rect.bottom(), 2.0, theme.accent);
-                if numbers {
-                    p.text(
-                        Pos2::new(x + 3.0, rect.top() + 2.0),
-                        Align2::LEFT_TOP,
-                        bar.to_string(),
-                        small(11.0),
-                        theme.accent,
-                    );
-                }
-            } else {
-                vline(&p, x, rect.top(), rect.bottom(), 1.0, beat_c);
-            }
-        }
-        for &d in self.dropped {
-            if d >= v0 && d <= v1 {
-                let x = x_of(rect, self.view, d);
-                vline(&p, x, rect.bottom() - 8.0, rect.bottom(), 1.0, theme.bad);
-            }
-        }
-
-        // A time ruler along the bottom.
-        let step = nice_step(span / (w as f64 / 90.0));
-        let mut t = (v0 / step).ceil() * step;
-        while t < v1 {
-            let x = x_of(rect, self.view, t);
-            vline(
-                &p,
-                x,
-                rect.bottom() - 14.0,
-                rect.bottom() - 10.0,
-                1.0,
-                theme.muted,
-            );
-            let label = fmt_time(t);
-            let label = if step < 1.0 {
-                label[..label.len() - 2].to_string()
-            } else {
-                label[..label.len() - 4].to_string()
-            };
-            p.text(
-                Pos2::new(x + 2.0, rect.bottom() - 2.0),
-                Align2::LEFT_BOTTOM,
-                label,
-                small(10.0),
-                theme.muted,
-            );
-            t += step;
-        }
-
-        if let Some((at, active)) = self.playhead
-            && at >= v0
-            && at <= v1
-        {
-            let c = if active {
-                theme.marker
-            } else {
-                theme.marker.gamma_multiply(0.45)
-            };
-            vline(
-                &p,
-                x_of(rect, self.view, at),
-                rect.top(),
-                rect.bottom(),
-                1.5,
-                c,
-            );
-        }
-        resp
+        let label = fmt_time(t);
+        let label = if step < 1.0 {
+            label[..label.len() - 2].to_string()
+        } else {
+            label[..label.len() - 4].to_string()
+        };
+        p.text(
+            Pos2::new(x + 2.0, rect.bottom() - 2.0),
+            Align2::LEFT_BOTTOM,
+            label,
+            small(10.0),
+            theme.muted,
+        );
+        t += step;
     }
-}
-
-/// The whole track small, with the part the waveform shows outlined.
-pub fn overview(
-    ui: &mut Ui,
-    theme: &Theme,
-    peaks: &Peaks,
-    duration: f64,
-    view: (f64, f64),
-) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 22.0),
-        Sense::click_and_drag(),
-    );
-    let p = ui.painter_at(rect);
-    p.rect_filled(rect, CornerRadius::same(3), theme.wave_bg);
-    let w = rect.width().max(1.0);
-    let whole = (0.0, duration);
-    let mut x = 0.0;
-    while x < w {
-        let t0 = (x / w) as f64 * duration;
-        let t1 = ((x + 1.0) / w) as f64 * duration;
-        if let Some((lo, hi)) = peak_range(peaks, duration, t0, t1) {
-            let (c, h) = (rect.center().y, rect.height() / 2.0);
-            p.rect_filled(
-                Rect::from_min_max(
-                    Pos2::new(rect.left() + x, c - hi * h),
-                    Pos2::new(rect.left() + x + 1.0, (c - lo * h).max(c - hi * h + 1.0)),
-                ),
-                CornerRadius::ZERO,
-                theme.muted.gamma_multiply(0.6),
-            );
-        }
-        x += 1.0;
-    }
-    let win = Rect::from_x_y_ranges(
-        x_of(rect, whole, view.0.max(0.0))..=x_of(rect, whole, view.1.min(duration)),
-        rect.y_range(),
-    );
-    p.rect_filled(
-        win,
-        CornerRadius::ZERO,
-        theme.selection.gamma_multiply(0.25),
-    );
-    p.rect_stroke(
-        win,
-        CornerRadius::ZERO,
-        Stroke::new(1.0_f32, theme.selection),
-        egui::StrokeKind::Inside,
-    );
-    resp
 }
 
 // ---- tempo over time ---------------------------------------------------------------------

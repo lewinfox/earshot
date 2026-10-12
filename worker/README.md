@@ -117,7 +117,7 @@ and the stretch keeps the stereo.
 ```json
 → {"id": 8, "type": "tempo_lock", "wav": "/abs/path.wav", "priority": "background", "deadline_s": 900}
 ← {"id": 8, "type": "progress", "analyser": "tempo_lock", "fraction": 0.42}
-← {"id": 8, "type": "result", "analyser": "tempo_lock", "version": 1, "data": {"analysis": {...}, "peaks": {...}}}
+← {"id": 8, "type": "result", "analyser": "tempo_lock", "version": 1, "data": {"analysis": {...}}}
 
 → {"id": 9, "type": "straighten", "wav": "/abs/path.wav", "priority": "background", "deadline_s": 900,
    "target_bpm": 124, "beats": [s...], "beat_index": [int...], "out_dir": "/abs/dir",
@@ -137,9 +137,8 @@ and the stretch keeps the stereo.
   `sections` (`start_beat`, `end_beat`, `start`, `end`, `bpm`: stretches at one tempo),
   `tempo_changes` (`beat`, `time`, `from_bpm`, `to_bpm`, `ratio`, `kind`: "tempo
   change", "half-time" or "double-time"), `duration`, `sr`, `detector`, `kick_shift`.
-  Beats are snapped to the kicks as dynamic grids are. `peaks`: `{"min": [...],
-  "max": [...]}`, 4000 buckets of -127..127, for the waveform. Fewer than two beats
-  is an `error`.
+  Beats are snapped to the kicks as dynamic grids are. (No waveform: earshot draws
+  its own from its decode.) Fewer than two beats is an `error`.
 - `straighten`: re-times the audio so beat k lands on `beats[0] + beat_index[k] ·
   60/target_bpm · level` (tempo-lock's `render.build_grid`) with Rubber Band, then
   writes an MP3 into `out_dir` named and tagged as tempo-lock's download is:
@@ -153,7 +152,7 @@ and the stretch keeps the stereo.
   tempo (× `level`) is refused, as are beats that don't strictly increase.
   `straighten`'s `data`: `output` (path), `bpm`, `level`, `engine`, `grid`
   (`target_bpm`, `source_beats`, `target_beats`: where each beat was, and is now),
-  `peaks`, `duration`, `bitrate_kbps`. Then, unless `measure` is false, `measure`
+  `duration`, `bitrate_kbps`. Then, unless `measure` is false, `measure`
   finds the beats in the output again (`{"analysis": {...}}` as above), to show how
   straight it came out; it failing is a `failed`, as the MP3 is already good. The
   straighten step failing (no Rubber Band, ffmpeg error) ends the job with `error`.

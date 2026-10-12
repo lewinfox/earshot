@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from . import audio
-from .analysis import analyse, waveform_peaks
+from .analysis import analyse
 from .render import RubberBandMissing, render, rubberband_binary
 
 # Versions of what each step returns, for the hello (bump when results change).
@@ -40,14 +40,14 @@ def _finite(name: str, values) -> None:
 
 def chart(y: np.ndarray, sr: int, progress) -> dict:
     """Everything tempo-lock's page draws for one track: beats (and downbeats, and the
-    detections it dropped), tempo over time, sections and tempo changes, stats, and
-    the waveform."""
+    detections it dropped), tempo over time, sections and tempo changes, and stats.
+    (earshot draws the waveform from its own decode.)"""
     a = analyse(y, sr, progress=progress)
     if len(a.beats) < 2:
         raise ValueError("found fewer than two beats")
     _finite("beat time", a.beats)
     _finite("bpm", a.bpm_curve)
-    return {"analysis": a.to_dict(), "peaks": waveform_peaks(y)}
+    return {"analysis": a.to_dict()}
 
 
 def tempo_of(beats: np.ndarray, beat_index: np.ndarray) -> float:
@@ -86,7 +86,6 @@ def check_straighten(p: dict) -> None:
 # Share of a straighten's time each part takes (the stretch is most of it).
 LOADED = 0.05
 STRETCHED = 0.8
-ENCODED = 0.95
 
 
 def straighten(y: np.ndarray, sr: int, p: dict, progress_for, emit, fail) -> None:
@@ -121,8 +120,6 @@ def straighten(y: np.ndarray, sr: int, p: dict, progress_for, emit, fail) -> Non
         title=audio.straightened((info.get("tags") or {}).get("title") or Path(name).stem, bpm),
     )
     os.replace(partial, out)
-    progress(ENCODED)
-    peaks = waveform_peaks(z)
     progress(1.0)
     emit("straighten", {
         "output": str(out),
@@ -130,7 +127,6 @@ def straighten(y: np.ndarray, sr: int, p: dict, progress_for, emit, fail) -> Non
         "level": level,
         "engine": engine,
         "grid": grid.to_dict(),
-        "peaks": peaks,
         "duration": len(z) / sr,
         "bitrate_kbps": bitrate,
     })

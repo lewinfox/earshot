@@ -1,7 +1,7 @@
 """Beat clean-up and tempo sections. Ported from tempo-lock/tests/test_analysis.py."""
 import numpy as np
 
-from earshot_worker.analysis import clean_beats, refine_to_onsets, segment_tempo, waveform_peaks
+from earshot_worker.analysis import clean_beats, refine_to_onsets, segment_tempo
 
 
 def _flat_env(duration=10.0, hop_s=0.005):
@@ -89,13 +89,3 @@ def test_segment_handles_wobbly_but_constant_tempo():
     bpm, times = _curve(120 + 3 * np.sin(np.arange(300) / 10) + rng.normal(0, 1.0, 300))
     _, changes = segment_tempo(bpm, times)
     assert changes == []
-
-
-def test_waveform_peaks_are_int8_min_max_per_bucket():
-    y = np.zeros((1000, 2), np.float32)
-    y[100, :] = 0.5
-    y[900, :] = -0.25
-    p = waveform_peaks(y, buckets=10)
-    assert len(p["min"]) == len(p["max"]) == 10
-    assert p["max"][1] == 127 and p["min"][9] == -64
-    assert max(p["max"]) <= 127 and min(p["min"]) >= -127

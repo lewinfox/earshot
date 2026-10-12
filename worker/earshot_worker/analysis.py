@@ -324,22 +324,3 @@ def analyse(y: np.ndarray, sr: int, backend: str = "auto", raw: RawBeats | None 
         dropped_beats=dropped,
         kick_shift=kick_shift,
     )
-
-
-def waveform_peaks(y: np.ndarray, buckets: int = 4000) -> dict:
-    """Min/max per bucket, quantised to int8, for drawing the waveform."""
-    mono = y.mean(axis=1) if y.ndim == 2 else y
-    n = len(mono)
-    buckets = min(buckets, n) or 1
-    edges = np.linspace(0, n, buckets + 1).astype(int)
-    mins = np.zeros(buckets, np.float32)
-    maxs = np.zeros(buckets, np.float32)
-    for i in range(buckets):
-        seg = mono[edges[i] : max(edges[i] + 1, edges[i + 1])]
-        mins[i] = seg.min()
-        maxs[i] = seg.max()
-    scale = max(1e-9, float(max(np.abs(mins).max(), np.abs(maxs).max())))
-    return {
-        "min": np.round(mins / scale * 127).astype(int).tolist(),
-        "max": np.round(maxs / scale * 127).astype(int).tolist(),
-    }

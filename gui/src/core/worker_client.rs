@@ -1027,15 +1027,6 @@ def read_wav(path):
             pcm = array("f", body) if fmt == 3 else array("f", [v / 32768 for v in array("h", body)])
         pos += 8 + size + (size & 1)
     return pcm, rate
-def peaks(path, n=4000):
-    pcm, _ = read_wav(path)
-    step = max(1, len(pcm) // n)
-    lo, hi = [], []
-    for b in range(0, len(pcm) - step + 1, step):
-        part = pcm[b:b + step]
-        lo.append(max(-127, int(min(part) * 127)))
-        hi.append(min(127, int(max(part) * 127)))
-    return {"min": lo, "max": hi}
 def chart_of(beats, down, duration, dropped):
     times = [(a + b) / 2 for a, b in zip(beats, beats[1:])]
     curve = [60.0 / (b - a) for a, b in zip(beats, beats[1:])]
@@ -1080,7 +1071,7 @@ for line in sys.stdin:
         send({"id": i, "type": "started"})
         send({"id": i, "type": "progress", "analyser": "tempo_lock", "fraction": 0.5})
         send({"id": i, "type": "result", "analyser": "tempo_lock", "version": 1,
-              "data": {"analysis": tempo_chart(r["wav"]), "peaks": peaks(r["wav"])}})
+              "data": {"analysis": tempo_chart(r["wav"])}})
         send({"id": i, "type": "done", "seconds": 0.1})
     elif r["type"] == "straighten":
         i = r["id"]
@@ -1097,7 +1088,7 @@ for line in sys.stdin:
         send({"id": i, "type": "result", "analyser": "straighten", "version": 1, "data": {
             "output": out, "bpm": r["target_bpm"], "level": r["level"], "engine": r["engine"],
             "grid": {"target_bpm": r["target_bpm"], "source_beats": beats, "target_beats": target},
-            "peaks": peaks(r["wav"]), "duration": duration, "bitrate_kbps": 320}})
+            "duration": duration, "bitrate_kbps": 320}})
         send({"id": i, "type": "progress", "analyser": "measure", "fraction": 0.5})
         jitter = [t + 0.003 * math.sin(k * 1.7) for k, t in enumerate(target)]
         send({"id": i, "type": "result", "analyser": "measure", "version": 1,
