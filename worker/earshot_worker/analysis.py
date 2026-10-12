@@ -2,7 +2,8 @@
 
 Copied from tempo-lock/tempolock/analysis.py (sibling project in this repo; projects
 never import each other, so this is a copy, not a link). Trimmed to what the worker
-needs: waveform_peaks and tempo-section segmentation were dropped.
+needs: waveform_peaks and tempo-section segmentation were dropped. Beats are then
+snapped to the kicks, as static grids are (snap.kick_shifts).
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .detectors import RawBeats, detect
+from .snap import kick_shifts
 
 
 @dataclass
@@ -26,6 +28,7 @@ class Analysis:
     min_bpm: float
     max_bpm: float
     dropped_beats: list = field(default_factory=list)  # spurious detections we discarded (s)
+    kick_shift: float = 0.0  # median move (s) of the beats onto the kicks
 
 
 def onset_envelope(mono: np.ndarray, sr: int, hop: int = 256) -> tuple[np.ndarray, np.ndarray]:
@@ -92,9 +95,12 @@ def clean_beats(beats: np.ndarray, env: np.ndarray, times: np.ndarray) -> tuple[
 
 
 # Share of the time each step takes on a CPU, measured on a 4.5-minute track: the beat
-# tracker ~80%, the onset envelope and beat clean-up the rest.
+# tracker ~80%, the onset envelope, the kick snap and beat clean-up the rest.
 DETECT_SHARE = 0.8
 ONSETS_SHARE = 0.1
+# The kick snap takes its offset from this many beats around each beat (about 15 s at
+# 125 BPM): enough hits for a steady median, short enough to follow the track.
+KICK_WINDOW = 32
 
 
 def analyse(y: np.ndarray, sr: int, backend: str = "auto", raw: RawBeats | None = None, progress=None) -> Analysis:
@@ -117,6 +123,14 @@ def analyse(y: np.ndarray, sr: int, backend: str = "auto", raw: RawBeats | None 
             k = int(np.argmin(np.abs(beats - d)))
             if abs(beats[k] - d) < 0.06:
                 is_down[k] = True
+    report(DETECT_SHARE + ONSETS_SHARE + 0.05)
+
+    # Beat This! is late (as in static analysis): move the beats to where the kicks
+    # start, each stretch of the track by its own median offset. The onset refinement
+    # above only lands on the peak of the onset strength, after the kick's start.
+    shifts = kick_shifts(mono, sr, beats, window=KICK_WINDOW)
+    beats = beats + shifts
+    kick_shift = float(np.median(shifts)) if len(shifts) else 0.0
 
     if len(beats) >= 2:
         ibi = np.diff(beats) / np.diff(index)
@@ -134,5 +148,6 @@ def analyse(y: np.ndarray, sr: int, backend: str = "auto", raw: RawBeats | None 
             min_bpm=float(np.percentile(bpm, 2)),
             max_bpm=float(np.percentile(bpm, 98)),
             dropped_beats=dropped,
+            kick_shift=kick_shift,
         )
-    return Analysis(sr, len(y) / sr, raw.detector, beats, np.asarray(index, int), is_down, np.array([]), 0.0, 0.0, 0.0, dropped)
+    return Analysis(sr, len(y) / sr, raw.detector, beats, np.asarray(index, int), is_down, np.array([]), 0.0, 0.0, 0.0, dropped, kick_shift)

@@ -1,11 +1,12 @@
-"""Snap a straight grid to where the kicks start.
+"""Snap a grid to where the kicks start: the one kick snap for static and dynamic grids.
 
 Beat This! puts its beats 20-40 ms after the start of the kick, so a grid phased from
 it is late by about that much. A grid line belongs where the kick's attack begins:
 on the click if the hit opens with one, never on a faint sound before it.
 
 For each grid line inside a kick section, find where its hit starts (attacks), then
-move the grid by the median offset. Worked out in research/beatgrid (hybrid.py,
+move the grid by the median offset: one for a straight grid, one per stretch of the
+track for a grid that follows the music (kick_shifts). Worked out in research/beatgrid (hybrid.py,
 attack.py); see its README for the numbers.
 """
 from __future__ import annotations
@@ -19,11 +20,14 @@ RISE = 0.30  # the hit proper reaches this far from the gap to the body; a faint
 FOOT_SLOPE = 0.10  # walk back down the rise while it's steeper than this share of its steepest
 # Kick sections: kick-band rises summed over KICK_WIN_S, above KICK_LEVEL of their 90th
 # percentile, for at least KICK_MIN_S. Less than KICK_MIN_SHARE of the track (breakbeats,
-# drum & bass): every grid line counts.
+# drum & bass): every grid line counts for the snap, and the static analysis chooses
+# its excerpts from the music as a whole.
 KICK_WIN_S = 2.0
 KICK_LEVEL = 0.35
 KICK_MIN_S = 8.0
 KICK_MIN_SHARE = 0.3
+# Fewer hits than this to go on: leave the grid where it is.
+MIN_HITS = 8
 
 
 def energy(y: np.ndarray, sr: int, low: bool = False) -> np.ndarray:
@@ -76,40 +80,78 @@ def attacks(lines: np.ndarray, e: np.ndarray, before: float, after: float) -> tu
     return out, ok
 
 
-def kick_sections(el: np.ndarray) -> np.ndarray:
-    """Per 10 ms: inside a stretch of steady kicks, judged from the audio alone (not
-    from the grid, so a grid that has drifted off the kicks can't hide them).
-    el: energy(y, sr, low=True)."""
-    step = 10 * MS
-    a = np.sqrt(el[: len(el) // step * step]).reshape(-1, step).mean(1)
-    rise = np.maximum(np.diff(a, prepend=a[0]), 0)
-    level = np.convolve(rise, np.ones(int(KICK_WIN_S * 100)), mode="same")
+def kick_sections(rise: np.ndarray, fps: float) -> np.ndarray:
+    """Per frame of `rise`: inside a stretch of steady kicks. rise: kick-band onset
+    strength, `fps` frames per second. Judged from the audio alone (not from a grid, so
+    a grid that has drifted off the kicks can't hide them). Shared by the static
+    analysis (choosing excerpts) and the kick snap (choosing grid lines)."""
+    level = np.convolve(rise, np.ones(int(KICK_WIN_S * fps)), mode="same")
     on = level > KICK_LEVEL * np.percentile(level, 90)
     edges = np.flatnonzero(np.diff(np.concatenate([[0], on.astype(int), [0]])))
-    for a0, b0 in zip(edges[::2], edges[1::2]):
-        if b0 - a0 < KICK_MIN_S * 100:
-            on[a0:b0] = False
+    for a, b in zip(edges[::2], edges[1::2]):
+        if b - a < KICK_MIN_S * fps:
+            on[a:b] = False
+    return on
+
+
+def kick_frames(el: np.ndarray) -> np.ndarray:
+    """Per 10 ms: whether hits there count for the snap. el: energy(y, sr, low=True).
+    Inside kick sections; everywhere when they cover less than KICK_MIN_SHARE of the
+    track (breakbeats, drum & bass)."""
+    step = 10 * MS
+    a = np.sqrt(el[: len(el) // step * step]).reshape(-1, step).mean(1)
+    on = kick_sections(np.maximum(np.diff(a, prepend=a[0]), 0), 100)
     if on.mean() < KICK_MIN_SHARE:
         on[:] = True
     return on
 
 
+def kick_shifts(y: np.ndarray, sr: int, lines: np.ndarray, window: int | None = None) -> np.ndarray:
+    """How far (s) to move each grid line so the grid sits where the kicks start. The
+    one kick snap for both grid kinds.
+
+    Per line, the offset of the hit there (attacks), counting lines inside kick
+    sections only; then the median offset, twice (the second time in a tighter
+    window, around the lines as moved by the first).
+    - window None (a straight grid): one median over the whole track, so every line
+      moves by the same amount.
+    - window n (a grid that follows the music, one line per detected beat): the median
+      over the n lines around each line, so each section of the track gets its own;
+      a line with fewer than MIN_HITS hits around it takes the whole track's.
+    Fewer than MIN_HITS hits in the whole track: no move. Not wrapped to a beat, so a
+    downbeat moved with its beat stays on the same beat."""
+    lines = np.asarray(lines, float)
+    shift = np.zeros(len(lines))
+    if len(lines) == 0:
+        return shift
+    e = energy(y, sr)
+    sections = kick_frames(energy(y, sr, low=True))
+    for before, after in ((0.060, 0.040), (0.025, 0.025)):
+        at_lines = lines + shift
+        at, ok = attacks(at_lines, e, before, after)
+        use = ok & sections[np.clip((at_lines * 100).astype(int), 0, len(sections) - 1)]
+        if use.sum() < MIN_HITS:
+            break
+        off = at - at_lines
+        whole = float(np.median(off[use]))
+        if window is None:
+            shift += whole
+            continue
+        step = np.full(len(lines), whole)
+        half = window // 2
+        for i in range(len(lines)):
+            lo, hi = max(0, i - half), min(len(lines), i + half + 1)
+            near = off[lo:hi][use[lo:hi]]
+            if len(near) >= MIN_HITS:
+                step[i] = float(np.median(near))
+        shift += step
+    return shift
+
+
 def snap_to_kicks(y: np.ndarray, sr: int, bpm: float, beat: float) -> float:
     """How far (s) to move a straight grid (a line at `beat`, then every 60/bpm) so it
-    sits where the kicks start: the median offset of the hits at grid lines inside
-    kick sections, twice (the second time in a tighter window). Not wrapped to a
-    beat, so a downbeat moved by the same amount stays on the same beat."""
-    e = energy(y, sr)
-    sections = kick_sections(energy(y, sr, low=True))
+    sits where the kicks start (kick_shifts over the whole track)."""
     period = 60 / bpm
     dur = len(y) / sr
-    shift = 0.0
-    for before, after in ((0.060, 0.040), (0.025, 0.025)):
-        b = beat + shift
-        lines = b + period * np.arange(np.ceil(-b / period), (dur - b) / period)
-        at, ok = attacks(lines, e, before, after)
-        use = ok & sections[np.clip((lines * 100).astype(int), 0, len(sections) - 1)]
-        if use.sum() < 8:
-            break
-        shift += float(np.median(at[use] - lines[use]))
-    return shift
+    lines = beat + period * np.arange(np.ceil(-beat / period), (dur - beat) / period)
+    return float(kick_shifts(y, sr, lines)[0]) if len(lines) else 0.0

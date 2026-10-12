@@ -12,8 +12,8 @@ from earshot_worker.static_tempo import (
     excerpt_starts,
     grid_fit,
     is_steady,
-    kick_sections,
 )
+from earshot_worker.snap import kick_sections
 
 # Five excerpts, start to end of a five-minute track, as analyse_static picks them.
 CENTRES = np.array([8.0, 70.0, 150.0, 230.0, 292.0])
@@ -98,7 +98,7 @@ def test_little_steady_kick_uses_the_whole_music():
     # Breakbeats: hardly any four-to-the-floor kick. Excerpts span the music as before.
     t, env, low = envelopes([(100, 160)])
     starts = np.array(excerpt_starts(t, env, low, 44100)) / 44100
-    assert kick_sections(low).mean() < 0.3
+    assert kick_sections(low, FPS).mean() < 0.3
     assert starts[0] < 5 and starts[-1] > 280
 
 

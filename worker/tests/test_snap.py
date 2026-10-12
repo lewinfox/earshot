@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from earshot_worker.snap import attacks, energy, snap_to_kicks
+from earshot_worker.snap import attacks, energy, kick_shifts, snap_to_kicks
 
 SR = 44100
 BPM = 124.0
@@ -70,3 +70,38 @@ def test_snap_moves_a_late_grid_onto_the_kicks():
     assert abs(late + shift - times[0]) < 0.002
     # Not wrapped: a downbeat moved by the same amount stays on its beat.
     assert -0.040 < shift < 0
+
+
+def drifting_track(seconds=90.0, first=0.5, sr=SR):
+    """Kicks whose tempo drifts from 122 to 126 BPM, over quiet noise. Returns the
+    signal and the kick start times."""
+    y = noise(seconds * 1000, 0.002, seed=4)
+    times, t = [], first
+    while t < seconds - 0.5:
+        times.append(t)
+        t += 60 / (122 + 4 * t / seconds)
+    hit = kick(sr)
+    for t in times:
+        i = int(round(t * sr))
+        y[i : i + len(hit)] += hit[: len(y) - i]
+    return y, np.array(times)
+
+
+def test_dynamic_grid_lands_on_the_kicks():
+    # A beat per kick, as Beat This! leaves them: 22 ms late in the first half, 36 ms
+    # late in the second, with a few ms of jitter. Each stretch moves by its own offset.
+    y, times = drifting_track()
+    late = np.where(times < 45, 0.022, 0.036)
+    lines = times + late + np.random.default_rng(5).uniform(-0.003, 0.003, len(times))
+    snapped = lines + kick_shifts(y, SR, lines, window=32)
+    err = np.abs(snapped - times)[2:-2]
+    assert np.median(err) < 0.003 and np.percentile(err, 90) < 0.006, err
+    # A straight-grid snap can't follow the change in lateness.
+    one = lines + kick_shifts(y, SR, lines)
+    assert np.percentile(np.abs(one - times)[2:-2], 90) > 0.005
+
+
+def test_too_few_hits_leave_the_grid_alone():
+    y = noise(30_000, 0.002, seed=6)
+    lines = 0.5 + PERIOD * np.arange(50)
+    assert not kick_shifts(y, SR, lines, window=32).any()

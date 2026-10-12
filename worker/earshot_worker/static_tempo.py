@@ -37,7 +37,7 @@ from __future__ import annotations
 import numpy as np
 
 from .detectors import SMALL_CHECKPOINT, get_beat_this
-from .snap import snap_to_kicks
+from .snap import KICK_MIN_SHARE, kick_sections, snap_to_kicks
 
 SR = 11025
 NFFT = 1024
@@ -55,13 +55,6 @@ STEADY_MS = 60.0
 # lining up with the track's tempo at all. (A drift of more than half a beat wraps
 # the phase round, so the phase check alone misses it.)
 STEADY_TEMPO_PCT = 5.0
-# Kick sections for choosing excerpts: kick-band onsets summed over KICK_WIN_S, above
-# KICK_LEVEL of their 90th percentile, for at least KICK_MIN_S. Tracks with less than
-# KICK_MIN_SHARE of them (breakbeats, drum & bass) choose excerpts as before.
-KICK_WIN_S = 2.0
-KICK_LEVEL = 0.35
-KICK_MIN_S = 8.0
-KICK_MIN_SHARE = 0.3
 
 
 def onset_envelope(y: np.ndarray, sr: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -147,20 +140,6 @@ def bass_on_grid(t: np.ndarray, low: np.ndarray, phase: float, period: float, a:
     return float(np.mean([low[max(0, j - w) : j + w + 1].max() for j in i]))
 
 
-def kick_sections(low: np.ndarray) -> np.ndarray:
-    """Per envelope frame: inside a stretch of steady kicks (the kick-band onset
-    strength over KICK_WIN_S is above KICK_LEVEL of its 90th percentile, for at least
-    KICK_MIN_S)."""
-    fps = SR / HOP
-    level = np.convolve(low, np.ones(int(KICK_WIN_S * fps)), mode="same")
-    on = level > KICK_LEVEL * np.percentile(level, 90)
-    edges = np.flatnonzero(np.diff(np.concatenate([[0], on.astype(int), [0]])))
-    for a, b in zip(edges[::2], edges[1::2]):
-        if b - a < KICK_MIN_S * fps:
-            on[a:b] = False
-    return on
-
-
 def excerpt_starts(t: np.ndarray, env: np.ndarray, low: np.ndarray, sr: int) -> list[int]:
     """Start sample of each EXCERPT_S excerpt: the first and last 15 s with a steady
     kick, then the window with the strongest kick in each of MIDDLE_EXCERPTS equal
@@ -169,7 +148,7 @@ def excerpt_starts(t: np.ndarray, env: np.ndarray, low: np.ndarray, sr: int) -> 
     strongest onsets between."""
     fps = SR / HOP
     w = int(EXCERPT_S * fps)
-    kick = kick_sections(low)
+    kick = kick_sections(low, fps)
     on = np.flatnonzero(kick)
     if kick.mean() >= KICK_MIN_SHARE and on[-1] + 1 - on[0] >= w * EXCERPTS:
         first, last = int(on[0]), int(on[-1]) + 1
@@ -345,6 +324,7 @@ def analyse_static(y: np.ndarray, sr: int, progress=None) -> dict:
         "spread_ms": spread_ms,
         "drift_pct": float(drift_pct),
         "steady": is_steady(spread_ms, lined, len(found), drift_pct),
+        "kick_shift": float(shift),
     }
 
 
