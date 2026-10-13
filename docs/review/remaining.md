@@ -19,7 +19,9 @@ Done (see the README). One open idea, from the user's feature notes:
 - [x] Undo/redo (`core::edit::History`): metadata, grid edits, collections, Flow
   edits; creating, duplicating and deleting collections (phase C); removing tracks
   from the library.
-- [ ] Metadata editing UI (the Store keeps user values with `source='user'`).
+- [x] Metadata editing UI: "Edit info…" in the track menu (one track or many; mixed
+  fields are left alone unless edited). Beside each text field, "file" or "edited",
+  with Revert to go back to the file's value. Undoable.
 - [x] Duplicates view (All tracks > Library > Duplicates), with "Show in file
   manager" and "Remove from library" (undoable; files are never deleted).
 - [ ] Fill `tracks.key_pc` / `key_minor` so key search in SQL doesn't need text
@@ -48,7 +50,9 @@ Done (see the README). One open idea, from the user's feature notes:
 - [x] Load a user keymap from disk: `keymap.txt` in the data folder, shown in
   Settings > Keymap with its errors; the built-in one otherwise.
 - [x] Two loads onto one player in flight: only the newest lands (load tickets).
-- [ ] Show the play history somewhere (it's saved, nothing reads it yet).
+- [x] Show the play history: All tracks > Library > History lists the sessions, each
+  one's tracks in play order (with "Save as playlist"); Plays and Last played columns
+  (and `plays>=3`, `played<7` in searches).
 - [ ] LED feedback to controllers (`ControlSpec` getters + `EngineEvent`s).
 - [ ] Effects on the `Processor` chain; slip, reverse, censor via
   `Transport::jump`.

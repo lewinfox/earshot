@@ -8,7 +8,13 @@ use crate::core::edit::{Edit, EditCmd};
 impl EarshotApp {
     pub(super) fn edit_cmd(&mut self, c: EditCmd) {
         match c {
-            EditCmd::Editor(tracks) => self.modals.edit_tracks(tracks, &self.index),
+            EditCmd::Editor(tracks) => {
+                // Where each value came from arrives after (`StoreEvent::MetaSources`).
+                self.lib
+                    .store
+                    .request_meta(tracks.clone(), store_sink(&self.sink));
+                self.modals.edit_tracks(tracks, &self.index);
+            }
             c => self.lib.store.send(StoreCmd::Edit(c)),
         }
     }

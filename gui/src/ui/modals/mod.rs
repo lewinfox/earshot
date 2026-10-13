@@ -11,6 +11,8 @@ pub mod keys;
 pub mod metadata;
 pub mod settings;
 
+use std::collections::HashMap;
+
 use earshot_engine::{OutputInfo, Routing};
 
 use self::metadata::MetaEditor;
@@ -19,6 +21,7 @@ use crate::core::command::{Command, ViewCmd};
 use crate::core::index::LibraryIndex;
 use crate::core::keymap::Keymap;
 use crate::core::player::AudioSettings;
+use crate::core::store::Sources;
 use crate::core::track::TrackId;
 use crate::core::view::{Modal, Mode, SettingsTab};
 
@@ -77,6 +80,11 @@ impl Modals {
         self.meta.open(tracks, lib);
         self.open(Modal::Metadata);
         self.raise = Some(Modal::Metadata);
+    }
+
+    /// Where the metadata editor's values came from, from the Store.
+    pub fn meta_sources(&mut self, m: HashMap<i64, HashMap<String, Sources>>) {
+        self.meta.set_sources(&m);
     }
 
     pub fn close(&mut self, m: Modal) {

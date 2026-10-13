@@ -144,6 +144,8 @@ impl EarshotApp {
                     lib.browser.set_scope(Scope::All);
                 }
             }
+            StoreEvent::Sessions(s) => self.panels.library.browser.set_sessions(s),
+            StoreEvent::MetaSources(m) => self.modals.meta_sources(m),
             StoreEvent::Edited(e) => self.edits.record(e),
             StoreEvent::Error(e) => eprintln!("library: {e}"),
         }

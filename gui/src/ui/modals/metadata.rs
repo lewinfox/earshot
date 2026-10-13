@@ -3,12 +3,19 @@
 //! mixed, and Save changes only the fields touched. Values are saved as the user's
 //! (`track_meta` source 'user'), so a rescan keeps them; nothing is written to the
 //! files. Saving is one undo step (`EditCmd::Set`).
+//!
+//! Beside each text field: "edited" when it's the user's value, with "Revert" to go
+//! back to the file's (by clearing the user's), or "file" when it's the file's. That
+//! comes from the Store just after the editor opens ([`MetaEditor::set_sources`]).
+
+use std::collections::HashMap;
 
 use egui::{RichText, Sense, Stroke, Ui, vec2};
 
 use crate::core::command::Command;
 use crate::core::edit::{EditCmd, Field, Value};
 use crate::core::index::LibraryIndex;
+use crate::core::store::Sources;
 use crate::core::track::TrackId;
 use crate::ui::theme::{CUE_PALETTE, THEME, rgb};
 
@@ -31,9 +38,24 @@ enum Start {
     Mixed,
 }
 
+/// Where a text field's values came from, once the Store has said.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum Origin {
+    /// Not heard yet, or not a `track_meta` field (rating, colour, tags).
+    #[default]
+    Unknown,
+    /// The files' (or an import's) values, on every track that has one.
+    File,
+    /// The user's, on `tracks` of them. `file` is what shows once that's cleared.
+    Edited { tracks: usize, file: Start },
+}
+
 struct Row {
     field: Field,
     start: Start,
+    origin: Origin,
+    /// "Revert" was clicked: save no value of the user's.
+    revert: bool,
     /// Text fields, the key and the tags (comma-separated).
     text: String,
     rating: Option<u8>,
@@ -55,6 +77,8 @@ impl Row {
         Row {
             field,
             start,
+            origin: Origin::Unknown,
+            revert: false,
             text,
             rating,
             colour,
@@ -65,6 +89,9 @@ impl Row {
     /// The value to save. Empty text clears the user's value, so the file's tag
     /// shows again.
     fn value(&self) -> Option<Value> {
+        if self.revert {
+            return None;
+        }
         match self.field {
             Field::Rating => self.rating.map(Value::Rating),
             Field::Colour => self.colour.map(Value::Colour),
@@ -107,6 +134,40 @@ impl MetaEditor {
         self.tracks = found.iter().map(|t| t.id).collect();
     }
 
+    /// Where each text field's values came from (track → field → sources, strongest
+    /// first), as the Store found them. Ignored unless it covers these tracks.
+    pub fn set_sources(&mut self, all: &HashMap<i64, HashMap<String, Sources>>) {
+        if self.tracks.is_empty() || !self.tracks.iter().all(|t| all.contains_key(t)) {
+            return;
+        }
+        for row in &mut self.rows {
+            let Some(name) = row.field.meta() else {
+                continue;
+            };
+            let mut edited = 0;
+            let mut file: Vec<Option<&str>> = vec![];
+            for t in &self.tracks {
+                let sources = all[t].get(name).map_or(&[][..], |s| s.as_slice());
+                let user = sources.first().is_some_and(|s| s.0 == "user");
+                edited += user as usize;
+                file.push(sources.get(user as usize).map(|s| s.1.as_str()));
+            }
+            row.origin = if edited == 0 {
+                Origin::File
+            } else {
+                let mut once = file.clone();
+                once.dedup();
+                Origin::Edited {
+                    tracks: edited,
+                    file: match once.as_slice() {
+                        [one] => Start::Same(one.map(|v| Value::Text(v.to_string()))),
+                        _ => Start::Mixed,
+                    },
+                }
+            };
+        }
+    }
+
     /// What Save sets: the fields touched, and only those.
     fn changes(&self) -> Vec<(Field, Option<Value>)> {
         self.rows
@@ -131,8 +192,9 @@ impl MetaEditor {
             );
         }
         ui.add_space(6.0);
+        let n = self.tracks.len();
         egui::Grid::new("metadata-grid")
-            .num_columns(2)
+            .num_columns(3)
             .spacing(vec2(10.0, 6.0))
             .show(ui, |ui| {
                 for row in &mut self.rows {
@@ -142,12 +204,13 @@ impl MetaEditor {
                         Field::Colour => colour(ui, row),
                         _ => text(ui, row),
                     }
+                    origin(ui, row, n);
                     ui.end_row();
                 }
             });
         ui.add_space(4.0);
         ui.label(
-            RichText::new("Empty text shows the file's own tag. Files aren't changed.")
+            RichText::new("Empty text shows the file's own value. Files aren't changed.")
                 .small()
                 .color(THEME.muted),
         );
@@ -179,6 +242,7 @@ impl MetaEditor {
 fn text(ui: &mut Ui, row: &mut Row) {
     let hint = match (row.mixed(), row.field) {
         (true, _) => "mixed",
+        _ if row.revert => "the files' values",
         (false, Field::Tags) => "comma, separated",
         (false, Field::Key) => "8A, Am, F#m …",
         _ => "",
@@ -188,6 +252,67 @@ fn text(ui: &mut Ui, row: &mut Row) {
         .desired_width(320.0);
     if ui.add(edit).changed() {
         row.touched = true;
+        row.revert = false;
+    }
+}
+
+/// Where a text field's value came from: "file", or "edited" with a button back to
+/// the file's value.
+fn origin(ui: &mut Ui, row: &mut Row, tracks: usize) {
+    // Always this wide, so the window keeps its size when the sources arrive.
+    ui.horizontal(|ui| {
+        ui.set_min_width(100.0);
+        origin_marks(ui, row, tracks);
+    });
+}
+
+fn origin_marks(ui: &mut Ui, row: &mut Row, tracks: usize) {
+    let small = |s: &str| RichText::new(s).small().color(THEME.muted);
+    match &row.origin {
+        Origin::Unknown => {
+            ui.label("");
+        }
+        Origin::File if row.text.is_empty() && !row.mixed() => {
+            ui.label("");
+        }
+        Origin::File => {
+            ui.label(small("file")).on_hover_text("From the file");
+        }
+        Origin::Edited { .. } if row.revert => {
+            ui.label(small("file"))
+                .on_hover_text("Goes back to the file's value when saved");
+        }
+        Origin::Edited {
+            tracks: edited,
+            file,
+        } => {
+            let file = file.clone();
+            let whose = match (*edited, tracks) {
+                (_, 1) => "Edited here".to_string(),
+                (e, n) if e == n => "Edited here, on every track".to_string(),
+                (e, n) => format!("Edited here, on {e} of the {n} tracks"),
+            };
+            let back = match &file {
+                Start::Same(Some(Value::Text(v))) => format!("The file says \"{v}\""),
+                Start::Same(_) => "The file has no value".to_string(),
+                Start::Mixed => "The files' values differ".to_string(),
+            };
+            ui.horizontal(|ui| {
+                ui.label(small("edited")).on_hover_text(&whose);
+                if ui
+                    .small_button("Revert")
+                    .on_hover_text(format!("Back to the file's value. {back}."))
+                    .clicked()
+                {
+                    row.revert = true;
+                    row.touched = true;
+                    row.text = match file {
+                        Start::Same(Some(Value::Text(v))) => v,
+                        _ => String::new(),
+                    };
+                }
+            });
+        }
     }
 }
 
@@ -300,6 +425,61 @@ mod tests {
             e.changes()
                 .contains(&(Field::Tags, Some(Value::tags(["dub", "warm"]))))
         );
+    }
+
+    /// "edited" or "file" beside each text field, and Revert clears the user's value.
+    #[test]
+    fn where_values_came_from_and_revert() {
+        let s = |v: &[(&str, &str)]| -> Sources {
+            v.iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
+        };
+        let mut all: HashMap<i64, HashMap<String, Sources>> = HashMap::new();
+        all.insert(
+            1,
+            HashMap::from([
+                ("title".into(), s(&[("user", "A"), ("tag", "a (file)")])),
+                ("artist".into(), s(&[("tag", "Artist A")])),
+                ("genre".into(), s(&[("user", "House")])),
+            ]),
+        );
+        all.insert(
+            2,
+            HashMap::from([
+                ("title".into(), s(&[("tag", "B")])),
+                ("genre".into(), s(&[("user", "House")])),
+            ]),
+        );
+        let mut e = MetaEditor::default();
+        e.open(vec![1, 2], &lib());
+        // Not for these tracks: ignored.
+        e.set_sources(&HashMap::from([(1, HashMap::new())]));
+        assert_eq!(row(&mut e, Field::Title).origin, Origin::Unknown);
+        e.set_sources(&all);
+        assert_eq!(
+            row(&mut e, Field::Title).origin,
+            Origin::Edited {
+                tracks: 1,
+                file: Start::Mixed
+            }
+        );
+        assert_eq!(row(&mut e, Field::Artist).origin, Origin::File);
+        assert_eq!(
+            row(&mut e, Field::Genre).origin,
+            Origin::Edited {
+                tracks: 2,
+                file: Start::Same(None)
+            }
+        );
+        assert_eq!(row(&mut e, Field::Rating).origin, Origin::Unknown);
+
+        // Revert: no value of the user's, on every track.
+        let g = row(&mut e, Field::Genre);
+        g.revert = true;
+        g.touched = true;
+        g.text.clear();
+        assert_eq!(e.changes(), vec![(Field::Genre, None)]);
     }
 
     #[test]

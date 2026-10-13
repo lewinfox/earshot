@@ -41,6 +41,10 @@ pub struct LibTrack {
     pub colour: Option<u32>,
     /// Tag names, sorted.
     pub tags: Vec<String>,
+    /// Times it counted as played (`plays`), in any session.
+    pub plays: u32,
+    /// When it last started a counted play (unix seconds).
+    pub last_played: Option<i64>,
 }
 
 /// (track id, waveform thumbnail)
@@ -94,6 +98,9 @@ pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
     let mut feats: HashMap<(i64, String), f64> = HashMap::new();
     let mut tags: HashMap<i64, Vec<String>> = HashMap::new();
     let tag_sql = "SELECT tt.track_id, g.name FROM track_tags tt JOIN tags g ON g.id = tt.tag_id";
+    // (count, last start) by track.
+    let mut played: HashMap<i64, (u32, i64)> = HashMap::new();
+    let play_sql = "SELECT track_id, count(*), max(started_at) FROM plays";
     let mut add_meta = |id: i64, field: String, source: String, value: String| {
         let rank = source_rank(&source);
         let e = meta.entry((id, field)).or_insert((u8::MAX, String::new()));
@@ -131,12 +138,19 @@ pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
             while let Some(r) = q.next()? {
                 tags.entry(r.get(0)?).or_default().push(r.get(1)?);
             }
+            let mut st = c.prepare(&format!("{play_sql} GROUP BY track_id"))?;
+            let mut q = st.query([])?;
+            while let Some(r) = q.next()? {
+                played.insert(r.get(0)?, (r.get(1)?, r.get(2)?));
+            }
         }
         Some(ids) => {
             let mut st = c.prepare_cached(&format!("{base} AND t.id = ?1"))?;
             let mut st_meta = c.prepare_cached(&format!("{meta_sql} AND track_id = ?1"))?;
             let mut st_feat = c.prepare_cached(&format!("{feat_sql} AND track_id = ?1"))?;
             let mut st_tag = c.prepare_cached(&format!("{tag_sql} WHERE tt.track_id = ?1"))?;
+            let mut st_play =
+                c.prepare_cached(&format!("{play_sql} WHERE track_id = ?1 GROUP BY track_id"))?;
             for &id in ids {
                 rows.extend(st.query_row([id], map).optional()?);
                 let mut q = st_meta.query([id])?;
@@ -150,6 +164,10 @@ pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
                 let mut q = st_tag.query([id])?;
                 while let Some(r) = q.next()? {
                     tags.entry(r.get(0)?).or_default().push(r.get(1)?);
+                }
+                let mut q = st_play.query([id])?;
+                while let Some(r) = q.next()? {
+                    played.insert(r.get(0)?, (r.get(1)?, r.get(2)?));
                 }
             }
         }
@@ -188,6 +206,8 @@ pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
                 grid_source: source.as_deref().and_then(GridSource::parse),
                 energy: feats.get(&(id, "energy".into())).copied(),
                 drifts: feats.get(&(id, "drifts".into())).is_some_and(|d| *d != 0.0),
+                plays: played.get(&id).map_or(0, |p| p.0),
+                last_played: played.get(&id).map(|p| p.1),
                 path: path.to_string_lossy().into_owned(),
             }
         })
@@ -764,7 +784,7 @@ pub struct Play {
 }
 
 /// Every saved play, oldest first.
-#[cfg_attr(not(test), allow(dead_code))] // nothing shows the history yet
+#[cfg_attr(not(test), allow(dead_code))] // the app reads them by session (`sessions`)
 pub fn plays(c: &Connection) -> Result<Vec<Play>> {
     let mut st = c.prepare(
         "SELECT session_id, track_id, deck, started_at, ended_at FROM plays
@@ -781,6 +801,69 @@ pub fn plays(c: &Connection) -> Result<Vec<Play>> {
             })
         })?
         .collect::<rusqlite::Result<_>>()?)
+}
+
+/// One run of the app that played something, for the History view.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlaySession {
+    pub id: i64,
+    /// When it started, in local time ("2026-10-13 21:04").
+    pub label: String,
+    /// What counted as played, in the order it started (a track may repeat).
+    pub tracks: Vec<i64>,
+}
+
+/// The sessions with at least one play, newest first.
+pub fn sessions(c: &Connection) -> Result<Vec<PlaySession>> {
+    let mut st = c.prepare(
+        "SELECT s.id, strftime('%Y-%m-%d %H:%M', s.started_at, 'unixepoch', 'localtime')
+         FROM sessions s WHERE EXISTS (SELECT 1 FROM plays p WHERE p.session_id = s.id)
+         ORDER BY s.started_at DESC, s.id DESC",
+    )?;
+    let mut out: Vec<PlaySession> = st
+        .query_map([], |r| {
+            Ok(PlaySession {
+                id: r.get(0)?,
+                label: r.get(1)?,
+                tracks: vec![],
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let at: HashMap<i64, usize> = out.iter().enumerate().map(|(i, s)| (s.id, i)).collect();
+    let mut st = c.prepare("SELECT session_id, track_id FROM plays ORDER BY started_at, rowid")?;
+    let mut q = st.query([])?;
+    while let Some(r) = q.next()? {
+        if let Some(&i) = at.get(&r.get::<_, i64>(0)?) {
+            out[i].tracks.push(r.get(1)?);
+        }
+    }
+    Ok(out)
+}
+
+/// One metadata field of a track as each source has it, strongest first
+/// (user > import > tag): (source, value).
+pub type Sources = Vec<(String, String)>;
+
+/// What each source says for these tracks' `track_meta` fields: track → field →
+/// sources. Fields no source has are left out.
+pub fn meta_sources(c: &Connection, ids: &[i64]) -> Result<HashMap<i64, HashMap<String, Sources>>> {
+    let mut st =
+        c.prepare_cached("SELECT field, source, value FROM track_meta WHERE track_id = ?1")?;
+    let mut out: HashMap<i64, HashMap<String, Sources>> = HashMap::new();
+    for &id in ids {
+        let fields = out.entry(id).or_default();
+        let mut q = st.query([id])?;
+        while let Some(r) = q.next()? {
+            fields
+                .entry(r.get(0)?)
+                .or_default()
+                .push((r.get(1)?, r.get(2)?));
+        }
+        for s in fields.values_mut() {
+            s.sort_by_key(|(source, _)| source_rank(source));
+        }
+    }
+    Ok(out)
 }
 
 pub fn setting(c: &Connection, key: &str) -> Result<Option<String>> {

@@ -35,6 +35,7 @@ impl EarshotApp {
                     eprintln!("{e}");
                 }
             }
+            LibraryCmd::ListSessions => self.lib.store.send(StoreCmd::ListSessions),
             LibraryCmd::FindDuplicates => {
                 let (reader, sink) = (self.lib.store.reader.clone(), self.sink.clone());
                 std::thread::spawn(move || {
@@ -184,6 +185,17 @@ impl EarshotApp {
                 store.send(StoreCmd::Edit(EditCmd::RemoveTracks { from, tracks }))
             }
             CollectionCmd::SetQuery(id, query) => store.send(StoreCmd::SetQuery { id, query }),
+            CollectionCmd::SavePlaylist { name, tracks } => {
+                store.send(StoreCmd::Edit(EditCmd::Create {
+                    id: store.new_collection_id(),
+                    parent: None,
+                    kind: CollectionKind::Playlist,
+                    section: None,
+                    name,
+                    query: None,
+                    tracks,
+                }))
+            }
         }
     }
 

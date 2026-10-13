@@ -783,6 +783,12 @@ pub enum CollectionCmd {
         tracks: Vec<TrackId>,
     },
     SetQuery(CollectionId, String),
+    /// A new playlist at the top level, named, holding `tracks` in order (e.g. a
+    /// session from the History).
+    SavePlaylist {
+        name: String,
+        tracks: Vec<TrackId>,
+    },
 }
 
 /// User actions on the Flow being built.

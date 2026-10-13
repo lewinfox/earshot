@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use earshot_engine::HOTCUES;
 use rusqlite::{Connection, OpenFlags};
 
-pub use read::{JobRow, LibTrack, Memory, Preview, ResultState, TrackCues};
+pub use read::{JobRow, LibTrack, Memory, PlaySession, Preview, ResultState, Sources, TrackCues};
 pub use write::{AnalysisSave, GridSave, ScannedFile, Writer, grid_bpm};
 
 use super::collections::{Collection, CollectionKind, FlowGraph, NodeId, Section};
@@ -243,6 +243,9 @@ pub enum StoreCmd {
     EndPlay {
         deck: usize,
     },
+    /// Answered with [`StoreEvent::Sessions`]. On the writer thread, so it sees every
+    /// play saved before it.
+    ListSessions,
     ListCollections,
     /// Answered with [`StoreEvent::FlowLoaded`].
     LoadFlow(i64),
@@ -343,6 +346,11 @@ pub enum StoreEvent {
     },
     /// Every collection (after any of them changes).
     Collections(Vec<Collection>),
+    /// The play sessions with plays, newest first.
+    Sessions(Vec<PlaySession>),
+    /// What each metadata source says for these tracks (track → field → sources,
+    /// strongest first): from [`Store::request_meta`].
+    MetaSources(std::collections::HashMap<i64, std::collections::HashMap<String, Sources>>),
     /// (id, name, graph), or `None` if there's no such Flow.
     FlowLoaded(Option<(i64, String, FlowGraph)>),
     /// Collections that no longer exist.
@@ -434,6 +442,16 @@ impl Store {
         let reader = self.reader.clone();
         std::thread::spawn(move || match reader.with(|c| read::cues(c, track)) {
             Ok(cues) => sink(StoreEvent::Cues { track, cues }),
+            Err(e) => sink(StoreEvent::Error(e)),
+        });
+    }
+
+    /// Load what each metadata source says for these tracks on a reader thread, and
+    /// send it as [`StoreEvent::MetaSources`].
+    pub fn request_meta(&self, ids: Vec<i64>, sink: EventSink) {
+        let reader = self.reader.clone();
+        std::thread::spawn(move || match reader.with(|c| read::meta_sources(c, &ids)) {
+            Ok(m) => sink(StoreEvent::MetaSources(m)),
             Err(e) => sink(StoreEvent::Error(e)),
         });
     }
