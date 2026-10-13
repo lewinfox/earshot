@@ -11,6 +11,7 @@ use crate::core::command::{AppCmd, Command};
 use crate::core::keymap::Origin;
 use crate::core::view::SettingsTab;
 use crate::ui::theme::THEME;
+use crate::ui::widgets::{Button, Slider};
 
 /// The window's title, which is also its id.
 pub const TITLE: &str = "Settings";
@@ -101,10 +102,11 @@ fn note(ui: &mut Ui, text: &str) {
 fn analysis(ui: &mut Ui, env: &AnalysisEnv) -> Vec<Command> {
     let mut out = vec![];
     let mut n = env.workers;
-    ui.horizontal(|ui| {
-        ui.label("Background workers");
-        ui.add(egui::Slider::new(&mut n, 1..=env.cores.max(1)));
-    });
+    ui.add(Slider::new(
+        "Background workers",
+        &mut n,
+        1..=env.cores.max(1),
+    ));
     note(
         ui,
         "How many tracks the library analyses at once. Each worker holds its own copy \
@@ -128,7 +130,7 @@ fn analysis(ui: &mut Ui, env: &AnalysisEnv) -> Vec<Command> {
     };
     ui.horizontal(|ui| {
         if ui
-            .add_enabled(n > 0, egui::Button::new("Re-analyse stale tracks"))
+            .add_enabled(n > 0, Button::new("Re-analyse stale tracks"))
             .on_hover_text("Analyse them again in the background, grids in the mode they have")
             .clicked()
         {
@@ -169,7 +171,7 @@ fn keymap(ui: &mut Ui, env: &KeymapEnv) -> Option<Command> {
     });
     ui.horizontal(|ui| {
         if ui
-            .button("Reload")
+            .add(Button::new("Reload"))
             .on_hover_text("Read the file again (the built-in keymap if it isn't there)")
             .clicked()
         {
@@ -177,7 +179,7 @@ fn keymap(ui: &mut Ui, env: &KeymapEnv) -> Option<Command> {
         }
         let missing = *env.origin == Origin::BuiltIn;
         if ui
-            .add_enabled(missing, egui::Button::new("Make a copy to edit"))
+            .add_enabled(missing, Button::new("Make a copy to edit"))
             .on_hover_text("Write the built-in keymap to the file, and use it")
             .on_disabled_hover_text("The file is already there")
             .clicked()

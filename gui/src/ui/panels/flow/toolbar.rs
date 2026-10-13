@@ -10,6 +10,7 @@ use crate::core::track::Track;
 use crate::ui::panels::CoreView;
 use crate::ui::theme::THEME;
 use crate::ui::util;
+use crate::ui::widgets::{Button, Toggle};
 
 impl FlowUi {
     pub(super) fn toolbar(&mut self, ui: &mut Ui, v: &CoreView, out: &mut Vec<Command>) {
@@ -80,14 +81,14 @@ impl FlowUi {
             });
         });
         if ui
-            .button("Fit")
+            .add(Button::new("Fit"))
             .on_hover_text("Fit everything in view")
             .clicked()
         {
             self.camera.fit = true;
         }
         if ui
-            .add_enabled(!self.graph.is_empty(), egui::Button::new("Reflow"))
+            .add_enabled(!self.graph.is_empty(), Button::new("Reflow"))
             .on_hover_text("Tidy the layout: one column per step through the set")
             .clicked()
         {
@@ -96,7 +97,7 @@ impl FlowUi {
         }
         let path = self.bake_path().filter(|_| self.flow.is_some());
         if ui
-            .add_enabled(path.is_some(), egui::Button::new("Save as playlist"))
+            .add_enabled(path.is_some(), Button::new("Save as playlist"))
             .on_hover_text(
                 "Save a path through the Flow as a playlist: through the selected \
                  card, or the whole Flow when it's one chain",
@@ -106,9 +107,9 @@ impl FlowUi {
         {
             self.bake(p, out);
         }
-        ui.toggle_value(&mut self.full, "Full screen")
+        ui.add(Toggle::new(&mut self.full, "Full screen"))
             .on_hover_text("Hide the player while planning");
-        let add = ui.button("Add track");
+        let add = ui.add(Button::new("Add track"));
         if add.clicked() {
             self.pop = match self.pop {
                 Some(Pop::Search(_)) => None,

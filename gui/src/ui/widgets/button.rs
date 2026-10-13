@@ -10,13 +10,77 @@ use egui::{
 use crate::ui::theme::THEME;
 use crate::ui::util;
 
-/// Symbols drawn as shapes, for glyphs the font lacks.
-#[derive(Clone, Copy)]
+/// Symbols drawn as shapes, for glyphs the font lacks. [`HwButton`] and
+/// [`RoundButton`](super::RoundButton) draw them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
     /// ▶ ❚❚, like the play button on Mixxx and most controllers.
     PlayPause,
+    /// ▶
+    Play,
+    /// ❚❚
+    Pause,
+    /// ■
+    Stop,
     /// A bar line, red over white, as Rekordbox marks "put the 1 here".
     Downbeat,
+}
+
+impl Icon {
+    /// Draw the icon about `size` points tall, centred in `rect`, in `colour` (the
+    /// downbeat keeps its own colours and fills the rect's height).
+    pub fn paint(self, p: &egui::Painter, rect: Rect, size: f32, colour: Color32) {
+        let c = rect.center();
+        match self {
+            Icon::PlayPause => play_pause(p, rect, size, colour),
+            Icon::Play => {
+                // Right of centre: a triangle's weight is towards its flat side.
+                let (h, w) = (size, size * 0.85);
+                let left = c.x - w * 0.4;
+                p.add(Shape::convex_polygon(
+                    vec![
+                        pos2(left, c.y - h / 2.0),
+                        pos2(left + w, c.y),
+                        pos2(left, c.y + h / 2.0),
+                    ],
+                    colour,
+                    Stroke::NONE,
+                ));
+            }
+            Icon::Pause => {
+                for dx in [-0.27, 0.27] {
+                    p.rect_filled(
+                        Rect::from_center_size(
+                            c + vec2(dx * size, 0.0),
+                            vec2(size * 0.3, size * 0.9),
+                        ),
+                        1,
+                        colour,
+                    );
+                }
+            }
+            Icon::Stop => {
+                p.rect_filled(
+                    Rect::from_center_size(c, vec2(size, size) * 0.75),
+                    1,
+                    colour,
+                );
+            }
+            Icon::Downbeat => {
+                let (half, w) = (rect.height() * 0.32, 3.0);
+                p.rect_filled(
+                    Rect::from_min_max(pos2(c.x - w / 2.0, c.y - half), pos2(c.x + w / 2.0, c.y)),
+                    0,
+                    THEME.downbeat,
+                );
+                p.rect_filled(
+                    Rect::from_min_max(pos2(c.x - w / 2.0, c.y), pos2(c.x + w / 2.0, c.y + half)),
+                    0,
+                    THEME.marker,
+                );
+            }
+        }
+    }
 }
 
 pub struct HwButton<'a> {
@@ -127,27 +191,7 @@ impl Widget for HwButton<'_> {
             );
         }
         match self.icon {
-            Some(Icon::PlayPause) => play_pause(p, rect, self.font, text),
-            Some(Icon::Downbeat) => {
-                let (c, half) = (rect.center(), rect.height() * 0.32);
-                let w = 3.0;
-                p.rect_filled(
-                    Rect::from_min_max(
-                        egui::pos2(c.x - w / 2.0, c.y - half),
-                        egui::pos2(c.x + w / 2.0, c.y),
-                    ),
-                    0,
-                    THEME.downbeat,
-                );
-                p.rect_filled(
-                    Rect::from_min_max(
-                        egui::pos2(c.x - w / 2.0, c.y),
-                        egui::pos2(c.x + w / 2.0, c.y + half),
-                    ),
-                    0,
-                    THEME.marker,
-                );
-            }
+            Some(icon) => icon.paint(p, rect, self.font, text),
             None => match self.caption {
                 Some(caption) => {
                     p.text(

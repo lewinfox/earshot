@@ -2,6 +2,17 @@
 //! mixer: knobs, faders, lit buttons and level meters. Chips (the Camelot key). The
 //! layout pieces: the vertical icon stack and the horizontal tool tabs.
 //!
+//! Everywhere else (Prepare's tools, the library, the Flow, settings) uses the app's
+//! own controls rather than styling egui's by hand:
+//!
+//! - [`RoundButton`]: play, pause and stop, as round icon buttons ([`Icon`] draws
+//!   them, as it does for the lit buttons).
+//! - [`Button`]: normal, primary (the accent) and subtle text buttons.
+//! - [`Toggle`]: a switch for on/off; [`segmented`] for one of a few choices.
+//! - [`Slider`]: a named slider with its value.
+//!
+//! Menus keep egui's own buttons and checkboxes.
+//!
 //! Knobs and faders share one behaviour ([`interact`]): drag to change (Shift for fine
 //! adjust), double-click to reset, mouse wheel to nudge, and a tooltip with the exact
 //! value. What a control means (its range, default and how its value reads) is a
@@ -13,6 +24,10 @@ pub mod fader;
 pub mod icon_stack;
 pub mod knob;
 pub mod meter;
+pub mod round_button;
+pub mod slider;
+pub mod text_button;
+pub mod toggle;
 pub mod tool_tabs;
 
 pub use button::{HwButton, Icon, held};
@@ -21,6 +36,10 @@ pub use fader::Fader;
 pub use icon_stack::{Opens, StackItem, icon_stack};
 pub use knob::Knob;
 pub use meter::Meter;
+pub use round_button::{RoundButton, RoundSize};
+pub use slider::Slider;
+pub use text_button::Button;
+pub use toggle::{Seg, Toggle, segmented};
 pub use tool_tabs::{Tab, tool_tabs};
 
 use egui::{Response, Ui, Vec2};
