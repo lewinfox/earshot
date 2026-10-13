@@ -1742,3 +1742,140 @@ fn flow_edits_from_the_library_undo_exactly() {
     let ids: Vec<_> = flow(&w).nodes.iter().map(|n| n.id).collect();
     assert_eq!(ids, vec![1, 3]);
 }
+
+/// A made-up vector: track `t`'s sound, nearest track `t + 1000`'s.
+fn vector(t: i64, dim: usize) -> Vec<f32> {
+    // Pseudo-random from t % 1000 (xorshift), so unrelated tracks point every which
+    // way; t / 1000 nudges it a little.
+    let mut x = (t % 1000) as u64 * 0x9E37_79B9_7F4A_7C15 + 1;
+    (0..dim)
+        .map(|i| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+                + (t / 1000) as f32 * 0.01 * (i as f32 * 0.5).cos()
+        })
+        .collect()
+}
+
+/// The in-memory block follows the database: loaded on opening, added to as vectors
+/// are saved, without a removed track's (and with it again after undo).
+#[test]
+fn embeddings_are_loaded_once_and_kept_in_step() {
+    use crate::core::embeddings::{CLAP_DIM, CLAP_MODEL};
+    let (dir, mut w, a, b) = two_tracks("embeddings");
+    let block = w.embeddings();
+    assert!(block.read().unwrap().is_empty());
+    w.save_embedding(a, CLAP_MODEL, &vector(1, CLAP_DIM))
+        .unwrap();
+    w.save_embedding(b, CLAP_MODEL, &vector(1001, CLAP_DIM))
+        .unwrap();
+    w.save_embedding(b, "other", &[1.0, 2.0]).unwrap();
+    assert!(w.save_embedding(b, CLAP_MODEL, &[f32::NAN]).is_err());
+    {
+        let e = block.read().unwrap();
+        assert_eq!(e.len(), 2);
+        let near = e.like_track(a, 5, |_| false);
+        assert_eq!(near.len(), 1);
+        assert_eq!(near[0].0, b);
+        assert!(near[0].1 > 0.999, "the same sound");
+    }
+
+    let removal = w
+        .edit(EditCmd::RemoveFromLibrary(vec![b]))
+        .unwrap()
+        .unwrap();
+    assert!(block.read().unwrap().get(b).is_none());
+    w.apply_edit(&removal.inverse()).unwrap();
+    assert!(block.read().unwrap().get(b).is_some());
+
+    // A new run loads them all at once, as one block.
+    drop(w);
+    let w = Writer::new(open_writer(&dir.join(FILE_NAME)).unwrap());
+    let e = w.embeddings();
+    let e = e.read().unwrap();
+    assert_eq!(e.len(), 2);
+    assert_eq!(e.like_track(b, 1, |_| false)[0].0, a);
+}
+
+/// Sound-alike search, before (every vector read from the database for each search)
+/// and after (one scan over the block in memory). 5,000 tracks of 512 floats.
+/// `cargo test --release -p earshot-gui -- --ignored embedding_search_speed --nocapture`
+#[test]
+#[ignore]
+fn embedding_search_speed() {
+    use std::time::Instant;
+
+    use crate::core::embeddings::{self, CLAP_DIM, CLAP_MODEL};
+    const N: i64 = 5000;
+    const SEARCHES: u32 = 20;
+    let (dir, w) = setup("embedding-speed");
+    {
+        let tx = w.conn();
+        tx.execute_batch("BEGIN").unwrap();
+        for t in 1..=N {
+            tx.execute("INSERT INTO tracks(id, added_at) VALUES (?1, 0)", [t])
+                .unwrap();
+            tx.execute(
+                "INSERT INTO embeddings(track_id, model, dim, vector) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    t,
+                    CLAP_MODEL,
+                    CLAP_DIM as i64,
+                    embeddings::to_blob(&vector(t, CLAP_DIM))
+                ],
+            )
+            .unwrap();
+        }
+        tx.execute_batch("COMMIT").unwrap();
+    }
+
+    // Before: read and normalise every vector, then score, for each search.
+    let from_db = |q: i64| {
+        let rows = read::embeddings(w.conn(), CLAP_MODEL, None).unwrap();
+        let query = embeddings::normalised(&rows.iter().find(|r| r.0 == q).unwrap().1).unwrap();
+        let mut scored: Vec<(i64, f32)> = rows
+            .iter()
+            .filter(|r| r.0 != q)
+            .map(|(id, v)| {
+                (
+                    *id,
+                    embeddings::dot(&embeddings::normalised(v).unwrap(), &query),
+                )
+            })
+            .collect();
+        scored.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+        scored.truncate(20);
+        scored
+    };
+    let t = Instant::now();
+    let mut before = vec![];
+    for i in 0..SEARCHES {
+        before = from_db(1 + i as i64);
+    }
+    let db_ms = t.elapsed().as_secs_f64() * 1000.0 / SEARCHES as f64;
+
+    let t = Instant::now();
+    let block = Writer::new(open_writer(&dir.join(FILE_NAME)).unwrap()).embeddings();
+    let load_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let block = block.read().unwrap();
+    assert_eq!(block.len(), N as usize);
+    let t = Instant::now();
+    let mut after = vec![];
+    for i in 0..SEARCHES {
+        after = block.like_track(1 + i as i64, 20, |_| false);
+    }
+    let mem_ms = t.elapsed().as_secs_f64() * 1000.0 / SEARCHES as f64;
+    let ids = |v: &[(i64, f32)]| v.iter().map(|x| x.0).collect::<Vec<_>>();
+    assert_eq!(ids(&before)[0], ids(&after)[0]);
+    assert_eq!(
+        ids(&after)[0],
+        SEARCHES as i64 + 1000,
+        "its own sound, 1000 on"
+    );
+    eprintln!(
+        "{N} x {CLAP_DIM}: from the database {db_ms:.2} ms per search; \
+         loading the block {load_ms:.1} ms once, then {mem_ms:.3} ms per search"
+    );
+}

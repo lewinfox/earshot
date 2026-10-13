@@ -15,7 +15,7 @@ mod write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use earshot_engine::HOTCUES;
 use rusqlite::{Connection, OpenFlags};
@@ -25,6 +25,7 @@ pub use write::{AnalysisSave, GridSave, ScannedFile, Writer, grid_bpm};
 
 use super::collections::{Collection, CollectionKind, FlowGraph, NodeId, Section};
 use super::edit::{Edit, EditCmd};
+use super::embeddings::Embeddings;
 
 /// Bump when `engine/src/waveform.rs` changes its output, so cached waveforms are redone.
 pub const WAVEFORM_VERSION: i64 = 1;
@@ -187,6 +188,14 @@ pub enum StoreCmd {
         track: i64,
         field: String,
         value: Option<String>,
+    },
+    /// A track's embedding from `model` (e.g. `embeddings::CLAP_MODEL`). Kept in the in-memory
+    /// block too ([`Store::embeddings`]) when it's that model's.
+    #[allow(dead_code)] // for the CLAP analyser to come; tests use it
+    SaveEmbedding {
+        track: i64,
+        model: String,
+        vector: Vec<f32>,
     },
     /// The audio hash of a file, worked out in the background.
     SetContentHash {
@@ -374,6 +383,7 @@ pub struct Store {
     tx: Sender<Job>,
     pub reader: Reader,
     next_collection: Arc<AtomicI64>,
+    embeddings: Arc<RwLock<Embeddings>>,
 }
 
 impl Store {
@@ -387,6 +397,7 @@ impl Store {
         )?;
         let (tx, rx) = channel::<Job>();
         let mut writer = Writer::new(conn);
+        let embeddings = writer.embeddings();
         std::thread::Builder::new()
             .name("earshot-store".into())
             .spawn(move || {
@@ -405,7 +416,16 @@ impl Store {
             tx,
             reader: Reader::new(path),
             next_collection: Arc::new(AtomicI64::new(next)),
+            embeddings,
         })
+    }
+
+    /// Every library track's `embeddings::CLAP_MODEL` embedding, in one block in memory, for
+    /// sound-alike search (`core::embeddings`). Loaded when the Store opened and kept
+    /// up to date by the writer; read-lock it only for a search.
+    #[allow(dead_code)] // for the Vibe suggestion feature to come; tests use it
+    pub fn embeddings(&self) -> &Arc<RwLock<Embeddings>> {
+        &self.embeddings
     }
 
     /// Queue a command. Never blocks; errors come back as [`StoreEvent::Error`].

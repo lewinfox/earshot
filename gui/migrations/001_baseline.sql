@@ -146,6 +146,8 @@ CREATE TABLE blobs (
   PRIMARY KEY (track_id, kind)
 ) STRICT;
 
+-- A vector per track per model (e.g. 'clap'): `dim` little-endian f32s. The app searches
+-- them in memory (core/embeddings.rs), loaded once when the Store opens.
 CREATE TABLE embeddings (
   track_id  INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
   model     TEXT NOT NULL,

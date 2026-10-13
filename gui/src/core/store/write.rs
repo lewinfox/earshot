@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::decode::TrackTags;
@@ -19,6 +20,7 @@ use crate::core::collections::{
     self, CollectionKind, FlowGraph, FlowNode, NodeId, Section, Spacing,
 };
 use crate::core::edit::Edit;
+use crate::core::embeddings::{self, CLAP_MODEL, Embeddings};
 use crate::core::hash::Hash;
 use crate::core::keys::{parse_key, pitch_class};
 use crate::core::query;
@@ -83,15 +85,71 @@ pub struct Writer {
     events: Vec<StoreEvent>,
     /// The play session plays are saved in (`StoreCmd::StartSession`).
     session: Option<i64>,
+    /// Every library track's [`CLAP_MODEL`] vector, loaded here and kept in step with
+    /// what this writer saves (`Store::embeddings` shares it).
+    embeddings: Arc<RwLock<Embeddings>>,
 }
 
 impl Writer {
     pub(super) fn new(conn: Connection) -> Writer {
+        let mut block = Embeddings::default();
+        match read::embeddings(&conn, CLAP_MODEL, None) {
+            Ok(rows) => {
+                for (id, v) in rows {
+                    block.insert(id, &v);
+                }
+            }
+            Err(e) => eprintln!("loading the embeddings: {e}"),
+        }
         Writer {
             conn,
             events: vec![],
             session: None,
+            embeddings: Arc::new(RwLock::new(block)),
         }
+    }
+
+    /// The in-memory embeddings, shared.
+    pub fn embeddings(&self) -> Arc<RwLock<Embeddings>> {
+        self.embeddings.clone()
+    }
+
+    /// Save a track's embedding from `model`. A [`CLAP_MODEL`] one goes into the
+    /// in-memory block too.
+    pub fn save_embedding(&mut self, track: i64, model: &str, vector: &[f32]) -> Result<()> {
+        if vector.is_empty() || vector.iter().any(|x| !x.is_finite()) {
+            return Err(StoreError::Refused("an embedding must be finite numbers"));
+        }
+        self.conn
+            .prepare_cached(
+                "INSERT INTO embeddings(track_id, model, dim, vector) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(track_id, model) DO UPDATE SET dim = excluded.dim,
+                   vector = excluded.vector",
+            )?
+            .execute(params![
+                track,
+                model,
+                vector.len() as i64,
+                embeddings::to_blob(vector)
+            ])?;
+        if model == CLAP_MODEL {
+            self.refresh_embeddings(&[track])?;
+        }
+        Ok(())
+    }
+
+    /// Bring these tracks' rows of the in-memory block in line with the database:
+    /// a library track's vector in, a removed or merged-away track's out.
+    pub(super) fn refresh_embeddings(&mut self, tracks: &[i64]) -> Result<()> {
+        let found = read::embeddings(&self.conn, CLAP_MODEL, Some(tracks))?;
+        let mut block = self.embeddings.write().unwrap();
+        for &t in tracks {
+            match found.iter().find(|f| f.0 == t) {
+                Some((_, v)) if block.insert(t, v) => {}
+                _ => block.remove(t),
+            }
+        }
+        Ok(())
     }
 
     pub fn emit(&mut self, e: StoreEvent) {
@@ -138,6 +196,11 @@ impl Writer {
                 field,
                 value,
             } => self.set_meta(track, &field, "user", value.as_deref()),
+            StoreCmd::SaveEmbedding {
+                track,
+                model,
+                vector,
+            } => self.save_embedding(track, &model, &vector),
             StoreCmd::SetContentHash { file, hash } => {
                 self.set_content_hash(file, &hash).map(|_| ())
             }
@@ -390,7 +453,8 @@ impl Writer {
             params![merged.map_or(track, |m| m.1), hash.to_vec()],
         )?;
         tx.commit()?;
-        if merged.is_some() {
+        if let Some((from, into)) = merged {
+            self.refresh_embeddings(&[from, into])?;
             self.emit_library()?;
             self.emit_collections()?;
         }
@@ -1417,6 +1481,10 @@ fn merge(c: &Connection, from: i64, into: i64) -> Result<()> {
     )?;
     c.execute(
         "UPDATE OR IGNORE blobs SET track_id = ?2 WHERE track_id = ?1",
+        p,
+    )?;
+    c.execute(
+        "UPDATE OR IGNORE embeddings SET track_id = ?2 WHERE track_id = ?1",
         p,
     )?;
     c.execute(

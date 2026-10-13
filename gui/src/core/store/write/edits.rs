@@ -460,6 +460,7 @@ impl Writer {
                     }
                 }
                 tx.commit()?;
+                self.refresh_embeddings(tracks)?;
                 self.emit_library()
             }
             Edit::FlowGraph { flow, ops, .. } => {

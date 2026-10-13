@@ -9,6 +9,8 @@ pub mod bus;
 pub mod collections;
 pub mod command;
 pub mod edit;
+#[allow(dead_code)] // searched by the Vibe suggestion feature to come; tests use it
+pub mod embeddings;
 pub mod hash;
 pub mod history;
 pub mod index;

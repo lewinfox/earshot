@@ -614,6 +614,42 @@ pub fn flow(c: &Connection, id: i64) -> Result<Option<(i64, String, FlowGraph)>>
     Ok(Some((id, name, flow_graph(c, id)?)))
 }
 
+/// The library's vectors from one embedding model (of these tracks, or all): a
+/// removed track's are left out, and so is a blob that isn't whole floats of its
+/// `dim`.
+pub fn embeddings(
+    c: &Connection,
+    model: &str,
+    tracks: Option<&[i64]>,
+) -> Result<Vec<(i64, Vec<f32>)>> {
+    let sql = "SELECT e.track_id, e.dim, e.vector FROM embeddings e
+               JOIN tracks t ON t.id = e.track_id
+               WHERE e.model = ?1 AND t.deleted_at IS NULL";
+    let decode = |r: &rusqlite::Row| -> rusqlite::Result<Option<(i64, Vec<f32>)>> {
+        let (id, dim, blob): (i64, i64, Vec<u8>) = (r.get(0)?, r.get(1)?, r.get(2)?);
+        Ok(crate::core::embeddings::from_blob(&blob)
+            .filter(|v| v.len() as i64 == dim)
+            .map(|v| (id, v)))
+    };
+    let mut out = vec![];
+    match tracks {
+        None => {
+            for row in c.prepare(sql)?.query_map([model], decode)? {
+                out.extend(row?);
+            }
+        }
+        Some(ids) => {
+            let mut st = c.prepare_cached(&format!("{sql} AND e.track_id = ?2"))?;
+            for &id in ids {
+                for row in st.query_map(params![model, id], decode)? {
+                    out.extend(row?);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Where a Flow's canvas was looking, if that was saved (and reads as a camera).
 pub fn flow_camera(c: &Connection, id: i64) -> Result<Option<FlowCamera>> {
     let json: Option<String> = c
