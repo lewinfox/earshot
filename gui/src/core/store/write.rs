@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::decode::TrackTags;
@@ -11,15 +12,17 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use super::read::{self, JOB_PREFIX, JobRow, source_rank, waveform_params};
 use super::{
-    CueKind, GridSource, Result, StoreCmd, StoreError, StoreEvent, WAVEFORM_VERSION, bytes_path,
-    now, path_bytes,
+    CueKind, FlowCamera, GridSource, Result, StoreCmd, StoreError, StoreEvent, WAVEFORM_VERSION,
+    bytes_path, now, path_bytes,
 };
 use crate::core::analysis::registry::{self, AnalyserId};
 use crate::core::collections::{
     self, CollectionKind, FlowGraph, FlowNode, NodeId, Section, Spacing,
 };
 use crate::core::edit::Edit;
+use crate::core::embeddings::{self, CLAP_MODEL, Embeddings};
 use crate::core::hash::Hash;
+use crate::core::keys::{parse_key, pitch_class};
 use crate::core::query;
 
 mod edits;
@@ -82,15 +85,71 @@ pub struct Writer {
     events: Vec<StoreEvent>,
     /// The play session plays are saved in (`StoreCmd::StartSession`).
     session: Option<i64>,
+    /// Every library track's [`CLAP_MODEL`] vector, loaded here and kept in step with
+    /// what this writer saves (`Store::embeddings` shares it).
+    embeddings: Arc<RwLock<Embeddings>>,
 }
 
 impl Writer {
     pub(super) fn new(conn: Connection) -> Writer {
+        let mut block = Embeddings::default();
+        match read::embeddings(&conn, CLAP_MODEL, None) {
+            Ok(rows) => {
+                for (id, v) in rows {
+                    block.insert(id, &v);
+                }
+            }
+            Err(e) => eprintln!("loading the embeddings: {e}"),
+        }
         Writer {
             conn,
             events: vec![],
             session: None,
+            embeddings: Arc::new(RwLock::new(block)),
         }
+    }
+
+    /// The in-memory embeddings, shared.
+    pub fn embeddings(&self) -> Arc<RwLock<Embeddings>> {
+        self.embeddings.clone()
+    }
+
+    /// Save a track's embedding from `model`. A [`CLAP_MODEL`] one goes into the
+    /// in-memory block too.
+    pub fn save_embedding(&mut self, track: i64, model: &str, vector: &[f32]) -> Result<()> {
+        if vector.is_empty() || vector.iter().any(|x| !x.is_finite()) {
+            return Err(StoreError::Refused("an embedding must be finite numbers"));
+        }
+        self.conn
+            .prepare_cached(
+                "INSERT INTO embeddings(track_id, model, dim, vector) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(track_id, model) DO UPDATE SET dim = excluded.dim,
+                   vector = excluded.vector",
+            )?
+            .execute(params![
+                track,
+                model,
+                vector.len() as i64,
+                embeddings::to_blob(vector)
+            ])?;
+        if model == CLAP_MODEL {
+            self.refresh_embeddings(&[track])?;
+        }
+        Ok(())
+    }
+
+    /// Bring these tracks' rows of the in-memory block in line with the database:
+    /// a library track's vector in, a removed or merged-away track's out.
+    pub(super) fn refresh_embeddings(&mut self, tracks: &[i64]) -> Result<()> {
+        let found = read::embeddings(&self.conn, CLAP_MODEL, Some(tracks))?;
+        let mut block = self.embeddings.write().unwrap();
+        for &t in tracks {
+            match found.iter().find(|f| f.0 == t) {
+                Some((_, v)) if block.insert(t, v) => {}
+                _ => block.remove(t),
+            }
+        }
+        Ok(())
     }
 
     pub fn emit(&mut self, e: StoreEvent) {
@@ -142,6 +201,11 @@ impl Writer {
                 field,
                 value,
             } => self.set_meta(track, &field, "user", value.as_deref()),
+            StoreCmd::SaveEmbedding {
+                track,
+                model,
+                vector,
+            } => self.save_embedding(track, &model, &vector),
             StoreCmd::SetContentHash { file, hash } => {
                 self.set_content_hash(file, &hash).map(|_| ())
             }
@@ -163,9 +227,14 @@ impl Writer {
             StoreCmd::ListCollections => self.emit_collections(),
             StoreCmd::LoadFlow(id) => {
                 let f = read::flow(&self.conn, id)?;
-                self.emit(StoreEvent::FlowLoaded(f));
+                let camera = match f {
+                    Some(_) => read::flow_camera(&self.conn, id)?,
+                    None => None,
+                };
+                self.emit(StoreEvent::FlowLoaded(f, camera));
                 Ok(())
             }
+            StoreCmd::SaveFlowCamera { id, camera } => self.save_flow_camera(id, camera),
             StoreCmd::Create {
                 id,
                 parent,
@@ -389,7 +458,8 @@ impl Writer {
             params![merged.map_or(track, |m| m.1), hash.to_vec()],
         )?;
         tx.commit()?;
-        if merged.is_some() {
+        if let Some((from, into)) = merged {
+            self.refresh_embeddings(&[from, into])?;
             self.emit_library()?;
             self.emit_collections()?;
         }
@@ -1010,6 +1080,19 @@ impl Writer {
         self.emit_collections()
     }
 
+    /// Where a Flow's canvas is looking. Not an edit: the Flow's `updated_at` stays.
+    pub fn save_flow_camera(&mut self, id: i64, camera: FlowCamera) -> Result<()> {
+        let json = serde_json::to_string(&camera).expect("four numbers serialise");
+        let n = self.conn.execute(
+            "UPDATE collections SET view_state = ?2 WHERE id = ?1 AND kind = 'flow'",
+            params![id, json],
+        )?;
+        if n == 0 {
+            return Err(StoreError::NoCollection(id));
+        }
+        Ok(())
+    }
+
     /// A smart playlist's query. Refused if it doesn't parse.
     pub fn set_query(&mut self, id: i64, q: &str) -> Result<()> {
         query::parse(q).map_err(|e| StoreError::BadQuery(e.to_string()))?;
@@ -1235,6 +1318,44 @@ fn put_meta(
             )?
             .execute(params![track, field, source])?,
     };
+    if field == "key" {
+        refresh_key(c, track)?;
+    }
+    Ok(())
+}
+
+/// Copy the track's key (the resolved `key` field, if it reads as one) into
+/// `tracks.key_pc` and `key_minor`, so queries can test it without parsing text.
+fn refresh_key(c: &Connection, track: i64) -> Result<()> {
+    let text: Option<String> = c
+        .prepare_cached(
+            "SELECT value FROM track_meta_resolved WHERE track_id = ?1 AND field = 'key'",
+        )?
+        .query_row([track], |r| r.get(0))
+        .optional()?;
+    let key = text.as_deref().and_then(parse_key);
+    c.prepare_cached("UPDATE tracks SET key_pc = ?2, key_minor = ?3 WHERE id = ?1")?
+        .execute(params![
+            track,
+            key.map(pitch_class),
+            key.map(|k| k.minor as i64)
+        ])?;
+    Ok(())
+}
+
+/// Fill `key_pc` / `key_minor` for tracks that have a key but not those columns (a
+/// database from before they were kept). Run when the database is opened.
+pub(super) fn fill_keys(c: &Connection) -> Result<()> {
+    let ids: Vec<i64> = c
+        .prepare(
+            "SELECT t.id FROM tracks t WHERE t.key_pc IS NULL AND EXISTS
+               (SELECT 1 FROM track_meta m WHERE m.track_id = t.id AND m.field = 'key')",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for id in ids {
+        refresh_key(c, id)?;
+    }
     Ok(())
 }
 
@@ -1369,11 +1490,16 @@ fn merge(c: &Connection, from: i64, into: i64) -> Result<()> {
         p,
     )?;
     c.execute(
+        "UPDATE OR IGNORE embeddings SET track_id = ?2 WHERE track_id = ?1",
+        p,
+    )?;
+    c.execute(
         "UPDATE tracks SET duration_s = coalesce((SELECT duration_s FROM tracks WHERE id = ?1), duration_s)
          WHERE id = ?2",
         p,
     )?;
     c.execute("DELETE FROM track_search WHERE rowid = ?1", [from])?;
     c.execute("DELETE FROM tracks WHERE id = ?1", [from])?;
+    refresh_key(c, into)?;
     reindex(c, into)
 }

@@ -387,6 +387,32 @@ impl JobQueue {
         (dropped, cancel)
     }
 
+    /// Drop everything for these tracks (removed from the library): what's waiting,
+    /// and what's running, on any lane (told to drop its results). Returns the tracks
+    /// that had something, and the running worker jobs to cancel.
+    pub fn remove(&mut self, tracks: &[i64]) -> (Vec<i64>, Vec<(Lane, u64)>) {
+        let mut cancel = vec![];
+        for (&lane, job) in &self.lanes {
+            if tracks.contains(&job.track) {
+                job.superseded.store(true, Ordering::Relaxed);
+                cancel.extend(job.worker_job.map(|j| (lane, j)));
+            }
+        }
+        let mut dropped: Vec<i64> = vec![];
+        self.entries.retain(|k, _| {
+            let gone = tracks.contains(&k.0);
+            if gone {
+                dropped.push(k.0);
+            }
+            !gone
+        });
+        dropped.dedup(); // entries are sorted by track
+        for t in tracks {
+            self.audio.remove(t);
+        }
+        (dropped, cancel)
+    }
+
     /// The lane is done with its track (finished, failed, or superseded). Returns the
     /// track, and whether nothing more is queued for it.
     pub fn finish(&mut self, lane: Lane) -> Option<(i64, bool)> {
@@ -472,6 +498,36 @@ mod tests {
         assert_eq!(q.finish(Lane::Background(0)), Some((1, true)));
         assert!(q.take(Lane::Background(0)).is_none());
         assert_eq!(q.take(Lane::Deck).unwrap().track, 9);
+    }
+
+    /// A track removed from the library: its waiting work goes, its running work is
+    /// cancelled, and other tracks are untouched.
+    #[test]
+    fn removing_tracks_drops_and_cancels_their_work() {
+        let mut q = JobQueue::new(4);
+        for t in [1, 2, 3] {
+            q.request(t, &grid(Background, Want::Missing, Mode::Static), None);
+        }
+        q.request(9, &grid(Deck, Want::Missing, Mode::Static), None);
+        let running = q.take(Lane::Background(0)).unwrap();
+        assert_eq!(running.track, 1);
+        assert!(q.worker_job(Lane::Background(0), 5));
+        let deck = q.take(Lane::Deck).unwrap();
+        assert_eq!(deck.track, 9);
+
+        let (dropped, cancel) = q.remove(&[1, 3, 9, 42]);
+        assert_eq!(dropped, [1, 3, 9]);
+        // The deck lane hadn't sent its job yet: it learns when it does.
+        assert_eq!(cancel, [(Lane::Background(0), 5)]);
+        assert!(running.superseded.load(Ordering::Relaxed));
+        assert!(deck.superseded.load(Ordering::Relaxed));
+        assert!(!q.worker_job(Lane::Deck, 6));
+        assert!(!q.has(1) && !q.has(3) && !q.has(9));
+        assert_eq!(q.requests(2), grid(Background, Want::Missing, Mode::Static));
+        // The lanes end with nothing left for their tracks, and 2 runs next.
+        assert_eq!(q.finish(Lane::Background(0)), Some((1, true)));
+        assert_eq!(q.finish(Lane::Deck), Some((9, true)));
+        assert_eq!(q.take(Lane::Background(0)).unwrap().track, 2);
     }
 
     #[test]

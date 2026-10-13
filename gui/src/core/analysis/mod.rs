@@ -230,6 +230,26 @@ impl Analyser {
         tracks.len()
     }
 
+    /// Tracks removed from the library: drop their queued analysis, cancel any that's
+    /// running (not counted as a failure), and clear their saved queue rows. Putting
+    /// them back (undo) doesn't queue them again.
+    pub fn forget(&self, tracks: &[i64]) {
+        let s = &self.shared;
+        let mut q = s.queue.lock().unwrap();
+        let (dropped, cancel) = q.remove(tracks);
+        for &t in &dropped {
+            s.save_queue(&q, t);
+        }
+        drop(q);
+        for (lane, job) in cancel {
+            s.worker(lane).cancel(job);
+        }
+        for &t in &dropped {
+            s.emit(AnalysisEvent::new(t, None));
+        }
+        s.ready.notify_all();
+    }
+
     /// Tell the queue whether a deck is playing, which holds background jobs back.
     pub fn set_playing(&self, on: bool) {
         let mut q = self.shared.queue.lock().unwrap();

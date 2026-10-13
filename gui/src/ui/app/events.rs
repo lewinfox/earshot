@@ -134,7 +134,7 @@ impl EarshotApp {
                     self.cues.insert(track, Arc::new(cues));
                 }
             }
-            StoreEvent::FlowLoaded(flow) => self.load_flow(flow),
+            StoreEvent::FlowLoaded(flow, camera) => self.load_flow(flow, camera),
             StoreEvent::Deleted(ids) => {
                 if self.flow().flow.is_some_and(|id| ids.contains(&id)) {
                     self.flow().load(None, None);

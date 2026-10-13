@@ -317,6 +317,14 @@ fn copies_of_the_same_audio_are_duplicates() {
     // Removing one from the library (an undoable edit) leaves no duplicate; the file
     // stays, a rescan doesn't bring it back, and undo does.
     let copy = dupes[0][1];
+    let job = |t: i64| JobRow {
+        track: t,
+        analyser: "grid".into(),
+        want: "missing".into(),
+        params: None,
+    };
+    w.save_jobs(copy, &[job(copy)]).unwrap();
+    w.save_jobs(dupes[0][0], &[job(dupes[0][0])]).unwrap();
     let e = w
         .edit(crate::core::edit::EditCmd::RemoveFromLibrary(vec![
             copy, copy,
@@ -336,6 +344,13 @@ fn copies_of_the_same_audio_are_duplicates() {
             .any(|e| matches!(e, StoreEvent::Library(l) if l.len() == 2))
     );
     assert!(read::duplicates(w.conn()).unwrap().is_empty());
+    // Its saved analysis queue went with it; the other track's stays.
+    let queued: Vec<i64> = read::queued_jobs(w.conn())
+        .unwrap()
+        .iter()
+        .map(|j| j.track)
+        .collect();
+    assert_eq!(queued, [dupes[0][0]]);
     // (Every file found, the copy changed.)
     let music = dir.join("music");
     let found: Vec<PathBuf> = ["a.mp3", "copy of a.mp3", "b.mp3"]
@@ -1084,7 +1099,12 @@ fn smart_playlists_run_their_query_in_sql_like_in_memory() {
         "bpm:141",
         "key:8A",
         "key:C",
+        "key:Cmaj",
+        "key:9a",
         "-key:Am",
+        "key:8B OR key:9A",
+        "sort:key",
+        "sort:-key",
         "is:analysed",
         "-is:analysed",
         "in:9",
@@ -1123,6 +1143,30 @@ fn smart_playlists_run_their_query_in_sql_like_in_memory() {
     assert!(matches!(
         w.set_query(1, "bpm:"),
         Err(StoreError::BadQuery(_))
+    ));
+}
+
+/// A Flow's camera is kept with it and comes back with it; only Flows have one.
+#[test]
+fn a_flows_camera_round_trips_with_the_flow() {
+    let (_dir, mut w) = setup("flow-camera");
+    w.create_collection(4, None, Flow, "F", None).unwrap();
+    w.create_collection(5, None, Crate, "C", None).unwrap();
+    let loaded = |w: &mut Writer| {
+        w.take_events();
+        w.apply(StoreCmd::LoadFlow(4)).unwrap();
+        w.take_events().into_iter().find_map(|e| match e {
+            StoreEvent::FlowLoaded(f, camera) => Some((f.map(|f| f.0), camera)),
+            _ => None,
+        })
+    };
+    assert_eq!(loaded(&mut w), Some((Some(4), None)));
+    let camera = [-100.5, -50.0, 900.0, 450.25];
+    w.apply(StoreCmd::SaveFlowCamera { id: 4, camera }).unwrap();
+    assert_eq!(loaded(&mut w), Some((Some(4), Some(camera))));
+    assert!(matches!(
+        w.save_flow_camera(5, camera),
+        Err(StoreError::NoCollection(5))
     ));
 }
 
@@ -1181,7 +1225,7 @@ fn the_store_thread_writes_and_reports() {
             .any(|e| matches!(e, StoreEvent::Library(l) if l.len() == 1))
     );
     assert!(events.iter().any(
-        |e| matches!(e, StoreEvent::FlowLoaded(Some((f, _, g))) if *f == flow && g.nodes.len() == 1)
+        |e| matches!(e, StoreEvent::FlowLoaded(Some((f, _, g)), _) if *f == flow && g.nodes.len() == 1)
     ));
     assert!(
         events
@@ -1340,6 +1384,50 @@ fn a_metadata_edit_undoes_back_to_the_tag_and_redoes() {
             .iter()
             .any(|e| matches!(e, StoreEvent::Edited(_)))
     );
+}
+
+fn key_cols(w: &Writer, id: i64) -> (Option<i64>, Option<i64>) {
+    w.conn()
+        .query_row(
+            "SELECT key_pc, key_minor FROM tracks WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+}
+
+/// `key_pc` / `key_minor` follow the key that wins: the tag's, the user's over it,
+/// the tag's again when the user's is cleared; nothing for a key that doesn't read.
+#[test]
+fn the_key_columns_follow_the_resolved_key() {
+    let (dir, mut w, a) = one_track("key-cols");
+    assert_eq!(key_cols(&w, a), (Some(9), Some(1)), "the tag's 8A: A minor");
+    w.edit(EditCmd::Set {
+        tracks: vec![a],
+        values: vec![(Field::Key, text("F#"))],
+    })
+    .unwrap();
+    let e = edited(&mut w);
+    assert_eq!(key_cols(&w, a), (Some(6), Some(0)));
+    w.apply_edit(&e.inverse()).unwrap();
+    assert_eq!(key_cols(&w, a), (Some(9), Some(1)), "undo: the tag's again");
+    w.set_meta(a, "key", "user", Some("not a key")).unwrap();
+    assert_eq!(key_cols(&w, a), (None, None));
+    w.set_meta(a, "key", "user", None).unwrap();
+    // A rescan with a new tag.
+    let mut f = file(&dir.join("music/a.mp3"), "A", None);
+    f.size = 2000;
+    f.tags.key = Some("Ebm".into());
+    scan(&mut w, &dir, &[f]);
+    assert_eq!(key_cols(&w, a), (Some(3), Some(1)));
+
+    // A database from before the columns were kept gets them on opening.
+    w.conn()
+        .execute("UPDATE tracks SET key_pc = NULL, key_minor = NULL", [])
+        .unwrap();
+    drop(w);
+    let w = Writer::new(open_writer(&dir.join(FILE_NAME)).unwrap());
+    assert_eq!(key_cols(&w, a), (Some(3), Some(1)));
 }
 
 /// A bulk edit only changes the fields it lists: tracks keep their own (mixed)
@@ -1730,4 +1818,141 @@ fn flow_edits_from_the_library_undo_exactly() {
     w.apply_edit(&remove).unwrap();
     let ids: Vec<_> = flow(&w).nodes.iter().map(|n| n.id).collect();
     assert_eq!(ids, vec![1, 3]);
+}
+
+/// A made-up vector: track `t`'s sound, nearest track `t + 1000`'s.
+fn vector(t: i64, dim: usize) -> Vec<f32> {
+    // Pseudo-random from t % 1000 (xorshift), so unrelated tracks point every which
+    // way; t / 1000 nudges it a little.
+    let mut x = (t % 1000) as u64 * 0x9E37_79B9_7F4A_7C15 + 1;
+    (0..dim)
+        .map(|i| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+                + (t / 1000) as f32 * 0.01 * (i as f32 * 0.5).cos()
+        })
+        .collect()
+}
+
+/// The in-memory block follows the database: loaded on opening, added to as vectors
+/// are saved, without a removed track's (and with it again after undo).
+#[test]
+fn embeddings_are_loaded_once_and_kept_in_step() {
+    use crate::core::embeddings::{CLAP_DIM, CLAP_MODEL};
+    let (dir, mut w, a, b) = two_tracks("embeddings");
+    let block = w.embeddings();
+    assert!(block.read().unwrap().is_empty());
+    w.save_embedding(a, CLAP_MODEL, &vector(1, CLAP_DIM))
+        .unwrap();
+    w.save_embedding(b, CLAP_MODEL, &vector(1001, CLAP_DIM))
+        .unwrap();
+    w.save_embedding(b, "other", &[1.0, 2.0]).unwrap();
+    assert!(w.save_embedding(b, CLAP_MODEL, &[f32::NAN]).is_err());
+    {
+        let e = block.read().unwrap();
+        assert_eq!(e.len(), 2);
+        let near = e.like_track(a, 5, |_| false);
+        assert_eq!(near.len(), 1);
+        assert_eq!(near[0].0, b);
+        assert!(near[0].1 > 0.999, "the same sound");
+    }
+
+    let removal = w
+        .edit(EditCmd::RemoveFromLibrary(vec![b]))
+        .unwrap()
+        .unwrap();
+    assert!(block.read().unwrap().get(b).is_none());
+    w.apply_edit(&removal.inverse()).unwrap();
+    assert!(block.read().unwrap().get(b).is_some());
+
+    // A new run loads them all at once, as one block.
+    drop(w);
+    let w = Writer::new(open_writer(&dir.join(FILE_NAME)).unwrap());
+    let e = w.embeddings();
+    let e = e.read().unwrap();
+    assert_eq!(e.len(), 2);
+    assert_eq!(e.like_track(b, 1, |_| false)[0].0, a);
+}
+
+/// Sound-alike search, before (every vector read from the database for each search)
+/// and after (one scan over the block in memory). 5,000 tracks of 512 floats.
+/// `cargo test --release -p earshot-gui -- --ignored embedding_search_speed --nocapture`
+#[test]
+#[ignore]
+fn embedding_search_speed() {
+    use std::time::Instant;
+
+    use crate::core::embeddings::{self, CLAP_DIM, CLAP_MODEL};
+    const N: i64 = 5000;
+    const SEARCHES: u32 = 20;
+    let (dir, w) = setup("embedding-speed");
+    {
+        let tx = w.conn();
+        tx.execute_batch("BEGIN").unwrap();
+        for t in 1..=N {
+            tx.execute("INSERT INTO tracks(id, added_at) VALUES (?1, 0)", [t])
+                .unwrap();
+            tx.execute(
+                "INSERT INTO embeddings(track_id, model, dim, vector) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    t,
+                    CLAP_MODEL,
+                    CLAP_DIM as i64,
+                    embeddings::to_blob(&vector(t, CLAP_DIM))
+                ],
+            )
+            .unwrap();
+        }
+        tx.execute_batch("COMMIT").unwrap();
+    }
+
+    // Before: read and normalise every vector, then score, for each search.
+    let from_db = |q: i64| {
+        let rows = read::embeddings(w.conn(), CLAP_MODEL, None).unwrap();
+        let query = embeddings::normalised(&rows.iter().find(|r| r.0 == q).unwrap().1).unwrap();
+        let mut scored: Vec<(i64, f32)> = rows
+            .iter()
+            .filter(|r| r.0 != q)
+            .map(|(id, v)| {
+                (
+                    *id,
+                    embeddings::dot(&embeddings::normalised(v).unwrap(), &query),
+                )
+            })
+            .collect();
+        scored.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+        scored.truncate(20);
+        scored
+    };
+    let t = Instant::now();
+    let mut before = vec![];
+    for i in 0..SEARCHES {
+        before = from_db(1 + i as i64);
+    }
+    let db_ms = t.elapsed().as_secs_f64() * 1000.0 / SEARCHES as f64;
+
+    let t = Instant::now();
+    let block = Writer::new(open_writer(&dir.join(FILE_NAME)).unwrap()).embeddings();
+    let load_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let block = block.read().unwrap();
+    assert_eq!(block.len(), N as usize);
+    let t = Instant::now();
+    let mut after = vec![];
+    for i in 0..SEARCHES {
+        after = block.like_track(1 + i as i64, 20, |_| false);
+    }
+    let mem_ms = t.elapsed().as_secs_f64() * 1000.0 / SEARCHES as f64;
+    let ids = |v: &[(i64, f32)]| v.iter().map(|x| x.0).collect::<Vec<_>>();
+    assert_eq!(ids(&before)[0], ids(&after)[0]);
+    assert_eq!(
+        ids(&after)[0],
+        SEARCHES as i64 + 1000,
+        "its own sound, 1000 on"
+    );
+    eprintln!(
+        "{N} x {CLAP_DIM}: from the database {db_ms:.2} ms per search; \
+         loading the block {load_ms:.1} ms once, then {mem_ms:.3} ms per search"
+    );
 }

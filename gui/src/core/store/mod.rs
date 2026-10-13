@@ -15,7 +15,7 @@ mod write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use earshot_engine::HOTCUES;
 use rusqlite::{Connection, OpenFlags};
@@ -25,6 +25,7 @@ pub use write::{AnalysisSave, GridSave, ScannedFile, Writer, grid_bpm};
 
 use super::collections::{Collection, CollectionKind, FlowGraph, NodeId, Section};
 use super::edit::{Edit, EditCmd};
+use super::embeddings::Embeddings;
 
 /// Bump when `engine/src/waveform.rs` changes its output, so cached waveforms are redone.
 pub const WAVEFORM_VERSION: i64 = 1;
@@ -146,6 +147,10 @@ impl CueKind {
     }
 }
 
+/// Where a Flow's canvas looks: `[left, top, right, bottom]` in canvas points. Kept
+/// in the Flow's `collections.view_state` (as JSON), so it goes when the Flow does.
+pub type FlowCamera = [f32; 4];
+
 /// What the UI (or anything that doesn't need an answer) asks the Store to do.
 /// Results and failures come back as [`StoreEvent`]s.
 #[derive(Debug)]
@@ -183,6 +188,14 @@ pub enum StoreCmd {
         track: i64,
         field: String,
         value: Option<String>,
+    },
+    /// A track's embedding from `model` (e.g. `embeddings::CLAP_MODEL`). Kept in the in-memory
+    /// block too ([`Store::embeddings`]) when it's that model's.
+    #[allow(dead_code)] // for the CLAP analyser to come; tests use it
+    SaveEmbedding {
+        track: i64,
+        model: String,
+        vector: Vec<f32>,
     },
     /// The audio hash of a file, worked out in the background.
     SetContentHash {
@@ -296,6 +309,11 @@ pub enum StoreCmd {
         id: i64,
         graph: FlowGraph,
     },
+    /// Where a Flow's canvas is looking (its `view_state`), so it opens there again.
+    SaveFlowCamera {
+        id: i64,
+        camera: FlowCamera,
+    },
     /// Add tracks to a crate (each once), the end of a playlist, or a Flow (as
     /// new starting cards). The UI sends the undoable form, `EditCmd::AddTracks`.
     #[allow(dead_code)]
@@ -351,8 +369,9 @@ pub enum StoreEvent {
     /// What each metadata source says for these tracks (track → field → sources,
     /// strongest first): from [`Store::request_meta`].
     MetaSources(std::collections::HashMap<i64, std::collections::HashMap<String, Sources>>),
-    /// (id, name, graph), or `None` if there's no such Flow.
-    FlowLoaded(Option<(i64, String, FlowGraph)>),
+    /// (id, name, graph), or `None` if there's no such Flow; and where its canvas was
+    /// looking, if that was saved.
+    FlowLoaded(Option<(i64, String, FlowGraph)>, Option<FlowCamera>),
     /// Collections that no longer exist.
     Deleted(Vec<i64>),
     /// An edit was made (from [`StoreCmd::Edit`], or a hand-fixed grid): one step
@@ -372,6 +391,7 @@ pub struct Store {
     tx: Sender<Job>,
     pub reader: Reader,
     next_collection: Arc<AtomicI64>,
+    embeddings: Arc<RwLock<Embeddings>>,
 }
 
 impl Store {
@@ -385,6 +405,7 @@ impl Store {
         )?;
         let (tx, rx) = channel::<Job>();
         let mut writer = Writer::new(conn);
+        let embeddings = writer.embeddings();
         std::thread::Builder::new()
             .name("earshot-store".into())
             .spawn(move || {
@@ -403,7 +424,16 @@ impl Store {
             tx,
             reader: Reader::new(path),
             next_collection: Arc::new(AtomicI64::new(next)),
+            embeddings,
         })
+    }
+
+    /// Every library track's `embeddings::CLAP_MODEL` embedding, in one block in memory, for
+    /// sound-alike search (`core::embeddings`). Loaded when the Store opened and kept
+    /// up to date by the writer; read-lock it only for a search.
+    #[allow(dead_code)] // for the Vibe suggestion feature to come; tests use it
+    pub fn embeddings(&self) -> &Arc<RwLock<Embeddings>> {
+        &self.embeddings
     }
 
     /// Queue a command. Never blocks; errors come back as [`StoreEvent::Error`].
@@ -481,6 +511,7 @@ fn open_writer(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     migrate(&mut conn)?;
+    write::fill_keys(&conn)?;
     Ok(conn)
 }
 
@@ -607,6 +638,13 @@ impl Reader {
 
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
         self.with(|c| read::setting(c, key))
+    }
+
+    /// Where a Flow's canvas was looking, as saved. (The app gets it with the Flow:
+    /// `StoreEvent::FlowLoaded`.)
+    #[cfg(test)]
+    pub fn flow_camera(&self, id: i64) -> Result<Option<FlowCamera>> {
+        self.with(|c| read::flow_camera(c, id))
     }
 
     /// Every saved play, oldest first.

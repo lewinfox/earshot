@@ -17,8 +17,8 @@ CREATE TABLE tracks (
   active_grid_id  INTEGER REFERENCES beatgrids(id) ON DELETE SET NULL,
   -- Effective values, copied from the active grid (and, later, key analysis).
   bpm             REAL,
-  key_pc          INTEGER,            -- pitch class 0-11 (not filled in yet)
-  key_minor       INTEGER,
+  key_pc          INTEGER,            -- the tonic's pitch class 0-11 (C = 0), from the
+  key_minor       INTEGER,            -- resolved `key` field (core/keys.rs `pitch_class`)
   rating          INTEGER,
   color           INTEGER,
   deleted_at      INTEGER
@@ -146,6 +146,8 @@ CREATE TABLE blobs (
   PRIMARY KEY (track_id, kind)
 ) STRICT;
 
+-- A vector per track per model (e.g. 'clap'): `dim` little-endian f32s. The app searches
+-- them in memory (core/embeddings.rs), loaded once when the Store opens.
 CREATE TABLE embeddings (
   track_id  INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
   model     TEXT NOT NULL,
@@ -205,7 +207,7 @@ CREATE TABLE collections (
   name            TEXT NOT NULL,
   query           TEXT,
   sort_order      INTEGER,
-  view_state      TEXT,
+  view_state      TEXT,     -- a Flow: where its canvas looks, JSON [left, top, right, bottom]
   source_flow_id  INTEGER REFERENCES collections(id) ON DELETE SET NULL,
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
@@ -306,8 +308,9 @@ CREATE TABLE library_roots (
 
 -- Settings, as text (JSON for structured ones): 'analysis.background_workers' (how
 -- many background worker processes may run at once), 'audio.output' (device, buffer
--- size, routing) and 'decks.tempo_ranges' (each deck's tempo fader range). The UI's
--- own preferences (layout, zoom) are kept by eframe, not here.
+-- size, routing), 'decks.tempo_ranges' (each deck's tempo fader range) and 'flow.open'
+-- (the Flow on the canvas last; JSON, null for none). The UI's own preferences
+-- (layout, zoom) are kept by eframe, not here.
 CREATE TABLE settings (
   key    TEXT PRIMARY KEY,
   value  TEXT NOT NULL

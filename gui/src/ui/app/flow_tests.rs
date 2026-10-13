@@ -182,7 +182,7 @@ fn the_open_flow_and_its_view_come_back_from_the_database() {
     let saved = |key: &str| reader.setting(key).ok().flatten();
     settle_until(&mut h, |_| {
         saved(settings::FLOW_OPEN).as_deref() == Some(id.to_string().as_str())
-            && saved(&settings::flow_camera(id)).is_some()
+            && reader.flow_camera(id).ok().flatten().is_some()
     });
     // The camera is kept as the view was (the canvas may have resized it to fit).
     let kept = h.state().panels.flow.view();

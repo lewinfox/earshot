@@ -24,7 +24,7 @@ use std::fmt;
 
 use rusqlite::types::Value as SqlValue;
 
-use super::keys::{Camelot, key_name, parse_key};
+use super::keys::{Camelot, parse_key, pitch_class};
 use super::track::{Status, TextField, Track, TrackId};
 
 /// What a query can look at.
@@ -778,7 +778,10 @@ fn sql_field(f: Field) -> String {
             "coalesce(t.bpm, CAST(nullif(trim({}), '') AS REAL))",
             meta("bpm")
         ),
-        Field::Key => format!("lower(trim({}))", meta("key")),
+        // The key's place in the sort, as in memory: by Camelot number, then B before
+        // A. The number from the tonic's pitch class is that of the relative major (3
+        // semitones up from a minor tonic), at 7 steps round the wheel per semitone.
+        Field::Key => "(((t.key_pc + 3 * t.key_minor) * 7 + 7) % 12 * 2 + t.key_minor)".into(),
         Field::Energy => {
             "(SELECT r FROM (SELECT track_id, percent_rank() OVER (ORDER BY value) * 9 + 1 AS r
                            FROM track_features WHERE name = 'energy') e WHERE e.track_id = t.id)"
@@ -826,30 +829,6 @@ fn like(s: &str) -> SqlValue {
         .replace('%', "\\%")
         .replace('_', "\\_");
     SqlValue::Text(format!("%{esc}%"))
-}
-
-/// Every spelling of `k` that [`parse_key`] reads, lowercase: "8a", "am", "a min" …
-/// The tag holds the key as text, so SQL matches it against these.
-fn key_spellings(k: Camelot) -> Vec<String> {
-    let mut out = vec![
-        key_name(k).to_lowercase(),
-        format!("0{}", key_name(k).to_lowercase()),
-    ];
-    for note in ["c", "d", "e", "f", "g", "a", "b"] {
-        for acc in ["", "#", "b", "♯", "♭"] {
-            for suffix in [
-                "", "m", "min", "minor", "maj", "major", " m", " min", " minor", " maj", " major",
-            ] {
-                let s = format!("{note}{acc}{suffix}");
-                if parse_key(&s) == Some(k) {
-                    out.push(s);
-                }
-            }
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
 }
 
 /// A condition that is always 0 or 1 (never NULL), so NOT works as it does in memory.
@@ -946,14 +925,9 @@ fn sql(e: &Expr, args: &mut Vec<SqlValue>) -> String {
                     format!("coalesce({col} {o} ?{n}, 0)")
                 }
                 Value::Key(k) => {
-                    let list: Vec<String> = key_spellings(*k)
-                        .into_iter()
-                        .map(|s| {
-                            args.push(SqlValue::Text(s));
-                            format!("?{}", args.len())
-                        })
-                        .collect();
-                    format!("coalesce({col} IN ({}), 0)", list.join(", "))
+                    args.push(SqlValue::Integer(pitch_class(*k) as i64));
+                    args.push(SqlValue::Integer(k.minor as i64));
+                    format!("coalesce(t.key_pc = ?{n} AND t.key_minor = ?{}, 0)", n + 1)
                 }
                 Value::Bool(b) => format!("({col}) = {}", *b as i32),
                 Value::Status(s) => format!("({col}) = {}", *s as i32),
@@ -1163,14 +1137,5 @@ mod tests {
         let s = parse("sort:-plays").unwrap().sort;
         v.sort_by(|x, y| compare(&s, x, y, &()));
         assert_eq!(v[2].id, 1, "no plays: lowest");
-    }
-
-    #[test]
-    fn key_spellings_cover_the_names() {
-        let s = key_spellings(parse_key("8A").unwrap());
-        for k in ["8a", "08a", "am", "a min", "aminor"] {
-            assert!(s.contains(&k.to_string()), "{k}");
-        }
-        assert!(!s.contains(&"c".to_string()));
     }
 }

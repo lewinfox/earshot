@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::core::edit::EditCmd;
+use crate::core::store::FlowCamera;
 
 impl EarshotApp {
     pub(super) fn library_cmd(&mut self, c: LibraryCmd) {
@@ -118,7 +119,7 @@ impl EarshotApp {
                     tracks: if flow { vec![] } else { tracks.clone() },
                 }));
                 if flow {
-                    self.load_flow(Some((id, name, Default::default())));
+                    self.load_flow(Some((id, name, Default::default())), None);
                     self.panels.flow.add_tracks(&tracks);
                     self.show_flow_tab();
                 } else {
@@ -236,12 +237,14 @@ impl EarshotApp {
     }
 
     /// Put a Flow on the canvas (`None`: an empty one), looking where it was looking
-    /// last. Where the canvas was looking before is saved first.
-    pub(super) fn load_flow(&mut self, flow: Option<(CollectionId, String, FlowGraph)>) {
+    /// last (`camera`, saved with the Flow). Where the canvas was looking before is
+    /// saved first.
+    pub(super) fn load_flow(
+        &mut self,
+        flow: Option<(CollectionId, String, FlowGraph)>,
+        camera: Option<FlowCamera>,
+    ) {
         self.save_flow_view_now();
-        let camera = flow.as_ref().and_then(|(id, ..)| {
-            settings::read(&self.lib.store.reader, &settings::flow_camera(*id))
-        });
         self.flow().load(flow, camera);
     }
 
@@ -259,9 +262,7 @@ impl EarshotApp {
         };
         let busy = ctx.input(|i| i.pointer.any_down());
         if let Some(camera) = self.panels.flow.camera_to_save(busy) {
-            self.lib
-                .store
-                .send(settings::save(&settings::flow_camera(id), &camera));
+            self.lib.store.send(StoreCmd::SaveFlowCamera { id, camera });
         } else if let Some(wait) = self.panels.flow.camera_wait() {
             // No frames come while nothing moves: wake up to save it.
             ctx.request_repaint_after(wait);
@@ -273,9 +274,7 @@ impl EarshotApp {
         if let Some(id) = self.panels.flow.flow
             && let Some(camera) = self.panels.flow.unsaved_camera()
         {
-            self.lib
-                .store
-                .send(settings::save(&settings::flow_camera(id), &camera));
+            self.lib.store.send(StoreCmd::SaveFlowCamera { id, camera });
         }
     }
 

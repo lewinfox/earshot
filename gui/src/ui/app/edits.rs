@@ -15,7 +15,12 @@ impl EarshotApp {
                     .request_meta(tracks.clone(), store_sink(&self.sink));
                 self.modals.edit_tracks(tracks, &self.index);
             }
-            c => self.lib.store.send(StoreCmd::Edit(c)),
+            c => {
+                if let EditCmd::RemoveFromLibrary(tracks) = &c {
+                    self.lib.analyser.forget(tracks);
+                }
+                self.lib.store.send(StoreCmd::Edit(c))
+            }
         }
     }
 
@@ -33,6 +38,14 @@ impl EarshotApp {
 
     /// Make an edit as it is (undo's inverse, or redo's edit), not recording it.
     fn apply_edit(&mut self, e: Edit) {
+        // Redoing a removal: its analysis goes, as it did the first time.
+        if let Edit::Removal {
+            tracks,
+            removed: true,
+        } = &e
+        {
+            self.lib.analyser.forget(tracks);
+        }
         let store = self.lib.store.clone();
         let flow = &mut self.panels.flow;
         match e {
