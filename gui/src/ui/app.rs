@@ -111,6 +111,9 @@ pub struct EarshotApp {
     frame: EngineFrame,
     /// Keep repainting until then (see [`SETTLE`]).
     settle_until: Option<Instant>,
+    /// The engine has the players' saved keylock and quantise (see
+    /// [`EarshotApp::save_deck_options`]).
+    deck_options_restored: bool,
 }
 
 /// Start audio on the chosen device; failing that the default one, then the null
@@ -240,12 +243,31 @@ impl EarshotApp {
             panels: Panels::new(LibraryPane::new(tables)),
             frame: EngineFrame::default(),
             settle_until: None,
+            deck_options_restored: false,
         };
         app.lib.store.send(StoreCmd::ListRoots);
         app.lib.store.send(StoreCmd::StartSession);
         let ranges = app.settings.tempo_ranges.clone();
         for (deck, range) in DeckId::first(DECKS).zip(ranges) {
             app.dispatch((deck, EngineCmd::TempoRange(range)).into());
+        }
+        let options = app.settings.deck_options.clone();
+        for (i, o) in options.into_iter().enumerate().take(session::SLOTS) {
+            let deck = session::slot(i);
+            app.dispatch(
+                (
+                    deck,
+                    EngineCmd::Keylock(earshot_engine::Set::from_bool(o.keylock)),
+                )
+                    .into(),
+            );
+            app.dispatch(
+                (
+                    deck,
+                    EngineCmd::Quantize(earshot_engine::Set::from_bool(o.quantize)),
+                )
+                    .into(),
+            );
         }
         app.restore_flow();
         app.rescan();
@@ -282,6 +304,36 @@ impl EarshotApp {
                 .store
                 .send(settings::save(settings::TEMPO_RANGES, &ranges));
             self.settings.tempo_ranges = ranges;
+        }
+    }
+
+    /// Save the players' keylock and quantise when they change (from a button, a key
+    /// or MIDI).
+    fn save_deck_options(&mut self) {
+        let Some(sh) = &self.frame.snap else {
+            return;
+        };
+        let options: Vec<settings::DeckOptions> = (0..session::SLOTS)
+            .map(|i| {
+                let d = sh.deck(session::slot(i));
+                settings::DeckOptions {
+                    keylock: d.keylock,
+                    quantize: d.quantize,
+                }
+            })
+            .collect();
+        // Not until the engine has the saved ones: before that it reports its own
+        // defaults, which would overwrite them.
+        if !self.deck_options_restored {
+            let saved = &self.settings.deck_options;
+            self.deck_options_restored = saved.is_empty() || options.starts_with(saved);
+            return;
+        }
+        if options != self.settings.deck_options {
+            self.lib
+                .store
+                .send(settings::save(settings::DECK_OPTIONS, &options));
+            self.settings.deck_options = options;
         }
     }
 
@@ -607,6 +659,7 @@ impl eframe::App for EarshotApp {
         self.track_plays();
         self.refresh_suggestions();
         self.save_tempo_ranges();
+        self.save_deck_options();
 
         for c in self.draw(ctx) {
             self.dispatch(c);

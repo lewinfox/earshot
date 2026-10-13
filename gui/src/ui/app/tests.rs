@@ -1169,3 +1169,47 @@ fn library_columns_fit_their_contents_until_dragged() {
     let w = s.columns.iter().find(|c| c.0 == ColumnId::Title).unwrap().1;
     assert!(w > auto[&ColumnId::Title] + 30.0, "{w}");
 }
+
+/// Keylock and quantise come back as they were after a restart, per player.
+#[test]
+fn deck_options_survive_a_restart() {
+    use crate::core::settings::{self, DeckOptions};
+    let mut h = start_with("deck-options", stand_in);
+    let deck1 = DeckId::new(0).unwrap();
+    h.state_mut()
+        .dispatch((deck1, EngineCmd::Keylock(earshot_engine::Set::On)).into());
+    h.state_mut().dispatch(
+        (
+            DeckId::PREPARE,
+            EngineCmd::Quantize(earshot_engine::Set::Off),
+        )
+            .into(),
+    );
+    let want = |o: &[DeckOptions]| {
+        o.first().is_some_and(|d| d.keylock)
+            && o.get(DeckId::PREPARE.index()).is_some_and(|d| !d.quantize)
+    };
+    settle_until(&mut h, |a| {
+        settings::read::<Vec<DeckOptions>>(&a.lib.store.reader, settings::DECK_OPTIONS)
+            .is_some_and(|o| want(&o))
+    });
+    drop(h);
+
+    // The same database, a new app.
+    let dir = scratch_dir("deck-options");
+    let services = Services {
+        db: dir.join(store::FILE_NAME),
+        null_audio: true,
+        worker: stand_in,
+        midi: false,
+    };
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(vec2(1700.0, 1000.0))
+        .build_eframe(move |cc| EarshotApp::new(cc, services).expect("app"));
+    settle_until(&mut h, |a| {
+        a.frame
+            .snap
+            .as_ref()
+            .is_some_and(|s| s.deck(deck1).keylock && !s.deck(DeckId::PREPARE).quantize)
+    });
+}
