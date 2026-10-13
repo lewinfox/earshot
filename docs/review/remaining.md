@@ -14,16 +14,17 @@ Done (see the README). One open idea, from the user's feature notes:
 ## Library and curation
 - [x] Save play history to the `plays` table (and `sessions`: one per run of the
   app). "Played this session" still means this run, so nothing is read back yet.
-- [ ] Save the last-open Flow and its camera position in the DB (still in eframe
-  storage).
+- [x] Save the last-open Flow and its camera position in the DB: the open Flow is
+  the `flow.open` setting, each Flow's camera its own `collections.view_state`
+  (sent back with the Flow in `StoreEvent::FlowLoaded`). UiPrefs holds neither.
 - [x] Undo/redo (`core::edit::History`): metadata, grid edits, collections, Flow
   edits; creating, duplicating and deleting collections (phase C); removing tracks
   from the library.
 - [ ] Metadata editing UI (the Store keeps user values with `source='user'`).
 - [x] Duplicates view (All tracks > Library > Duplicates), with "Show in file
   manager" and "Remove from library" (undoable; files are never deleted).
-- [ ] Fill `tracks.key_pc` / `key_minor` so key search in SQL doesn't need text
-  matching.
+- [x] Fill `tracks.key_pc` / `key_minor` (from the resolved key, whenever it
+  changes; filled on opening for older databases). `key:` in SQL uses them.
 - [ ] `TrackId` is an `i64` alias; consider a newtype.
 
 ## Analysis
@@ -35,9 +36,14 @@ Done (see the README). One open idea, from the user's feature notes:
 - [x] UI for the background worker cap (`analysis.background_workers` setting,
   default 4): Settings > Analysis, applied at once. How the cores are split between
   the workers is still set at startup.
-- [ ] Removing a track should cancel its queued jobs (they fail harmlessly now).
-- [ ] CLAP embeddings: load once into one contiguous in-memory block and search
-  there. Registry fields `AudioNeeds` and `depends_on` are ready for it.
+- [x] Removing a track cancels its analysis (`Analyser::forget`): waiting jobs
+  dropped, a running one cancelled (not a failure), saved queue rows deleted.
+- [x] CLAP embeddings: one contiguous, normalised in-memory block
+  (`core::embeddings`), loaded when the Store opens and kept in step by the writer
+  (`Store::embeddings`). 5,000 × 512: 0.6 ms a search, against ~10 ms reading
+  them from the database each time.
+- [ ] The CLAP analyser itself (a worker analyser at 48 kHz: `AudioNeeds`), saving
+  with `StoreCmd::SaveEmbedding`, and a Vibe suggestion feature searching the block.
 
 ## Performance and control
 - [x] Once (2026-10-13): Prepare's player ignored input while analysis ran. Most
