@@ -23,7 +23,7 @@ pub mod queue;
 pub mod registry;
 
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -138,6 +138,10 @@ impl Analyser {
         store: Store,
         worker: fn(Role, usize) -> WorkerConfig,
     ) -> Analyser {
+        let stale = remove_stale_wavs(&std::env::temp_dir());
+        if stale > 0 {
+            eprintln!("analysis: deleted {stale} WAVs left by earlier runs");
+        }
         let cores = cores();
         let cap = store
             .reader
@@ -591,13 +595,15 @@ impl Shared {
         };
 
         // Beatgrid: in the worker.
-        let wav =
-            std::env::temp_dir().join(format!("earshot-analyse-{}-{}.wav", std::process::id(), id));
-        write_mono_wav(&wav, &audio)
-            .map_err(|e| fail(format!("writing {}: {e}", wav.display())))?;
+        // Deleted when this goes out of scope, however the job ends.
+        let wav = TempWav(
+            std::env::temp_dir().join(format!("{TEMP_PREFIX}{}-{id}.wav", std::process::id())),
+        );
+        write_mono_wav(&wav.0, &audio)
+            .map_err(|e| fail(format!("writing {}: {e}", wav.0.display())))?;
         progress(WORKER_START, "waiting for the analyser");
         let request = worker_client::Request {
-            wav: wav.clone(),
+            wav: wav.0.clone(),
             priority: match lane {
                 Lane::Deck => JobPriority::Deck,
                 Lane::Background(_) => JobPriority::Background,
@@ -626,7 +632,7 @@ impl Shared {
             };
             progress(WORKER_START + (1.0 - WORKER_START) * f, stage)
         });
-        let _ = std::fs::remove_file(&wav);
+        drop(wav);
         let outcome = outcome.map_err(fail)?;
         let reply = match outcome.grid {
             Some(Ok(g)) => g,
@@ -816,6 +822,53 @@ fn update_decks(
 }
 
 /// 32-bit float mono WAV, the average of both channels.
+/// How the WAVs written for the worker are named: `<prefix><pid>-<track>.wav`.
+const TEMP_PREFIX: &str = "earshot-analyse-";
+
+/// A WAV written for the worker, deleted when dropped (the job finished, failed or
+/// panicked).
+struct TempWav(PathBuf);
+
+impl Drop for TempWav {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Delete the worker WAVs that earshot runs no longer running left in `dir` (killed
+/// mid-job, or out of memory). Returns how many.
+fn remove_stale_wavs(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for path in entries.flatten().map(|e| e.path()) {
+        let Some(pid) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix(TEMP_PREFIX))
+            .and_then(|n| n.split('-').next())
+            .and_then(|p| p.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if !earshot_running(pid) && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Whether process `pid` is an earshot that's still running (Linux; elsewhere, only
+/// this one counts).
+fn earshot_running(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .is_ok_and(|name| name.trim_end().starts_with("earshot"))
+}
+
 pub(super) fn write_mono_wav(path: &Path, audio: &TrackAudio) -> std::io::Result<()> {
     write_wav(path, audio, false)
 }
@@ -857,6 +910,26 @@ fn write_wav(path: &Path, audio: &TrackAudio, stereo: bool) -> std::io::Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_worker_wavs_are_deleted_but_live_ones_kept() {
+        let dir = std::env::temp_dir().join(format!("earshot-stale-wavs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ours = dir.join(format!("{TEMP_PREFIX}{}-7.wav", std::process::id()));
+        // A pid no process has (above Linux's pid_max).
+        let gone = dir.join(format!("{TEMP_PREFIX}{}-8.wav", 4_194_305));
+        let other = dir.join("unrelated.wav");
+        for p in [&ours, &gone, &other] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        assert_eq!(remove_stale_wavs(&dir), 1);
+        assert!(ours.exists() && !gone.exists() && other.exists());
+        {
+            let _wav = TempWav(ours.clone());
+        }
+        assert!(!ours.exists(), "dropped: deleted");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn result(analyser: &str, version: u32, failed: bool, same_audio: bool) -> ResultState {
         ResultState {
