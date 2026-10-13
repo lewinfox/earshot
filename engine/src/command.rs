@@ -322,6 +322,17 @@ pub struct EngineState {
     pub prepare: DeckState,
     pub mixer: MixerState,
     pub sync_leader: Option<DeckId>,
+    pub hotcue_mode: HotcueMode,
+}
+
+/// What pressing a hot cue does on a stopped deck (a playing one just jumps there).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum HotcueMode {
+    /// Jump there and play on (Rekordbox's default, and earshot's).
+    #[default]
+    PlayOnPress,
+    /// Play from there while held; letting go stops and goes back (Mixxx's).
+    PlayWhileHeld,
 }
 
 pub enum PreviewCmd {
@@ -365,6 +376,8 @@ pub enum Command {
     /// The deck synced decks follow. `None`: each synced deck picks one (a playing
     /// deck that isn't synced itself, if there is one).
     SetSyncLeader(Option<DeckId>),
+    /// What hot cues do on a stopped deck, on every player.
+    SetHotcueMode(HotcueMode),
     SetRouting(Routing),
     Preview(PreviewCmd),
     /// Put every deck and the mixer back as they were (after an audio restart).

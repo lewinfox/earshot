@@ -1,4 +1,4 @@
-//! The settings window: a tab each for audio, analysis and the keymap. What it changes
+//! The settings window: a tab each for audio, the decks, analysis and the keymap. What it changes
 //! goes out as commands; the audio tab is [`super::audio`].
 
 use std::path::Path;
@@ -11,13 +11,15 @@ use crate::core::command::{AppCmd, Command};
 use crate::core::keymap::Origin;
 use crate::core::view::SettingsTab;
 use crate::ui::theme::THEME;
-use crate::ui::widgets::{Button, Slider};
+use crate::ui::widgets::{Button, Seg, Slider, segmented};
+use earshot_engine::HotcueMode;
 
 /// The window's title, which is also its id.
 pub const TITLE: &str = "Settings";
 
-const TABS: [(SettingsTab, &str); 3] = [
+const TABS: [(SettingsTab, &str); 4] = [
     (SettingsTab::Audio, "Audio"),
+    (SettingsTab::Decks, "Decks"),
     (SettingsTab::Analysis, "Analysis"),
     (SettingsTab::Keymap, "Keymap"),
 ];
@@ -87,6 +89,7 @@ impl SettingsUi {
                                 .ui(ui, env.audio_settings, env.audio, env.routing),
                         )
                     }
+                    SettingsTab::Decks => out.extend(decks(ui, env.hotcue_mode)),
                     SettingsTab::Analysis => out.extend(analysis(ui, &env.analysis)),
                     SettingsTab::Keymap => out.extend(keymap(ui, &env.keymap_file)),
                 }
@@ -97,6 +100,28 @@ impl SettingsUi {
 
 fn note(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).size(11.0).color(THEME.muted));
+}
+
+fn decks(ui: &mut Ui, mode: HotcueMode) -> Vec<Command> {
+    let mut out = vec![];
+    ui.horizontal(|ui| {
+        ui.label("Hot cues on a stopped deck");
+        let choices = [
+            Seg::new(HotcueMode::PlayOnPress, "Play when pressed")
+                .tip("Jump to the hot cue and keep playing"),
+            Seg::new(HotcueMode::PlayWhileHeld, "Play while held")
+                .tip("Play from the hot cue while it's held; let go to stop and go back"),
+        ];
+        if let Some(m) = segmented(ui, mode, &choices) {
+            out.push(Command::App(AppCmd::HotcueMode(m)));
+        }
+    });
+    note(
+        ui,
+        "On a playing deck a hot cue always jumps there and plays on. Applies to every \
+         deck and Prepare's player.",
+    );
+    out
 }
 
 fn analysis(ui: &mut Ui, env: &AnalysisEnv) -> Vec<Command> {

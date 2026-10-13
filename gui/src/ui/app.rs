@@ -251,6 +251,7 @@ impl EarshotApp {
         for (deck, range) in DeckId::first(DECKS).zip(ranges) {
             app.dispatch((deck, EngineCmd::TempoRange(range)).into());
         }
+        let _ = player::set_hotcue_mode(&app.player, app.settings.hotcue_mode);
         let options = app.settings.deck_options.clone();
         for (i, o) in options.into_iter().enumerate().take(session::SLOTS) {
             let deck = session::slot(i);
@@ -375,6 +376,15 @@ impl EarshotApp {
                     analysis::SETTING_BACKGROUND_WORKERS,
                     &self.background_workers,
                 ));
+            }
+            Command::App(AppCmd::HotcueMode(m)) => {
+                self.settings.hotcue_mode = m;
+                if let Err(e) = player::set_hotcue_mode(&self.player, m) {
+                    eprintln!("hot cue mode: {e}");
+                }
+                self.lib
+                    .store
+                    .send(settings::save(settings::HOTCUE_MODE, &m));
             }
             Command::App(AppCmd::ReloadKeymap) => self.reload_keymap(),
             Command::App(c @ (AppCmd::CountStale | AppCmd::QueueStale)) => {
@@ -614,6 +624,7 @@ impl EarshotApp {
             audio_settings: &self.settings.audio,
             audio: &self.audio,
             routing,
+            hotcue_mode: self.settings.hotcue_mode,
             keymap: &self.keymap,
             mode: self.prefs.mode,
             analysis: AnalysisEnv {

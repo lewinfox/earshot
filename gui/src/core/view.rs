@@ -86,6 +86,8 @@ pub enum SettingsTab {
     /// The output device, buffer and routing.
     #[default]
     Audio,
+    /// How the decks behave (hot cues).
+    Decks,
     /// How many background workers analyse at once.
     Analysis,
     /// The keymap file.

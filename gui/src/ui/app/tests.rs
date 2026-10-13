@@ -1249,3 +1249,28 @@ fn deck_pages_switch_in_place() {
     steps(&mut h, 5);
     assert_eq!(place(&h), before);
 }
+
+/// Hot cues play on when pressed unless Settings > Decks says "Play while held"; the
+/// choice is saved and reaches the player.
+#[test]
+fn hotcue_mode_setting() {
+    use crate::core::settings;
+    use crate::core::view::SettingsTab;
+    use earshot_engine::HotcueMode;
+    let mut h = start("hotcue-mode");
+    assert_eq!(h.state().player.lock().unwrap().hotcue_mode, HotcueMode::PlayOnPress);
+    h.state_mut()
+        .dispatch(ViewCmd::Settings(SettingsTab::Decks).into());
+    steps(&mut h, 3);
+    render(&mut h, "settings-decks");
+    h.get_by_label("Play while held").click();
+    steps(&mut h, 3);
+    assert_eq!(
+        h.state().player.lock().unwrap().hotcue_mode,
+        HotcueMode::PlayWhileHeld
+    );
+    settle_until(&mut h, |a| {
+        settings::read::<HotcueMode>(&a.lib.store.reader, settings::HOTCUE_MODE)
+            == Some(HotcueMode::PlayWhileHeld)
+    });
+}

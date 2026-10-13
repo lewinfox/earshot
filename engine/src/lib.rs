@@ -25,8 +25,8 @@ use std::time::Duration;
 
 pub use command::{
     ChannelParam, ChannelState, Command, CueSet, DeckCmd, DeckId, DeckState, EQ_HIGH, EQ_LOW,
-    EQ_MID, EngineState, HOTCUES, LoadedTrack, LoopState, MAX_DECKS, MasterParam, MixerState,
-    ParamId, Press, PreviewCmd, Set, XfSide,
+    EQ_MID, EngineState, HOTCUES, HotcueMode, LoadedTrack, LoopState, MAX_DECKS, MasterParam,
+    MixerState, ParamId, Press, PreviewCmd, Set, XfSide,
 };
 pub use engine::{Out, Routing};
 pub use output::{OutputInfo, OutputOptions};

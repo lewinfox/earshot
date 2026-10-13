@@ -12,8 +12,8 @@ use std::time::Instant;
 
 use crate::beatgrid::Beatgrid;
 use crate::command::{
-    ChannelParam, Command, DeckCmd, DeckId, DeckState, EngineState, HOTCUES, LoadedTrack,
-    LoopState, MAX_DECKS, MasterParam, ParamId, Press, PreviewCmd, SLOTS, XfSide,
+    ChannelParam, Command, DeckCmd, DeckId, DeckState, EngineState, HOTCUES, HotcueMode,
+    LoadedTrack, LoopState, MAX_DECKS, MasterParam, ParamId, Press, PreviewCmd, SLOTS, XfSide,
 };
 use crate::decode::TrackAudio;
 use crate::dsp::{self, Limiter, Smoothed};
@@ -207,6 +207,8 @@ struct Deck {
     quantize: bool,
     cue_point: f64,
     preview: Preview,
+    /// What a hot cue does while stopped ([`Command::SetHotcueMode`]).
+    hotcue_mode: HotcueMode,
     hotcues: [Option<f64>; HOTCUES],
     /// While synced: the smoothed tempo ratio to the leader, and the smoothed phase
     /// correction on top of it. 0 = not following yet.
@@ -256,6 +258,7 @@ impl Deck {
             quantize: true,
             cue_point: 0.0,
             preview: Preview::None,
+            hotcue_mode: HotcueMode::default(),
             hotcues: [None; HOTCUES],
             sync_ratio: 0.0,
             sync_correction: 0.0,
@@ -589,7 +592,11 @@ impl Deck {
                         self.jump(t, JumpReason::Hotcue);
                         if !self.playing() {
                             self.player.transport.playing = true;
-                            self.preview = Preview::Hotcue(slot);
+                            // Held: it stops and goes back on release. Pressed: it
+                            // just plays on.
+                            if self.hotcue_mode == HotcueMode::PlayWhileHeld {
+                                self.preview = Preview::Hotcue(slot);
+                            }
                         }
                     }
                     (Press::Up, Some(t)) if self.preview == Preview::Hotcue(slot) => {
@@ -1128,6 +1135,11 @@ impl Renderer {
             Command::SetSyncLeader(l) => {
                 self.sync_leader = l.filter(|l| l.index() < self.live);
             }
+            Command::SetHotcueMode(m) => {
+                for d in &mut self.decks {
+                    d.hotcue_mode = m;
+                }
+            }
             Command::SetRouting(r) => self.routing = r,
             Command::Preview(p) => self.preview_cmd(p),
             Command::Restore(st) => self.restore(st),
@@ -1260,6 +1272,7 @@ impl Renderer {
         self.set_param(ParamId::Master(MasterParam::HeadGain), m.head_gain);
         self.set_param(ParamId::Master(MasterParam::HeadMix), m.head_mix);
         self.apply(Command::SetSyncLeader(st.sync_leader));
+        self.apply(Command::SetHotcueMode(st.hotcue_mode));
         // Its tracks are out; the box itself is freed elsewhere.
         self.trash(Garbage::State(st));
     }
@@ -2126,6 +2139,38 @@ mod tests {
         assert!(thru > middle * 1.3, "{thru} vs {middle}");
         rig.master(MasterParam::Crossfader, -1.0);
         assert!((level(&mut rig) - thru).abs() < 0.01);
+    }
+
+    #[test]
+    fn hot_cues_on_a_stopped_deck_play_on_or_while_held() {
+        let press = |rig: &mut Rig, press| rig.deck(0, DeckCmd::Hotcue { slot: 0, press });
+        for (mode, plays_on) in [
+            (HotcueMode::PlayOnPress, true),
+            (HotcueMode::PlayWhileHeld, false),
+        ] {
+            let mut rig = Rig::new();
+            rig.load(0, 120.0, 120.0);
+            rig.send(Command::SetHotcueMode(mode));
+            rig.deck(0, DeckCmd::Seek(1.0));
+            press(&mut rig, Press::Down); // sets it at 1 s
+            press(&mut rig, Press::Up);
+            rig.deck(0, DeckCmd::Seek(0.0));
+            rig.run(0.01);
+            press(&mut rig, Press::Down);
+            rig.run(0.2);
+            assert!(rig.snap().decks[0].playing, "{mode:?}: plays while held");
+            press(&mut rig, Press::Up);
+            rig.run(0.05);
+            let d = rig.snap().decks[0];
+            assert_eq!(d.playing, plays_on, "{mode:?}: after letting go");
+            if !plays_on {
+                assert!(
+                    (d.position - 1.0).abs() < 0.01,
+                    "back to the cue: {}",
+                    d.position
+                );
+            }
+        }
     }
 
     #[test]

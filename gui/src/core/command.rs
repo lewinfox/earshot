@@ -123,6 +123,8 @@ pub enum AppCmd {
     StopAnalysis,
     /// Let this many background analysis workers run at once (and save it).
     BackgroundWorkers(usize),
+    /// What hot cues do on a stopped deck (and save it).
+    HotcueMode(earshot_engine::HotcueMode),
     /// Read the user's keymap file again (the built-in one if there's none).
     ReloadKeymap,
     /// Count the tracks with stale analysis (answered with `Event::Stale`).

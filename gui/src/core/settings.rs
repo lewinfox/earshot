@@ -1,7 +1,7 @@
 //! Deck and audio settings (tempo ranges, keylock and quantise), and the Flow canvas's: engine and app state, kept in the Store's `settings`
 //! table as JSON. (The UI's own preferences, like the layout, are kept by the UI.)
 
-use earshot_engine::TempoRange;
+use earshot_engine::{HotcueMode, TempoRange};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +16,8 @@ pub const TEMPO_RANGES: &str = "decks.tempo_ranges";
 /// Each player's options ([`DeckOptions`]), by `DeckId::index()`: decks 1-4, then
 /// Prepare's player.
 pub const DECK_OPTIONS: &str = "decks.options";
+/// What hot cues do on a stopped deck ([`HotcueMode`]).
+pub const HOTCUE_MODE: &str = "decks.hotcue_mode";
 /// The Flow that was on the canvas last. (Where its canvas was looking is kept with
 /// the Flow: `StoreCmd::SaveFlowCamera`.)
 pub const FLOW_OPEN: &str = "flow.open";
@@ -26,6 +28,7 @@ pub struct Settings {
     pub audio: AudioSettings,
     pub tempo_ranges: Vec<TempoRange>,
     pub deck_options: Vec<DeckOptions>,
+    pub hotcue_mode: HotcueMode,
     pub flow_open: Option<CollectionId>,
 }
 
@@ -43,6 +46,7 @@ impl Settings {
             audio: read(reader, AUDIO).unwrap_or_default(),
             tempo_ranges: read(reader, TEMPO_RANGES).unwrap_or_default(),
             deck_options: read(reader, DECK_OPTIONS).unwrap_or_default(),
+            hotcue_mode: read(reader, HOTCUE_MODE).unwrap_or_default(),
             flow_open: read(reader, FLOW_OPEN).unwrap_or_default(),
         }
     }

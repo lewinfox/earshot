@@ -11,9 +11,9 @@ use std::sync::{Arc, Mutex};
 use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::decode;
 use earshot_engine::{
-    Command, CueSet, DeckId, Engine, EngineSnapshot, EngineState, LoadedTrack, MAX_DECKS,
-    MixerState, Monitor, OutputInfo, OutputOptions, PreviewCmd, Routing, Set, energy, loudness,
-    waveform,
+    Command, CueSet, DeckId, Engine, EngineSnapshot, EngineState, HotcueMode, LoadedTrack,
+    MAX_DECKS, MixerState, Monitor, OutputInfo, OutputOptions, PreviewCmd, Routing, Set, energy,
+    loudness, waveform,
 };
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +44,8 @@ pub struct Inner {
     pub preview: PreviewSession,
     pub mixer: MixerState,
     pub sync_leader: Option<DeckId>,
+    /// What hot cues do on a stopped deck (a setting; kept for audio restarts).
+    pub hotcue_mode: HotcueMode,
     pub generation: u64,
     /// The newest load asked for on each player (see [`request_load`]). Only that
     /// one may put its track on.
@@ -131,6 +133,7 @@ impl Inner {
         let mut st = EngineState {
             mixer: self.mixer,
             sync_leader: self.sync_leader,
+            hotcue_mode: self.hotcue_mode,
             ..EngineState::default()
         };
         for id in session::players(MAX_DECKS) {
@@ -154,6 +157,7 @@ pub fn new_player() -> Player {
         preview: PreviewSession::default(),
         mixer: MixerState::default(),
         sync_leader: None,
+        hotcue_mode: HotcueMode::default(),
         generation: 0,
         load_tickets: [0; SLOTS],
         routing: None,
@@ -204,6 +208,13 @@ pub fn output_options(saved: &AudioSettings) -> OutputOptions {
         ),
         null: std::env::var("EARSHOT_NULL_AUDIO").is_ok_and(|v| v == "1"),
     }
+}
+
+/// What hot cues do on a stopped deck, from now on (and after an audio restart).
+pub fn set_hotcue_mode(player: &Player, mode: HotcueMode) -> Result<(), String> {
+    let mut inner = player.lock().unwrap();
+    inner.hotcue_mode = mode;
+    inner.send(Command::SetHotcueMode(mode))
 }
 
 /// Change where master and headphones go, without restarting audio.
