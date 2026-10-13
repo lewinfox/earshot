@@ -2,8 +2,12 @@
 members = ["audio", "engine", "gui"]
 resolver = "2"
 
+# Libraries (not our crates): optimised, with debug info for file and line numbers
+# only, so backtraces still say where. Full debug info for every library made each
+# build about three times the size on disk. Our own crates keep full debug info.
 [profile.dev.package."*"]
 opt-level = 2
+debug = "line-tables-only"
 
 [profile.dev.package.earshot-engine]
 opt-level = 2
