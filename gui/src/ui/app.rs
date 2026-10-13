@@ -492,6 +492,10 @@ impl EarshotApp {
                 PlayEvent::Ended { deck } => StoreCmd::EndPlay { deck },
             };
             self.lib.store.send(cmd);
+            // A new play: the History lists it (after it's saved).
+            if matches!(e, PlayEvent::Counted { .. }) && self.panels.library.browser.in_history() {
+                self.lib.store.send(StoreCmd::ListSessions);
+            }
         }
     }
 

@@ -1124,6 +1124,8 @@ fn master_in_prepare_is_the_player() {
     );
 }
 
+mod history;
+mod metadata;
 mod tempo_lock;
 
 /// The text columns fit their contents; clicking a row sizes nothing, and dragging

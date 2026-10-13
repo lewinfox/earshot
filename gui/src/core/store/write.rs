@@ -132,6 +132,11 @@ impl Writer {
                 started_at,
             } => self.save_play(track, deck, started_at),
             StoreCmd::EndPlay { deck } => self.end_play(deck, now()),
+            StoreCmd::ListSessions => {
+                let s = read::sessions(&self.conn)?;
+                self.emit(StoreEvent::Sessions(s));
+                Ok(())
+            }
             StoreCmd::SetMeta {
                 track,
                 field,
@@ -562,7 +567,8 @@ impl Writer {
              SELECT ?1, id, ?3, ?4, 1 FROM tracks WHERE id = ?2",
             params![session, track, deck as i64, started_at],
         )?;
-        Ok(())
+        // Its play count and last play.
+        self.tracks_changed(&[track])
     }
 
     pub fn end_play(&mut self, deck: usize, at: i64) -> Result<()> {

@@ -1,5 +1,6 @@
 //! The library's track list and what it shows: every track, a folder on disk (the
-//! Explorer tree, a source of its own), or a collection. Filtered by the search box
+//! Explorer tree, a source of its own), a collection, the duplicates, or what was
+//! played in one session (the History). Filtered by the search box
 //! (`core::query`) and the columns' filters, sorted by a column or the search's
 //! `sort:`. Drawn by the one [`TrackTable`], so it multi-selects, drags, reorders a
 //! playlist's rows and has the track menu.
@@ -17,6 +18,7 @@ use crate::core::index::LibraryCmd;
 use crate::core::library::{self, Subdir};
 use crate::core::query::{self, Expr, Query, Sort};
 use crate::core::selection::Selection;
+use crate::core::store::PlaySession;
 use crate::core::track::{Status, TrackId};
 use crate::ui::panels::CoreView;
 use crate::ui::theme::THEME;
@@ -32,6 +34,8 @@ pub enum Scope {
     Collection(CollectionId),
     /// Tracks that share their audio with another, a group at a time.
     Duplicates,
+    /// What a session (a run of the app) played, in order. `None`: the newest.
+    History(Option<i64>),
 }
 
 #[derive(Default)]
@@ -58,6 +62,9 @@ pub struct LibraryUi {
     scroll_to: Option<usize>,
     /// Groups of tracks with the same audio, as last found (`LibraryCmd::FindDuplicates`).
     duplicates: Option<Vec<Vec<TrackId>>>,
+    /// The sessions that played something, newest first, as last listed
+    /// (`LibraryCmd::ListSessions`).
+    sessions: Option<Vec<PlaySession>>,
     pub scanning: bool,
     pub search_focus: bool,
 }
@@ -86,6 +93,33 @@ impl LibraryUi {
         self.rev += 1;
     }
 
+    /// The rows shown, in order.
+    #[cfg(test)]
+    pub fn shown(&self) -> &[TrackId] {
+        &self.shown
+    }
+
+    /// The sessions as listed.
+    pub fn set_sessions(&mut self, sessions: Vec<PlaySession>) {
+        self.sessions = Some(sessions);
+        self.rev += 1;
+    }
+
+    /// The History is showing.
+    pub fn in_history(&self) -> bool {
+        matches!(self.scope, Scope::History(_))
+    }
+
+    /// The session the History shows: the one picked, or the newest.
+    fn session(&self) -> Option<&PlaySession> {
+        let all = self.sessions.as_deref()?;
+        match self.scope {
+            Scope::History(Some(id)) => all.iter().find(|s| s.id == id),
+            Scope::History(None) => all.first(),
+            _ => None,
+        }
+    }
+
     /// The track with keyboard focus (for "load selected").
     pub fn focused(&self) -> Option<TrackId> {
         self.sel.focused()
@@ -111,6 +145,7 @@ impl LibraryUi {
         match &self.scope {
             Scope::All => TableView::Library,
             Scope::Duplicates => TableView::Duplicates,
+            Scope::History(_) => TableView::History,
             Scope::Folder(_) => TableView::Explorer,
             Scope::Collection(id) => match v.collections.get(*id).map(|c| c.kind) {
                 Some(CollectionKind::Playlist) => TableView::Playlist,
@@ -160,6 +195,8 @@ impl LibraryUi {
                     .copied()
                     .collect(),
             ),
+            // In play order (unless sorted), repeats and all.
+            Scope::History(_) => Some(self.session().map(|s| s.tracks.clone()).unwrap_or_default()),
             Scope::Folder(f) => {
                 let dir = format!("{f}/");
                 Some(
@@ -357,7 +394,51 @@ impl LibraryUi {
             out.push(LibraryCmd::FindDuplicates.into());
             clicked = true;
         }
+        if ui
+            .selectable_label(self.in_history(), "History")
+            .on_hover_text("What was played, one run of the app at a time")
+            .clicked()
+        {
+            self.set_scope(Scope::History(None));
+            // Listed afresh each time.
+            out.push(LibraryCmd::ListSessions.into());
+            clicked = true;
+        }
+        if self.in_history() {
+            clicked |= self.sessions_list(ui);
+        }
         clicked
+    }
+
+    /// The sessions under "History", newest first: when each started, and how many
+    /// plays. True when one was clicked.
+    fn sessions_list(&mut self, ui: &mut Ui) -> bool {
+        let Some(sessions) = &self.sessions else {
+            return false;
+        };
+        if sessions.is_empty() {
+            ui.label(RichText::new("  Nothing played yet").color(THEME.muted));
+            return false;
+        }
+        let shown = self.session().map(|s| s.id);
+        let mut picked = None;
+        for s in sessions {
+            ui.horizontal(|ui| {
+                ui.add_space(ui.spacing().indent);
+                let text = format!("{}  ({})", s.label, s.tracks.len());
+                if ui
+                    .selectable_label(shown == Some(s.id), text)
+                    .on_hover_text(plays(s.tracks.len()))
+                    .clicked()
+                {
+                    picked = Some(s.id);
+                }
+            });
+        }
+        if let Some(id) = picked {
+            self.set_scope(Scope::History(Some(id)));
+        }
+        picked.is_some()
     }
 
     // ---- the track list ---------------------------------------------------------------------
@@ -366,6 +447,10 @@ impl LibraryUi {
         match &self.scope {
             Scope::All => "All tracks".into(),
             Scope::Duplicates => "Duplicates".into(),
+            Scope::History(_) => match self.session() {
+                Some(s) => format!("Played {}", s.label),
+                None => "History".into(),
+            },
             Scope::Folder(f) => f.rsplit('/').next().unwrap_or(f).into(),
             Scope::Collection(id) => v
                 .collections
@@ -447,6 +532,32 @@ impl LibraryUi {
             };
             ui.label(RichText::new(text).color(THEME.muted));
         }
+        if self.in_history()
+            && let Some(s) = self.session()
+        {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "{}, in the order they played.",
+                        plays(s.tracks.len())
+                    ))
+                    .color(THEME.muted),
+                );
+                if ui
+                    .button("Save as playlist")
+                    .on_hover_text("A new playlist of these tracks, in this order")
+                    .clicked()
+                {
+                    out.push(
+                        CollectionCmd::SavePlaylist {
+                            name: format!("Played {}", s.label),
+                            tracks: s.tracks.clone(),
+                        }
+                        .into(),
+                    );
+                }
+            });
+        }
         if let Scope::Collection(id) = self.scope
             && let Some(c) = v
                 .collections
@@ -517,6 +628,14 @@ impl LibraryUi {
             drop_into(to, tracks, at.filter(|_| reorder), v, out);
         }
         res.clicked
+    }
+}
+
+/// "1 play" or "12 plays".
+fn plays(n: usize) -> String {
+    match n {
+        1 => "1 play".into(),
+        n => format!("{n} plays"),
     }
 }
 

@@ -40,6 +40,10 @@ pub struct Track {
     pub rating: Option<u8>,
     pub colour: Option<u32>,
     pub tags: Vec<String>,
+    /// Times it counted as played, in any session.
+    pub plays: u32,
+    /// When it last started a counted play (unix seconds).
+    pub last_played: Option<i64>,
     /// Title, artist, album, genre, comment, file name, tags: lowercase, one per
     /// line (see [`TextField`]).
     pub search_text: Box<str>,
@@ -91,6 +95,8 @@ impl Track {
             genre: l.genre,
             comment: l.comment,
             tags: l.tags,
+            plays: l.plays,
+            last_played: l.last_played,
             path: l.path,
         }
     }
@@ -214,6 +220,8 @@ pub(crate) fn lib_track(id: TrackId, title: &str, artist: &str) -> LibTrack {
         rating: None,
         colour: None,
         tags: vec![],
+        plays: 0,
+        last_played: None,
     }
 }
 

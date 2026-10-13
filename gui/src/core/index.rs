@@ -183,6 +183,9 @@ pub enum LibraryCmd {
     Reveal(TrackId),
     /// Find the tracks that share their audio (answered with `Event::Duplicates`).
     FindDuplicates,
+    /// List the play sessions, for the History (answered with
+    /// `StoreEvent::Sessions`).
+    ListSessions,
 }
 
 #[cfg(test)]

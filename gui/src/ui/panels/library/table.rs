@@ -49,6 +49,10 @@ pub enum ColumnId {
     Tags,
     Comment,
     File,
+    /// Times played, in any session.
+    Plays,
+    /// How long ago it last played.
+    LastPlayed,
     /// Suggestions: the tempo change needed.
     Change,
     /// Suggestions: the score, 0-100.
@@ -124,7 +128,7 @@ const fn col(
 }
 
 /// Every column, in the columns menu's order.
-pub const COLUMNS: [ColumnDef; 19] = [
+pub const COLUMNS: [ColumnDef; 21] = [
     col(
         ColumnId::Index,
         "#",
@@ -275,6 +279,27 @@ pub const COLUMNS: [ColumnDef; 19] = [
         },
     ),
     col(
+        ColumnId::Plays,
+        "Plays",
+        "Plays",
+        Some(Field::Plays),
+        44.0,
+        false,
+        |ui, c| {
+            let n = c.t.plays;
+            right(ui, &if n == 0 { String::new() } else { n.to_string() })
+        },
+    ),
+    col(
+        ColumnId::LastPlayed,
+        "Last played",
+        "Last played",
+        Some(Field::LastPlayed),
+        90.0,
+        false,
+        |ui, c| muted(ui, &c.t.last_played.map(ago).unwrap_or_default()),
+    ),
+    col(
         ColumnId::Change,
         "",
         "Tempo change",
@@ -311,7 +336,7 @@ pub fn def(id: ColumnId) -> &'static ColumnDef {
 }
 
 /// The columns any library list can show.
-pub const LIBRARY_COLUMNS: [ColumnId; 16] = [
+pub const LIBRARY_COLUMNS: [ColumnId; 18] = [
     ColumnId::Index,
     ColumnId::Status,
     ColumnId::Wave,
@@ -328,10 +353,12 @@ pub const LIBRARY_COLUMNS: [ColumnId; 16] = [
     ColumnId::Tags,
     ColumnId::Comment,
     ColumnId::File,
+    ColumnId::Plays,
+    ColumnId::LastPlayed,
 ];
 
 /// The suggestions' columns: the library's and the score's.
-pub const SUGGEST_COLUMNS: [ColumnId; 18] = [
+pub const SUGGEST_COLUMNS: [ColumnId; 20] = [
     ColumnId::Status,
     ColumnId::Wave,
     ColumnId::Colour,
@@ -347,6 +374,8 @@ pub const SUGGEST_COLUMNS: [ColumnId; 18] = [
     ColumnId::Tags,
     ColumnId::Comment,
     ColumnId::File,
+    ColumnId::Plays,
+    ColumnId::LastPlayed,
     ColumnId::Change,
     ColumnId::Score,
     ColumnId::Parts,
@@ -371,6 +400,8 @@ pub enum TableView {
     Suggest,
     /// Tracks that share their audio, a group at a time.
     Duplicates,
+    /// What a session played, in order.
+    History,
 }
 
 impl TableView {
@@ -386,7 +417,7 @@ impl TableView {
         use ColumnId::*;
         let ids: &[ColumnId] = match self {
             TableView::Suggest => &[Title, Change, Key, Score, Parts],
-            TableView::Playlist | TableView::Flow => {
+            TableView::Playlist | TableView::Flow | TableView::History => {
                 &[Index, Status, Wave, Title, Artist, Bpm, Key, Time]
             }
             TableView::Duplicates => &[Status, Title, Artist, Bpm, Time, File],
@@ -995,6 +1026,8 @@ fn header_menu(ui: &mut Ui, c: ColumnId, s: &mut TableState, available: &[Column
                     Field::Duration => "<5:00",
                     Field::Energy => "7-10",
                     Field::Rating => ">=4",
+                    Field::Plays => ">=3",
+                    Field::LastPlayed => "<7  (days ago)",
                     _ => "words",
                 };
                 let r = ui.add(
@@ -1198,6 +1231,31 @@ fn muted(ui: &mut Ui, s: &str) {
             .truncate()
             .selectable(false),
     );
+}
+
+/// Muted, against the cell's right edge (numbers).
+fn right(ui: &mut Ui, s: &str) {
+    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+        muted(ui, s)
+    });
+}
+
+/// How long ago a unix time was, roughly: "3 days ago".
+pub fn ago(unix: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let mins = (now - unix).max(0) / 60;
+    let (n, unit) = match mins {
+        0 => return "just now".into(),
+        1..60 => (mins, "minute"),
+        60..1440 => (mins / 60, "hour"),
+        1440..20160 => (mins / 1440, "day"),
+        20160..86400 => (mins / 10080, "week"),
+        86400..525600 => (mins / 43200, "month"),
+        _ => (mins / 525600, "year"),
+    };
+    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
 }
 
 fn index_cell(ui: &mut Ui, c: &mut Cell) {
@@ -1463,6 +1521,21 @@ mod tests {
                 assert!(v.available().contains(&c), "{v:?} {c:?}");
             }
         }
+    }
+
+    #[test]
+    fn ago_in_words() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert_eq!(ago(now - 30), "just now");
+        assert_eq!(ago(now - 600), "10 minutes ago");
+        assert_eq!(ago(now - 3600), "1 hour ago");
+        assert_eq!(ago(now - 3 * 86_400 - 5), "3 days ago");
+        assert_eq!(ago(now - 15 * 86_400), "2 weeks ago");
+        assert_eq!(ago(now - 70 * 86_400), "2 months ago");
+        assert_eq!(ago(now - 800 * 86_400), "2 years ago");
     }
 
     #[test]

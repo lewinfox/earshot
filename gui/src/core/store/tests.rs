@@ -554,6 +554,68 @@ fn plays_are_saved_per_session() {
     assert_eq!((plays[1].session, plays[1].ended_at), (session, None));
 }
 
+/// The History view's sessions: newest first, only those with plays, each in the
+/// order its plays started. A track's play count and last play come with it, and a
+/// saved play reports the track changed.
+#[test]
+fn sessions_list_their_plays_in_order() {
+    let (dir, mut w, a) = one_track("sessions");
+    scan(
+        &mut w,
+        &dir,
+        &[
+            file(&dir.join("music/a.mp3"), "A", None),
+            file(&dir.join("music/b.mp3"), "B", None),
+        ],
+    );
+    let b = library(&mut w).iter().find(|t| t.title == "B").unwrap().id;
+    let first = w.start_session().unwrap();
+    w.save_play(a, 0, 100).unwrap();
+    // Started earlier, on the other deck: it comes first.
+    w.save_play(b, 1, 50).unwrap();
+    w.save_play(a, 0, 200).unwrap();
+    // Nothing played in this one: not listed.
+    w.start_session().unwrap();
+    let last = w.start_session().unwrap();
+    w.take_events();
+    w.save_play(b, 0, 900).unwrap();
+    let changed = w.take_events();
+    assert!(matches!(&changed[..], [StoreEvent::TracksChanged(t)]
+            if t[0].id == b && t[0].plays == 2 && t[0].last_played == Some(900)));
+
+    w.apply(StoreCmd::ListSessions).unwrap();
+    let Some(StoreEvent::Sessions(s)) = w.take_events().pop() else {
+        panic!("no sessions event")
+    };
+    assert_eq!(
+        s.iter().map(|s| s.id).collect::<Vec<_>>(),
+        vec![last, first]
+    );
+    assert_eq!(s[0].tracks, vec![b]);
+    assert_eq!(s[1].tracks, vec![b, a, a]);
+    assert_eq!(s[1].label.len(), "2026-10-13 21:04".len());
+    let ta = get(&mut w, a);
+    assert_eq!((ta.plays, ta.last_played), (2, Some(200)));
+}
+
+/// What each source says for a field, strongest first: the editor's "edited" and
+/// "back to the file's value".
+#[test]
+fn meta_sources_strongest_first() {
+    let (_dir, mut w, a) = one_track("meta-sources");
+    w.edit(EditCmd::Set {
+        tracks: vec![a],
+        values: vec![(Field::Title, text("Mine")), (Field::Genre, text("Disco"))],
+    })
+    .unwrap();
+    let m = read::meta_sources(w.conn(), &[a, 9999]).unwrap();
+    let pair = |s: &str, v: &str| (s.to_string(), v.to_string());
+    assert_eq!(m[&a]["title"], vec![pair("user", "Mine"), pair("tag", "A")]);
+    assert_eq!(m[&a]["genre"], vec![pair("user", "Disco")]);
+    assert_eq!(m[&a]["artist"], vec![pair("tag", "Someone")]);
+    assert!(m[&9999].is_empty());
+}
+
 /// Bug 1: a grid fixed by hand while analysis ran isn't overwritten.
 /// Bug 4: and analysis doesn't change the BPM that came with it.
 #[test]
@@ -997,6 +1059,14 @@ fn smart_playlists_run_their_query_in_sql_like_in_memory() {
     ] {
         save_features(w.conn(), id(t), &[("energy", e)], None).unwrap();
     }
+    // Plays: Shallow twice (the last an hour ago), Other once, long ago.
+    for (t, ago) in [
+        ("Shallow", 3 * 86_400),
+        ("Shallow", 3600),
+        ("Other", 40 * 86_400),
+    ] {
+        w.save_play(id(t), 0, now() - ago).unwrap();
+    }
     let mut ix = LibraryIndex::default();
     ix.replace(library(&mut w));
     let mut colls = crate::core::collections::Collections::default();
@@ -1029,6 +1099,13 @@ fn smart_playlists_run_their_query_in_sql_like_in_memory() {
         "sort:-bpm",
         "sort:title",
         "daft sort:-energy",
+        "plays>=1",
+        "plays=2",
+        "played<7",
+        "-played<7",
+        "played:0",
+        "sort:-plays sort:title",
+        "sort:played sort:title",
     ] {
         w.set_query(1, q).unwrap();
         let parsed = query::parse(q).unwrap();

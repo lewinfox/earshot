@@ -194,9 +194,9 @@ pub fn track_menu(ui: &mut Ui, sel: &[TrackId], v: &CoreView, at: MenuAt, out: &
         ui.close();
     }
     let edit = if n == 1 {
-        "Edit…".to_string()
+        "Edit info…".to_string()
     } else {
-        format!("Edit {n} tracks…")
+        format!("Edit info of {n} tracks…")
     };
     if ui.button(edit).clicked() {
         out.push(EditCmd::Editor(sel.to_vec()).into());

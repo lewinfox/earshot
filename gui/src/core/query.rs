@@ -11,6 +11,7 @@
 //! key:8A  key:Am            a key, in Camelot or by name
 //! energy:7-10  rating>=4    energy is 1-10, ranked across the library
 //! tag:vocal  in:12          a tag; in collection 12
+//! plays>=3  played<7        times played; days since it was last played
 //! is:analysed  is:dynamic  is:drifting  is:missing
 //! status:busy               analysis: none, done, busy (queued or running), attention
 //! -tag:vocal  NOT x         leave out
@@ -44,6 +45,10 @@ pub enum Field {
     Colour,
     /// Seconds.
     Duration,
+    /// Times played, in any session.
+    Plays,
+    /// Days since it was last played (none if it never has been).
+    LastPlayed,
     Analysed,
     Dynamic,
     Drifts,
@@ -66,7 +71,7 @@ impl Field {
         use Field::*;
         match self {
             Title | Artist | Album | Genre | Comment | Path | Tag => Kind::Text,
-            Bpm | Energy | Rating | Colour | Duration => Kind::Num,
+            Bpm | Energy | Rating | Colour | Duration | Plays | LastPlayed => Kind::Num,
             Key => Kind::Key,
             Analysed | Dynamic | Drifts => Kind::Bool,
             Status => Kind::Status,
@@ -90,6 +95,8 @@ impl Field {
             "rating" | "stars" => Rating,
             "colour" | "color" => Colour,
             "time" | "length" | "duration" => Duration,
+            "plays" => Plays,
+            "played" | "lastplayed" => LastPlayed,
             "status" | "analysis" => Status,
             _ => return None,
         })
@@ -111,6 +118,8 @@ impl Field {
             Rating => "rating",
             Colour => "colour",
             Duration => "time",
+            Plays => "plays",
+            LastPlayed => "played",
             Analysed => "analysed",
             Dynamic => "dynamic",
             Drifts => "drifting",
@@ -494,6 +503,8 @@ impl Parser {
                 Ok(match op {
                     // "bpm:124" means about 124.
                     Op::Contains if f == Field::Bpm => Expr::Range(f, n - 0.5, n + 0.5),
+                    // "played:3": three days ago.
+                    Op::Contains if f == Field::LastPlayed => Expr::Range(f, n, n + 1.0),
                     Op::Contains => Expr::Cmp(f, Op::Eq, Value::Num(n)),
                     op => Expr::Cmp(f, op, Value::Num(n)),
                 })
@@ -583,8 +594,18 @@ fn num_field(t: &Track, f: Field) -> Option<f64> {
         Field::Rating => t.rating.map(f64::from),
         Field::Colour => t.colour.map(f64::from),
         Field::Duration => t.duration,
+        Field::Plays => Some(t.plays as f64),
+        Field::LastPlayed => t.last_played.map(days_since),
         _ => None,
     }
+}
+
+/// Days from a unix time to now.
+fn days_since(unix: i64) -> f64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64());
+    (now - unix as f64) / 86_400.0
 }
 
 fn bool_field(t: &Track, f: Field) -> bool {
@@ -766,6 +787,10 @@ fn sql_field(f: Field) -> String {
         Field::Rating => "t.rating".into(),
         Field::Colour => "t.color".into(),
         Field::Duration => "t.duration_s".into(),
+        Field::Plays => "(SELECT count(*) FROM plays p WHERE p.track_id = t.id)".into(),
+        Field::LastPlayed => "((unixepoch('subsec') - (SELECT max(started_at) FROM plays p
+                                WHERE p.track_id = t.id)) / 86400.0)"
+            .into(),
         Field::Analysed => "(t.active_grid_id IS NOT NULL)".into(),
         Field::Dynamic => "EXISTS (SELECT 1 FROM beatgrids g WHERE g.id = t.active_grid_id
                            AND g.source = 'analysis-dynamic')"
@@ -1106,6 +1131,38 @@ mod tests {
         let s = parse("sort:-title").unwrap().sort;
         v.sort_by(|x, y| compare(&s, x, y, &()));
         assert_eq!(v.map(|t| t.id), [3, 2, 1]);
+    }
+
+    /// Plays and last played, in memory and in SQL.
+    #[test]
+    fn plays_and_days_since_played() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let mut l = crate::core::track::lib_track(1, "A", "x");
+        let never = Track::new(l.clone());
+        l.id = 2;
+        l.plays = 3;
+        l.last_played = Some(now - 2 * 86_400 - 60);
+        let twice = Track::new(l);
+        let m = |s: &str, t: &Track| eval(&q(s), t, &());
+        assert!(m("plays>=3", &twice) && !m("plays>=3", &never));
+        assert!(m("plays=0", &never));
+        assert!(m("played<7", &twice) && !m("played<2", &twice));
+        assert!(m("played:2", &twice), "two days ago");
+        assert!(!m("played<7", &never), "never played: no days");
+        // Most recent first, never played last.
+        let mut old = twice.clone();
+        old.id = 3;
+        old.last_played = Some(now - 30 * 86_400);
+        let mut v = [&never, &old, &twice];
+        let s = parse("sort:played").unwrap().sort;
+        v.sort_by(|x, y| compare(&s, x, y, &()));
+        assert_eq!(v.map(|t| t.id), [2, 3, 1]);
+        let s = parse("sort:-plays").unwrap().sort;
+        v.sort_by(|x, y| compare(&s, x, y, &()));
+        assert_eq!(v[2].id, 1, "no plays: lowest");
     }
 
     #[test]
