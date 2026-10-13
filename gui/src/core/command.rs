@@ -13,7 +13,7 @@ use earshot_engine::{
     Routing, Set,
 };
 
-use super::bus::step_size;
+use super::bus::{LOOP_SIZES, step_size};
 use super::collections::{CollectionCmd, FlowCmd};
 use super::edit::EditCmd;
 use super::index::LibraryCmd;
@@ -169,6 +169,16 @@ impl Lane {
 }
 
 /// Carry out a command for the decks, mixer or engine. Returns the ones that belong
+/// A loop length in beats, as one of the loop sizes when it's within 2% of one
+/// (a hand-set loop keeps its own).
+fn nearest_loop_size(beats: f64) -> f64 {
+    LOOP_SIZES
+        .iter()
+        .copied()
+        .find(|s| (beats / s - 1.0).abs() < 0.02)
+        .unwrap_or(beats)
+}
+
 /// to the UI (views, loads, previews and audio restarts) for it to run.
 pub fn dispatch(player: &Player, store: &Store, cmd: Command) -> Result<Option<Command>, String> {
     let cmd = match direct(cmd) {
@@ -215,12 +225,21 @@ pub fn dispatch(player: &Player, store: &Store, cmd: Command) -> Result<Option<C
             inner.send(engine(c))?;
         }
         DeckCmd::ScaleLoop(factor) => {
+            let dir = if factor < 1.0 { -1 } else { 1 };
+            let mut size = step_size(loop_size, dir);
             if looping {
                 inner.send(engine(EngineCmd::LoopScale(factor)))?;
-            } else {
-                let dir = if factor < 1.0 { -1 } else { 1 };
-                inner.session_mut(deck).loop_size = step_size(loop_size, dir);
+                // The loop's own new length (it may not have been the size shown):
+                // the loop button shows it, and the next loop is that long.
+                let beats = snap
+                    .and_then(|d| Some((d.loop_in?, d.loop_out?)))
+                    .zip(grid.as_ref())
+                    .map(|((i, o), g)| (g.beat_at(o) - g.beat_at(i)) * factor);
+                if let Some(b) = beats.filter(|b| *b > 0.0) {
+                    size = nearest_loop_size(b);
+                }
             }
+            inner.session_mut(deck).loop_size = size;
         }
         DeckCmd::SeekFraction(at) => {
             let duration = snap.map_or(0.0, |s| s.duration);
@@ -325,10 +344,17 @@ mod tests {
         run(DeckCmd::LoopButton);
         let s = wait(&p, |s| s.decks[0].loop_active);
         assert_eq!(s.decks[0].loop_out, Some(1.0), "2 beats");
-        // Looping: ×2 doubles the loop itself, and the button ends it.
+        // Looping: ×2 doubles the loop itself, and the size shown with it; the button
+        // ends it, and the next loop is the new size.
         run(DeckCmd::ScaleLoop(2.0));
         wait(&p, |s| s.decks[0].loop_out == Some(2.0));
-        assert_eq!(p.lock().unwrap().session(a).loop_size, 2.0);
+        assert_eq!(p.lock().unwrap().session(a).loop_size, 4.0);
+        run(DeckCmd::LoopButton);
+        wait(&p, |s| !s.decks[0].loop_active);
+        run(DeckCmd::LoopButton);
+        let s = wait(&p, |s| s.decks[0].loop_active);
+        let (i, o) = (s.decks[0].loop_in.unwrap(), s.decks[0].loop_out.unwrap());
+        assert!((o - i - 2.0).abs() < 1e-6, "4 beats: {i}..{o}");
         run(DeckCmd::LoopButton);
         wait(&p, |s| !s.decks[0].loop_active);
 
