@@ -188,16 +188,24 @@ impl SuggestUi {
                 }
             });
         });
+        // A deck that's no longer shown (back to two decks): follow Master instead.
+        if matches!(self.source, RefSource::Deck(d) if d >= v.decks) {
+            self.source = RefSource::Master;
+        }
         ui.horizontal(|ui| {
             ui.label(RichText::new("After").color(THEME.muted));
-            let sources = [
+            let mut sources = vec![
                 Seg::new(RefSource::Master, "Master")
                     .tip("Whichever deck is playing (in Prepare, the player while it plays)"),
-                Seg::new(RefSource::Deck(0), "A").tip("The track on deck A, playing or not"),
-                Seg::new(RefSource::Deck(1), "B").tip("The track on deck B, playing or not"),
+            ];
+            // One per deck shown: A and B, or A to D.
+            for (d, (name, tip)) in DECK_SOURCES.iter().enumerate().take(v.decks) {
+                sources.push(Seg::new(RefSource::Deck(d), name).tip(tip));
+            }
+            sources.push(
                 Seg::new(RefSource::Selected, "Selected")
                     .tip("The track selected in the focused list, or the selected Flow card"),
-            ];
+            );
             if let Some(src) = segmented(ui, self.source, &sources) {
                 self.source = src;
             }
@@ -274,6 +282,14 @@ pub fn directions() -> [Seg<'static, Direction>; 3] {
 }
 
 /// A deck's letter by index.
+/// Each deck's segment in "After": its letter, and its tooltip.
+const DECK_SOURCES: [(&str, &str); 4] = [
+    ("A", "The track on deck A, playing or not"),
+    ("B", "The track on deck B, playing or not"),
+    ("C", "The track on deck C, playing or not"),
+    ("D", "The track on deck D, playing or not"),
+];
+
 fn letter(d: usize) -> String {
     DeckId::new(d)
         .and_then(deck_letter)

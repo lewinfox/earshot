@@ -622,6 +622,9 @@ fn four_decks() {
         worst * 1000.0
     );
     render(&mut h, "perform4");
+    // Suggestions can follow any of the four decks.
+    let tip = |h: &H, t: &str| h.query_all_by_label(t).count() > 0;
+    assert!(tip(&h, "C") && tip(&h, "D"), "decks C and D as sources");
     for d in DeckId::first(4) {
         h.state_mut()
             .dispatch((d, EngineCmd::Play(earshot_engine::Set::Off)).into());
