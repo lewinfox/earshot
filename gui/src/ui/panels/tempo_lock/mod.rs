@@ -300,10 +300,10 @@ impl TempoLockPanel<'_> {
         if let (Some((v, _)), Some(snap)) = (tab.listen.loaded, cx.engine.snap.as_ref()) {
             tab.cursor = tab.to_original(snap.preview.position, v);
             if tab.playing(cx) && tab.follow {
-                let span = tab.view.1 - tab.view.0;
-                if tab.cursor > tab.view.1 || tab.cursor < tab.view.0 {
-                    tab.set_view(tab.cursor - span * 0.1, tab.cursor + span * 0.9);
-                }
+                // Scrolls under a still playhead in the middle, as the decks do (and
+                // like them runs past the start and end).
+                let half = (tab.view.1 - tab.view.0) / 2.0;
+                tab.view = (tab.cursor - half, tab.cursor + half);
             }
         }
         ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
