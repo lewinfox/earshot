@@ -1,0 +1,109 @@
+# Release builds. Pushing a tag like v1.2.3 builds earshot for Linux, macOS and
+# Windows and attaches the binaries to a GitHub release for that tag. Running it by
+# hand (Actions > release > Run workflow) builds the same binaries as downloadable
+# artifacts, without a release, to check the builds still work.
+#
+# Only the app is built. The Python analysis worker (worker/) isn't bundled: the app
+# finds it through EARSHOT_WORKER_DIR (see the README; worker/README.md sets it up).
+
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04 # an older glibc, so the binary runs on more systems
+            target: x86_64-unknown-linux-gnu
+            exe: earshot-gui
+          - name: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            exe: earshot-gui
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            exe: earshot-gui.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # ALSA and D-Bus for audio and real-time priority, libclang for the keylock
+      # library's bindings, and the windowing libraries egui needs.
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libdbus-1-dev libclang-dev \
+            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
+            libxrandr-dev libxi-dev libgl1-mesa-dev
+
+      # The keylock library's bindings need libclang: the runner has LLVM installed.
+      - name: Windows libclang
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --release --locked -p earshot-gui --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME}"
+          [[ "$GITHUB_REF_TYPE" == tag ]] || version="dev-${GITHUB_SHA::7}"
+          name="earshot-${version}-${{ matrix.name }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" README.md "$name/"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            7z a "$name.zip" "$name" > /dev/null
+            echo "ASSET=$name.zip" >> "$GITHUB_ENV"
+          else
+            tar czf "$name.tar.gz" "$name"
+            echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ env.ASSET }}
+
+  release:
+    name: GitHub release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
