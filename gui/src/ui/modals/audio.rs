@@ -11,6 +11,7 @@ use egui::{RichText, Ui};
 use crate::core::command::{AudioCmd, Command};
 use crate::core::player::AudioSettings;
 use crate::ui::theme::THEME;
+use crate::ui::widgets::Button;
 
 const BUFFERS: [u32; 6] = [64, 128, 256, 512, 1024, 2048];
 
@@ -128,7 +129,7 @@ impl AudioUi {
                                 }
                             }
                         });
-                    if ui.small_button("Refresh").clicked() {
+                    if ui.add(Button::subtle("Refresh").small()).clicked() {
                         self.listed = false;
                     }
                 });
@@ -154,7 +155,7 @@ impl AudioUi {
         let changed = draft.device != saved.device || draft.buffer_frames != saved.buffer_frames;
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(changed, egui::Button::new("Apply"))
+                .add_enabled(changed, Button::primary("Apply"))
                 .on_hover_text("Restart audio on this device. Loaded tracks stay loaded.")
                 .clicked()
             {
@@ -220,14 +221,14 @@ fn routing_section(ui: &mut Ui, current: Routing, channels: u16) -> Option<Routi
         ui.label(RichText::new("Presets:").color(THEME.muted));
         if channels >= 4
             && ui
-                .button("Controller")
+                .add(Button::new("Controller"))
                 .on_hover_text("Master on 1/2, headphones on 3/4")
                 .clicked()
         {
             r = Routing::default_for(4);
         }
         if ui
-            .button("Speakers only")
+            .add(Button::new("Speakers only"))
             .on_hover_text("Master on 1/2, no headphones")
             .clicked()
         {
@@ -238,7 +239,7 @@ fn routing_section(ui: &mut Ui, current: Routing, channels: u16) -> Option<Routi
         }
         if channels >= 2
             && ui
-                .button("Split cue")
+                .add(Button::new("Split cue"))
                 .on_hover_text(
                     "One stereo output, e.g. laptop headphones: master in the right ear, \
                      cue and preview in the left",

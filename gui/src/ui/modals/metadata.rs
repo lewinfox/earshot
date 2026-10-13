@@ -18,6 +18,7 @@ use crate::core::index::LibraryIndex;
 use crate::core::store::Sources;
 use crate::core::track::TrackId;
 use crate::ui::theme::{CUE_PALETTE, THEME, rgb};
+use crate::ui::widgets::Button;
 
 /// The window's title, which is also its id.
 pub const TITLE: &str = "Edit tracks";
@@ -219,7 +220,7 @@ impl MetaEditor {
         ui.horizontal(|ui| {
             let changes = self.changes();
             if ui
-                .add_enabled(!changes.is_empty(), egui::Button::new("Save"))
+                .add_enabled(!changes.is_empty(), Button::primary("Save"))
                 .clicked()
             {
                 out.push(
@@ -231,7 +232,7 @@ impl MetaEditor {
                 );
                 done = true;
             }
-            if ui.button("Cancel").clicked() {
+            if ui.add(Button::new("Cancel")).clicked() {
                 done = true;
             }
         });
@@ -300,7 +301,7 @@ fn origin_marks(ui: &mut Ui, row: &mut Row, tracks: usize) {
             ui.horizontal(|ui| {
                 ui.label(small("edited")).on_hover_text(&whose);
                 if ui
-                    .small_button("Revert")
+                    .add(Button::subtle("Revert").small())
                     .on_hover_text(format!("Back to the file's value. {back}."))
                     .clicked()
                 {
@@ -325,7 +326,7 @@ fn rating(ui: &mut Ui, row: &mut Row) {
                 row.touched = true;
             }
         }
-        if ui.small_button("none").clicked() {
+        if ui.add(Button::subtle("none").small()).clicked() {
             row.rating = None;
             row.touched = true;
         }
@@ -353,7 +354,7 @@ fn colour(ui: &mut Ui, row: &mut Row) {
                 row.touched = true;
             }
         }
-        if ui.small_button("none").clicked() {
+        if ui.add(Button::subtle("none").small()).clicked() {
             row.colour = None;
             row.touched = true;
         }

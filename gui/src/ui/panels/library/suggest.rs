@@ -23,6 +23,7 @@ use crate::core::suggest::{Direction, Scored};
 use crate::core::track::TrackId;
 use crate::ui::panels::CoreView;
 use crate::ui::theme::THEME;
+use crate::ui::widgets::{Seg, segmented};
 
 /// Suggestions follow a tempo change once the tempo has held still this long.
 const SETTLE: Duration = Duration::from_secs(1);
@@ -182,53 +183,23 @@ impl SuggestUi {
             })
             .on_hover_text("Tab switches the keyboard between the library and this list");
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                // Right to left, so Build first.
-                for (d, name, tip) in [
-                    (Direction::Build, "Build", "More energy than now"),
-                    (Direction::Hold, "Hold", "About the same energy"),
-                    (Direction::Drop, "Drop", "Less energy than now"),
-                ] {
-                    if ui
-                        .selectable_label(self.direction == d, name)
-                        .on_hover_text(tip)
-                        .clicked()
-                    {
-                        self.direction = d;
-                    }
+                if let Some(d) = segmented(ui, self.direction, &directions()) {
+                    self.direction = d;
                 }
             });
         });
         ui.horizontal(|ui| {
             ui.label(RichText::new("After").color(THEME.muted));
-            for (src, name, tip) in [
-                (
-                    RefSource::Master,
-                    "Master",
-                    "Whichever deck is playing (in Prepare, the player while it plays)",
-                ),
-                (
-                    RefSource::Deck(0),
-                    "A",
-                    "The track on deck A, playing or not",
-                ),
-                (
-                    RefSource::Deck(1),
-                    "B",
-                    "The track on deck B, playing or not",
-                ),
-                (
-                    RefSource::Selected,
-                    "Selected",
-                    "The track selected in the focused list, or the selected Flow card",
-                ),
-            ] {
-                if ui
-                    .selectable_label(self.source == src, name)
-                    .on_hover_text(tip)
-                    .clicked()
-                {
-                    self.source = src;
-                }
+            let sources = [
+                Seg::new(RefSource::Master, "Master")
+                    .tip("Whichever deck is playing (in Prepare, the player while it plays)"),
+                Seg::new(RefSource::Deck(0), "A").tip("The track on deck A, playing or not"),
+                Seg::new(RefSource::Deck(1), "B").tip("The track on deck B, playing or not"),
+                Seg::new(RefSource::Selected, "Selected")
+                    .tip("The track selected in the focused list, or the selected Flow card"),
+            ];
+            if let Some(src) = segmented(ui, self.source, &sources) {
+                self.source = src;
             }
         });
         ui.horizontal(|ui| match &self.reference {
@@ -291,6 +262,15 @@ impl SuggestUi {
         .show(ui, v, media, out);
         res.clicked
     }
+}
+
+/// Drop, Hold and Build, for choosing which way the energy goes next.
+pub fn directions() -> [Seg<'static, Direction>; 3] {
+    [
+        Seg::new(Direction::Drop, "Drop").tip("Less energy than now"),
+        Seg::new(Direction::Hold, "Hold").tip("About the same energy"),
+        Seg::new(Direction::Build, "Build").tip("More energy than now"),
+    ]
 }
 
 /// A deck's letter by index.

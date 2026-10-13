@@ -8,11 +8,12 @@ use super::{FlowUi, POP_W, PickStamp, Pop};
 use crate::core::collections::{GraphOp, NodeId};
 use crate::core::history::RefTrack;
 use crate::core::query;
-use crate::core::suggest::Direction;
 use crate::core::track::{Track, TrackId};
 use crate::ui::panels::CoreView;
+use crate::ui::panels::library::suggest::directions;
 use crate::ui::panels::library::tracks::Media;
 use crate::ui::theme::THEME;
+use crate::ui::widgets::{Button, segmented};
 
 impl FlowUi {
     /// The open popup, if any.
@@ -77,17 +78,11 @@ impl FlowUi {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_width(POP_W);
                     ui.horizontal(|ui| {
-                        for (d, name) in [
-                            (Direction::Drop, "Drop"),
-                            (Direction::Hold, "Hold"),
-                            (Direction::Build, "Build"),
-                        ] {
-                            if ui.selectable_label(self.direction == d, name).clicked() {
-                                self.direction = d;
-                            }
+                        if let Some(d) = segmented(ui, self.direction, &directions()) {
+                            self.direction = d;
                         }
                         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button("Close").clicked() {
+                            if ui.add(Button::subtle("Close")).clicked() {
                                 close = true;
                             }
                         });

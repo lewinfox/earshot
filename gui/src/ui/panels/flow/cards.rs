@@ -16,7 +16,7 @@ use crate::ui::panels::library::tracks::{MenuAt, track_menu};
 use crate::ui::panels::{CoreView, PreviewState};
 use crate::ui::theme::THEME;
 use crate::ui::util;
-use crate::ui::widgets::key_chip;
+use crate::ui::widgets::{RoundButton, key_chip};
 
 /// What a card asks for, carried out after every card is drawn.
 pub enum CardAction {
@@ -126,7 +126,8 @@ pub fn card(
             });
         });
         let playing = state.preview.is_some_and(|p| p.playing);
-        if play_button(ui, playing)
+        if ui
+            .add(RoundButton::play_pause(playing))
             .on_hover_text(if playing {
                 "Pause the preview"
             } else {
@@ -417,37 +418,4 @@ pub fn art(ui: &mut Ui, size: f32, t: &Track, tex: Option<egui::TextureId>) {
         FontId::proportional(size * 0.35),
         THEME.marker,
     );
-}
-
-/// A white round button with a painted play triangle, or a stop square while
-/// `playing` (the font has no ▶ or ■).
-fn play_button(ui: &mut Ui, playing: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
-    let c = rect.center();
-    let fill = if resp.hovered() {
-        THEME.accent
-    } else {
-        THEME.marker
-    };
-    ui.painter().circle_filled(c, 14.0, fill);
-    if playing {
-        for dx in [-3.0, 3.0] {
-            ui.painter().rect_filled(
-                Rect::from_center_size(c + vec2(dx, 0.0), vec2(3.5, 11.0)),
-                1,
-                THEME.ink,
-            );
-        }
-        return resp;
-    }
-    ui.painter().add(egui::Shape::convex_polygon(
-        vec![
-            c + vec2(-3.5, -6.0),
-            c + vec2(6.5, 0.0),
-            c + vec2(-3.5, 6.0),
-        ],
-        THEME.ink,
-        Stroke::NONE,
-    ));
-    resp
 }

@@ -10,6 +10,7 @@ use super::{Cx, Panel};
 use crate::core::command::{AppCmd, Command, ViewCmd};
 use crate::core::index::LibraryCmd;
 use crate::core::view::{Modal, Mode, SettingsTab};
+use crate::ui::widgets::{Seg, segmented};
 
 /// Tracks being analysed, and failures since they were last dismissed.
 #[derive(Default)]
@@ -239,21 +240,16 @@ fn deck_count(ui: &mut Ui, cx: &mut Cx) {
         .snap
         .as_ref()
         .is_some_and(|s| s.live().iter().skip(2).any(|d| d.playing));
-    let gap = std::mem::replace(&mut ui.spacing_mut().item_spacing.x, 2.0);
-    let r = ui
-        .add_enabled(!hidden_playing, egui::Button::selectable(!four, "2 decks"))
-        .on_hover_text("Two decks")
-        .on_disabled_hover_text("Stop decks 3 and 4 first");
-    if r.clicked() && four {
-        cx.send(ViewCmd::FourDecks(false));
+    let counts = [
+        Seg::new(false, "2 decks")
+            .tip("Two decks")
+            .enabled(!hidden_playing)
+            .disabled_tip("Stop decks 3 and 4 first"),
+        Seg::new(true, "4 decks").tip("Four decks, smaller"),
+    ];
+    if let Some(four) = segmented(ui, four, &counts) {
+        cx.send(ViewCmd::FourDecks(four));
     }
-    let r = ui
-        .add(egui::Button::selectable(four, "4 decks"))
-        .on_hover_text("Four decks, smaller");
-    if r.clicked() && !four {
-        cx.send(ViewCmd::FourDecks(true));
-    }
-    ui.spacing_mut().item_spacing.x = gap;
 }
 
 pub struct MidiLog<'a>(pub &'a VecDeque<String>);

@@ -26,6 +26,7 @@ use crate::core::tempo_lock::{
 };
 use crate::core::track::TrackId;
 use crate::ui::theme::Theme;
+use crate::ui::widgets::{Button, RoundButton, RoundSize, Seg, Toggle, segmented};
 
 /// The shortest stretch the waveforms zoom in to, s.
 const MIN_SPAN: f64 = 1.0;
@@ -373,7 +374,7 @@ fn header(ui: &mut Ui, tab: &mut TempoLockUi, cx: &mut Cx) {
                     .desired_width(160.0)
                     .show_percentage(),
             );
-            if stage != Stage::SaveToLibrary && ui.button("Cancel").clicked() {
+            if stage != Stage::SaveToLibrary && ui.add(Button::new("Cancel")).clicked() {
                 cx.send(TempoLockCmd::Cancel);
             }
         });
@@ -396,47 +397,41 @@ fn controls(ui: &mut Ui, tab: &mut TempoLockUi, roots: &[String], cx: &mut Cx) {
                 .max_decimals(2),
         );
         if ui
-            .small_button("median")
+            .add(Button::subtle("median").small())
             .on_hover_text("The median detected tempo")
             .clicked()
         {
             tab.bpm = (median * tab.level.factor() * 100.0).round() / 100.0;
         }
         if ui
-            .small_button("round")
+            .add(Button::subtle("round").small())
             .on_hover_text("Round to a whole number")
             .clicked()
         {
             tab.bpm = tab.bpm.round();
         }
+        ui.separator();
         ui.label("Detected beats are").on_hover_text(
             "If the detector locked onto half- or double-time, say so here and type the real BPM",
         );
-        let before = tab.level;
-        egui::ComboBox::from_id_salt("tempo-lock-level")
-            .selected_text(level_name(tab.level))
-            .show_ui(ui, |ui| {
-                for l in [BeatLevel::Beat, BeatLevel::HalfTime, BeatLevel::DoubleTime] {
-                    ui.selectable_value(&mut tab.level, l, level_name(l));
-                }
-            });
-        if tab.level != before {
+        let levels = [BeatLevel::Beat, BeatLevel::HalfTime, BeatLevel::DoubleTime]
+            .map(|l| Seg::new(l, level_name(l)));
+        if let Some(l) = segmented(ui, tab.level, &levels) {
+            tab.level = l;
             tab.bpm = (median * tab.level.factor()).round();
         }
-        ui.label("Engine");
-        egui::ComboBox::from_id_salt("tempo-lock-engine")
-            .selected_text(engine_name(tab.engine))
-            .show_ui(ui, |ui| {
-                for e in [Engine::R3, Engine::R2] {
-                    ui.selectable_value(&mut tab.engine, e, engine_name(e));
-                }
-            });
+        ui.separator();
+        ui.label("Rubber Band");
+        let engines = [
+            Seg::new(Engine::R3, "R3").tip("Rubber Band's R3 engine: the best sound"),
+            Seg::new(Engine::R2, "R2").tip("Rubber Band's R2 engine: faster"),
+        ];
+        if let Some(e) = segmented(ui, tab.engine, &engines) {
+            tab.engine = e;
+        }
+        ui.separator();
         let ok = tab.can_straighten();
-        let b = ui.add_enabled(
-            ok.is_ok(),
-            egui::Button::new(RichText::new("Straighten").strong().color(theme.ink))
-                .fill(theme.accent),
-        );
+        let b = ui.add_enabled(ok.is_ok(), Button::primary("Straighten"));
         if b.clicked() {
             cx.send(TempoLockCmd::Straighten(StraightenOptions {
                 bpm: tab.bpm,
@@ -450,38 +445,41 @@ fn controls(ui: &mut Ui, tab: &mut TempoLockUi, roots: &[String], cx: &mut Cx) {
             b.on_disabled_hover_text(&why);
             ui.label(RichText::new(why).size(11.0).color(theme.warn));
         }
+    });
 
-        // Saving: once there's a straightened file.
-        if tab.straightened.is_some() {
-            ui.separator();
-            if tab.root.as_ref().is_none_or(|r| !roots.contains(r)) {
-                tab.root = roots.first().cloned();
-            }
-            egui::ComboBox::from_id_salt("tempo-lock-root")
-                .selected_text(tab.root.as_deref().map_or("no library folders", short_path))
-                .width(180.0)
-                .show_ui(ui, |ui| {
-                    for r in roots {
-                        ui.selectable_value(&mut tab.root, Some(r.clone()), r.as_str());
-                    }
-                })
-                .response
-                .on_hover_text("The library folder to save into");
-            let saving = matches!(tab.busy, Some((Stage::SaveToLibrary, _)));
-            let save = ui
-                .add_enabled(
-                    tab.root.is_some() && !saving,
-                    egui::Button::new("Save to library"),
-                )
-                .on_hover_text(
-                    "Copy the straightened MP3 into this folder (never over a file) and add it \
+    // Saving, on a row of its own: once there's a straightened file.
+    if tab.straightened.is_none() {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Save into");
+        if tab.root.as_ref().is_none_or(|r| !roots.contains(r)) {
+            tab.root = roots.first().cloned();
+        }
+        egui::ComboBox::from_id_salt("tempo-lock-root")
+            .selected_text(tab.root.as_deref().map_or("no library folders", short_path))
+            .width(180.0)
+            .show_ui(ui, |ui| {
+                for r in roots {
+                    ui.selectable_value(&mut tab.root, Some(r.clone()), r.as_str());
+                }
+            })
+            .response
+            .on_hover_text("The library folder to save into");
+        let saving = matches!(tab.busy, Some((Stage::SaveToLibrary, _)));
+        let save = ui
+            .add_enabled(
+                tab.root.is_some() && !saving,
+                Button::new("Save to library"),
+            )
+            .on_hover_text(
+                "Copy the straightened MP3 into this folder (never over a file) and add it \
                      to the library",
-                );
-            if save.clicked()
-                && let Some(r) = &tab.root
-            {
-                cx.send(TempoLockCmd::SaveToLibrary(PathBuf::from(r)));
-            }
+            );
+        if save.clicked()
+            && let Some(r) = &tab.root
+        {
+            cx.send(TempoLockCmd::SaveToLibrary(PathBuf::from(r)));
         }
     });
 }
@@ -491,9 +489,8 @@ fn transport(ui: &mut Ui, tab: &mut TempoLockUi, cx: &mut Cx) {
     let theme = cx.theme;
     let playing = tab.playing(cx);
     ui.horizontal_wrapped(|ui| {
-        let play = if playing { "Pause" } else { "Play" };
         if ui
-            .add(egui::Button::new(RichText::new(play).strong()).min_size(vec2(60.0, 0.0)))
+            .add(RoundButton::play_pause(playing))
             .on_hover_text("In the headphones (the preview player)")
             .clicked()
         {
@@ -503,33 +500,36 @@ fn transport(ui: &mut Ui, tab: &mut TempoLockUi, cx: &mut Cx) {
                 tab.play(cx);
             }
         }
-        if ui.button("Stop").clicked() {
+        if ui
+            .add(RoundButton::stop().size(RoundSize::Small))
+            .on_hover_text("Stop, back to the start")
+            .clicked()
+        {
             cx.send(TempoLockCmd::Listen(ListenCmd::Stop));
             tab.cursor = 0.0;
         }
         ui.separator();
-        for (v, name) in [
-            (Version::Original, "Original"),
-            (Version::Straightened, "Straightened"),
-        ] {
-            let enabled = v == Version::Original || tab.straightened.is_some();
-            let r = ui.add_enabled(enabled, egui::Button::selectable(tab.version == v, name));
-            if r.clicked() && tab.version != v {
-                tab.version = v;
-                if playing {
-                    tab.play(cx);
-                }
+        let versions = [
+            Seg::new(Version::Original, "Original"),
+            Seg::new(Version::Straightened, "Straightened")
+                .enabled(tab.straightened.is_some())
+                .disabled_tip("Straighten it first"),
+        ];
+        if let Some(v) = segmented(ui, tab.version, &versions) {
+            tab.version = v;
+            if playing {
+                tab.play(cx);
             }
         }
         ui.separator();
         if ui
-            .checkbox(&mut tab.clicks, "click track on beats")
+            .add(Toggle::new(&mut tab.clicks, "click track on beats"))
             .changed()
             && playing
         {
             tab.play(cx);
         }
-        ui.checkbox(&mut tab.follow, "follow playhead");
+        ui.add(Toggle::new(&mut tab.follow, "follow playhead"));
         let at = tab.from_original(tab.cursor, tab.version);
         ui.label(RichText::new(fmt_time(at)).monospace().size(14.0));
         if tab.listen.decoding {
@@ -1134,13 +1134,6 @@ fn level_name(l: BeatLevel) -> &'static str {
         BeatLevel::Beat => "the beat",
         BeatLevel::HalfTime => "half-time (×2)",
         BeatLevel::DoubleTime => "double-time (÷2)",
-    }
-}
-
-fn engine_name(e: Engine) -> &'static str {
-    match e {
-        Engine::R3 => "Rubber Band R3 (best)",
-        Engine::R2 => "Rubber Band R2 (faster)",
     }
 }
 
