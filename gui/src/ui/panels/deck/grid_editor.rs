@@ -11,12 +11,14 @@ use crate::ui::widgets::{HwButton, Icon};
 impl DeckUi {
     pub(super) fn grid_editor(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
         let deck = self.id;
-        let mut grid = |op| out.push(Command::Deck(deck, DeckCmd::Grid(op)));
         ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
-        ui.horizontal(|ui| {
+        // "Put the 1 here" down the left, as tall as the controls; the tempo and nudge
+        // rows beside it.
+        let tall = self.dims.controls_h();
+        ui.horizontal_top(|ui| {
             if ui
                 .add(
-                    HwButton::new("Anchor 1 here", self.colour(), vec2(30.0, 22.0))
+                    HwButton::new("Anchor 1 here", self.colour(), vec2(30.0, tall))
                         .icon(Icon::Downbeat)
                         .tinted(true),
                 )
@@ -26,9 +28,18 @@ impl DeckUi {
                 )
                 .clicked()
             {
-                grid(GridOp::AnchorHere);
+                out.push(Command::Deck(deck, DeckCmd::Grid(GridOp::AnchorHere)));
             }
+            ui.add_space(4.0);
+            ui.vertical(|ui| self.grid_rows(ui, info, out));
         });
+    }
+
+    /// The tempo row (-0.1 … ×2) and the nudge row, with where the bar's 1 is.
+    fn grid_rows(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
+        let deck = self.id;
+        let mut grid = |op| out.push(Command::Deck(deck, DeckCmd::Grid(op)));
+        ui.spacing_mut().item_spacing = vec2(3.0, 6.0);
         let cur = info.grid.as_ref().map(|g| g.mean_bpm());
         ui.horizontal(|ui| {
             ui.label(RichText::new("BPM").size(10.0).color(THEME.muted));
@@ -94,20 +105,21 @@ impl DeckUi {
             }
             // Where the bar's 1 nearest the playhead is, to the millisecond: a nudge
             // moves the lines by a hair, this by the number.
-            if let Some(g) = info.grid.as_deref() {
-                let beat = g.beat_at(self.state.position).round() as i64;
-                let pos = g.position_of(beat).max(1) as i64;
-                let t = g.time_at((beat - (pos - 1)) as f64);
-                let sign = if t < 0.0 { "-" } else { "" };
-                let (m, s) = ((t.abs() / 60.0).floor(), t.abs() % 60.0);
-                ui.label(
-                    RichText::new(format!("1 at {sign}{m:.0}:{s:06.3}"))
-                        .monospace()
-                        .size(10.0)
-                        .color(THEME.muted),
-                )
+            // Always there (dashes without a grid), so the page is the same width
+            // whether or not a track is loaded.
+            let at = info.grid.as_deref().map_or_else(
+                || "1 at -:--.---".to_string(),
+                |g| {
+                    let beat = g.beat_at(self.state.position).round() as i64;
+                    let pos = g.position_of(beat).max(1) as i64;
+                    let t = g.time_at((beat - (pos - 1)) as f64);
+                    let sign = if t < 0.0 { "-" } else { "" };
+                    let (m, s) = ((t.abs() / 60.0).floor(), t.abs() % 60.0);
+                    format!("1 at {sign}{m:.0}:{s:06.3}")
+                },
+            );
+            ui.label(RichText::new(at).monospace().size(10.0).color(THEME.muted))
                 .on_hover_text("The bar's 1 nearest the playhead");
-            }
         });
     }
 }

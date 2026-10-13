@@ -17,7 +17,7 @@ use std::sync::Arc;
 use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::{DeckCmd as EngineCmd, DeckId, DeckSnap};
 
-use egui::{Align, Color32, FontId, Layout, Rect, RichText, Stroke, StrokeKind, Ui, vec2};
+use egui::{Align, Color32, FontId, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Ui, vec2};
 
 mod cue_pane;
 mod grid_editor;
@@ -160,6 +160,17 @@ impl Dims {
     }
 }
 
+/// The two pages of a player's controls, picked with the tabs on their outer edge
+/// (as in Rekordbox): playing (hot cues, loops, beat jumps) or editing the grid.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Page {
+    Player,
+    Grid,
+}
+
+/// The tab strip's width.
+const TABS_W: f32 = 22.0;
+
 /// What a label being typed belongs to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum LabelTarget {
@@ -220,7 +231,12 @@ pub struct DeckUi {
     /// While dragging the waveform: (start x, start time, was playing).
     scrub: Option<(f32, f64, bool)>,
     pub wave: Option<DeckWave>,
-    grid_mode: bool,
+    /// What the controls between the tabs and CUE / play show.
+    page: Page,
+    /// Each page's width (player, grid) at `page_dims`, measured once, so the box is
+    /// as wide as the wider page and switching doesn't move anything.
+    page_widths: [Option<f32>; 2],
+    page_dims: Dims,
     /// Width of the controls row last frame, to right-align a left deck's.
     controls_w: f32,
     /// Where it was drawn last (see [`DeckUi::show`]).
@@ -244,7 +260,9 @@ impl DeckUi {
             seen_generation: u64::MAX,
             scrub: None,
             wave: None,
-            grid_mode: false,
+            page: Page::Player,
+            page_widths: [None; 2],
+            page_dims: Dims::FULL,
             controls_w: 0.0,
             side: Side::Left,
             dims: Dims::FULL,
@@ -433,7 +451,8 @@ impl DeckUi {
     }
 
     /// Prepare mode's player: the title and overview, then CUE / play and the BPM
-    /// ring, hot cues, loops, beat jumps and the grid editor, all in one row, `width` ×
+    /// ring, Q, and the page the tabs pick (hot cues, loops and beat jumps, or the
+    /// grid editor), in one row, `width` ×
     /// `height`. Its memory cues are in the cue pane beside the waveform
     /// ([`DeckUi::cue_pane`]).
     pub fn show_prepare(
@@ -461,29 +480,23 @@ impl DeckUi {
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing = vec2(3.0, 4.0);
                 self.transport(ui, out);
+                // Quantise beside the transport, on either page (Rekordbox has it by
+                // the jog).
+                let s = self.state;
+                let r = ui
+                    .add(
+                        HwButton::new("Q", THEME.accent, vec2(24.0, 18.0))
+                            .font(10.0)
+                            .lit(s.quantize),
+                    )
+                    .on_hover_text("Quantise: snap cues, loops and hot cues to the beat");
+                if held(ui, &r) == Some(true) {
+                    self.control(out, DeckControl::Quantize, 1.0);
+                }
                 ui.add_space(6.0);
-                self.pads(ui, info, out);
+                self.page(ui, info, out, false);
                 ui.add_space(6.0);
-                self.loops(ui, info, out);
-                ui.add_space(6.0);
-                self.jumps(ui, info, out);
-                ui.add_space(10.0);
-                ui.vertical(|ui| {
-                    ui.set_height(self.dims.controls_h());
-                    ui.set_width(330.0);
-                    let s = self.state;
-                    let r = ui
-                        .add(
-                            HwButton::new("Q", THEME.accent, vec2(24.0, 18.0))
-                                .font(10.0)
-                                .lit(s.quantize),
-                        )
-                        .on_hover_text("Quantise: snap cues, loops and hot cues to the beat");
-                    if held(ui, &r) == Some(true) {
-                        self.control(out, DeckControl::Quantize, 1.0);
-                    }
-                    self.grid_editor(ui, info, out);
-                });
+                self.page_tabs(ui);
             });
         });
     }
@@ -568,36 +581,11 @@ impl DeckUi {
         });
     }
 
-    /// CUE / play and the BPM ring nearest the mixer (like Rekordbox), then the hot cue
-    /// pads (or the grid editor), loops and beat jumps towards the outside. A left
-    /// deck's row is right-aligned, with those groups in the opposite order.
+    /// CUE / play and the BPM ring nearest the mixer (like Rekordbox), then the page
+    /// (hot cue pads, loops and beat jumps, or the grid editor) and its tabs on the
+    /// outer edge. A left deck's row is right-aligned and mirrored.
     fn controls(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
-        #[derive(Clone, Copy)]
-        enum Part {
-            Transport,
-            Pads,
-            Loops,
-            Jumps,
-            GridEditor,
-            GridButton,
-            Gap(f32),
-        }
-        use Part::*;
-        // CUE / play with the ring on the mixer side; the rest runs outwards from there.
-        let centre = [Transport];
-        let mut outer = vec![Gap(6.0)];
-        if self.grid_mode {
-            outer.push(GridEditor);
-        } else {
-            outer.extend([Pads, Gap(6.0), Loops, Gap(6.0), Jumps]);
-        }
-        outer.extend([Gap(6.0), GridButton]);
         let mirrored = self.side == Side::Left;
-        let parts: Vec<Part> = if mirrored {
-            outer.into_iter().rev().chain(centre).collect()
-        } else {
-            centre.into_iter().chain(outer).collect()
-        };
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing = vec2(3.0, 4.0);
             if mirrored {
@@ -605,39 +593,172 @@ impl DeckUi {
                 ui.add_space((ui.available_width() - self.controls_w).max(0.0));
             }
             let start = ui.cursor().min.x;
-            for part in parts {
-                match part {
-                    Transport => self.transport(ui, out),
-                    Pads => self.pads(ui, info, out),
-                    Loops => self.loops(ui, info, out),
-                    Jumps => self.jumps(ui, info, out),
-                    GridEditor => {
-                        ui.vertical(|ui| {
-                            ui.set_height(self.dims.controls_h());
-                            self.grid_editor(ui, info, out);
-                        });
-                    }
-                    GridButton => {
-                        let r = ui
-                            .add(
-                                HwButton::new(
-                                    "GRID",
-                                    THEME.accent,
-                                    vec2(self.dims.btn_w + 4.0, self.dims.btn_h),
-                                )
-                                .font(10.0)
-                                .lit(self.grid_mode),
-                            )
-                            .on_hover_text("Edit the beat grid (in place of the hot cue pads)");
-                        if r.clicked() {
-                            self.grid_mode = !self.grid_mode;
-                        }
-                    }
-                    Gap(w) => ui.add_space(w),
-                }
+            if mirrored {
+                self.page_tabs(ui);
+                ui.add_space(6.0);
+                self.page(ui, info, out, true);
+                ui.add_space(6.0);
+                self.transport(ui, out);
+            } else {
+                self.transport(ui, out);
+                ui.add_space(6.0);
+                self.page(ui, info, out, false);
+                ui.add_space(6.0);
+                self.page_tabs(ui);
             }
             self.controls_w = ui.cursor().min.x - start - ui.spacing().item_spacing.x;
         });
+    }
+
+    /// The page the tabs picked, in a fixed box (as wide as the widest page, as tall
+    /// as the controls) so switching doesn't move or resize anything. `mirrored`: the
+    /// player page's groups run the other way (a left deck).
+    fn page(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>, mirrored: bool) {
+        if self.page_dims != self.dims {
+            self.page_dims = self.dims;
+            self.page_widths = [None; 2];
+        }
+        let h = self.dims.controls_h();
+        // The other page, measured once without being shown (nothing on it can be
+        // clicked).
+        let other = match self.page {
+            Page::Player => Page::Grid,
+            Page::Grid => Page::Player,
+        };
+        if self.page_widths[other as usize].is_none() {
+            // Room to spare, so nothing in it wraps or squeezes.
+            let rect = Rect::from_min_size(ui.cursor().min, vec2(4000.0, h));
+            let mut hidden = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(Layout::left_to_right(Align::Min))
+                    .invisible(),
+            );
+            let mut ignored = vec![];
+            let w = self.page_contents(&mut hidden, info, &mut ignored, mirrored, other);
+            self.page_widths[other as usize] = Some(w);
+        }
+        let width = self
+            .page_widths
+            .iter()
+            .flatten()
+            .fold(0.0, |a: f32, b| a.max(*b));
+        let size = vec2(width, h);
+        let page = self.page;
+        let used = ui
+            .allocate_ui_with_layout(size, Layout::left_to_right(Align::Min), |ui| {
+                ui.set_min_size(size);
+                ui.set_max_height(h);
+                self.page_contents(ui, info, out, mirrored, page)
+            })
+            .inner;
+        // Never narrower than measured before (a hidden measure can come out a little
+        // wider than the page drawn): the box mustn't shrink under the tabs.
+        let known = self.page_widths[page as usize].unwrap_or(0.0);
+        self.page_widths[page as usize] = Some(known.max(used));
+    }
+
+    /// One page's controls; returns how wide they are.
+    fn page_contents(
+        &mut self,
+        ui: &mut Ui,
+        info: &DeckInfo,
+        out: &mut Vec<Command>,
+        mirrored: bool,
+        page: Page,
+    ) -> f32 {
+        ui.spacing_mut().item_spacing = vec2(3.0, 4.0);
+        let start = ui.cursor().min.x;
+        match page {
+            Page::Player => {
+                if mirrored {
+                    self.jumps(ui, info, out);
+                    ui.add_space(6.0);
+                    self.loops(ui, info, out);
+                    ui.add_space(6.0);
+                    self.pads(ui, info, out);
+                } else {
+                    self.pads(ui, info, out);
+                    ui.add_space(6.0);
+                    self.loops(ui, info, out);
+                    ui.add_space(6.0);
+                    self.jumps(ui, info, out);
+                }
+            }
+            Page::Grid => self.grid_editor(ui, info, out),
+        }
+        ui.cursor().min.x - start - ui.spacing().item_spacing.x
+    }
+
+    /// The tabs on the controls' outer edge: the player's controls, or the grid editor.
+    fn page_tabs(&mut self, ui: &mut Ui) {
+        let h = (self.dims.controls_h() - 4.0) / 2.0;
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            for (page, tip) in [
+                (Page::Player, "Hot cues, loops and beat jumps"),
+                (Page::Grid, "Edit the beat grid"),
+            ] {
+                let (rect, r) = ui.allocate_exact_size(vec2(TABS_W, h), Sense::click());
+                let on = self.page == page;
+                let hovered = r.hovered();
+                let p = ui.painter();
+                let fill = if on { THEME.panel_2 } else { THEME.panel };
+                p.rect_filled(rect, 3.0, fill);
+                if on {
+                    p.rect_stroke(
+                        rect,
+                        3.0,
+                        Stroke::new(1.0_f32, THEME.line),
+                        StrokeKind::Inside,
+                    );
+                }
+                let ink = match (on, hovered) {
+                    (true, _) => THEME.text,
+                    (false, true) => THEME.text.gamma_multiply(0.8),
+                    (false, false) => THEME.muted,
+                };
+                page_icon(p, rect.center(), page, ink);
+                let r = r
+                    .on_hover_text(tip)
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                r.widget_info(|| {
+                    egui::WidgetInfo::selected(
+                        egui::WidgetType::Button,
+                        true,
+                        on,
+                        match page {
+                            Page::Player => "Player controls",
+                            Page::Grid => "Grid controls",
+                        },
+                    )
+                });
+                if r.clicked() {
+                    self.page = page;
+                }
+            }
+        });
+    }
+}
+
+/// A tab's icon: four pads for the player, bars for the grid.
+fn page_icon(p: &egui::Painter, c: egui::Pos2, page: Page, ink: Color32) {
+    match page {
+        Page::Player => {
+            for (dx, dy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                let at = c + vec2(dx * 3.5, dy * 3.5);
+                p.rect_filled(egui::Rect::from_center_size(at, vec2(5.0, 5.0)), 1.0, ink);
+            }
+        }
+        Page::Grid => {
+            for (i, h) in [8.0, 12.0, 8.0, 12.0].into_iter().enumerate() {
+                let x = c.x - 4.5 + i as f32 * 3.0;
+                p.line_segment(
+                    [egui::pos2(x, c.y - h / 2.0), egui::pos2(x, c.y + h / 2.0)],
+                    Stroke::new(1.5_f32, ink),
+                );
+            }
+        }
     }
 }
 

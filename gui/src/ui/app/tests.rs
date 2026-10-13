@@ -1216,3 +1216,36 @@ fn deck_options_survive_a_restart() {
             .is_some_and(|s| s.deck(deck1).keylock && !s.deck(DeckId::PREPARE).quantize)
     });
 }
+
+/// The deck's tabs switch between the player's controls and the grid editor without
+/// moving anything: CUE and the tabs stay put.
+#[test]
+fn deck_pages_switch_in_place() {
+    let mut h = start("deck-pages");
+    let id = ids(&h)[0];
+    h.state_mut().dispatch(LibraryCmd::Load(id).into());
+    settle_until(&mut h, |a| a.panels.decks[0].wave.is_some());
+    steps(&mut h, 5);
+    let place = |h: &H| {
+        let first = |label: &str| h.get_all_by_label(label).next().unwrap().rect();
+        (
+            first("CUE"),
+            first("Player controls"),
+            first("Grid controls"),
+        )
+    };
+    let before = place(&h);
+    h.get_all_by_label("Grid controls").next().unwrap().click();
+    steps(&mut h, 5);
+    assert!(
+        h.query_all_by_label("Anchor 1 here").count() > 0,
+        "the grid editor"
+    );
+    assert_eq!(place(&h), before);
+    h.get_all_by_label("Player controls")
+        .next()
+        .unwrap()
+        .click();
+    steps(&mut h, 5);
+    assert_eq!(place(&h), before);
+}
