@@ -149,9 +149,19 @@ impl Dims {
         self.btn_h
     }
 
+    /// The standard heights of a control in the two rows: one row, or both (with the
+    /// gap between them).
+    fn single(self) -> f32 {
+        self.btn_h
+    }
+
+    fn double(self) -> f32 {
+        2.0 * self.btn_h + 4.0
+    }
+
     /// Two rows of buttons.
     fn controls_h(self) -> f32 {
-        2.0 * self.btn_h + 4.0
+        self.double()
     }
 
     /// The jog ring (with the BPM in it) fills the height of the controls.
@@ -237,7 +247,8 @@ pub struct DeckUi {
     /// as wide as the wider page and switching doesn't move anything.
     page_widths: [Option<f32>; 2],
     page_dims: Dims,
-    /// Width of the controls row last frame, to right-align a left deck's.
+    /// Width of the page and CUE / play last frame, to keep a left deck's against
+    /// the mixer.
     controls_w: f32,
     /// Where it was drawn last (see [`DeckUi::show`]).
     side: Side,
@@ -495,7 +506,9 @@ impl DeckUi {
                 }
                 ui.add_space(6.0);
                 self.page(ui, info, out, false);
-                ui.add_space(6.0);
+                // The tabs at the row's outer edge, as on the decks.
+                let tabs = TABS_W + ui.spacing().item_spacing.x;
+                ui.add_space((ui.available_width() - tabs).max(6.0));
                 self.page_tabs(ui);
             });
         });
@@ -588,25 +601,30 @@ impl DeckUi {
         let mirrored = self.side == Side::Left;
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing = vec2(3.0, 4.0);
-            if mirrored {
-                // Push the row against the mixer side (its width is from last frame).
-                ui.add_space((ui.available_width() - self.controls_w).max(0.0));
-            }
-            let start = ui.cursor().min.x;
+            // The tabs at the deck's outer edge (by the tempo fader); the page and CUE /
+            // play against the mixer. The space between takes what's left (the group's
+            // width is from last frame).
+            let gap = |ui: &mut Ui, group: f32| {
+                let tabs = TABS_W + ui.spacing().item_spacing.x;
+                ui.add_space((ui.available_width() - group - tabs).max(6.0));
+            };
             if mirrored {
                 self.page_tabs(ui);
-                ui.add_space(6.0);
+                gap(ui, self.controls_w);
+                let start = ui.cursor().min.x;
                 self.page(ui, info, out, true);
                 ui.add_space(6.0);
                 self.transport(ui, out);
+                self.controls_w = ui.cursor().min.x - start;
             } else {
+                let start = ui.cursor().min.x;
                 self.transport(ui, out);
                 ui.add_space(6.0);
                 self.page(ui, info, out, false);
-                ui.add_space(6.0);
+                self.controls_w = ui.cursor().min.x - start;
+                gap(ui, 0.0);
                 self.page_tabs(ui);
             }
-            self.controls_w = ui.cursor().min.x - start - ui.spacing().item_spacing.x;
         });
     }
 
