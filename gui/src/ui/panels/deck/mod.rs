@@ -807,7 +807,7 @@ impl Panel for DeckPanel<'_> {
     }
 }
 
-/// Prepare's player row (the Cues & Grid tool), `width` × `height`.
+/// Prepare's player controls, under its waveform in every tool, `width` × `height`.
 pub struct PreparePlayer<'a> {
     pub deck: &'a mut DeckUi,
     pub width: f32,

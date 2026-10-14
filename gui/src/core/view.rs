@@ -57,16 +57,16 @@ pub enum Aside {
     Suggestions,
 }
 
-/// Prepare's tool tabs: what we're doing to the track.
+/// Prepare's tool tabs, under the player: what we're doing to the track.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Tool {
-    /// The player's cues, loops, beat jumps and the grid editor.
-    #[default]
-    CuesGrid,
-    /// Analyse a track's tempo, straighten it and save the result (to come: a
-    /// placeholder for now).
+    /// Analyse a track's tempo, straighten it and save the result.
     TempoLock,
     /// The Flow editor: plan a set as a graph of cards, grown from suggestions.
+    /// (Saved layouts from when the player's controls were a tab of their own,
+    /// "Cues & Grid", open here.)
+    #[default]
+    #[serde(alias = "CuesGrid")]
     Flow,
 }
 
