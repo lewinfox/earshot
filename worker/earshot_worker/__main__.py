@@ -29,8 +29,9 @@ _proto = _claim_stdout()
 
 def _lowest_priority():
     """Analysis must never take CPU from playback or the UI. Linux's idle scheduling
-    class only runs us when nothing else wants the CPU; elsewhere, nice 19. Done
-    before torch starts its threads, so they inherit it.
+    class only runs us when nothing else wants the CPU; Windows' idle priority class
+    is the same idea; elsewhere, nice 19. Done before torch starts its threads, so
+    they inherit it.
 
     EARSHOT_WORKER_PRIORITY=inherit keeps the priority the process was started with:
     the app's deck worker (tracks just loaded onto a deck, at normal priority) and
@@ -38,12 +39,19 @@ def _lowest_priority():
     decided once, at startup."""
     if os.environ.get("EARSHOT_WORKER_PRIORITY") == "inherit":
         return
+    if os.name == "nt":
+        import ctypes
+
+        IDLE_PRIORITY_CLASS = 0x40
+        k32 = ctypes.windll.kernel32
+        k32.SetPriorityClass(k32.GetCurrentProcess(), IDLE_PRIORITY_CLASS)
+        return
     try:
         os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))
     except (AttributeError, OSError):
         try:
             os.nice(19)
-        except OSError:
+        except (AttributeError, OSError):
             pass
 
 
@@ -54,7 +62,6 @@ import itertools  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
 import math  # noqa: E402
-import resource  # noqa: E402
 import signal  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
@@ -326,8 +333,19 @@ def run_job(job: Job) -> None:
         send({"id": job.id, "type": "error", "error": str(e) or type(e).__name__})
     finally:
         # For the app's log: how long it took and how big the process has got.
-        peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
-        log.info("job %d (%s) took %.1f s; peak memory so far %d MB", job.id, job.kind, time.perf_counter() - t0, peak_mb)
+        log.info("job %d (%s) took %.1f s; peak memory so far %s", job.id, job.kind, time.perf_counter() - t0, _peak_memory())
+
+
+def _peak_memory() -> str:
+    """The most memory this process has used, for the log ("?" where the system
+    doesn't say: Windows has no `resource`)."""
+    try:
+        import resource
+    except ImportError:
+        return "?"
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # Kilobytes on Linux, bytes on macOS.
+    return f"{peak // (1 << 20 if sys.platform == 'darwin' else 1 << 10)} MB"
 
 
 def runner(queue: Queue) -> None:
