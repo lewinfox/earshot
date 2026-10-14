@@ -83,12 +83,23 @@ impl Icon {
     }
 }
 
+/// Room left between a button's label and its edges.
+const LABEL_PAD: f32 = 4.0;
+/// The smallest a label is shrunk to, to fit a fixed width.
+const MIN_FONT: f32 = 7.0;
+
+/// A controller-style button. Its size is fixed by default: a label too wide for it is
+/// drawn smaller, so the button never changes size with its label (a loop's "4" or
+/// "1/32") and stays lined up with the buttons around it. [`HwButton::min_width`]
+/// lets it grow to fit its label instead.
 pub struct HwButton<'a> {
     label: &'a str,
     icon: Option<Icon>,
     colour: Color32,
     lit: bool,
     size: egui::Vec2,
+    /// `size.x` is the least it is: wider when its label needs it.
+    grow: bool,
     font: f32,
     /// Show the colour on the border and label even when off (a set-but-idle hot cue).
     tinted: bool,
@@ -106,6 +117,7 @@ impl<'a> HwButton<'a> {
             colour,
             lit: false,
             size,
+            grow: false,
             font: 11.0,
             tinted: false,
             round: false,
@@ -143,11 +155,43 @@ impl<'a> HwButton<'a> {
         self.font = size;
         self
     }
+
+    /// Treat the width given as a minimum, growing to fit the label, instead of
+    /// shrinking the label to fit it.
+    #[cfg_attr(not(test), allow(dead_code))] // every button is fixed for now
+    pub fn min_width(mut self) -> Self {
+        self.grow = true;
+        self
+    }
+
+    /// Its size, and the label's font size, for a label `text_w` wide at the font
+    /// size asked for.
+    fn fit(&self, text_w: f32) -> (egui::Vec2, f32) {
+        let room = self.size.x - 2.0 * LABEL_PAD;
+        if self.icon.is_some() || self.round || text_w <= room {
+            (self.size, self.font)
+        } else if self.grow {
+            (vec2(text_w + 2.0 * LABEL_PAD, self.size.y), self.font)
+        } else {
+            let font = (self.font * room / text_w).max(MIN_FONT);
+            (self.size, font)
+        }
+    }
 }
 
 impl Widget for HwButton<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
-        let (rect, resp) = ui.allocate_exact_size(self.size, Sense::click_and_drag());
+        let text_w = ui
+            .painter()
+            .layout_no_wrap(
+                self.label.into(),
+                FontId::proportional(self.font),
+                Color32::WHITE,
+            )
+            .size()
+            .x;
+        let (size, font) = self.fit(text_w);
+        let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
         resp.widget_info(|| {
             egui::WidgetInfo::selected(egui::WidgetType::Button, true, self.lit, self.label)
         });
@@ -191,14 +235,14 @@ impl Widget for HwButton<'_> {
             );
         }
         match self.icon {
-            Some(icon) => icon.paint(p, rect, self.font, text),
+            Some(icon) => icon.paint(p, rect, font, text),
             None => match self.caption {
                 Some(caption) => {
                     p.text(
-                        rect.center() - vec2(0.0, self.font * 0.45),
+                        rect.center() - vec2(0.0, font * 0.45),
                         Align2::CENTER_CENTER,
                         self.label,
-                        FontId::proportional(self.font),
+                        FontId::proportional(font),
                         text,
                     );
                     // Left-aligned once it's too long to centre, and cut off.
@@ -210,7 +254,7 @@ impl Widget for HwButton<'_> {
                         rect.center().x - galley.size().x / 2.0
                     };
                     p.with_clip_rect(inner).galley(
-                        pos2(x, rect.center().y + self.font * 0.2),
+                        pos2(x, rect.center().y + font * 0.2),
                         galley,
                         text,
                     );
@@ -220,7 +264,7 @@ impl Widget for HwButton<'_> {
                         rect.center(),
                         Align2::CENTER_CENTER,
                         self.label,
-                        FontId::proportional(self.font),
+                        FontId::proportional(font),
                         text,
                     );
                 }
@@ -266,4 +310,22 @@ pub fn held(ui: &Ui, r: &Response) -> Option<bool> {
     }
     ui.ctx().data_mut(|d| d.insert_temp(id, down));
     Some(down)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fixed_button_shrinks_its_label_and_a_growing_one_widens() {
+        let b = HwButton::new("⟲ 1/32", THEME.text, vec2(40.0, 28.0)).font(10.0);
+        assert_eq!(b.fit(20.0), (vec2(40.0, 28.0), 10.0), "fits as it is");
+        let (size, font) = b.fit(40.0);
+        assert_eq!(size, vec2(40.0, 28.0), "same size whatever the label");
+        assert!((font - 8.0).abs() < 1e-4, "{font}");
+        assert_eq!(b.fit(500.0).1, MIN_FONT);
+        let b = b.min_width();
+        assert_eq!(b.fit(48.0), (vec2(56.0, 28.0), 10.0));
+        assert_eq!(b.fit(20.0).0, vec2(40.0, 28.0), "never narrower than asked");
+    }
 }

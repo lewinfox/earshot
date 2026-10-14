@@ -33,7 +33,7 @@ impl DeckUi {
         let r = ui
             .add(
                 HwButton::new(label, THEME.loop_button, vec2(w, self.dims.btn_h))
-                    .font(if label.len() > 4 { 9.0 } else { 10.0 })
+                    .font(10.0)
                     .lit(lit),
             )
             .on_hover_text(tip);
@@ -47,6 +47,8 @@ impl DeckUi {
     pub(super) fn loops(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
         let active = self.state.loop_active;
         let size = size_label(info.loop_size);
+        // Every button the same width, so the two rows line up.
+        let w = self.dims.btn_w + 10.0 / 3.0;
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 for (label, control) in [
@@ -59,7 +61,7 @@ impl DeckUi {
                                 HwButton::new(
                                     &format!("⟲ {size}"),
                                     THEME.loop_button,
-                                    vec2(self.dims.btn_w + 10.0, self.dims.btn_h),
+                                    vec2(w, self.dims.btn_h),
                                 )
                                 .font(10.0)
                                 .lit(active),
@@ -78,12 +80,8 @@ impl DeckUi {
                     };
                     let r = ui
                         .add(
-                            HwButton::new(
-                                label,
-                                THEME.loop_button,
-                                vec2(self.dims.btn_w, self.dims.btn_h),
-                            )
-                            .font(11.0),
+                            HwButton::new(label, THEME.loop_button, vec2(w, self.dims.btn_h))
+                                .font(11.0),
                         )
                         .on_hover_text(format!("{tip} the loop (or the next loop's size)"));
                     if held(ui, &r) == Some(true) {
@@ -91,8 +89,6 @@ impl DeckUi {
                     }
                 }
             });
-            // As wide as the row above.
-            let w = (3.0 * self.dims.btn_w + 10.0) / 3.0;
             ui.horizontal(|ui| {
                 self.hold_button(
                     ui,
