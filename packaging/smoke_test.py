@@ -25,6 +25,10 @@ env.update(
     TORCH_HOME=str(root / "models"),
     PATH=os.pathsep.join([str(root / "bin"), env.get("PATH", "")]),
 )
+# Ours too: Windows finds a program named without its folder on the PATH of the
+# process starting it, not the one it's given (the worker has the bundle's PATH as
+# its own, as the app starts it).
+os.environ["PATH"] = env["PATH"]
 sys.path.insert(0, str(root / "worker"))
 
 import numpy as np  # noqa: E402
