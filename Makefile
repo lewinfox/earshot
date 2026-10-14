@@ -2,7 +2,7 @@
 
 PACKAGES := earshot-gui earshot-engine earshot-audio
 
-.PHONY: help run release test test-worker fmt clean clean-all
+.PHONY: help run release test test-worker fmt clean clean-all clean-db
 
 help:
 	@echo "make run          run the app (debug build)"
@@ -12,6 +12,7 @@ help:
 	@echo "make fmt          format the Rust code"
 	@echo "make clean        delete earshot's own build outputs, keep the compiled libraries"
 	@echo "make clean-all    delete everything in target/ (next build is from scratch)"
+	@echo "make clean-db     delete the library database (after a schema change)"
 
 run:
 	cargo run -p earshot-gui
@@ -37,3 +38,15 @@ clean:
 
 clean-all:
 	cargo clean
+
+# The data folder, as core/services.rs `data_dir` finds it.
+ifeq ($(shell uname),Darwin)
+DATA_DIR ?= $(or $(EARSHOT_DATA_DIR),$(HOME)/Library/Application Support/io.github.lewinfox.earshot)
+else
+DATA_DIR ?= $(or $(EARSHOT_DATA_DIR),$(or $(XDG_DATA_HOME),$(HOME)/.local/share)/io.github.lewinfox.earshot)
+endif
+
+# The database (tracks, analysis, playlists and the settings kept in it) and its
+# write-ahead log. Logs, the keymap file and the UI layout stay.
+clean-db:
+	rm -f "$(DATA_DIR)/library.db" "$(DATA_DIR)/library.db-wal" "$(DATA_DIR)/library.db-shm"
