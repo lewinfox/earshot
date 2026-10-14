@@ -2,7 +2,7 @@
 
 PACKAGES := earshot-gui earshot-engine earshot-audio
 
-.PHONY: help run release test test-worker fmt clean clean-all clean-db
+.PHONY: help run release test test-worker fmt clean clean-all clean-db bundle
 
 help:
 	@echo "make run          run the app (debug build)"
@@ -13,6 +13,7 @@ help:
 	@echo "make clean        delete earshot's own build outputs, keep the compiled libraries"
 	@echo "make clean-all    delete everything in target/ (next build is from scratch)"
 	@echo "make clean-db     delete the library database (after a schema change)"
+	@echo "make bundle       a Linux release folder, ready to run (target/bundle/earshot)"
 
 run:
 	cargo run -p earshot-gui
@@ -28,6 +29,12 @@ test-worker:
 
 fmt:
 	cargo fmt
+
+# What a release ships (README "Releases"), checked with its own Python.
+bundle:
+	cargo build --release --locked -p earshot-gui
+	packaging/bundle.sh linux-x86_64 target/release/earshot-gui target/bundle/earshot
+	target/bundle/earshot/python/bin/python3 packaging/smoke_test.py target/bundle/earshot
 
 # Every build of our crates with different settings leaves its own ~400 MB binary,
 # and cargo never deletes old ones. The libraries we depend on rarely change, so

@@ -1215,6 +1215,7 @@ for line in sys.stdin:
     fn fake() -> WorkerConfig {
         WorkerConfig {
             program: PathBuf::from("/usr/bin/python3"),
+            missing: String::new(),
             args: vec!["-c".into(), FAKE.into()],
             dir: std::env::temp_dir(),
             envs: vec![],

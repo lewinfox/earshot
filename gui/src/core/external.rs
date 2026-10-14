@@ -31,7 +31,7 @@ use serde::Deserialize;
 use super::collections::Section;
 use super::sources::{NewSource, PathRules, Source, SourceConfig, SourceId, SourceKind};
 use super::store::ScannedFile;
-use super::worker_client::worker_dir;
+use super::worker_env::WorkerEnv;
 
 /// A library the worker found: what it is and where, before it's a source.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -298,18 +298,16 @@ struct Line {
 /// Run `python -m earshot_worker.libraries <args>` and return its last line.
 /// `progress` gets each progress message on the way.
 fn run(args: Vec<OsString>, mut progress: impl FnMut(String)) -> Result<Line, String> {
-    let dir = worker_dir();
-    let python = dir.join(".venv/bin/python");
-    if !python.exists() {
-        return Err(format!(
-            "the worker isn't set up: run {}/setup.sh",
-            dir.canonicalize().unwrap_or(dir.clone()).display()
-        ));
+    let env = WorkerEnv::find();
+    if let Some(why) = env.problem() {
+        return Err(why);
     }
-    let mut child = std::process::Command::new(&python)
+    let python = &env.python;
+    let mut child = std::process::Command::new(python)
         .args(["-m", "earshot_worker.libraries"])
         .args(&args)
-        .current_dir(&dir)
+        .current_dir(&env.dir)
+        .envs(env.envs.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())

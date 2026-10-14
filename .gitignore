@@ -1,3 +1,4 @@
 /target
 scratchpad/*
 .claude/worktrees/
+packaging/.cache/

@@ -14,7 +14,22 @@ worker/        Python analysis worker (Beat This! beatgrids), its own uv venv
 docs/design.md decisions and roadmap
 ```
 
-## Run it (Linux)
+## Install
+
+Download the file for your computer from the
+[releases page](https://github.com/lewinfox/earshot/releases), unpack it and run
+`earshot-gui` in the folder it makes. Everything it needs is in that folder: the
+analysis worker with its own Python and models, ffmpeg and Rubber Band. Nothing else
+is installed, and deleting the folder removes it (your library stays in the data
+folder, below).
+
+- **Linux** (x86_64): `tar xf earshot-*-linux-x86_64.tar.xz`. Needs ALSA, which every
+  desktop has.
+- **macOS** (Apple silicon): the download isn't signed yet, so macOS refuses to open
+  it. After unpacking, run `xattr -dr com.apple.quarantine earshot-*-macos-arm64`
+  once.
+
+## Build it from source (Linux)
 
 System packages (Ubuntu/Debian names):
 
@@ -25,7 +40,9 @@ sudo apt install build-essential pkg-config libasound2-dev libdbus-1-dev libclan
 You also need Rust (stable) and [uv](https://docs.astral.sh/uv/). Your user should be
 in the `audio` group.
 
-Set up the analysis worker once (downloads CPU-only torch, about 1 GB):
+Set up the analysis worker once (downloads CPU-only torch, about 1 GB). A build from
+source uses `worker/.venv`; a release ships a ready-made one instead
+(`packaging/bundle.sh`, see below).
 
 ```bash
 cd earshot/worker && ./setup.sh
@@ -45,7 +62,7 @@ Environment variables:
 | `EARSHOT_AUDIO_DEVICE` | system default | Case-insensitive part of the output device name, e.g. `DDJ` |
 | `EARSHOT_BUFFER` | `256` | Buffer size in frames (ignored if the device doesn't support it) |
 | `EARSHOT_NULL_AUDIO` | unset | `1` runs the engine on a timer with no sound card |
-| `EARSHOT_WORKER_DIR` | `earshot/worker` | Where the analysis worker and its `.venv` live |
+| `EARSHOT_WORKER_DIR` | the release's own, else `earshot/worker` | A worker folder with its own `.venv` to use instead |
 | `EARSHOT_DATA_DIR` | `~/.local/share/io.github.lewinfox.earshot` | Where `library.db` lives (e.g. to try things on a copy) |
 
 If no audio device can be opened, earshot falls back to the null output and shows a
@@ -122,6 +139,24 @@ cd worker && .venv/bin/python -m pytest
 ```
 
 See [`gui/README.md`](gui/README.md) for the code layout and an off-screen screenshot.
+
+## Releases
+
+Pushing a `vX.Y.Z` tag makes a GitHub release (`.github/workflows/release.yml`). For
+each platform, `packaging/bundle.sh` puts the app in a folder with everything it runs:
+
+- a standalone Python with the worker's packages installed, as `worker/uv.lock` pins them
+- the worker's code
+- the Beat This! checkpoints
+- ffmpeg and ffprobe (LGPL builds)
+- Rubber Band (built from source on Linux)
+
+The app finds these beside its binary (`gui/src/core/worker_env.rs`). Then
+`packaging/smoke_test.py` runs the folder's own worker, models and programs before
+it's uploaded. A download is about 400 MB, and about 1.7 GB unpacked.
+
+`make bundle` makes the Linux folder locally, in `target/bundle/earshot`. It needs uv
+and, to build Rubber Band, `sudo apt install build-essential libsndfile1-dev`.
 
 ## Known gaps
 

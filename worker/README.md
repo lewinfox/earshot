@@ -13,7 +13,9 @@ and go with library work and the tempo lock tool.
 uv run pytest
 ```
 
-The app runs it as `earshot/worker/.venv/bin/python -m earshot_worker`. `setup.sh` also
+A build from source runs it as `earshot/worker/.venv/bin/python -m earshot_worker`; a
+release ships its own Python with these packages installed instead
+(`packaging/bundle.sh`, `gui/src/core/worker_env.rs`). `setup.sh` also
 fetches the Beat This! checkpoints (~80 MB) into the torch cache, so the first analysis
 doesn't need the network.
 

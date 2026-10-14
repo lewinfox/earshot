@@ -3,8 +3,11 @@
 # hand (Actions > release > Run workflow) builds the same binaries as downloadable
 # artifacts, without a release, to check the builds still work.
 #
-# Only the app is built. The Python analysis worker (worker/) isn't bundled: the app
-# finds it through EARSHOT_WORKER_DIR (see the README; worker/README.md sets it up).
+# Each download is the app and everything it runs, ready to use: a Python with the
+# worker's packages, the worker, the Beat This! models, ffmpeg and Rubber Band
+# (packaging/bundle.sh), checked by packaging/smoke_test.py before it's uploaded.
+# Windows is built too but nobody has tried it yet, so a failure there doesn't stop the
+# release.
 
 name: release
 
@@ -23,6 +26,7 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.name == 'windows-x86_64' }}
     strategy:
       fail-fast: false
       matrix:
@@ -43,6 +47,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: astral-sh/setup-uv@v6
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -61,6 +67,8 @@ jobs:
             pkg-config libasound2-dev libdbus-1-dev libclang-dev \
             libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
             libxrandr-dev libxi-dev libgl1-mesa-dev
+          # Building Rubber Band for the bundle.
+          sudo apt-get install -y --no-install-recommends build-essential libsndfile1-dev
 
       # The keylock library's bindings need libclang: the runner has LLVM installed.
       - name: Windows libclang
@@ -77,14 +85,15 @@ jobs:
           version="${GITHUB_REF_NAME}"
           [[ "$GITHUB_REF_TYPE" == tag ]] || version="dev-${GITHUB_SHA::7}"
           name="earshot-${version}-${{ matrix.name }}"
-          mkdir "$name"
-          cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" README.md "$name/"
+          packaging/bundle.sh ${{ matrix.name }} "target/${{ matrix.target }}/release/${{ matrix.exe }}" "$name"
           if [[ "$RUNNER_OS" == Windows ]]; then
+            "$name/python/python.exe" packaging/smoke_test.py "$name"
             7z a "$name.zip" "$name" > /dev/null
             echo "ASSET=$name.zip" >> "$GITHUB_ENV"
           else
-            tar czf "$name.tar.gz" "$name"
-            echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
+            "$name/python/bin/python3" packaging/smoke_test.py "$name"
+            XZ_OPT=-T0 tar cJf "$name.tar.xz" "$name"
+            echo "ASSET=$name.tar.xz" >> "$GITHUB_ENV"
           fi
 
       - uses: actions/upload-artifact@v4

@@ -33,6 +33,7 @@ pub mod tempo_lock;
 pub mod track;
 pub mod view;
 pub mod worker_client;
+pub mod worker_env;
 
 use std::sync::Arc;
 

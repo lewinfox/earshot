@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -25,6 +25,8 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::json;
+
+use super::worker_env::WorkerEnv;
 
 /// The protocol version this client speaks; the worker must answer hello with it.
 pub const PROTOCOL: u32 = 2;
@@ -221,6 +223,8 @@ pub enum Update {
 #[derive(Clone, Debug)]
 pub struct WorkerConfig {
     pub program: PathBuf,
+    /// What to tell the user when `program` isn't there (how to set it up).
+    pub missing: String,
     pub args: Vec<OsString>,
     pub dir: PathBuf,
     pub envs: Vec<(String, String)>,
@@ -299,33 +303,27 @@ pub enum Role {
 /// memory) around for long after.
 pub const IDLE_EXIT: Duration = Duration::from_secs(60);
 
-/// The worker's folder (with its `.venv`): `EARSHOT_WORKER_DIR`, else `worker/` in
-/// this checkout.
-pub fn worker_dir() -> PathBuf {
-    std::env::var_os("EARSHOT_WORKER_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../worker"))
-}
-
 impl WorkerConfig {
-    /// The real worker: `worker/.venv/bin/python -m earshot_worker`, letting torch use
-    /// `threads` CPU threads.
+    /// The real worker: `python -m earshot_worker`, from the bundle or the checkout
+    /// (`core::worker_env`), letting torch use `threads` CPU threads.
     pub fn python(role: Role, threads: usize) -> WorkerConfig {
-        let dir = worker_dir();
+        let env = WorkerEnv::find();
         let threads = threads.to_string();
-        let mut envs: Vec<(String, String)> =
+        let mut envs = env.envs.clone();
+        envs.extend(
             ["OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"]
                 .iter()
-                .map(|k| (k.to_string(), threads.clone()))
-                .collect();
+                .map(|k| (k.to_string(), threads.clone())),
+        );
         if role == Role::Deck {
             // The worker would otherwise put itself in the idle CPU class.
             envs.push(("EARSHOT_WORKER_PRIORITY".into(), "inherit".into()));
         }
         WorkerConfig {
-            program: dir.join(".venv/bin/python"),
+            missing: env.problem().unwrap_or_default(),
+            program: env.python,
             args: vec!["-m".into(), "earshot_worker".into()],
-            dir,
+            dir: env.dir,
             envs,
             start_timeout: Duration::from_secs(180),
             heartbeat_timeout: Duration::from_secs(60),
@@ -743,10 +741,11 @@ impl Supervisor {
     fn spawn(&mut self) -> Result<(), String> {
         let c = &self.config;
         if !c.program.exists() {
-            return Err(format!(
-                "the analysis worker isn't set up: run {}/setup.sh",
-                c.dir.canonicalize().unwrap_or(c.dir.clone()).display()
-            ));
+            return Err(if c.missing.is_empty() {
+                format!("the analysis worker isn't there ({})", c.program.display())
+            } else {
+                c.missing.clone()
+            });
         }
         let mut command = std::process::Command::new(&c.program);
         command
@@ -1183,6 +1182,7 @@ for line in sys.stdin:
         }
         WorkerConfig {
             program: PathBuf::from("/usr/bin/python3"),
+            missing: String::new(),
             args,
             dir: std::env::temp_dir(),
             envs: vec![],
@@ -1336,6 +1336,7 @@ mod tests {
     fn missing_worker_says_how_to_set_it_up() {
         let mut config = fake(PROTOCOL, false);
         config.program = PathBuf::from("/nonexistent/python");
+        config.missing = "run setup.sh".into();
         let e = WorkerClient::start(config)
             .analyse(&req("x", 5000), &mut |_| {})
             .unwrap_err();
@@ -1402,7 +1403,7 @@ mod tests {
     fn analyses_a_real_track() {
         use earshot_engine::decode;
         let path = std::env::var("EARSHOT_TEST_TRACK").expect("set EARSHOT_TEST_TRACK");
-        let (audio, _) = decode::decode(&Path::new(&path).into()).unwrap();
+        let (audio, _) = decode::decode(&std::path::Path::new(&path).into()).unwrap();
         let wav = std::env::temp_dir().join(format!("earshot-test-{}.wav", std::process::id()));
         super::super::analysis::write_mono_wav(&wav, &audio).unwrap();
         let client = WorkerClient::start(WorkerConfig::python(Role::Deck, 4));
