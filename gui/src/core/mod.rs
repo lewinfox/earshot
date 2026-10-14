@@ -26,6 +26,7 @@ pub mod selection;
 pub mod services;
 pub mod session;
 pub mod settings;
+pub mod sources;
 pub mod store;
 pub mod suggest;
 pub mod tempo_lock;
@@ -67,7 +68,7 @@ pub enum Event {
         queued: bool,
         result: Result<usize, String>,
     },
-    /// Other libraries: found, read, imported.
+    /// Other DJ software's libraries: found, read, imported.
     External(external::ExternalEvent),
     /// News from the tempo lock tool.
     #[allow(dead_code)] // read by the tempo lock tab (step 7, B4)

@@ -101,7 +101,17 @@ impl EarshotApp {
 
     pub(super) fn store_event(&mut self, e: StoreEvent) {
         match e {
-            StoreEvent::Roots(roots) => self.panels.library.browser.folders = roots,
+            StoreEvent::Sources(list) => {
+                // The music folders, for the Explorer tree and where new files go.
+                self.panels.library.browser.folders = list
+                    .iter()
+                    .filter(|s| s.enabled && !s.kind.is_library())
+                    .filter_map(|s| s.location.as_ref())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect();
+                self.panels.library.external.set_sources(list.clone());
+                self.sources = list;
+            }
             StoreEvent::Library(tracks) => {
                 self.index.replace(tracks);
                 self.refresh_previews(None);

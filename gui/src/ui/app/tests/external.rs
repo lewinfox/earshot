@@ -8,6 +8,7 @@ use crate::core::collections::{CollectionCmd, Section};
 use crate::core::external::{
     ImportNode, ImportOptions, ImportSave, ImportTrack, NodeKind, external_key,
 };
+use crate::core::sources::{NewSource, SourceKind};
 
 /// A playlist whose files are outside the library folders (as another program's
 /// usually are) shows its tracks.
@@ -26,10 +27,19 @@ fn an_imported_playlist_lists_its_tracks() {
             p
         })
         .collect();
-    let lib = "mixxx:/test/mixxxdb.sqlite";
     let store = h.state().lib.store.clone();
+    let lib = store
+        .call(|w| {
+            w.add_source(&NewSource {
+                kind: SourceKind::Mixxx,
+                name: "Mixxx".into(),
+                location: Some("/test/mixxxdb.sqlite".into()),
+                config: Default::default(),
+            })
+        })
+        .unwrap();
     let save = ImportSave {
-        library: lib.into(),
+        source: lib,
         options: ImportOptions::default(),
         files: crate::core::library::changed_files(&store, &files).unwrap(),
         tracks: files

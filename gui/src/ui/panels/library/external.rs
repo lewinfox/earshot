@@ -1,10 +1,10 @@
-//! The library's "Other libraries" source: Rekordbox, Serato and Mixxx libraries and
-//! drives (`core::external`). The left pane always lists the three programs (where
-//! each one's library is: found in its usual place, or set with "Set location…"),
-//! then the libraries added with "Add…" (USB sticks, Rekordbox XML), each with its
-//! playlists and crates once read; the middle lists the tracks of the one picked.
-//! Right-click a library, folder, playlist, crate or track for "Import to earshot…",
-//! which asks what to bring (grid, hot cues, memory cues, overwrite) in a small window.
+//! The DJ software in the library's Sources pane: Rekordbox, Serato and Mixxx
+//! libraries, USB sticks and Rekordbox XML (sources read through cratelib,
+//! `core::external`). The three programs are always listed (set up or not: "Set
+//! location…"), then the libraries added with "Add…", each with its playlists and
+//! crates once read; the middle lists the tracks of the one picked. Right-click a
+//! library, folder, playlist, crate or track for "Import to earshot…", which asks
+//! what to bring (grid, hot cues, memory cues, overwrite) in a small window.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,9 +15,10 @@ use egui_extras::{Column, TableBuilder};
 use crate::core::command::Command;
 use crate::core::external::{
     ExtLibrary, ExtTrack, ExternalCmd, ExternalEvent, ImportOptions, Imported, Node, NodeKind,
-    NodePath, PROGRAMS, Source, Target, found_by_itself, has_memory_cues,
+    NodePath, Target,
 };
 use crate::core::index::LibraryCmd;
+use crate::core::sources::{Source, SourceId, SourceKind};
 use crate::core::track::TrackId;
 use crate::ui::panels::CoreView;
 use crate::ui::theme::THEME;
@@ -38,20 +39,19 @@ struct Dialog {
 
 #[derive(Default)]
 pub struct ExternalUi {
-    /// The libraries found in the programs' usual places.
-    found: Vec<Source>,
-    /// Where the user put libraries (Set location…, Add…), as saved.
-    locations: Vec<Source>,
+    /// Every source, as the Store has them (the libraries are drawn from these).
+    sources: Vec<Source>,
     /// Looked in the usual places yet (done the first time the pane shows).
     searched: bool,
     /// What the last search said, if it failed.
     find_error: Option<String>,
-    status: HashMap<Source, Status>,
+    /// Each library's read.
+    status: HashMap<SourceId, Status>,
     /// What the middle lists: a library, and a node in it (`None`: all its tracks).
-    open: Option<(Source, Option<NodePath>)>,
+    open: Option<(SourceId, Option<NodePath>)>,
     dialog: Option<Dialog>,
     /// An import running, and what it's doing.
-    importing: Option<(Source, String)>,
+    importing: Option<(SourceId, String)>,
     /// How the last import went.
     report: Option<Result<String, String>>,
     /// The selected row (an external track id).
@@ -61,36 +61,44 @@ pub struct ExternalUi {
 }
 
 impl ExternalUi {
-    /// Where the user put libraries, as saved.
-    pub fn set_locations(&mut self, locations: Vec<Source>) {
-        self.locations = locations;
+    /// The sources, as the Store has them now. A library moved elsewhere is read
+    /// again when next opened.
+    pub fn set_sources(&mut self, sources: Vec<Source>) {
+        for new in &sources {
+            let moved = self
+                .sources
+                .iter()
+                .any(|old| old.id == new.id && old.location != new.location);
+            if moved {
+                self.status.remove(&new.id);
+            }
+        }
+        self.sources = sources;
+        let listed = |id| self.sources.iter().any(|s| s.id == id && s.enabled);
+        if self.open.as_ref().is_some_and(|o| !listed(o.0)) {
+            self.open = None;
+        }
     }
 
-    /// What the pane lists: each program, with its library if known (set by the user,
-    /// else found in its usual place where that's looked for), then the other
-    /// libraries the user added.
-    fn entries(&self) -> Vec<(Option<(&'static str, &'static str)>, Option<Source>)> {
-        let mut out: Vec<_> = PROGRAMS
-            .iter()
-            .map(|&(format, name)| {
-                let found = || {
-                    found_by_itself(format)
-                        .then(|| self.found.iter().find(|s| s.format == format))
-                        .flatten()
-                };
-                let source = self
-                    .locations
-                    .iter()
-                    .find(|s| s.format == format)
-                    .or_else(found);
-                (Some((format, name)), source.cloned())
-            })
-            .collect();
-        out.extend(
-            self.locations
+    fn source(&self, id: SourceId) -> Option<&Source> {
+        self.sources.iter().find(|s| s.id == id)
+    }
+
+    /// What the pane lists: each program, with its library if it has one switched
+    /// on, then the other libraries.
+    fn entries(&self) -> Vec<(SourceKind, Option<Source>)> {
+        let on = |k: SourceKind| {
+            self.sources
                 .iter()
-                .filter(|s| !PROGRAMS.iter().any(|p| p.0 == s.format))
-                .map(|s| (None, Some(s.clone()))),
+                .find(|s| s.kind == k && s.enabled && s.location.is_some())
+                .cloned()
+        };
+        let mut out: Vec<_> = SourceKind::PROGRAMS.iter().map(|&k| (k, on(k))).collect();
+        out.extend(
+            self.sources
+                .iter()
+                .filter(|s| s.kind.is_library() && !s.kind.is_program() && s.enabled)
+                .map(|s| (s.kind, Some(s.clone()))),
         );
         out
     }
@@ -98,10 +106,7 @@ impl ExternalUi {
     /// Take in what came of an `ExternalCmd` (the app keeps the locations first).
     pub fn event(&mut self, e: ExternalEvent) {
         match e {
-            ExternalEvent::Found { at: None, result } => match result {
-                Ok(list) => self.found = list,
-                Err(e) => self.find_error = Some(e),
-            },
+            ExternalEvent::Found { at: None, result } => self.find_error = result.err(),
             ExternalEvent::Found {
                 at: Some(at),
                 result,
@@ -137,118 +142,99 @@ impl ExternalUi {
                 if self.importing.as_ref().is_some_and(|i| i.0 == source) {
                     self.importing = None;
                 }
-                self.report = Some(result.map(|r| summary(&source, &r)));
+                let name = self.source(source).map_or("a library", |s| s.name.as_str());
+                self.report = Some(result.map(|r| summary(name, &r)));
             }
         }
     }
 
-    /// The left pane: each library, and its playlists once read.
-    pub fn tree(&mut self, ui: &mut Ui, out: &mut Vec<Command>) {
+    /// The DJ software section of the Sources pane: each library, and its
+    /// playlists once read.
+    pub fn section(&mut self, ui: &mut Ui, out: &mut Vec<Command>) {
         if !self.searched {
             self.searched = true;
             out.push(ExternalCmd::Find.into());
         }
-        egui::ScrollArea::vertical()
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new("OTHER LIBRARIES")
-                        .size(10.0)
-                        .color(THEME.muted),
-                );
-                if let Some(e) = &self.find_error {
-                    ui.label(RichText::new(e).size(11.0).color(THEME.bad));
-                }
-                for (program, source) in self.entries() {
-                    match source {
-                        Some(source) => self.library(ui, &source, program, out),
-                        None => {
-                            let (format, name) = program.expect("only programs are unset");
-                            unset(ui, format, name, out);
-                        }
-                    }
-                }
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui
-                        .button("Add…")
-                        .on_hover_text("A USB stick, or a folder with a Rekordbox XML")
-                        .clicked()
-                    {
-                        out.push(ExternalCmd::Pick.into());
-                    }
-                    if ui
-                        .button("Look again")
-                        .on_hover_text("Look for libraries in each program's usual place")
-                        .clicked()
-                    {
-                        out.push(ExternalCmd::Find.into());
-                    }
-                });
-                if let Some((_, m)) = &self.importing {
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(RichText::new(format!("Importing… {m}")).size(11.0));
-                    });
-                }
-                if let Some(r) = &self.report {
-                    ui.add_space(6.0);
-                    let (text, colour) = match r {
-                        Ok(t) => (t.as_str(), THEME.muted),
-                        Err(e) => (e.as_str(), THEME.bad),
-                    };
-                    ui.label(RichText::new(text).size(11.0).color(colour));
-                }
+        if let Some(e) = &self.find_error {
+            ui.label(RichText::new(e).size(11.0).color(THEME.bad));
+        }
+        for (kind, source) in self.entries() {
+            match source {
+                Some(source) => self.library(ui, &source, out),
+                None => unset(ui, kind, out),
+            }
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .button("Add…")
+                .on_hover_text("A USB stick, or a folder with a Rekordbox XML")
+                .clicked()
+            {
+                out.push(ExternalCmd::Pick.into());
+            }
+            if ui
+                .button("Look again")
+                .on_hover_text("Look for libraries in each program's usual place")
+                .clicked()
+            {
+                out.push(ExternalCmd::Find.into());
+            }
+        });
+        if let Some((_, m)) = &self.importing {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new(format!("Importing… {m}")).size(11.0));
             });
+        }
+        if let Some(r) = &self.report {
+            let (text, colour) = match r {
+                Ok(t) => (t.as_str(), THEME.muted),
+                Err(e) => (e.as_str(), THEME.bad),
+            };
+            ui.label(RichText::new(text).size(11.0).color(colour));
+        }
         self.dialog(ui.ctx(), out);
     }
 
-    /// A library and (opened) its playlists. `program`: it's one of [`PROGRAMS`]'
-    /// (so its location can be set).
-    fn library(
-        &mut self,
-        ui: &mut Ui,
-        source: &Source,
-        program: Option<(&'static str, &'static str)>,
-        out: &mut Vec<Command>,
-    ) {
-        let id = ui.make_persistent_id(("external", source.key()));
+    /// Stop listing a library's tracks in the middle (a folder was picked).
+    pub fn close(&mut self) {
+        self.open = None;
+    }
+
+    /// A library and (opened) its playlists.
+    fn library(&mut self, ui: &mut Ui, source: &Source, out: &mut Vec<Command>) {
+        let id = ui.make_persistent_id(("external", source.id));
         let state =
             egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
         let is_open = state.is_open();
         let header = state.show_header(ui, |ui| {
-            let selected = self.open.as_ref() == Some(&(source.clone(), None));
+            let selected = self.open == Some((source.id, None));
             let r = ui
                 .selectable_label(selected, RichText::new(&source.name).strong())
-                .on_hover_text(&source.path);
+                .on_hover_text(
+                    source
+                        .location
+                        .as_deref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default(),
+                );
             if r.clicked() {
                 self.show(source, None, out);
             }
             r.context_menu(|ui| {
                 self.import_item(ui, source, Target::Library);
                 if ui.button("Read again").clicked() {
-                    self.status.remove(source);
+                    self.status.remove(&source.id);
                     self.read(source, out);
                     ui.close();
                 }
                 ui.separator();
-                if let Some((format, _)) = program
-                    && ui.button("Set location…").clicked()
-                {
-                    out.push(
-                        ExternalCmd::SetLocation {
-                            format: format.into(),
-                        }
-                        .into(),
-                    );
+                if source.kind.is_program() && ui.button("Set location…").clicked() {
+                    out.push(ExternalCmd::SetLocation { kind: source.kind }.into());
                     ui.close();
                 }
-                if self.locations.contains(source) && ui.button("Forget location").clicked() {
-                    out.push(ExternalCmd::Forget(source.clone()).into());
-                    if self.open.as_ref().is_some_and(|o| o.0 == *source) {
-                        self.open = None;
-                    }
+                if ui.button("Remove").clicked() {
+                    out.push(LibraryCmd::RemoveSource(source.id).into());
                     ui.close();
                 }
             });
@@ -256,7 +242,7 @@ impl ExternalUi {
         if is_open {
             self.read_once(source, out);
         }
-        header.body(|ui| match self.status.get(source) {
+        header.body(|ui| match self.status.get(&source.id) {
             None => {}
             Some(Status::Reading(m)) => {
                 ui.horizontal(|ui| {
@@ -294,7 +280,7 @@ impl ExternalUi {
             });
             return;
         }
-        let id = ui.make_persistent_id(("external", source.key(), &path));
+        let id = ui.make_persistent_id(("external", source.id, &path));
         let header =
             egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
                 .show_header(ui, |ui| self.node_label(ui, source, n, &path, out));
@@ -315,7 +301,7 @@ impl ExternalUi {
         path: &NodePath,
         out: &mut Vec<Command>,
     ) {
-        let selected = self.open.as_ref() == Some(&(source.clone(), Some(path.clone())));
+        let selected = self.open == Some((source.id, Some(path.clone())));
         let icon = match n.kind {
             NodeKind::Folder => "📁",
             NodeKind::Playlist => "☰",
@@ -339,7 +325,7 @@ impl ExternalUi {
                 source: source.clone(),
                 target,
                 options: ImportOptions {
-                    memory_cues: has_memory_cues(&source.format),
+                    memory_cues: source.kind.has_memory_cues(),
                     ..ImportOptions::default()
                 },
             });
@@ -348,21 +334,21 @@ impl ExternalUi {
     }
 
     fn read_once(&mut self, source: &Source, out: &mut Vec<Command>) {
-        if !self.status.contains_key(source) {
+        if !self.status.contains_key(&source.id) {
             self.read(source, out);
         }
     }
 
     fn read(&mut self, source: &Source, out: &mut Vec<Command>) {
         self.status
-            .insert(source.clone(), Status::Reading(String::new()));
+            .insert(source.id, Status::Reading(String::new()));
         out.push(ExternalCmd::Read(source.clone()).into());
     }
 
     /// List a library's tracks, or a node's, in the middle.
     fn show(&mut self, source: &Source, node: Option<NodePath>, out: &mut Vec<Command>) {
         self.read_once(source, out);
-        self.open = Some((source.clone(), node));
+        self.open = Some((source.id, node));
         self.selected = None;
     }
 
@@ -373,10 +359,13 @@ impl ExternalUi {
 
     /// The middle: the picked library's or node's tracks.
     pub fn list(&mut self, ui: &mut Ui, v: &CoreView, out: &mut Vec<Command>) {
-        let Some((source, node)) = self.open.clone() else {
+        let Some((id, node)) = self.open.clone() else {
             return;
         };
-        let Some(Status::Ready(lib)) = self.status.get(&source) else {
+        let Some(source) = self.source(id).cloned() else {
+            return;
+        };
+        let Some(Status::Ready(lib)) = self.status.get(&id) else {
             ui.label(RichText::new("Reading…").color(THEME.muted));
             return;
         };
@@ -523,7 +512,7 @@ impl ExternalUi {
             self.dialog = Some(Dialog {
                 source: source.clone(),
                 options: ImportOptions {
-                    memory_cues: has_memory_cues(&source.format),
+                    memory_cues: source.kind.has_memory_cues(),
                     ..ImportOptions::default()
                 },
                 target,
@@ -540,7 +529,7 @@ impl ExternalUi {
     /// The import window, while it's open.
     fn dialog(&mut self, ctx: &egui::Context, out: &mut Vec<Command>) {
         let Some(d) = &mut self.dialog else { return };
-        let what = match (&d.target, self.status.get(&d.source)) {
+        let what = match (&d.target, self.status.get(&d.source.id)) {
             (Target::Library, _) => format!("Everything in {}", d.source.name),
             (Target::Node(p), Some(Status::Ready(lib))) => lib
                 .node(p)
@@ -573,7 +562,7 @@ impl ExternalUi {
                     .on_hover_text("Becomes the track's grid; the one it had is kept, to go back to");
                 ui.checkbox(&mut o.hot_cues, "Hot cues")
                     .on_hover_text("Into empty pads (with Overwrite, into every pad)");
-                let memory = has_memory_cues(&d.source.format);
+                let memory = d.source.kind.has_memory_cues();
                 if !memory {
                     o.memory_cues = false;
                 }
@@ -584,7 +573,7 @@ impl ExternalUi {
                         "Replace what earshot has (your own edits too), and set hot cues over \
                          earshot's. Without it, imports only fill gaps.",
                     );
-                if o.needs_cues() && d.source.format == "serato" {
+                if o.needs_cues() && d.source.kind == SourceKind::Serato {
                     ui.label(
                         RichText::new("Serato keeps cues and grids in the audio files: reading them takes a while.")
                             .size(11.0)
@@ -599,11 +588,11 @@ impl ExternalUi {
             });
         if go {
             let d = self.dialog.take().expect("open");
-            let lib = match self.status.get(&d.source) {
+            let lib = match self.status.get(&d.source.id) {
                 Some(Status::Ready(lib)) => Some(lib.clone()),
                 _ => None,
             };
-            self.importing = Some((d.source.clone(), String::new()));
+            self.importing = Some((d.source.id, String::new()));
             self.report = None;
             out.push(
                 ExternalCmd::Import {
@@ -621,23 +610,18 @@ impl ExternalUi {
 }
 
 /// A program whose library isn't known yet: right-click to say where it is.
-fn unset(ui: &mut Ui, format: &str, name: &str, out: &mut Vec<Command>) {
+fn unset(ui: &mut Ui, kind: SourceKind, out: &mut Vec<Command>) {
     ui.horizontal(|ui| {
         ui.add_space(ui.spacing().indent);
         let r = ui
             .add(
-                egui::Label::new(RichText::new(format!("{name}  ·  not set")).color(THEME.muted))
-                    .sense(egui::Sense::click()),
+                egui::Label::new(
+                    RichText::new(format!("{}  ·  not set", kind.label())).color(THEME.muted),
+                )
+                .sense(egui::Sense::click()),
             )
             .on_hover_text("Right-click › Set location…");
-        let set = |out: &mut Vec<Command>| {
-            out.push(
-                ExternalCmd::SetLocation {
-                    format: format.into(),
-                }
-                .into(),
-            )
-        };
+        let set = |out: &mut Vec<Command>| out.push(ExternalCmd::SetLocation { kind }.into());
         if r.double_clicked() {
             set(out);
         }
@@ -651,7 +635,7 @@ fn unset(ui: &mut Ui, format: &str, name: &str, out: &mut Vec<Command>) {
 }
 
 /// "Imported 120 tracks (3 not on this computer), 4 playlists, 80 grids, 300 cues."
-fn summary(source: &Source, r: &Imported) -> String {
+fn summary(name: &str, r: &Imported) -> String {
     let mut parts = vec![format!("{} tracks", r.tracks)];
     if r.collections > 0 {
         parts.push(format!("{} playlists and crates", r.collections));
@@ -662,7 +646,7 @@ fn summary(source: &Source, r: &Imported) -> String {
     if r.cues > 0 {
         parts.push(format!("{} cues", r.cues));
     }
-    let mut s = format!("Imported from {}: {}.", source.name, parts.join(", "));
+    let mut s = format!("Imported from {name}: {}.", parts.join(", "));
     if r.missing > 0 {
         s += &format!(" {} tracks aren't on this computer.", r.missing);
     }

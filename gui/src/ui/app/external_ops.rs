@@ -1,13 +1,13 @@
 //! Other DJ programs' libraries (`core::external`): finding, reading and importing
 //! them, each on a thread of its own; what comes of it arrives as
-//! `Event::External`, for the library pane's "Other libraries". Where the user put
-//! each library, and the path rules that find its files, are kept in the settings
-//! (`settings::EXTERNAL`).
+//! `Event::External`. Libraries found or set become sources (`core::sources`), and a
+//! read's path rules are kept in its source's settings.
 
 use std::path::PathBuf;
 
 use super::*;
-use crate::core::external::{self, ExternalCmd, ExternalEvent, Imported, PROGRAMS};
+use crate::core::external::{self, ExternalCmd, ExternalEvent, Imported};
+use crate::core::sources::SourceConfig;
 
 impl EarshotApp {
     pub(super) fn external_cmd(&mut self, c: ExternalCmd) {
@@ -26,7 +26,7 @@ impl EarshotApp {
                 let sink = self.sink.clone();
                 std::thread::spawn(move || {
                     if let Some(dir) = rfd::FileDialog::new()
-                        .set_title("A DJ library's folder, or a drive")
+                        .set_title("A USB stick, or a folder with a Rekordbox XML")
                         .pick_folder()
                     {
                         sink(Event::Command(ExternalCmd::Detect(dir).into()));
@@ -42,47 +42,42 @@ impl EarshotApp {
                     })
                 });
             }
-            ExternalCmd::SetLocation { format } => {
+            ExternalCmd::SetLocation { kind } => {
                 let sink = self.sink.clone();
-                let name = program_name(&format).to_string();
                 std::thread::spawn(move || {
                     if let Some(at) = rfd::FileDialog::new()
-                        .set_title(format!("Where is the {name} library?"))
+                        .set_title(format!("Where is the {} library?", kind.label()))
                         .pick_folder()
                     {
-                        sink(Event::Command(ExternalCmd::Locate { format, at }.into()));
+                        sink(Event::Command(ExternalCmd::Locate { kind, at }.into()));
                     }
                 });
             }
-            ExternalCmd::Locate { format, at } => {
+            ExternalCmd::Locate { kind, at } => {
                 std::thread::spawn(move || {
                     let result = external::find(Some(&at)).and_then(|found| {
                         found
                             .into_iter()
-                            .find(|s| s.format == format)
+                            .find(|f| f.kind() == Some(kind))
                             .ok_or_else(|| {
-                                format!("No {} library in {}", program_name(&format), at.display())
+                                format!("No {} library in {}", kind.label(), at.display())
                             })
                     });
-                    send(ExternalEvent::Located { format, result })
+                    send(ExternalEvent::Located { result })
                 });
             }
-            ExternalCmd::Forget(source) => {
-                self.settings.external.locations.retain(|s| *s != source);
-                self.save_external();
-            }
             ExternalCmd::Read(source) => {
-                let (roots, paths) = (self.roots(), self.path_rules(&source));
+                let roots = self.roots();
                 std::thread::spawn(move || {
-                    let s = source.clone();
-                    let result = external::read(&source, &roots, &paths, false, |message| {
+                    let id = source.id;
+                    let result = external::read(&source, &roots, false, |message| {
                         send(ExternalEvent::Progress {
-                            source: s.clone(),
+                            source: id,
                             message,
                         })
                     });
                     send(ExternalEvent::Read {
-                        source,
+                        source: id,
                         result: result.map(Arc::new),
                     })
                 });
@@ -93,13 +88,13 @@ impl EarshotApp {
                 options,
                 read,
             } => {
-                let (roots, paths) = (self.roots(), self.path_rules(&source));
+                let roots = self.roots();
                 let (store, hasher) = (self.lib.store.clone(), self.hasher.clone());
                 std::thread::spawn(move || {
-                    let s = source.clone();
+                    let id = source.id;
                     let progress = |message| {
                         send(ExternalEvent::Progress {
-                            source: s.clone(),
+                            source: id,
                             message,
                         })
                     };
@@ -109,11 +104,10 @@ impl EarshotApp {
                         let lib = match read {
                             Some(lib) if !options.needs_cues() => lib,
                             _ => {
-                                let lib = Arc::new(external::read(
-                                    &source, &roots, &paths, true, progress,
-                                )?);
+                                let lib =
+                                    Arc::new(external::read(&source, &roots, true, progress)?);
                                 send(ExternalEvent::Read {
-                                    source: source.clone(),
+                                    source: id,
                                     result: Ok(lib.clone()),
                                 });
                                 lib
@@ -121,7 +115,7 @@ impl EarshotApp {
                         };
                         let (mut save, missing) = external::plan(&source, &lib, &target, options);
                         send(ExternalEvent::Progress {
-                            source: source.clone(),
+                            source: id,
                             message: format!("reading {} files' tags", save.tracks.len()),
                         });
                         let files: Vec<PathBuf> =
@@ -134,91 +128,69 @@ impl EarshotApp {
                     })();
                     // New files need their audio hashes worked out.
                     let _ = hasher.send(());
-                    send(ExternalEvent::Imported { source, result })
+                    send(ExternalEvent::Imported { source: id, result })
                 });
             }
         }
     }
 
-    /// Keep what an event says about where libraries and their files are, then pass
-    /// it to the pane.
+    /// Libraries found or set become sources; a read's path rules go into its
+    /// source's settings. Then the pane hears of it.
     pub(super) fn external_event(&mut self, e: ExternalEvent) {
-        if let ExternalEvent::Read {
-            source,
-            result: Ok(lib),
-        } = &e
-        {
-            for w in &lib.warnings {
-                eprintln!("reading {}: {w}", source.name);
+        match &e {
+            // In the usual places: a program's library, unless it has one (or had,
+            // and the user removed it).
+            ExternalEvent::Found {
+                at: None,
+                result: Ok(found),
+            } => {
+                for f in found {
+                    let Some(new) = f.to_source() else { continue };
+                    let known = self.sources.iter().any(|s| s.kind == new.kind);
+                    if new.kind.found_by_itself() && !known {
+                        self.lib.store.send(StoreCmd::AddSource(new));
+                    }
+                }
             }
-        }
-        let ext = &mut self.settings.external;
-        let changed = match &e {
-            // Added with Add…: listed from now on.
+            // Added with Add…: every library there.
             ExternalEvent::Found {
                 at: Some(_),
                 result: Ok(found),
             } => {
-                let before = ext.locations.len();
-                for s in found {
-                    if !ext.locations.contains(s) {
-                        ext.locations.push(s.clone());
-                    }
+                for new in found.iter().filter_map(|f| f.to_source()) {
+                    self.lib.store.send(StoreCmd::AddSource(new));
                 }
-                ext.locations.len() != before
             }
-            ExternalEvent::Located {
-                format,
-                result: Ok(source),
-            } => {
-                ext.locations.retain(|s| s.format != *format);
-                ext.locations.push(source.clone());
-                true
+            ExternalEvent::Located { result: Ok(found) } => {
+                if let Some(new) = found.to_source() {
+                    self.lib.store.send(StoreCmd::AddSource(new));
+                }
             }
             ExternalEvent::Read {
                 source,
                 result: Ok(lib),
             } => {
-                let key = source.key();
-                if lib.paths.is_empty() {
-                    ext.paths.remove(&key).is_some()
-                } else if ext.paths.get(&key) != Some(&lib.paths) {
-                    ext.paths.insert(key, lib.paths.clone());
-                    true
-                } else {
-                    false
+                for w in &lib.warnings {
+                    eprintln!("reading source {source}: {w}");
+                }
+                if let Some(s) = self.sources.iter().find(|s| s.id == *source)
+                    && s.config.paths != lib.paths
+                {
+                    let mut s = s.clone();
+                    s.config = SourceConfig {
+                        paths: lib.paths.clone(),
+                        ..s.config
+                    };
+                    self.lib.store.send(StoreCmd::UpdateSource(s));
                 }
             }
-            _ => false,
-        };
-        if changed {
-            self.save_external();
+            _ => {}
         }
         self.panels.library.external.event(e);
     }
 
-    /// Save the settings for other libraries, and show the pane where they are.
-    pub(super) fn save_external(&mut self) {
-        let ext = &self.settings.external;
-        self.lib.store.send(settings::save(settings::EXTERNAL, ext));
-        self.panels
-            .library
-            .external
-            .set_locations(ext.locations.clone());
-    }
-
-    /// A library's path rules, as last found.
-    fn path_rules(&self, source: &external::Source) -> external::PathRules {
-        self.settings
-            .external
-            .paths
-            .get(&source.key())
-            .cloned()
-            .unwrap_or_default()
-    }
-
     /// Where to start looking for files another program stores under other paths
-    /// (it runs under Wine, or the library came from another computer): the library
+    /// (it runs under Wine, or the library came from another computer): the music
     /// folders, and the system's Music folder. The search widens from there.
     fn roots(&self) -> Vec<PathBuf> {
         let mut roots: Vec<PathBuf> = self
@@ -237,12 +209,4 @@ impl EarshotApp {
         }
         roots
     }
-}
-
-/// "Rekordbox", "Serato", "Mixxx" for a format, else the format.
-pub(crate) fn program_name(format: &str) -> &str {
-    PROGRAMS
-        .iter()
-        .find(|p| p.0 == format)
-        .map_or(format, |p| p.1)
 }

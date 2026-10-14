@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::core::edit::EditCmd;
+use crate::core::sources::NewSource;
 use crate::core::store::FlowCamera;
 
 impl EarshotApp {
@@ -24,10 +25,23 @@ impl EarshotApp {
                 });
             }
             LibraryCmd::AddRoots(folders) => {
-                self.lib.store.send(StoreCmd::AddRoots(folders));
+                for f in folders {
+                    self.lib
+                        .store
+                        .send(StoreCmd::AddSource(NewSource::folder(f)));
+                }
                 self.rescan();
             }
-            LibraryCmd::RemoveRoot(path) => self.lib.store.send(StoreCmd::RemoveRoot(path)),
+            LibraryCmd::RemoveRoot(path) => {
+                let folder = self.sources.iter().find(|s| {
+                    !s.kind.is_library()
+                        && s.location.as_deref() == Some(std::path::Path::new(&path))
+                });
+                if let Some(s) = folder {
+                    self.lib.store.send(StoreCmd::RemoveSource(s.id));
+                }
+            }
+            LibraryCmd::RemoveSource(id) => self.lib.store.send(StoreCmd::RemoveSource(id)),
             LibraryCmd::Rescan => self.rescan(),
             LibraryCmd::Reveal(track) => {
                 if let Some(t) = self.index.get(track)

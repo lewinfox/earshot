@@ -1,14 +1,15 @@
 //! Other DJ programs' libraries (Rekordbox, Serato, Mixxx, Rekordbox XML, USB
-//! sticks), read through cratelib by the worker's `python -m earshot_worker.libraries`
-//! (one short-lived process per read; see worker/README.md, "Other libraries"), and
-//! importing from them.
+//! sticks): sources (`core::sources`) read through cratelib by the worker's
+//! `python -m earshot_worker.libraries` (one short-lived process per read; see
+//! worker/README.md, "Other libraries"), and importing from them.
 //!
 //! Importing (a playlist, crate, folder, track or the whole library) brings in
-//! tracks whose files are on this machine (as tracks, linked in `external_links`),
+//! tracks whose files are on this machine (as tracks, linked to the source in
+//! `track_sources`),
 //! and the playlists and crates, in a folder named after the library. Importing
 //! again updates what an earlier import made (`collections.external`) instead of
 //! making copies. What else comes is [`ImportOptions`]:
-//! - Metadata, as source `import:<library>`. It fills fields earshot has no value
+//! - Metadata, as `track_meta` source `source:<id>`. It fills fields earshot has no value
 //!   for; with `overwrite`, it replaces earshot's (the user's edits included).
 //! - The beat grid, as a new grid (source `import`) made the active one.
 //! - Hot cues, into empty pads (`overwrite`: over set ones too).
@@ -17,7 +18,7 @@
 //! The worker hands cues and grids over on our own decoder's timeline (it applies
 //! cratelib's decoder offsets: an MP3 starts earlier for us than for Rekordbox).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -25,15 +26,16 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use earshot_engine::beatgrid::{Beatgrid, Constant, GridModel};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use super::collections::Section;
+use super::sources::{NewSource, PathRules, Source, SourceConfig, SourceId, SourceKind};
 use super::store::ScannedFile;
 use super::worker_client::worker_dir;
 
-/// A library another program keeps.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Source {
+/// A library the worker found: what it is and where, before it's a source.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct Found {
     /// cratelib's `Format`: rekordbox_db, rekordbox_xml, rekordbox_usb, serato, mixxx.
     pub format: String,
     /// Its file or folder.
@@ -44,56 +46,22 @@ pub struct Source {
     pub name: String,
 }
 
-/// The programs the "Other libraries" pane always lists: (cratelib format, name).
-pub const PROGRAMS: [(&str, &str); 3] = [
-    ("rekordbox_db", "Rekordbox"),
-    ("serato", "Serato"),
-    ("mixxx", "Mixxx"),
-];
-
-/// Whether a program's library is looked for in its usual place, or only where the
-/// user says (Set location…). On Linux, Rekordbox and Serato only run under Wine or
-/// in a container, where looking for them would be guessing.
-pub fn found_by_itself(format: &str) -> bool {
-    !cfg!(target_os = "linux") || format == "mixxx"
-}
-
-/// Path rules for one library: our folder → the same folder as its program stores
-/// it (cratelib's `PathMap`).
-pub type PathRules = BTreeMap<String, String>;
-
-/// What's kept about other libraries, in the Store's settings
-/// (`settings::EXTERNAL`).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ExternalSettings {
-    /// Libraries the user pointed earshot at (Set location…, Add…).
-    pub locations: Vec<Source>,
-    /// Each library's path rules, by [`Source::key`], as last found.
-    pub paths: HashMap<String, PathRules>,
-}
-
-impl ExternalSettings {
-    /// Drop path rules whose folder of ours has gone (a drive unplugged for good, a
-    /// folder renamed): the next read looks again. True if anything changed.
-    pub fn revalidate(&mut self) -> bool {
-        let mut changed = false;
-        for rules in self.paths.values_mut() {
-            let before = rules.len();
-            rules.retain(|ours, _| Path::new(ours).is_dir());
-            changed |= rules.len() != before;
-        }
-        let before = self.paths.len();
-        self.paths.retain(|_, r| !r.is_empty());
-        changed || self.paths.len() != before
+impl Found {
+    pub fn kind(&self) -> Option<SourceKind> {
+        SourceKind::parse(&self.format).filter(|k| k.is_library())
     }
-}
 
-impl Source {
-    /// The library's name in the database: `external_links.library`, and
-    /// `track_meta.source` is `import:` and this.
-    pub fn key(&self) -> String {
-        format!("{}:{}", self.format, self.path)
+    /// The source it makes (`None`: a format earshot doesn't know).
+    pub fn to_source(&self) -> Option<NewSource> {
+        Some(NewSource {
+            kind: self.kind()?,
+            name: self.name.clone(),
+            location: Some(PathBuf::from(&self.path)),
+            config: SourceConfig {
+                volume_root: self.volume_root.clone(),
+                ..SourceConfig::default()
+            },
+        })
     }
 }
 
@@ -183,11 +151,6 @@ pub fn grid_of(markers: &[Marker], duration: f64) -> Option<Beatgrid> {
             Beatgrid::new(times, positions).ok()
         }
     }
-}
-
-/// Is this a library whose memory cues can be imported (Rekordbox's)?
-pub fn has_memory_cues(format: &str) -> bool {
-    format.starts_with("rekordbox")
 }
 
 impl ExtTrack {
@@ -327,7 +290,7 @@ impl ExtLibrary {
 #[derive(Deserialize)]
 struct Line {
     progress: Option<String>,
-    libraries: Option<Vec<Source>>,
+    libraries: Option<Vec<Found>>,
     library: Option<ExtLibrary>,
     error: Option<String>,
 }
@@ -376,7 +339,7 @@ fn run(args: Vec<OsString>, mut progress: impl FnMut(String)) -> Result<Line, St
 
 /// The libraries in each program's usual place on this computer (`at: None`), or
 /// in a file, folder or drive. Blocking: call from a background thread.
-pub fn find(at: Option<&Path>) -> Result<Vec<Source>, String> {
+pub fn find(at: Option<&Path>) -> Result<Vec<Found>, String> {
     let mut args: Vec<OsString> = vec!["find".into()];
     args.extend(at.map(|p| p.as_os_str().to_owned()));
     run(args, |_| {})?
@@ -386,24 +349,27 @@ pub fn find(at: Option<&Path>) -> Result<Vec<Source>, String> {
 
 /// Read a whole library. `roots` (earshot's music folders) are where to look for
 /// files the program stores under other paths (it runs under Wine, or the library
-/// came from another computer), starting from `paths`, the rules found last time.
-/// `cues`: with
+/// came from another computer), starting from the source's path rules as found last
+/// time. `cues`: with
 /// every track's cues and grid, which is slower (Serato keeps them in the audio
 /// files, Rekordbox its grids in analysis files). Blocking: call from a background
 /// thread.
 pub fn read(
     source: &Source,
     roots: &[PathBuf],
-    paths: &PathRules,
     cues: bool,
     progress: impl FnMut(String),
 ) -> Result<ExtLibrary, String> {
+    let Some(location) = &source.location else {
+        return Err(format!("{}: where it is isn't set", source.name));
+    };
+    let paths = &source.config.paths;
     let mut args: Vec<OsString> = vec![
         "read".into(),
-        source.format.clone().into(),
-        source.path.clone().into(),
+        source.kind.as_str().into(),
+        location.as_os_str().to_owned(),
     ];
-    if let Some(v) = &source.volume_root {
+    if let Some(v) = &source.config.volume_root {
         args.extend(["--volume-root".into(), v.into()]);
     }
     for r in roots {
@@ -430,7 +396,7 @@ pub fn read(
 pub struct ImportOptions {
     pub grid: bool,
     pub hot_cues: bool,
-    /// Rekordbox only ([`has_memory_cues`]).
+    /// Rekordbox only (`SourceKind::has_memory_cues`).
     pub memory_cues: bool,
     /// Imported metadata and hot cues replace what earshot has, instead of only
     /// filling gaps.
@@ -498,8 +464,8 @@ pub struct ImportNode {
 /// Everything one import writes, in one transaction (`Writer::import_external`).
 #[derive(Debug)]
 pub struct ImportSave {
-    /// [`Source::key`].
-    pub library: String,
+    /// The source it's from.
+    pub source: SourceId,
     pub options: ImportOptions,
     /// Files new to earshot, or changed since it last looked, with their tags.
     pub files: Vec<ScannedFile>,
@@ -534,11 +500,11 @@ pub struct Imported {
     pub cues: usize,
 }
 
-/// A collection's `external`: the library, its section, the names down to it and
-/// its kind (a folder and a playlist may share a name), joined by a character no
-/// name has.
-pub fn external_key(library: &str, section: Section, names: &[&str], kind: NodeKind) -> String {
-    let mut k = format!("{library}\u{1f}{}", section.as_str());
+/// A collection's `external`: the source, its section, the names down to it and its
+/// kind (a folder and a playlist may share a name), joined by a character no name
+/// has.
+pub fn external_key(source: SourceId, section: Section, names: &[&str], kind: NodeKind) -> String {
+    let mut k = format!("{source}\u{1f}{}", section.as_str());
     for n in names {
         k.push('\u{1f}');
         k.push_str(n);
@@ -559,14 +525,14 @@ pub fn plan(
     target: &Target,
     options: ImportOptions,
 ) -> (ImportSave, usize) {
-    let library = source.key();
+    let library = source.id;
     let tracks_in = match target {
         Target::Library => lib.tracks_in(None),
         Target::Node(path) => lib.tracks_in(Some(path)),
         Target::Track(id) => lib.track(id).into_iter().collect(),
     };
     let missing = tracks_in.iter().filter(|t| t.file.is_none()).count();
-    let memory = options.memory_cues && has_memory_cues(&source.format);
+    let memory = options.memory_cues && source.kind.has_memory_cues();
     let tracks = tracks_in
         .iter()
         .filter_map(|t| {
@@ -618,13 +584,13 @@ pub fn plan(
         let children: Vec<ImportNode> = chosen
             .iter()
             .filter(|n| node_section(n) == section)
-            .map(|n| import_node(&library, section, n, &mut vec![]))
+            .map(|n| import_node(library, section, n, &mut vec![]))
             .collect();
         if !children.is_empty() {
             let root = ImportNode {
                 name: source.name.clone(),
                 kind: NodeKind::Folder,
-                external: external_key(&library, section, &[], NodeKind::Folder),
+                external: external_key(library, section, &[], NodeKind::Folder),
                 children,
                 tracks: vec![],
             };
@@ -632,7 +598,7 @@ pub fn plan(
         }
     }
     let save = ImportSave {
-        library,
+        source: library,
         options,
         files: vec![],
         tracks,
@@ -656,7 +622,7 @@ fn node_section(n: &Node) -> Section {
 }
 
 fn import_node<'a>(
-    library: &str,
+    library: SourceId,
     section: Section,
     n: &'a Node,
     names: &mut Vec<&'a str>,
@@ -686,23 +652,21 @@ fn import_node<'a>(
 /// the results in the library pane.
 #[derive(Debug, Clone)]
 pub enum ExternalCmd {
-    /// Look for libraries in each program's usual place.
+    /// Look for libraries in each program's usual place (those found become sources).
     Find,
     /// Ask for a library file, folder or drive to look in (a picker).
     Pick,
-    /// Look for libraries in this file, folder or drive (Add…).
+    /// Look for libraries in this file, folder or drive (Add…); they become sources.
     Detect(PathBuf),
     /// Ask where this program's library is (a picker), and keep it.
     SetLocation {
-        format: String,
+        kind: SourceKind,
     },
     /// Look for this program's library here.
     Locate {
-        format: String,
+        kind: SourceKind,
         at: PathBuf,
     },
-    /// Stop listing a library the user pointed earshot at.
-    Forget(Source),
     Read(Source),
     /// Bring this in. `read`: the library as already read, if it was (it's read
     /// again when the options need cues and grids).
@@ -720,21 +684,18 @@ pub enum ExternalEvent {
     /// The libraries found in the usual places, or (`at`) in a file or folder.
     Found {
         at: Option<PathBuf>,
-        result: Result<Vec<Source>, String>,
+        result: Result<Vec<Found>, String>,
     },
     /// Where the user says a program's library is: found there, or not.
-    Located {
-        format: String,
-        result: Result<Source, String>,
-    },
+    Located { result: Result<Found, String> },
     /// What a read is doing ("Reading Mixxx tracks 120/900").
-    Progress { source: Source, message: String },
+    Progress { source: SourceId, message: String },
     Read {
-        source: Source,
+        source: SourceId,
         result: Result<Arc<ExtLibrary>, String>,
     },
     Imported {
-        source: Source,
+        source: SourceId,
         result: Result<Imported, String>,
     },
 }
@@ -821,10 +782,12 @@ mod tests {
 
     fn source() -> Source {
         Source {
-            format: "rekordbox_xml".into(),
-            path: "/x/rb.xml".into(),
-            volume_root: None,
+            id: 7,
+            kind: SourceKind::RekordboxXml,
             name: "Rekordbox XML (rb.xml)".into(),
+            location: Some("/x/rb.xml".into()),
+            config: SourceConfig::default(),
+            enabled: true,
         }
     }
 
@@ -847,7 +810,11 @@ mod tests {
             r#"{"libraries": [{"format": "serato", "path": "/m/_Serato_", "volume_root": "C:/", "name": "Serato"}]}"#,
         )
         .unwrap();
-        assert_eq!(found.libraries.unwrap()[0].key(), "serato:/m/_Serato_");
+        let s = found.libraries.unwrap()[0].to_source().unwrap();
+        assert_eq!(
+            (s.kind, s.config.volume_root.as_deref()),
+            (SourceKind::Serato, Some("C:/"))
+        );
     }
 
     #[test]
@@ -893,7 +860,7 @@ mod tests {
         assert_eq!(
             playlists.children[0].children[0].external,
             external_key(
-                "rekordbox_xml:/x/rb.xml",
+                7,
                 Section::Playlists,
                 &["Sets", "Friday"],
                 NodeKind::Playlist
@@ -924,7 +891,7 @@ mod tests {
         assert!(t.grid.is_empty() && t.hot_cues.is_empty() && t.memory_cues.is_empty());
         // Mixxx has no memory cues to bring.
         let mixxx = Source {
-            format: "mixxx".into(),
+            kind: SourceKind::Mixxx,
             ..source()
         };
         let (save, _) = plan(
@@ -957,27 +924,6 @@ mod tests {
         assert_eq!(g.times(), [0.0, 0.5, 1.0, 2.0]);
         assert_eq!(g.positions(), [1, 2, 3, 4]);
         assert!(g.as_constant().is_none());
-    }
-
-    #[test]
-    fn revalidating_drops_rules_whose_folder_has_gone() {
-        let here = std::env::temp_dir().to_string_lossy().into_owned();
-        let mut s = ExternalSettings::default();
-        s.paths.insert(
-            "a".into(),
-            PathRules::from([
-                (here.clone(), "C:/M".into()),
-                ("/no/such/dir".into(), "D:/".into()),
-            ]),
-        );
-        s.paths.insert(
-            "b".into(),
-            PathRules::from([("/no/such/dir".into(), "E:/".into())]),
-        );
-        assert!(s.revalidate());
-        assert_eq!(s.paths.len(), 1);
-        assert_eq!(s.paths["a"], PathRules::from([(here, "C:/M".into())]));
-        assert!(!s.revalidate(), "nothing more to drop");
     }
 
     #[test]
@@ -1014,7 +960,7 @@ mod tests {
         assert_eq!(
             sets.children[0].external,
             external_key(
-                "rekordbox_xml:/x/rb.xml",
+                7,
                 Section::Playlists,
                 &["Sets", "Saturday"],
                 NodeKind::Playlist

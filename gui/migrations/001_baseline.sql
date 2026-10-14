@@ -2,6 +2,40 @@
 -- Times are seconds since the epoch unless the column name says otherwise.
 -- Only the Store thread (gui/src/core/store) writes to this database.
 
+-- ---- sources ----------------------------------------------------------------------
+
+-- Where tracks come from (core/sources.rs): earshot's music folders, other DJ
+-- programs' libraries and, later, streaming services. The library pane's Sources
+-- lists these. `location` is the folder's or library's path, as the OS's bytes
+-- (NULL: not set yet); `config` is JSON (`SourceConfig`: a Serato library's volume
+-- root, the path rules that find a library's files here). A disabled source's tracks
+-- aren't listed; a program's library the user removed stays as a disabled row, so
+-- looking in the usual places doesn't bring it back.
+CREATE TABLE sources (
+  id        INTEGER PRIMARY KEY,
+  kind      TEXT NOT NULL CHECK (kind IN ('folder', 'rekordbox_db', 'rekordbox_xml',
+                                          'rekordbox_usb', 'serato', 'mixxx')),
+  name      TEXT NOT NULL,
+  location  BLOB,
+  config    TEXT NOT NULL DEFAULT '{}',
+  enabled   INTEGER NOT NULL DEFAULT 1,
+  added_at  INTEGER NOT NULL,
+  UNIQUE (kind, location)
+) STRICT;
+
+-- Which sources have which tracks: a folder, every file found in it (`external_id`:
+-- the file's path); another library, the tracks imported from it (its own id for
+-- them). A track is in the library while an enabled source has it and one of its
+-- files is present.
+CREATE TABLE track_sources (
+  source_id    INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  external_id  TEXT NOT NULL,
+  track_id     INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+  synced_at    INTEGER NOT NULL,
+  PRIMARY KEY (source_id, external_id)
+) STRICT;
+CREATE INDEX track_sources_track ON track_sources(track_id);
+
 -- ---- track identity ---------------------------------------------------------------
 
 -- A track is its id, not its path: files can move, and a track can have had several.
@@ -24,7 +58,8 @@ CREATE TABLE tracks (
   deleted_at      INTEGER
 ) STRICT;
 
--- Where a track's audio is (or was). `path` is the OS path's raw bytes.
+-- Where a track's audio is (or was). `path` is a `Location` (audio/src/media.rs): a
+-- local path's raw bytes, or a URL.
 -- `content_hash` is the SHA-256 of the audio, not the tags (core/hash.rs): from the
 -- file's TXXX:AUDIO_SHA256 frame when it has one, else worked out in the background.
 CREATE TABLE files (
@@ -42,11 +77,11 @@ CREATE INDEX files_hash ON files(content_hash);
 -- ---- metadata ---------------------------------------------------------------------
 
 -- One value per field per source. A rescan only ever writes source 'tag', so what the
--- user typed ('user') or another library said ('import:<name>') survives it.
+-- user typed ('user') or a source said ('source:<sources.id>') survives it.
 CREATE TABLE track_meta (
   track_id    INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
   field       TEXT NOT NULL,           -- title, artist, album, genre, comment, bpm, key …
-  source      TEXT NOT NULL CHECK (source IN ('tag', 'user') OR source LIKE 'import:%'),
+  source      TEXT NOT NULL CHECK (source IN ('tag', 'user') OR source LIKE 'source:%'),
   value       TEXT NOT NULL,
   updated_at  INTEGER NOT NULL,
   PRIMARY KEY (track_id, field, source)
@@ -209,7 +244,7 @@ CREATE TABLE collections (
   sort_order      INTEGER,
   view_state      TEXT,     -- a Flow: where its canvas looks, JSON [left, top, right, bottom]
   source_flow_id  INTEGER REFERENCES collections(id) ON DELETE SET NULL,
-  -- Made by importing from another library: which library and where in it
+  -- Made by importing from a source: which source and where in it
   -- (core/external.rs `external_key`), so importing again updates it.
   external        TEXT UNIQUE,
   created_at      INTEGER NOT NULL,
@@ -272,19 +307,6 @@ CREATE TABLE plays (
 ) STRICT;
 CREATE INDEX plays_track ON plays(track_id);
 
--- The same track in another library (core/external.rs): `library` is
--- '<format>:<path>', `external_id` the track's id there. A track linked here is
--- listed even outside the library folders.
-CREATE TABLE external_links (
-  track_id     INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
-  library      TEXT NOT NULL,
-  external_id  TEXT NOT NULL,
-  synced_at    INTEGER,
-  etag         TEXT,
-  PRIMARY KEY (library, external_id)
-) STRICT;
-CREATE INDEX external_links_track ON external_links(track_id);
-
 -- Background work that should survive a restart. (Audio hashing doesn't need it:
 -- its queue is `files.content_hash IS NULL`.) Analysis jobs: `kind` is
 -- 'analyse:<analyser>', one row per track and analyser while it's queued (deleted when
@@ -304,19 +326,10 @@ CREATE UNIQUE INDEX jobs_track_kind ON jobs(track_id, kind);
 
 -- ---- settings ---------------------------------------------------------------------
 
--- Folders scanned for music; `path` is the OS path's raw bytes.
-CREATE TABLE library_roots (
-  id        INTEGER PRIMARY KEY,
-  path      BLOB NOT NULL UNIQUE,
-  added_at  INTEGER NOT NULL
-) STRICT;
-
 -- Settings, as text (JSON for structured ones): 'analysis.background_workers' (how
 -- many background worker processes may run at once), 'audio.output' (device, buffer
 -- size, routing), 'decks.tempo_ranges' (each deck's tempo fader range), 'flow.open'
--- (the Flow on the canvas last; JSON, null for none) and 'external.libraries' (other
--- libraries the user pointed earshot at, and each one's path rules: where its files
--- are here). The UI's own preferences
+-- (the Flow on the canvas last; JSON, null for none). The UI's own preferences
 -- (layout, zoom) are kept by eframe, not here.
 CREATE TABLE settings (
   key    TEXT PRIMARY KEY,

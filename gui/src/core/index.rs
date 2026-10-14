@@ -177,6 +177,8 @@ pub enum LibraryCmd {
     AddRoots(Vec<std::path::PathBuf>),
     /// Stop scanning a library folder.
     RemoveRoot(String),
+    /// Remove a source (a folder, another library; a program's is switched off).
+    RemoveSource(crate::core::sources::SourceId),
     /// Look through the library folders again.
     Rescan,
     /// Show the track's file in the file manager.

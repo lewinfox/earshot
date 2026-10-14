@@ -55,8 +55,8 @@ pub enum TempoLockCmd {
     Straighten(StraightenOptions),
     /// Stop what's running (analysis, straightening or measuring).
     Cancel,
-    /// Copy the straightened MP3 into this library folder (one of the Store's
-    /// `library_roots`) and scan it in.
+    /// Copy the straightened MP3 into this music folder (a folder source) and scan
+    /// it in.
     SaveToLibrary(PathBuf),
     /// Listen to the original or the straightened version in the headphones. The UI's
     /// shell plays these (it has the player); [`TempoLock::run`] ignores them.
@@ -1073,7 +1073,10 @@ impl Shared {
     /// Copy `output` into the library folder `root` under a name no file there has,
     /// and scan it in. The new file's path.
     fn save_to_library(&self, output: &Path, root: &Path) -> Result<PathBuf, String> {
-        let roots = self.store.call(|w| w.roots()).map_err(|e| e.to_string())?;
+        let roots = self
+            .store
+            .call(|w| w.folders())
+            .map_err(|e| e.to_string())?;
         if !roots.iter().any(|r| same_dir(r, root)) {
             return Err(format!(
                 "{} isn't one of the library folders",
@@ -1269,7 +1272,9 @@ for line in sys.stdin:
         }
         let store = Store::open(&dir.join(FILE_NAME), Arc::new(|_| {})).unwrap();
         let r = root.clone();
-        store.call(move |w| w.add_roots(&[r])).unwrap();
+        store
+            .call(move |w| w.add_source(&crate::core::sources::NewSource::folder(r)))
+            .unwrap();
         library::scan_library(&store).unwrap();
         let track = store
             .reader

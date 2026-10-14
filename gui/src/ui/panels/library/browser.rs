@@ -252,41 +252,32 @@ impl LibraryUi {
     // ---- the Explorer -------------------------------------------------------------------
 
     /// The library folders on disk, as a tree.
-    pub fn explorer(&mut self, ui: &mut Ui, v: &CoreView, out: &mut Vec<Command>) {
-        egui::ScrollArea::vertical()
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new("FOLDERS ON DISK")
-                        .size(10.0)
-                        .color(THEME.muted),
-                );
-                if self.folders.is_empty() {
-                    ui.label(
-                        RichText::new("No folders yet. Menu > Import > Folder...")
-                            .size(11.0)
-                            .color(THEME.muted),
-                    );
-                }
-                for root in self.folders.clone() {
-                    let name = root.rsplit('/').next().unwrap_or(&root).to_string();
-                    self.node(
-                        ui,
-                        &Subdir {
-                            name,
-                            path: root,
-                            has_children: true,
-                        },
-                        true,
-                        v,
-                        out,
-                    );
-                }
-                ui.add_space(6.0);
-                if ui.button("Add a folder...").clicked() {
-                    out.push(LibraryCmd::PickRoots.into());
-                }
-            });
+    /// The music folders, as a tree (the Sources pane's Folders section).
+    pub fn folder_tree(&mut self, ui: &mut Ui, v: &CoreView, out: &mut Vec<Command>) {
+        if self.folders.is_empty() {
+            ui.label(
+                RichText::new("No music folders yet.")
+                    .size(11.0)
+                    .color(THEME.muted),
+            );
+        }
+        for root in self.folders.clone() {
+            let name = root.rsplit('/').next().unwrap_or(&root).to_string();
+            self.node(
+                ui,
+                &Subdir {
+                    name,
+                    path: root,
+                    has_children: true,
+                },
+                true,
+                v,
+                out,
+            );
+        }
+        if ui.button("Add a folder…").clicked() {
+            out.push(LibraryCmd::PickRoots.into());
+        }
     }
 
     fn label(&mut self, ui: &mut Ui, d: &Subdir, root: bool, v: &CoreView, out: &mut Vec<Command>) {

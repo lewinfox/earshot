@@ -19,7 +19,7 @@ impl Writer {
     /// ids from `ids`, handed out by the Store beforehand.
     pub fn import_external(&mut self, save: ImportSave, ids: Range<i64>) -> Result<Imported> {
         let t = now();
-        let source = format!("import:{}", save.library);
+        let source = format!("source:{}", save.source);
         let opts = save.options;
         let mut done = Imported::default();
         let tx = self.conn.transaction()?;
@@ -42,11 +42,11 @@ impl Writer {
             ours.insert(&it.external_id, track);
             done.tracks += 1;
             tx.execute(
-                "INSERT INTO external_links(track_id, library, external_id, synced_at)
+                "INSERT INTO track_sources(source_id, external_id, track_id, synced_at)
                  VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(library, external_id) DO UPDATE SET
+                 ON CONFLICT(source_id, external_id) DO UPDATE SET
                    track_id = excluded.track_id, synced_at = excluded.synced_at",
-                params![track, save.library, it.external_id, t],
+                params![save.source, it.external_id, track, t],
             )?;
             for field in FIELDS {
                 let value = it.meta.iter().find(|m| m.0 == field).map(|m| m.1.as_str());

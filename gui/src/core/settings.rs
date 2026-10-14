@@ -6,7 +6,6 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use super::collections::CollectionId;
-use super::external::ExternalSettings;
 use super::player::AudioSettings;
 use super::store::{Reader, StoreCmd};
 
@@ -22,9 +21,6 @@ pub const HOTCUE_MODE: &str = "decks.hotcue_mode";
 /// The Flow that was on the canvas last. (Where its canvas was looking is kept with
 /// the Flow: `StoreCmd::SaveFlowCamera`.)
 pub const FLOW_OPEN: &str = "flow.open";
-/// Other libraries: where the user put them, and their path rules
-/// (`external::ExternalSettings`).
-pub const EXTERNAL: &str = "external.libraries";
 
 /// What was saved, read once at startup.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -34,7 +30,6 @@ pub struct Settings {
     pub deck_options: Vec<DeckOptions>,
     pub hotcue_mode: HotcueMode,
     pub flow_open: Option<CollectionId>,
-    pub external: ExternalSettings,
 }
 
 /// A player's options that stay as they were set, from one run to the next.
@@ -53,7 +48,6 @@ impl Settings {
             deck_options: read(reader, DECK_OPTIONS).unwrap_or_default(),
             hotcue_mode: read(reader, HOTCUE_MODE).unwrap_or_default(),
             flow_open: read(reader, FLOW_OPEN).unwrap_or_default(),
-            external: read(reader, EXTERNAL).unwrap_or_default(),
         }
     }
 }

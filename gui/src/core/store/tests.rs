@@ -7,6 +7,7 @@ use earshot_engine::decode::TrackTags;
 use super::*;
 use crate::core::collections::CollectionKind::{Crate, Flow, Folder, Playlist, Smart};
 use crate::core::collections::{FlowGraph, FlowNode, Section};
+use crate::core::sources::{NewSource, SourceId, SourceKind};
 use write::save_features;
 
 /// A fresh database in its own folder, which also serves as the library root.
@@ -36,6 +37,11 @@ fn file(path: &Path, title: &str, hash: Option<u8>) -> ScannedFile {
         tags: tags(title, "Someone"),
         tag_hash: hash.map(|h| [h; 32]),
     }
+}
+
+/// Add a music folder.
+fn add_folder(w: &mut Writer, path: &Path) -> SourceId {
+    w.add_source(&NewSource::folder(path.into())).unwrap()
 }
 
 /// Scan these files (all of them changed) under `dir/music`.
@@ -143,7 +149,7 @@ fn a_newer_database_is_refused() {
 #[test]
 fn rescans_keep_what_the_user_typed() {
     let (dir, mut w) = setup("meta");
-    w.add_roots(&[dir.join("music")]).unwrap();
+    add_folder(&mut w, &dir.join("music"));
     let a = dir.join("music/a.mp3");
     scan(&mut w, &dir, &[file(&a, "Tag Title", None)]);
     let id = library(&mut w)[0].id;
@@ -174,7 +180,7 @@ fn rescans_keep_what_the_user_typed() {
 #[test]
 fn a_track_with_no_title_shows_its_file_name() {
     let (dir, mut w) = setup("stem");
-    w.add_roots(&[dir.join("music")]).unwrap();
+    add_folder(&mut w, &dir.join("music"));
     let mut f = file(&dir.join("music/Some Song.mp3"), "", None);
     f.tags.title = None;
     scan(&mut w, &dir, &[f]);
@@ -182,12 +188,13 @@ fn a_track_with_no_title_shows_its_file_name() {
 }
 
 #[test]
-fn files_outside_the_roots_are_kept_but_not_listed() {
+fn a_removed_folders_tracks_are_kept_but_not_listed() {
     let (dir, mut w) = setup("roots");
-    w.add_roots(&[dir.join("music")]).unwrap();
+    add_folder(&mut w, &dir.join("music"));
     scan(&mut w, &dir, &[file(&dir.join("music/a.mp3"), "A", None)]);
     assert_eq!(library(&mut w).len(), 1);
-    w.remove_root(&dir.join("music").to_string_lossy()).unwrap();
+    let music = read::sources(w.conn()).unwrap()[0].id;
+    w.remove_source(music).unwrap();
     assert!(library(&mut w).is_empty());
     let n: i64 = w
         .conn()
@@ -198,7 +205,7 @@ fn files_outside_the_roots_are_kept_but_not_listed() {
 
 /// A track with an analysis, a hand-fixed grid and a place in a Flow.
 fn curated_track(w: &mut Writer, dir: &Path, path: &Path, hash: Option<u8>) -> i64 {
-    w.add_roots(&[dir.join("music")]).unwrap();
+    add_folder(w, &dir.join("music"));
     scan(w, dir, &[file(path, "Moved", hash)]);
     let id = library(w)[0].id;
     w.save_user_grid(id, &grid(128.0)).unwrap();
@@ -297,7 +304,7 @@ fn a_moved_file_hashed_later_is_merged_back() {
 #[test]
 fn copies_of_the_same_audio_are_duplicates() {
     let (dir, mut w) = setup("dupes");
-    w.add_roots(&[dir.join("music")]).unwrap();
+    add_folder(&mut w, &dir.join("music"));
     scan(
         &mut w,
         &dir,
@@ -395,7 +402,7 @@ fn analysis(track: i64, bpm: f64, expected: Option<i64>, force: bool) -> Analysi
 
 fn one_track(name: &str) -> (PathBuf, Writer, i64) {
     let (dir, mut w) = setup(name);
-    w.add_roots(&[dir.join("music")]).unwrap();
+    add_folder(&mut w, &dir.join("music"));
     scan(&mut w, &dir, &[file(&dir.join("music/a.mp3"), "A", None)]);
     let id = library(&mut w)[0].id;
     (dir, w, id)
@@ -419,7 +426,7 @@ fn the_first_beat_is_kept_with_the_track() {
 #[test]
 fn stale_analyser_results_are_one_query() {
     let (dir, mut w) = setup("stale");
-    w.add_roots(&[dir.join("music")]).unwrap();
+    add_folder(&mut w, &dir.join("music"));
     scan(
         &mut w,
         &dir,
@@ -1047,7 +1054,7 @@ fn smart_playlists_run_their_query_in_sql_like_in_memory() {
     use crate::core::query;
 
     let (dir, mut w) = setup("smart");
-    w.add_roots(&[dir.join("music")]).unwrap();
+    add_folder(&mut w, &dir.join("music"));
     let mut files = vec![];
     for (name, artist, bpm, key) in [
         ("Deep Space", "Daft", 124.0, "Am"),
@@ -1187,8 +1194,8 @@ fn the_store_thread_writes_and_reports() {
         Arc::new(move |e| sink_events.lock().unwrap().push(e)),
     )
     .unwrap();
-    store.send(StoreCmd::AddRoots(vec![dir.join("music")]));
-    let roots = store.call(|w| w.roots()).unwrap();
+    store.send(StoreCmd::AddSource(NewSource::folder(dir.join("music"))));
+    let roots = store.call(|w| w.folders()).unwrap();
     assert_eq!(roots, vec![dir.join("music")]);
     let f = file(&dir.join("music/a.mp3"), "A", None);
     let root = dir.join("music");
@@ -1220,7 +1227,7 @@ fn the_store_thread_writes_and_reports() {
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, StoreEvent::Roots(r) if r.len() == 1))
+            .any(|e| matches!(e, StoreEvent::Sources(r) if r.len() == 1))
     );
     assert!(
         events
@@ -1254,7 +1261,7 @@ fn a_grid_edit_doesnt_wait_for_the_database() {
     let f = file(&root.join("a.mp3"), "A", None);
     store
         .call(move |w| {
-            w.add_roots(std::slice::from_ref(&root))?;
+            w.add_source(&NewSource::folder(root.clone()))?;
             w.apply_scan(&[root], &[f.path.clone()], &[f])
         })
         .unwrap();
@@ -1337,7 +1344,7 @@ fn text(s: &str) -> Option<Value> {
 /// Two tracks, scanned with tag titles "A" and "B".
 fn two_tracks(name: &str) -> (PathBuf, Writer, i64, i64) {
     let (dir, mut w) = setup(name);
-    w.add_roots(&[dir.join("music")]).unwrap();
+    add_folder(&mut w, &dir.join("music"));
     let (fa, fb) = (dir.join("music/a.mp3"), dir.join("music/b.mp3"));
     scan(&mut w, &dir, &[file(&fa, "A", None), file(&fb, "B", None)]);
     let lib = library(&mut w);
@@ -1966,7 +1973,20 @@ mod import {
         ExtCue, ImportNode, ImportOptions, ImportSave, ImportTrack, Marker, NodeKind, external_key,
     };
 
-    const LIB: &str = "rekordbox_xml:/x/rb.xml";
+    /// The library imported from: the first source each test adds ([`library_source`]).
+    const LIB: SourceId = 1;
+
+    fn library_source(w: &mut Writer) {
+        let id = w
+            .add_source(&NewSource {
+                kind: SourceKind::RekordboxXml,
+                name: "Rekordbox XML".into(),
+                location: Some("/x/rb.xml".into()),
+                config: Default::default(),
+            })
+            .unwrap();
+        assert_eq!(id, LIB);
+    }
 
     fn cue(start_s: f64, end_s: Option<f64>, slot: Option<u8>, name: &str) -> ExtCue {
         ExtCue {
@@ -2013,7 +2033,7 @@ mod import {
         overwrite: bool,
     ) -> ImportSave {
         ImportSave {
-            library: LIB.into(),
+            source: LIB,
             options: ImportOptions {
                 overwrite,
                 ..ImportOptions::default()
@@ -2055,6 +2075,7 @@ mod import {
     #[test]
     fn brings_in_tracks_metadata_grids_cues_and_playlists() {
         let (dir, mut w) = setup("import");
+        library_source(&mut w);
         let a = dir.join("music/a.mp3");
         scan(&mut w, &dir, &[file(&a, "Tag A", None)]);
         // B is outside the library folders: imported, it's listed all the same.
@@ -2122,6 +2143,7 @@ mod import {
     #[test]
     fn a_track_whose_file_was_unreadable_is_skipped() {
         let (dir, mut w) = setup("import-missing");
+        library_source(&mut w);
         let gone = dir.join("music/gone.mp3");
         let done = w
             .import_external(
@@ -2131,5 +2153,80 @@ mod import {
             .unwrap();
         assert_eq!(done.tracks, 0);
         assert_eq!(playlist_tracks(&mut w), Vec::<i64>::new());
+    }
+}
+
+mod sources {
+    use super::*;
+    use crate::core::sources::{NewSource, SourceKind};
+
+    fn rekordbox(at: &str) -> NewSource {
+        NewSource {
+            kind: SourceKind::RekordboxDb,
+            name: "Rekordbox".into(),
+            location: Some(at.into()),
+            config: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_program_has_one_library_and_removing_it_switches_it_off() {
+        let (_dir, mut w) = setup("sources-program");
+        let a = w.add_source(&rekordbox("/a/master.db")).unwrap();
+        // Set somewhere else: the same source, moved.
+        let b = w.add_source(&rekordbox("/b/master.db")).unwrap();
+        assert_eq!(a, b);
+        let s = read::sources(w.conn()).unwrap();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].location.as_deref(), Some(Path::new("/b/master.db")));
+        // Removed: kept, switched off, so looking in the usual places won't bring it back.
+        w.remove_source(a).unwrap();
+        let s = read::sources(w.conn()).unwrap();
+        assert_eq!((s.len(), s[0].enabled), (1, false));
+        // Set again: on again.
+        w.add_source(&rekordbox("/c/master.db")).unwrap();
+        assert!(read::sources(w.conn()).unwrap()[0].enabled);
+    }
+
+    #[test]
+    fn a_folder_lists_its_files_until_switched_off_or_removed() {
+        let (dir, mut w) = setup("sources-folder");
+        let music = add_folder(&mut w, &dir.join("music"));
+        scan(&mut w, &dir, &[file(&dir.join("music/a.mp3"), "A", None)]);
+        assert_eq!(library(&mut w).len(), 1);
+        let mut s = read::sources(w.conn()).unwrap()[0].clone();
+        s.enabled = false;
+        w.update_source(&s).unwrap();
+        assert!(library(&mut w).is_empty(), "switched off");
+        s.enabled = true;
+        w.update_source(&s).unwrap();
+        assert_eq!(library(&mut w).len(), 1);
+        // Not a folder: refused.
+        assert!(w.add_source(&NewSource::folder(dir.join("nope"))).is_err());
+        w.remove_source(music).unwrap();
+        assert!(library(&mut w).is_empty());
+        assert!(read::sources(w.conn()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn removing_a_library_takes_what_it_said_about_tracks() {
+        let (dir, mut w) = setup("sources-meta");
+        add_folder(&mut w, &dir.join("music"));
+        scan(&mut w, &dir, &[file(&dir.join("music/a.mp3"), "Tag", None)]);
+        let id = library(&mut w)[0].id;
+        let xml = w
+            .add_source(&NewSource {
+                kind: SourceKind::RekordboxXml,
+                name: "XML".into(),
+                location: Some("/x.xml".into()),
+                config: Default::default(),
+            })
+            .unwrap();
+        w.set_meta(id, "genre", &format!("source:{xml}"), Some("House"))
+            .unwrap();
+        assert_eq!(library(&mut w)[0].genre, "House");
+        w.remove_source(xml).unwrap();
+        let t = library(&mut w);
+        assert_eq!((t.len(), t[0].genre.as_str()), (1, ""), "still in its folder");
     }
 }

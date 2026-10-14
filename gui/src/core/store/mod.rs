@@ -27,6 +27,7 @@ pub use write::{AnalysisSave, GridSave, ScannedFile, Writer, grid_bpm};
 use super::collections::{Collection, CollectionKind, FlowGraph, NodeId, Section};
 use super::edit::{Edit, EditCmd};
 use super::embeddings::Embeddings;
+use super::sources::{NewSource, Source, SourceId};
 
 /// Bump when `engine/src/waveform.rs` changes its output, so cached waveforms are redone.
 pub const WAVEFORM_VERSION: i64 = 1;
@@ -40,9 +41,10 @@ pub const FILE_NAME: &str = "library.db";
 const BASELINE: &str = include_str!("../../../migrations/001_baseline.sql");
 
 /// `user_version` of a database made from [`BASELINE`]. Development builds used 1 and
-/// 2 (before beatgrids stored their model), 3 (before collections had sections) and 4
-/// (before imports from other libraries); those are refused, not converted.
-pub const SCHEMA_VERSION: i64 = 5;
+/// 2 (before beatgrids stored their model), 3 (before collections had sections), 4
+/// (before imports from other libraries) and 5 (before sources); those are refused,
+/// not converted.
+pub const SCHEMA_VERSION: i64 = 6;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -158,9 +160,17 @@ pub type FlowCamera = [f32; 4];
 /// Results and failures come back as [`StoreEvent`]s.
 #[derive(Debug)]
 pub enum StoreCmd {
-    ListRoots,
-    AddRoots(Vec<PathBuf>),
-    RemoveRoot(String),
+    /// Answered with [`StoreEvent::Sources`].
+    ListSources,
+    /// A music folder, another library … Adding one that's there (a program's, of
+    /// the same kind) sets it again and switches it on.
+    AddSource(NewSource),
+    /// Its name, location, settings, or switched on or off.
+    UpdateSource(Source),
+    /// A folder or added library goes (its tracks stay in the database, unlisted
+    /// unless another source has them); a program's library is switched off, so
+    /// looking in the usual places doesn't bring it back.
+    RemoveSource(SourceId),
     /// A hand-edited grid: saved as a new grid row and made the active one.
     SaveUserGrid {
         track: i64,
@@ -353,7 +363,8 @@ pub enum StoreCmd {
 /// What changed. The UI patches its copy of the library from these.
 #[derive(Debug)]
 pub enum StoreEvent {
-    Roots(Vec<String>),
+    /// Every source (after any of them changes).
+    Sources(Vec<Source>),
     /// Every track in the library (after a scan, or tracks merging).
     Library(Vec<LibTrack>),
     /// These tracks changed (analysis, a grid edit, metadata).
@@ -659,6 +670,11 @@ impl Reader {
 
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
         self.with(|c| read::setting(c, key))
+    }
+
+    /// Every source (`core::sources`).
+    pub fn sources(&self) -> Result<Vec<Source>> {
+        self.with(read::sources)
     }
 
     /// Where a Flow's canvas was looking, as saved. (The app gets it with the Flow:

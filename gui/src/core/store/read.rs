@@ -1,6 +1,6 @@
 //! Queries. Plain functions on a connection, so the writer and the read pool share them.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use earshot_engine::HOTCUES;
@@ -12,8 +12,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use super::{CueKind, FlowCamera, GridSource, Result, StoreError, WAVEFORM_VERSION, bytes_path};
 use crate::core::collections::{Collection, CollectionKind, FlowGraph, FlowNode, NodeId, Section};
 use crate::core::query;
+use crate::core::sources::{Source, SourceKind};
 
-/// A library track as the UI sees it: metadata resolved (user > import > tag), and
+/// A library track as the UI sees it: metadata resolved (user > source > tag), and
 /// the effective BPM (from the active grid).
 #[derive(Clone, Debug, PartialEq)]
 pub struct LibTrack {
@@ -63,8 +64,8 @@ pub(super) fn source_rank(source: &str) -> u8 {
     }
 }
 
-/// Tracks with a file that's present: all of them under the library roots or
-/// imported from another library (`None`), or just these ids (wherever they are).
+/// Tracks with a file that's present: every one an enabled source has (`None`), or
+/// just these ids (wherever they are).
 pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
     let base = "SELECT t.id, f.path, t.duration_s, t.bpm, g.source, t.rating, t.color
          FROM tracks t
@@ -116,18 +117,15 @@ pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
                     WHERE name IN ('energy', 'drifts')";
     match ids {
         None => {
-            let roots = roots(c)?;
-            let linked: HashSet<i64> = c
-                .prepare("SELECT DISTINCT track_id FROM external_links")?
-                .query_map([], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
-            let mut st = c.prepare(&format!("{base} ORDER BY f.path"))?;
+            let mut st = c.prepare(&format!(
+                "{base} AND EXISTS (SELECT 1 FROM track_sources ts
+                                    JOIN sources s ON s.id = ts.source_id AND s.enabled
+                                    WHERE ts.track_id = t.id)
+                 ORDER BY f.path"
+            ))?;
             rows = st
                 .query_map([], map)?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-                .into_iter()
-                .filter(|r| linked.contains(&r.0) || roots.iter().any(|root| under(&r.1, root)))
-                .collect();
+                .collect::<rusqlite::Result<Vec<_>>>()?;
             let mut st = c.prepare(&meta_sql)?;
             let mut q = st.query([])?;
             while let Some(r) = q.next()? {
@@ -225,11 +223,39 @@ pub(super) fn under(path: &[u8], root: &[u8]) -> bool {
     path.starts_with(root) && (path.len() == root.len() || path[root.len()] == b'/')
 }
 
-pub fn roots(c: &Connection) -> Result<Vec<Vec<u8>>> {
-    let mut st = c.prepare_cached("SELECT path FROM library_roots ORDER BY path")?;
-    Ok(st
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?)
+/// Every source, folders first (by path), then libraries.
+pub fn sources(c: &Connection) -> Result<Vec<Source>> {
+    let mut st = c.prepare_cached(
+        "SELECT id, kind, name, location, config, enabled FROM sources
+         ORDER BY kind != 'folder', location, id",
+    )?;
+    let rows = st
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<Vec<u8>>>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, bool>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, kind, name, location, config, enabled)| {
+            Some(Source {
+                id,
+                kind: SourceKind::parse(&kind)?,
+                name,
+                location: location.map(bytes_path),
+                config: serde_json::from_str(&config)
+                    .inspect_err(|e| eprintln!("source {id}'s settings: {e}"))
+                    .unwrap_or_default(),
+                enabled,
+            })
+        })
+        .collect())
 }
 
 /// Where a track's audio is now: its first file that isn't missing.

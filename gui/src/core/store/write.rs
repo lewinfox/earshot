@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use super::read::{self, JOB_PREFIX, JobRow, source_rank, waveform_params};
 use super::{
     CueKind, FlowCamera, GridSource, Result, StoreCmd, StoreError, StoreEvent, WAVEFORM_VERSION,
-    bytes_path, now, path_bytes,
+    now, path_bytes,
 };
 use crate::core::analysis::registry::{self, AnalyserId};
 use crate::core::collections::{
@@ -27,6 +27,7 @@ use crate::core::query;
 
 mod edits;
 mod import;
+mod sources;
 
 /// A file the scan found that is new, or whose size or modified time changed.
 #[derive(Debug, Clone)]
@@ -174,9 +175,10 @@ impl Writer {
 
     pub fn apply(&mut self, cmd: StoreCmd) -> Result<()> {
         match cmd {
-            StoreCmd::ListRoots => self.emit_roots(),
-            StoreCmd::AddRoots(paths) => self.add_roots(&paths),
-            StoreCmd::RemoveRoot(path) => self.remove_root(&path),
+            StoreCmd::ListSources => self.emit_sources(),
+            StoreCmd::AddSource(s) => self.add_source(&s).map(|_| ()),
+            StoreCmd::UpdateSource(s) => self.update_source(&s),
+            StoreCmd::RemoveSource(id) => self.remove_source(id),
             StoreCmd::SaveUserGrid { track, grid } => self.save_user_grid(track, &grid).map(|_| ()),
             StoreCmd::SaveWaveform { track, data } => self.save_waveform(track, &data),
             StoreCmd::SaveFeatures { track, features } => {
@@ -280,68 +282,21 @@ impl Writer {
         Ok(())
     }
 
-    // ---- library roots ----------------------------------------------------------------
-
-    pub fn roots(&self) -> Result<Vec<PathBuf>> {
-        Ok(read::roots(&self.conn)?
-            .into_iter()
-            .map(bytes_path)
-            .collect())
-    }
-
-    fn emit_roots(&mut self) -> Result<()> {
-        let r = self
-            .roots()?
-            .into_iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect();
-        self.emit(StoreEvent::Roots(r));
-        Ok(())
-    }
-
-    pub fn add_roots(&mut self, paths: &[PathBuf]) -> Result<()> {
-        for p in paths {
-            if !p.is_dir() {
-                self.emit(StoreEvent::Error(StoreError::Refused(
-                    "that is not a folder",
-                )));
-                continue;
-            }
-            let mut b = path_bytes(p);
-            while b.len() > 1 && b.ends_with(b"/") {
-                b.pop();
-            }
-            self.conn.execute(
-                "INSERT OR IGNORE INTO library_roots(path, added_at) VALUES (?1, ?2)",
-                params![b, now()],
-            )?;
-        }
-        self.emit_roots()
-    }
-
-    /// Tracks stay in the database (keeping their analysis), but aren't listed.
-    pub fn remove_root(&mut self, path: &str) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM library_roots WHERE path = ?1",
-            [path_bytes(std::path::Path::new(path))],
-        )?;
-        self.emit_roots()?;
-        self.emit_library()
-    }
-
     // ---- scanning and identity ---------------------------------------------------------
 
-    /// Record a scan of `roots`: `found` is every audio file under them, `changed`
-    /// the new or modified ones with their tags. Files under the roots that weren't
-    /// found are marked missing (not deleted). A new file whose stamped hash matches
-    /// a track whose files are all missing becomes that track's file (it was moved).
+    /// Record a scan of the music folders `scanned`: `found` is every audio file in
+    /// them, `changed` the new or modified ones with their tags. Files in the scanned
+    /// folders that weren't found are marked missing (not deleted). A new file whose
+    /// stamped hash matches a track whose files are all missing becomes that track's
+    /// file (it was moved). Every file found is linked to the folder source it's in.
     /// Only tag-sourced metadata is written, so the user's edits survive.
     pub fn apply_scan(
         &mut self,
-        roots: &[PathBuf],
+        scanned: &[PathBuf],
         found: &[PathBuf],
         changed: &[ScannedFile],
     ) -> Result<()> {
+        let roots = scanned;
         let t = now();
         let tx = self.conn.transaction()?;
         tx.execute_batch(
@@ -373,6 +328,7 @@ impl Writer {
         for f in changed {
             record_file(&tx, f, t)?;
         }
+        link_to_folders(&tx, found, t)?;
         tx.commit()?;
         self.emit_library()
     }
@@ -1311,6 +1267,29 @@ pub(super) fn fill_keys(c: &Connection) -> Result<()> {
 }
 
 /// What the file's tags say, as source 'tag'. Never touches other sources.
+/// Link each file to the folder source it's in (the innermost, if folders nest).
+fn link_to_folders(tx: &Connection, found: &[PathBuf], t: i64) -> Result<()> {
+    let folders: Vec<(i64, Vec<u8>)> = tx
+        .prepare("SELECT id, location FROM sources WHERE kind = 'folder' AND location IS NOT NULL")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut st = tx.prepare_cached(
+        "INSERT OR IGNORE INTO track_sources(source_id, external_id, track_id, synced_at)
+         SELECT ?1, ?2, track_id, ?3 FROM files WHERE path = ?4",
+    )?;
+    for p in found {
+        let bytes = path_bytes(p);
+        let folder = folders
+            .iter()
+            .filter(|(_, root)| read::under(&bytes, root))
+            .max_by_key(|(_, root)| root.len());
+        if let Some((id, _)) = folder {
+            st.execute(params![id, p.to_string_lossy(), t, bytes])?;
+        }
+    }
+    Ok(())
+}
+
 /// Record one new or changed file and its tags (see [`Writer::apply_scan`]); returns
 /// its track.
 fn record_file(tx: &Connection, f: &ScannedFile, t: i64) -> Result<i64> {
@@ -1457,7 +1436,7 @@ fn merge(c: &Connection, from: i64, into: i64) -> Result<()> {
     )?;
     c.execute("UPDATE plays SET track_id = ?2 WHERE track_id = ?1", p)?;
     c.execute(
-        "UPDATE OR IGNORE external_links SET track_id = ?2 WHERE track_id = ?1",
+        "UPDATE OR IGNORE track_sources SET track_id = ?2 WHERE track_id = ?1",
         p,
     )?;
     c.execute(

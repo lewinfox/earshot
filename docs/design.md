@@ -224,7 +224,8 @@ tags(track_id, tag, source, confidence)                          -- CLAP categor
 cues(id, track_id, kind, slot, position_s, length_s, label, color) -- memory/hot cues, saved loops
 crates(id, name, parent_id, kind, query JSON); crate_tracks(crate_id, track_id, position)
 sets(id, started_at, ended_at); set_plays(set_id, track_id, deck, started_at, ended_at)
-external_links(track_id, library, external_id, synced_at)        -- cratelib mapping
+sources(id, kind, name, location, config, enabled)               -- folders, DJ libraries, streaming
+track_sources(source_id, external_id, track_id, synced_at)       -- which sources have a track
 jobs(id, kind, track_id, status, error, created_at, finished_at) -- worker queue, survives restarts
 ```
 

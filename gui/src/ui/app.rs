@@ -82,6 +82,8 @@ pub struct EarshotApp {
     history: History,
     /// Edits that can be undone and redone.
     edits: edit::History,
+    /// Where tracks come from (music folders, other libraries), as the Store has them.
+    sources: Vec<crate::core::sources::Source>,
     /// Hot cue labels and memory cues of the tracks on the players, by track id.
     cues: HashMap<i64, Arc<store::TrackCues>>,
     analysis: AnalysisSummary,
@@ -226,6 +228,7 @@ impl EarshotApp {
             collections: Collections::default(),
             history: History::default(),
             edits: edit::History::default(),
+            sources: vec![],
             cues: HashMap::new(),
             analysis: AnalysisSummary::default(),
             preview: None,
@@ -245,7 +248,7 @@ impl EarshotApp {
             settle_until: None,
             deck_options_restored: false,
         };
-        app.lib.store.send(StoreCmd::ListRoots);
+        app.lib.store.send(StoreCmd::ListSources);
         app.lib.store.send(StoreCmd::StartSession);
         let ranges = app.settings.tempo_ranges.clone();
         for (deck, range) in DeckId::first(DECKS).zip(ranges) {
@@ -272,13 +275,12 @@ impl EarshotApp {
         }
         app.restore_flow();
         app.rescan();
-        // Other libraries: drop path rules whose folders have gone (the next read
-        // looks for the files again), and show where the user put each library.
-        if app.settings.external.revalidate() {
-            app.save_external();
-        } else {
-            let locations = app.settings.external.locations.clone();
-            app.panels.library.external.set_locations(locations);
+        // Sources' path rules whose folders have gone are dropped: the next read
+        // looks for those files again.
+        for mut s in app.lib.store.reader.sources().unwrap_or_default() {
+            if s.config.revalidate() {
+                app.lib.store.send(StoreCmd::UpdateSource(s));
+            }
         }
         if services.midi {
             app.connect_midi();

@@ -29,14 +29,11 @@ pub enum Source {
     Crates,
     /// Flows, in folders.
     Flows,
-    /// The library folders on disk.
-    Explorer,
-    /// Other DJ software's libraries and drives, through cratelib (to come).
-    External,
-    /// Streaming services (to come: greyed out).
-    SoundCloud,
-    Beatport,
-    Spotify,
+    /// Where tracks come from (`core::sources`): the music folders, other DJ
+    /// software's libraries and drives, and (to come) streaming services.
+    #[serde(alias = "Explorer", alias = "External", alias = "SoundCloud")]
+    #[serde(alias = "Beatport", alias = "Spotify")]
+    Sources,
 }
 
 impl Source {

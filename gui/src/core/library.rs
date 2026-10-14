@@ -131,7 +131,7 @@ pub fn list_subdirs(path: &str) -> Result<Vec<Subdir>, String> {
 /// [`start_hasher`]. Blocking: call from a background thread.
 pub fn scan_library(store: &Store) -> Result<(), StoreError> {
     // Through the writer, so a folder added just before is included.
-    let roots = store.call(|w| w.roots())?;
+    let roots = store.call(|w| w.folders())?;
     let known = store.reader.known_files()?;
     let mut files = Vec::new();
     for r in &roots {

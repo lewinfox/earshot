@@ -36,35 +36,22 @@ use super::flow::FlowUi;
 use super::{Cx, Panel, resized};
 use crate::core::collections::CollectionCmd;
 use crate::core::command::{Command, ViewCmd};
+use crate::core::sources::STREAMING;
 use crate::core::track::TrackId;
 use crate::core::view::{Aside, Mode, Pane, Region, Source};
 use crate::ui::widgets::{Opens, StackItem, icon_stack, icon_stack::WIDTH};
 
-/// A placeholder (greyed out) in the left stack.
-const fn later(id: Source, icon: &'static str, tip: &'static str) -> StackItem<Source> {
-    StackItem {
-        id,
-        icon,
-        tip,
-        enabled: false,
-    }
-}
-
 /// The left icon stack.
-const SOURCES: [StackItem<Source>; 9] = [
+const SOURCES: [StackItem<Source>; 5] = [
     StackItem::new(Source::AllTracks, "🎵", "All tracks"),
     StackItem::new(Source::Playlists, "☰", "Playlists and smart playlists"),
     StackItem::new(Source::Crates, "📦", "Crates"),
     StackItem::new(Source::Flows, "🔀", "Flows: sets planned on a canvas"),
-    StackItem::new(Source::Explorer, "📁", "Folders on disk"),
     StackItem::new(
-        Source::External,
+        Source::Sources,
         "🖴",
-        "Other libraries: Rekordbox, Serato, Mixxx, drives",
+        "Sources: music folders, Rekordbox, Serato, Mixxx, drives",
     ),
-    later(Source::SoundCloud, "☁", "SoundCloud (coming)"),
-    later(Source::Beatport, "🛒", "Beatport (coming)"),
-    later(Source::Spotify, "🎧", "Spotify (coming)"),
 ];
 
 /// The right icon stack.
@@ -148,14 +135,34 @@ impl LibraryPane {
                 let table = self.tables.get_mut(TableView::Library);
                 self.browser.all_tracks(ui, &cx.core, table, cx.out);
             }
-            Source::Explorer => self.browser.explorer(ui, &cx.core, cx.out),
-            Source::External => self.external.tree(ui, cx.out),
-            Source::SoundCloud | Source::Beatport | Source::Spotify => {
-                placeholder(ui, cx, "Streaming", "Coming later.")
-            }
+            Source::Sources => self.sources(ui, cx),
             Source::Playlists | Source::Crates | Source::Flows => {
                 unreachable!("sections are drawn above")
             }
+        }
+    }
+
+    /// The Sources pane: where tracks come from, a section per kind. Picking a
+    /// folder lists its files in the middle; picking a library, its tracks.
+    fn sources(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let before = self.browser.scope().clone();
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                heading(ui, cx, "Folders");
+                self.browser.folder_tree(ui, &cx.core, cx.out);
+                ui.add_space(10.0);
+                heading(ui, cx, "DJ software");
+                self.external.section(ui, cx.out);
+                ui.add_space(10.0);
+                heading(ui, cx, "Streaming");
+                for name in STREAMING {
+                    ui.label(RichText::new(format!("{name}  ·  coming")).color(cx.theme.muted));
+                }
+            });
+        // A folder was picked: it's what the middle lists now.
+        if *self.browser.scope() != before && matches!(self.browser.scope(), Scope::Folder(_)) {
+            self.external.close();
         }
     }
 
@@ -177,7 +184,7 @@ impl LibraryPane {
 
     /// The middle: the track list (another library's, while one is picked there).
     fn middle(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        if cx.prefs.layout().source == Some(Source::External) && self.external.showing() {
+        if cx.prefs.layout().source == Some(Source::Sources) && self.external.showing() {
             self.external.list(ui, &cx.core, cx.out);
             return;
         }
@@ -287,15 +294,14 @@ impl LibraryPane {
 /// than the handle's grab radius plus the pointer's search radius.
 const HANDLE_GAP: i8 = 4;
 
-/// A source that isn't built yet.
-fn placeholder(ui: &mut Ui, cx: &Cx, title: &str, text: &str) {
+/// A section's heading in a pane.
+fn heading(ui: &mut Ui, cx: &Cx, title: &str) {
     ui.label(
         RichText::new(title.to_uppercase())
             .size(10.0)
             .color(cx.theme.muted),
     );
-    ui.add_space(4.0);
-    ui.label(RichText::new(text).color(cx.theme.muted));
+    ui.add_space(2.0);
 }
 
 impl Panel for LibraryPane {
