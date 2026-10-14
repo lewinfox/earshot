@@ -150,10 +150,32 @@ pub fn scan_library(store: &Store) -> Result<(), StoreError> {
         }
     }
 
+    let rows = read_tags(&changed);
+    store.call(move |w| w.apply_scan(&roots, &files, &rows))
+}
+
+/// The files among `paths` that are new to the library or changed since it last
+/// looked, with their tags, ready for the Store. Files that can't be read are left
+/// out. Blocking: call from a background thread.
+pub fn changed_files(store: &Store, paths: &[PathBuf]) -> Result<Vec<ScannedFile>, StoreError> {
+    let known = store.reader.known_files()?;
+    let changed: Vec<_> = paths
+        .iter()
+        .filter_map(|p| {
+            let (size, mtime_ns) = stamp(&std::fs::metadata(p).ok()?);
+            (known.get(&path_bytes(p)) != Some(&(size, mtime_ns)))
+                .then(|| (p.clone(), size, mtime_ns))
+        })
+        .collect();
+    Ok(read_tags(&changed))
+}
+
+/// Read the tags of (path, size, modified time) files.
+fn read_tags(changed: &[(PathBuf, i64, i64)]) -> Vec<ScannedFile> {
     // Reading tags is mostly file I/O; spread it over a few threads.
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
     let chunk = changed.len().div_ceil(threads).max(1);
-    let rows: Vec<ScannedFile> = std::thread::scope(|s| {
+    std::thread::scope(|s| {
         let handles: Vec<_> = changed
             .chunks(chunk)
             .map(|c| {
@@ -168,8 +190,7 @@ pub fn scan_library(store: &Store) -> Result<(), StoreError> {
             .into_iter()
             .flat_map(|h| h.join().unwrap())
             .collect()
-    });
-    store.call(move |w| w.apply_scan(&roots, &files, &rows))
+    })
 }
 
 /// Record one file, new or changed, without walking the library folders: for a file

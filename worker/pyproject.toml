@@ -1,8 +1,8 @@
 [project]
 name = "earshot-worker"
 version = "0.1.0"
-description = "Stateless analysis worker for earshot (beatgrids via Beat This!)"
-requires-python = ">=3.10"
+description = "Stateless analysis worker for earshot (beatgrids via Beat This!) and its reader for other DJ libraries (cratelib)"
+requires-python = ">=3.12"
 dependencies = [
     "numpy",
     "scipy",
@@ -13,6 +13,9 @@ dependencies = [
     # built for, and torchaudio lags torch. Keep the two on the same minor version.
     "torch==2.11.*",
     "torchaudio==2.11.*",
+    # Other DJ programs' libraries (earshot_worker/libraries.py); pinned to a commit
+    # in [tool.uv.sources].
+    "cratelib",
 ]
 
 [dependency-groups]
@@ -29,6 +32,8 @@ packages = ["earshot_worker"]
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu" }]
 torchaudio = [{ index = "pytorch-cpu" }]
+# Bump `rev` to pick up cratelib changes.
+cratelib = { git = "https://github.com/lewinfox/cratelib", rev = "7997d9f037860f4152c065c12aa06ebd725f5ca4" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

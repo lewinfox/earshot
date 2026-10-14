@@ -272,6 +272,14 @@ impl EarshotApp {
         }
         app.restore_flow();
         app.rescan();
+        // Other libraries: drop path rules whose folders have gone (the next read
+        // looks for the files again), and show where the user put each library.
+        if app.settings.external.revalidate() {
+            app.save_external();
+        } else {
+            let locations = app.settings.external.locations.clone();
+            app.panels.library.external.set_locations(locations);
+        }
         if services.midi {
             app.connect_midi();
         }
@@ -419,6 +427,7 @@ impl EarshotApp {
             }
             Command::Deck(deck, DeckCmd::Load(id)) => self.load(Some(deck), id),
             Command::Library(c) => self.library_cmd(c),
+            Command::External(c) => self.external_cmd(c),
             Command::TempoLock(TempoLockCmd::Listen(c)) => self.listen(c),
             Command::TempoLock(c) => self.tempo_lock.run(c),
             Command::Collection(c) => self.collection_cmd(c),
@@ -710,6 +719,7 @@ fn store_sink(sink: &Sink) -> EventSink {
 
 mod edits;
 mod events;
+mod external_ops;
 #[cfg(test)]
 mod flow_tests;
 mod frame;

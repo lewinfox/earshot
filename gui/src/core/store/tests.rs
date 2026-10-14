@@ -1956,3 +1956,177 @@ fn embedding_search_speed() {
          loading the block {load_ms:.1} ms once, then {mem_ms:.3} ms per search"
     );
 }
+
+mod import {
+    use super::*;
+    use crate::core::external::{
+        ExtCue, ImportNode, ImportOptions, ImportSave, ImportTrack, Marker, NodeKind, external_key,
+    };
+
+    const LIB: &str = "rekordbox_xml:/x/rb.xml";
+
+    fn cue(start_s: f64, end_s: Option<f64>, slot: Option<u8>, name: &str) -> ExtCue {
+        ExtCue {
+            role: if end_s.is_some() { "loop" } else { "cue" }.into(),
+            start_s,
+            end_s,
+            slot,
+            name: name.into(),
+            colour: Some(0x00FF00),
+        }
+    }
+
+    fn track(id: &str, file: &Path, title: &str) -> ImportTrack {
+        ImportTrack {
+            external_id: id.into(),
+            file: file.into(),
+            meta: vec![("title", title.into()), ("genre", "House".into())],
+            rating: Some(4),
+            colour: None,
+            grid: vec![Marker {
+                start_s: 0.1,
+                bpm: 120.0,
+                beat: 1,
+            }],
+            hot_cues: vec![cue(1.0, None, Some(0), "drop"), cue(2.0, None, Some(1), "")],
+            memory_cues: vec![cue(3.0, None, None, ""), cue(4.0, Some(5.0), None, "")],
+        }
+    }
+
+    fn playlist(name: &str, tracks: &[&str]) -> ImportNode {
+        ImportNode {
+            name: name.into(),
+            kind: NodeKind::Playlist,
+            external: external_key(LIB, Section::Playlists, &[name], NodeKind::Playlist),
+            children: vec![],
+            tracks: tracks.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+
+    fn save(
+        files: Vec<ScannedFile>,
+        tracks: Vec<ImportTrack>,
+        friday: &[&str],
+        overwrite: bool,
+    ) -> ImportSave {
+        ImportSave {
+            library: LIB.into(),
+            options: ImportOptions {
+                overwrite,
+                ..ImportOptions::default()
+            },
+            files,
+            tracks,
+            roots: vec![(
+                Section::Playlists,
+                ImportNode {
+                    name: "Rekordbox XML".into(),
+                    kind: NodeKind::Folder,
+                    external: external_key(LIB, Section::Playlists, &[], NodeKind::Folder),
+                    children: vec![playlist("Friday", friday)],
+                    tracks: vec![],
+                },
+            )],
+        }
+    }
+
+    fn by_title(w: &mut Writer, title: &str) -> LibTrack {
+        library(w)
+            .into_iter()
+            .find(|t| t.title == title)
+            .expect(title)
+    }
+
+    fn playlist_tracks(w: &mut Writer) -> Vec<i64> {
+        let id: i64 = w
+            .conn()
+            .query_row(
+                "SELECT id FROM collections WHERE kind = 'playlist'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        read::collection_tracks(w.conn(), id).unwrap()
+    }
+
+    #[test]
+    fn brings_in_tracks_metadata_grids_cues_and_playlists() {
+        let (dir, mut w) = setup("import");
+        let a = dir.join("music/a.mp3");
+        scan(&mut w, &dir, &[file(&a, "Tag A", None)]);
+        // B is outside the library folders: imported, it's listed all the same.
+        let b = dir.join("elsewhere/b.mp3");
+        let tracks = vec![track("1", &a, "RB A"), track("2", &b, "RB B")];
+        let files = vec![file(&b, "Tag B", None)];
+        let done = w
+            .import_external(
+                save(files, tracks.clone(), &["2", "1", "2"], false),
+                100..110,
+            )
+            .unwrap();
+        assert_eq!(
+            (done.tracks, done.collections, done.grids, done.cues),
+            (2, 1, 2, 8)
+        );
+
+        // Without overwrite, the file's title stays; the genre it lacked comes in.
+        let ta = by_title(&mut w, "Tag A");
+        assert_eq!((ta.genre.as_str(), ta.rating), ("House", Some(4)));
+        assert_eq!(
+            (ta.bpm, ta.grid_source),
+            (Some(120.0), Some(GridSource::Import))
+        );
+        let tb = by_title(&mut w, "Tag B");
+        assert_eq!(playlist_tracks(&mut w), [tb.id, ta.id, tb.id]);
+        let hot = read::hotcues(w.conn(), ta.id).unwrap();
+        assert_eq!((hot[0], hot[1], hot[2]), (Some(1.0), Some(2.0), None));
+        let cues = read::cues(w.conn(), ta.id).unwrap();
+        assert_eq!(cues.hot_labels[0].as_deref(), Some("drop"));
+        assert_eq!(
+            cues.memories
+                .iter()
+                .map(|m| (m.start, m.end))
+                .collect::<Vec<_>>(),
+            [(3.0, None), (4.0, Some(5.0))]
+        );
+
+        // The user changes things in earshot, the playlist changes in Rekordbox, and
+        // it's imported again without overwrite: theirs stays, the playlist follows,
+        // nothing is doubled.
+        let mut pads = hot;
+        pads[0] = Some(9.0);
+        w.save_hotcues(ta.id, &pads).unwrap();
+        w.set_meta(ta.id, "title", "user", Some("Mine")).unwrap();
+        w.import_external(save(vec![], tracks.clone(), &["1"], false), 110..120)
+            .unwrap();
+        let ta = by_title(&mut w, "Mine");
+        assert_eq!(read::hotcues(w.conn(), ta.id).unwrap()[0], Some(9.0));
+        assert_eq!(read::memories(w.conn(), ta.id).unwrap().len(), 2);
+        assert_eq!(playlist_tracks(&mut w), [ta.id]);
+        let n: i64 = w
+            .conn()
+            .query_row("SELECT count(*) FROM collections", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2, "the folder and the playlist, updated in place");
+
+        // With overwrite, the library's values win, the user's typing included.
+        w.import_external(save(vec![], tracks, &["1"], true), 120..130)
+            .unwrap();
+        let ta = by_title(&mut w, "RB A");
+        assert_eq!(read::hotcues(w.conn(), ta.id).unwrap()[0], Some(1.0));
+    }
+
+    #[test]
+    fn a_track_whose_file_was_unreadable_is_skipped() {
+        let (dir, mut w) = setup("import-missing");
+        let gone = dir.join("music/gone.mp3");
+        let done = w
+            .import_external(
+                save(vec![], vec![track("1", &gone, "X")], &["1"], false),
+                1..3,
+            )
+            .unwrap();
+        assert_eq!(done.tracks, 0);
+        assert_eq!(playlist_tracks(&mut w), Vec::<i64>::new());
+    }
+}

@@ -209,6 +209,9 @@ CREATE TABLE collections (
   sort_order      INTEGER,
   view_state      TEXT,     -- a Flow: where its canvas looks, JSON [left, top, right, bottom]
   source_flow_id  INTEGER REFERENCES collections(id) ON DELETE SET NULL,
+  -- Made by importing from another library: which library and where in it
+  -- (core/external.rs `external_key`), so importing again updates it.
+  external        TEXT UNIQUE,
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 ) STRICT;
@@ -269,7 +272,9 @@ CREATE TABLE plays (
 ) STRICT;
 CREATE INDEX plays_track ON plays(track_id);
 
--- The same track in another library (cratelib, Rekordbox …).
+-- The same track in another library (core/external.rs): `library` is
+-- '<format>:<path>', `external_id` the track's id there. A track linked here is
+-- listed even outside the library folders.
 CREATE TABLE external_links (
   track_id     INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
   library      TEXT NOT NULL,
@@ -308,8 +313,10 @@ CREATE TABLE library_roots (
 
 -- Settings, as text (JSON for structured ones): 'analysis.background_workers' (how
 -- many background worker processes may run at once), 'audio.output' (device, buffer
--- size, routing), 'decks.tempo_ranges' (each deck's tempo fader range) and 'flow.open'
--- (the Flow on the canvas last; JSON, null for none). The UI's own preferences
+-- size, routing), 'decks.tempo_ranges' (each deck's tempo fader range), 'flow.open'
+-- (the Flow on the canvas last; JSON, null for none) and 'external.libraries' (other
+-- libraries the user pointed earshot at, and each one's path rules: where its files
+-- are here). The UI's own preferences
 -- (layout, zoom) are kept by eframe, not here.
 CREATE TABLE settings (
   key    TEXT PRIMARY KEY,

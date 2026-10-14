@@ -1,6 +1,6 @@
 //! Queries. Plain functions on a connection, so the writer and the read pool share them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use earshot_engine::HOTCUES;
@@ -62,8 +62,8 @@ pub(super) fn source_rank(source: &str) -> u8 {
     }
 }
 
-/// Tracks with a file that's present: all of them under the library roots (`None`),
-/// or just these ids (wherever they are).
+/// Tracks with a file that's present: all of them under the library roots or
+/// imported from another library (`None`), or just these ids (wherever they are).
 pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
     let base = "SELECT t.id, f.path, t.duration_s, t.bpm, g.source, t.rating, t.color
          FROM tracks t
@@ -116,12 +116,16 @@ pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
     match ids {
         None => {
             let roots = roots(c)?;
+            let linked: HashSet<i64> = c
+                .prepare("SELECT DISTINCT track_id FROM external_links")?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
             let mut st = c.prepare(&format!("{base} ORDER BY f.path"))?;
             rows = st
                 .query_map([], map)?
                 .collect::<rusqlite::Result<Vec<_>>>()?
                 .into_iter()
-                .filter(|r| roots.iter().any(|root| under(&r.1, root)))
+                .filter(|r| linked.contains(&r.0) || roots.iter().any(|root| under(&r.1, root)))
                 .collect();
             let mut st = c.prepare(&meta_sql)?;
             let mut q = st.query([])?;

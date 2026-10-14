@@ -583,7 +583,9 @@ impl LibraryUi {
             });
         }
         self.refresh(v, table);
-        if self.folders.is_empty() && !self.scanning {
+        // Nothing in the library at all (tracks imported from another library count,
+        // wherever their files are).
+        if self.folders.is_empty() && !self.scanning && v.lib.tracks().is_empty() {
             ui.add_space(40.0);
             ui.vertical_centered(|ui| {
                 ui.label(

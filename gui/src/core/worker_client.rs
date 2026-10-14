@@ -299,13 +299,19 @@ pub enum Role {
 /// memory) around for long after.
 pub const IDLE_EXIT: Duration = Duration::from_secs(60);
 
+/// The worker's folder (with its `.venv`): `EARSHOT_WORKER_DIR`, else `worker/` in
+/// this checkout.
+pub fn worker_dir() -> PathBuf {
+    std::env::var_os("EARSHOT_WORKER_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../worker"))
+}
+
 impl WorkerConfig {
     /// The real worker: `worker/.venv/bin/python -m earshot_worker`, letting torch use
     /// `threads` CPU threads.
     pub fn python(role: Role, threads: usize) -> WorkerConfig {
-        let dir = std::env::var_os("EARSHOT_WORKER_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../worker"));
+        let dir = worker_dir();
         let threads = threads.to_string();
         let mut envs: Vec<(String, String)> =
             ["OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"]

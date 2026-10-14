@@ -16,6 +16,7 @@ use earshot_engine::{
 use super::bus::{LOOP_SIZES, step_size};
 use super::collections::{CollectionCmd, FlowCmd};
 use super::edit::EditCmd;
+use super::external::ExternalCmd;
 use super::index::LibraryCmd;
 use super::player::{self, AudioSettings, GridOp, Player};
 use super::store::{Memory, Store, StoreCmd};
@@ -38,6 +39,8 @@ pub enum Command {
     Collection(CollectionCmd),
     /// The Flow on the canvas.
     Flow(FlowCmd),
+    /// Other DJ programs' libraries: find, read, import. Run by the UI, like `Library`.
+    External(ExternalCmd),
     /// The tempo lock tool (`TempoLock::run`). Run by the UI, like `Library`.
     TempoLock(TempoLockCmd),
     /// Metadata, ratings, tags and collection edits, which can be undone. Run by the
@@ -403,6 +406,12 @@ impl From<FlowCmd> for Command {
 impl From<EditCmd> for Command {
     fn from(c: EditCmd) -> Command {
         Command::Edit(c)
+    }
+}
+
+impl From<ExternalCmd> for Command {
+    fn from(c: ExternalCmd) -> Command {
+        Command::External(c)
     }
 }
 

@@ -19,6 +19,7 @@
 pub mod browser;
 pub mod collections;
 pub mod drag;
+pub mod external;
 pub mod suggest;
 pub mod table;
 pub mod tracks;
@@ -27,6 +28,7 @@ use egui::{RichText, Ui};
 
 use self::browser::{LibraryUi, Scope};
 use self::collections::{CollectionsUi, TreeCtx};
+use self::external::ExternalUi;
 use self::suggest::SuggestUi;
 use self::table::{TableView, Tables};
 use self::tracks::Media;
@@ -58,7 +60,7 @@ const SOURCES: [StackItem<Source>; 9] = [
     StackItem::new(
         Source::External,
         "🖴",
-        "Other libraries: Rekordbox, Mixxx, drives (coming)",
+        "Other libraries: Rekordbox, Serato, Mixxx, drives",
     ),
     later(Source::SoundCloud, "☁", "SoundCloud (coming)"),
     later(Source::Beatport, "🛒", "Beatport (coming)"),
@@ -76,6 +78,8 @@ pub struct LibraryPane {
     /// The track list and the Explorer tree.
     pub browser: LibraryUi,
     pub collections: CollectionsUi,
+    /// Other DJ programs' libraries.
+    pub external: ExternalUi,
     pub suggest: SuggestUi,
     /// Waveform thumbnails and cover art for every list.
     pub media: Media,
@@ -90,6 +94,7 @@ impl LibraryPane {
         LibraryPane {
             browser: LibraryUi::default(),
             collections: CollectionsUi::default(),
+            external: ExternalUi::default(),
             suggest: SuggestUi::default(),
             media: Media::default(),
             tables,
@@ -144,13 +149,7 @@ impl LibraryPane {
                 self.browser.all_tracks(ui, &cx.core, table, cx.out);
             }
             Source::Explorer => self.browser.explorer(ui, &cx.core, cx.out),
-            Source::External => placeholder(
-                ui,
-                cx,
-                "Other libraries",
-                "Rekordbox and Mixxx libraries, and drives, will show here once \
-                 earshot can read them (through cratelib).",
-            ),
+            Source::External => self.external.tree(ui, cx.out),
             Source::SoundCloud | Source::Beatport | Source::Spotify => {
                 placeholder(ui, cx, "Streaming", "Coming later.")
             }
@@ -176,8 +175,12 @@ impl LibraryPane {
         }
     }
 
-    /// The middle: the track list.
+    /// The middle: the track list (another library's, while one is picked there).
     fn middle(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        if cx.prefs.layout().source == Some(Source::External) && self.external.showing() {
+            self.external.list(ui, &cx.core, cx.out);
+            return;
+        }
         let table = self.tables.get_mut(self.browser.view(&cx.core));
         if self
             .browser

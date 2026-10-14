@@ -183,3 +183,40 @@ the idle class again, so each process has one priority for life. The app
 Job ids and priorities are per process. With a process just for deck loads, a deck job
 never has to stop background work, so the worker doesn't preempt (protocol v2 as first
 merged did, with a `requeued` message; that's gone).
+
+## Other libraries
+
+`python -m earshot_worker.libraries` reads Rekordbox, Serato and Mixxx libraries,
+Rekordbox XML and USB sticks through [cratelib](https://github.com/lewinfox/cratelib)
+(pinned to a commit in `pyproject.toml`'s `[tool.uv.sources]`). It never imports torch
+and runs once per request (`gui/src/core/external.rs` runs it). JSON lines on stdout:
+any number of `{"progress": "..."}`, then `{"libraries": [...]}`, `{"library": {...}}`
+or `{"error": "..."}` (exit status 1).
+
+```sh
+python -m earshot_worker.libraries find [PATH]     # the usual places, or PATH
+python -m earshot_worker.libraries read FORMAT PATH [--volume-root R] [--root DIR]... [--cues] [--paths JSON]
+```
+
+- A library is `{"format", "path", "volume_root", "name"}`; `format` is cratelib's
+  (`rekordbox_db`, `rekordbox_xml`, `rekordbox_usb`, `serato`, `mixxx`).
+- `read` gives `tracks` (`id`, `location` as the program stores it, `file` on this
+  machine or null, `title`, `artist`, `album`, `genre`, `comment`, `bpm`, `key` as
+  "Am", `rating` 0-5, `colour` 0xRRGGBB, `duration_s`) and `playlists`: a tree of
+  `{"name", "kind": "folder", "children"}` and `{"name", "kind": "playlist" | "crate",
+  "tracks": [id...]}`.
+- Finding the files when the program stores other paths (Wine, a container, another
+  computer, a changed drive letter): `--paths` gives the rules found before (JSON
+  `{our folder: the program's}`; Wine's `Z:` is `/` anyway). Tracks still missing are
+  looked for by name and size (cratelib's `discover`), from the `--root` folders
+  (earshot's music folders and the system Music folder) outwards, never above the
+  home folder or `/media`, `/mnt`, `/Volumes`. A found file's path and its location
+  share an ending; what's before it is a rule. `read` returns the rules that apply as
+  `paths`, for earshot to keep (and check at startup).
+- `--cues` adds each track's `cues` (`role`, `start_s`, `end_s`, `slot`: hot cue pad
+  or null for a memory cue, `name`, `colour`) and `grid` (`start_s`, `bpm`, `beat` in
+  the bar). It's slower: Serato keeps these in the audio files, Rekordbox its grids in
+  analysis files. Times are seconds **on earshot's timeline**: cratelib's are on
+  Rekordbox's, and for an MP3 symphonia drops the Info frame and trims the LAME
+  tag's encoder delay, so they move earlier by cratelib's `mp3_gapless_offset_ms`
+  (other formats: no change; symphonia ignores MP4 edit lists, as Rekordbox does).

@@ -11,6 +11,7 @@ pub mod command;
 pub mod edit;
 #[allow(dead_code)] // searched by the Vibe suggestion feature to come; tests use it
 pub mod embeddings;
+pub mod external;
 pub mod hash;
 pub mod history;
 pub mod index;
@@ -66,6 +67,8 @@ pub enum Event {
         queued: bool,
         result: Result<usize, String>,
     },
+    /// Other libraries: found, read, imported.
+    External(external::ExternalEvent),
     /// News from the tempo lock tool.
     #[allow(dead_code)] // read by the tempo lock tab (step 7, B4)
     TempoLock(tempo_lock::TempoLockEvent),

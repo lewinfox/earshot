@@ -16,6 +16,7 @@ impl EarshotApp {
                 }
                 Event::Scanned(Ok(())) => self.panels.library.browser.scanning = false,
                 Event::Store(e) => self.store_event(e),
+                Event::External(e) => self.external_event(e),
                 Event::Duplicates(Ok(groups)) => self.panels.library.browser.set_duplicates(groups),
                 Event::Duplicates(Err(e)) => eprintln!("finding duplicates: {e}"),
                 Event::Stale { queued, result } => {

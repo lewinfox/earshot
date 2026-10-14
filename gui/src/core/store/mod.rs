@@ -39,9 +39,9 @@ pub const FILE_NAME: &str = "library.db";
 const BASELINE: &str = include_str!("../../../migrations/001_baseline.sql");
 
 /// `user_version` of a database made from [`BASELINE`]. Development builds used 1 and
-/// 2 (before beatgrids stored their model) and 3 (before collections had sections);
-/// those are refused, not converted.
-pub const SCHEMA_VERSION: i64 = 4;
+/// 2 (before beatgrids stored their model), 3 (before collections had sections) and 4
+/// (before imports from other libraries); those are refused, not converted.
+pub const SCHEMA_VERSION: i64 = 5;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -458,6 +458,14 @@ impl Store {
             }))
             .map_err(|_| StoreError::Closed)?;
         rx.recv().map_err(|_| StoreError::Closed)?
+    }
+
+    /// Bring in what an import found (`core::external`), handing out ids for the
+    /// collections it may make. Blocking: call from a background thread.
+    pub fn import(&self, save: super::external::ImportSave) -> Result<super::external::Imported> {
+        let n = save.nodes() as i64;
+        let first = self.next_collection.fetch_add(n, Ordering::Relaxed);
+        self.call(move |w| w.import_external(save, first..first + n))
     }
 
     /// An id for a new collection. Only the writer inserts collections,

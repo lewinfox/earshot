@@ -26,6 +26,7 @@ use crate::core::keys::{parse_key, pitch_class};
 use crate::core::query;
 
 mod edits;
+mod import;
 
 /// A file the scan found that is new, or whose size or modified time changed.
 #[derive(Debug, Clone)]
@@ -370,57 +371,7 @@ impl Writer {
             )?;
         }
         for f in changed {
-            let bytes = path_bytes(&f.path);
-            let existing: Option<i64> = tx
-                .query_row(
-                    "SELECT track_id FROM files WHERE path = ?1",
-                    [&bytes],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let track = match existing {
-                Some(track) => {
-                    // Changed on disk: its stamped hash (or none, to work out again).
-                    tx.execute(
-                        "UPDATE files SET size = ?2, mtime_ns = ?3, content_hash = ?4,
-                           missing_since = NULL WHERE path = ?1",
-                        params![bytes, f.size, f.mtime_ns, f.tag_hash.map(|h| h.to_vec())],
-                    )?;
-                    track
-                }
-                None => {
-                    let moved = match &f.tag_hash {
-                        Some(h) => orphan_with_hash(&tx, h, None)?,
-                        None => None,
-                    };
-                    let track = match moved {
-                        Some(track) => track,
-                        None => {
-                            tx.execute("INSERT INTO tracks(added_at) VALUES (?1)", [t])?;
-                            tx.last_insert_rowid()
-                        }
-                    };
-                    tx.execute(
-                        "INSERT INTO files(track_id, path, size, mtime_ns, content_hash)
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params![
-                            track,
-                            bytes,
-                            f.size,
-                            f.mtime_ns,
-                            f.tag_hash.map(|h| h.to_vec())
-                        ],
-                    )?;
-                    track
-                }
-            };
-            if let Some(d) = f.tags.duration {
-                tx.execute(
-                    "UPDATE tracks SET duration_s = ?2 WHERE id = ?1",
-                    params![track, d],
-                )?;
-            }
-            write_tag_meta(&tx, track, &f.tags, t)?;
+            record_file(&tx, f, t)?;
         }
         tx.commit()?;
         self.emit_library()
@@ -1360,6 +1311,63 @@ pub(super) fn fill_keys(c: &Connection) -> Result<()> {
 }
 
 /// What the file's tags say, as source 'tag'. Never touches other sources.
+/// Record one new or changed file and its tags (see [`Writer::apply_scan`]); returns
+/// its track.
+fn record_file(tx: &Connection, f: &ScannedFile, t: i64) -> Result<i64> {
+    let bytes = path_bytes(&f.path);
+    let existing: Option<i64> = tx
+        .query_row(
+            "SELECT track_id FROM files WHERE path = ?1",
+            [&bytes],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let track = match existing {
+        Some(track) => {
+            // Changed on disk: its stamped hash (or none, to work out again).
+            tx.execute(
+                "UPDATE files SET size = ?2, mtime_ns = ?3, content_hash = ?4,
+                   missing_since = NULL WHERE path = ?1",
+                params![bytes, f.size, f.mtime_ns, f.tag_hash.map(|h| h.to_vec())],
+            )?;
+            track
+        }
+        None => {
+            let moved = match &f.tag_hash {
+                Some(h) => orphan_with_hash(tx, h, None)?,
+                None => None,
+            };
+            let track = match moved {
+                Some(track) => track,
+                None => {
+                    tx.execute("INSERT INTO tracks(added_at) VALUES (?1)", [t])?;
+                    tx.last_insert_rowid()
+                }
+            };
+            tx.execute(
+                "INSERT INTO files(track_id, path, size, mtime_ns, content_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    track,
+                    bytes,
+                    f.size,
+                    f.mtime_ns,
+                    f.tag_hash.map(|h| h.to_vec())
+                ],
+            )?;
+            track
+        }
+    };
+    if let Some(d) = f.tags.duration {
+        tx.execute(
+            "UPDATE tracks SET duration_s = ?2 WHERE id = ?1",
+            params![track, d],
+        )?;
+    }
+    write_tag_meta(tx, track, &f.tags, t)?;
+    Ok(track)
+}
+
 fn write_tag_meta(c: &Connection, track: i64, tags: &TrackTags, t: i64) -> Result<()> {
     let bpm = tags.bpm.map(|b| format!("{b}"));
     for (field, value) in [
