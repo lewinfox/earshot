@@ -145,3 +145,25 @@ def test_cues_and_grids_come_on_earshots_timeline(tmp_path):
         assert (loop["start_s"], loop["end_s"]) == pytest.approx((2.0 - s, 3.0 - s))
         [m] = t["grid"]
         assert m == pytest.approx({"start_s": 0.5 - s, "bpm": 120.0, "beat": 1})
+
+
+def test_files_on_another_drive_are_found(tmp_path, monkeypatch):
+    """On Windows, a library from another computer whose music is now on another
+    drive: searched only once the usual places have been."""
+    from earshot_worker import libraries
+
+    music, other = tmp_path / "C/Users/me/Music", tmp_path / "E"
+    music.mkdir(parents=True)
+    (other / "DJ/house").mkdir(parents=True)
+    for name, data in (("a.mp3", b"aaaa"), ("b.mp3", b"bbbbbb")):
+        (other / "DJ/house" / name).write_bytes(data)
+    lib = cratelib.Library("test")
+    lib.add_track(cratelib.Track("1", "D:/Music/house/a.mp3", title="A", file_size=4))
+    lib.add_track(cratelib.Track("2", "D:/Music/house/b.mp3", title="B", file_size=6))
+    monkeypatch.setattr(libraries, "send", lambda _: None)
+
+    monkeypatch.setattr(libraries, "drives", list)
+    assert libraries.find_files(lib, [music], {}) == {}, "not without other drives"
+    monkeypatch.setattr(libraries, "drives", lambda: [other])
+    assert libraries.find_files(lib, [music], {}) == {str(other / "DJ"): "D:/Music"}
+    assert lib.tracks["1"].file == other / "DJ/house/a.mp3"
