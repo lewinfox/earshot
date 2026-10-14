@@ -129,6 +129,32 @@ def analyse(label: str, extra: dict) -> None:
     proc.wait(timeout=30)
 
 
+# Beat This! on its own, step by step: where it stops, if it does (every thread's
+# Python stack is printed after STACKS_S).
+STACKS_S = 120
+STEPS = f"""
+import faulthandler, sys, time
+faulthandler.dump_traceback_later({STACKS_S}, exit=True)
+t = time.monotonic()
+def step(what):
+    global t
+    print(f"  {{what}}: {{time.monotonic() - t:.1f}} s", flush=True)
+    t = time.monotonic()
+import torch
+step(f"import torch {{torch.__version__}}, {{torch.get_num_threads()}} threads")
+from earshot_worker.detectors import get_beat_this
+step("import the detector")
+model = get_beat_this()
+step("load the model")
+import soundfile as sf
+y, sr = sf.read(sys.argv[1], dtype="float32")
+beats, _ = model(y, sr)
+step(f"find {{len(beats)}} beats")
+"""
+r = subprocess.run([str(python), "-c", STEPS, str(wav)], cwd=root / "worker", env=env, capture_output=True, text=True, timeout=STACKS_S + 60)
+print(r.stdout + r.stderr[-6000:], flush=True)
+check("Beat This! runs on its own", r.returncode == 0)
+
 analyse("normal priority", {"EARSHOT_WORKER_PRIORITY": "inherit"})
 analyse("idle priority", {})
 
