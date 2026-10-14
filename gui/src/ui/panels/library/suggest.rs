@@ -174,20 +174,6 @@ impl SuggestUi {
         table: &mut TableState,
         out: &mut Vec<Command>,
     ) -> bool {
-        ui.horizontal(|ui| {
-            let title = RichText::new("Suggestions").strong();
-            ui.label(if has_focus {
-                title.color(THEME.accent)
-            } else {
-                title
-            })
-            .on_hover_text("Tab switches the keyboard between the library and this list");
-            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                if let Some(d) = segmented(ui, self.direction, &directions()) {
-                    self.direction = d;
-                }
-            });
-        });
         // A deck that's no longer shown (back to two decks): follow Master instead.
         if matches!(self.source, RefSource::Deck(d) if d >= v.decks) {
             self.source = RefSource::Master;
@@ -209,6 +195,11 @@ impl SuggestUi {
             if let Some(src) = segmented(ui, self.source, &sources) {
                 self.source = src;
             }
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                if let Some(d) = segmented(ui, self.direction, &directions()) {
+                    self.direction = d;
+                }
+            });
         });
         ui.horizontal(|ui| match &self.reference {
             None => {

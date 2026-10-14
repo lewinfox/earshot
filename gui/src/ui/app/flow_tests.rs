@@ -160,15 +160,15 @@ fn the_suggestions_pane_opens_and_closes_from_its_icon() {
     let mut h = flow_tab("flow-suggest");
     with_cards(&mut h, 1);
     let tip = "Suggestions: what could follow the selected card";
-    assert!(h.query_by_label("Suggestions").is_some(), "open at first");
+    assert!(h.query_by_label("After").is_some(), "open at first");
     h.get_by_label(tip).click();
     steps(&mut h, 20);
     assert_eq!(h.state().prefs.prepare.aside, None);
-    assert!(h.query_by_label("Suggestions").is_none(), "closed");
+    assert!(h.query_by_label("After").is_none(), "closed");
     h.get_by_label(tip).click();
     steps(&mut h, 20);
     assert!(h.state().prefs.prepare.aside.is_some());
-    assert!(h.query_by_label("Suggestions").is_some(), "open again");
+    assert!(h.query_by_label("After").is_some(), "open again");
 }
 
 #[test]
