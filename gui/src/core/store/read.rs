@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use earshot_engine::HOTCUES;
 use earshot_engine::beatgrid::{Beatgrid, Constant, GridModel};
 use earshot_engine::loudness::Loudness;
+use earshot_engine::media::Location;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::{CueKind, FlowCamera, GridSource, Result, StoreError, WAVEFORM_VERSION, bytes_path};
@@ -231,7 +232,8 @@ pub fn roots(c: &Connection) -> Result<Vec<Vec<u8>>> {
         .collect::<rusqlite::Result<_>>()?)
 }
 
-pub fn track_path(c: &Connection, id: i64) -> Result<PathBuf> {
+/// Where a track's audio is now: its first file that isn't missing.
+pub fn track_location(c: &Connection, id: i64) -> Result<Location> {
     c.query_row(
         "SELECT path FROM files WHERE track_id = ?1 AND missing_since IS NULL
          ORDER BY id LIMIT 1",
@@ -239,7 +241,7 @@ pub fn track_path(c: &Connection, id: i64) -> Result<PathBuf> {
         |r| r.get::<_, Vec<u8>>(0),
     )
     .optional()?
-    .map(bytes_path)
+    .map(Location::from_bytes)
     .ok_or(StoreError::NoTrack(id))
 }
 

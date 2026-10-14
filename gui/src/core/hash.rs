@@ -15,8 +15,10 @@
 //! - Anything else (Ogg, or a file we can't parse): the whole file.
 
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, SeekFrom};
 use std::path::Path;
+
+use earshot_engine::media::{Location, Media};
 
 use sha2::{Digest, Sha256};
 
@@ -25,21 +27,21 @@ pub type Hash = [u8; 32];
 /// The ID3 `TXXX` description cratelib and music-sync store the hash under.
 pub const AUDIO_HASH: &str = "AUDIO_SHA256";
 
-/// The audio hash of any supported file, by its extension.
-pub fn content_hash(path: &Path) -> io::Result<Hash> {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_lowercase)
-        .unwrap_or_default();
-    let mut f = File::open(path)?;
-    let size = f.metadata()?.len();
+/// The audio hash of any supported track, by its extension.
+pub fn content_hash(at: &Location) -> io::Result<Hash> {
+    let ext = at.extension().unwrap_or_default();
+    let mut f = at.open().map_err(io::Error::other)?;
+    let f = f.as_mut();
+    let size = match f.len() {
+        Some(n) => n,
+        None => f.seek(SeekFrom::End(0))?,
+    };
     let ranges = match ext.as_str() {
-        "mp3" | "aac" => vec![id3_audio_range(&mut f, size)?],
-        "m4a" | "mp4" | "m4b" | "alac" => mp4_mdat(&mut f, size)?,
-        "flac" => flac_frames(&mut f, size)?,
-        "wav" => riff_chunk(&mut f, size, false)?,
-        "aif" | "aiff" | "aifc" => riff_chunk(&mut f, size, true)?,
+        "mp3" | "aac" => vec![id3_audio_range(f, size)?],
+        "m4a" | "mp4" | "m4b" | "alac" => mp4_mdat(f, size)?,
+        "flac" => flac_frames(f, size)?,
+        "wav" => riff_chunk(f, size, false)?,
+        "aif" | "aiff" | "aifc" => riff_chunk(f, size, true)?,
         _ => vec![],
     };
     let ranges = if ranges.is_empty() {
@@ -47,7 +49,7 @@ pub fn content_hash(path: &Path) -> io::Result<Hash> {
     } else {
         ranges
     };
-    hash_ranges(&mut f, &ranges)
+    hash_ranges(f, &ranges)
 }
 
 /// cratelib's `audio_sha256`, byte for byte: SHA-256 of an MP3 without its ID3v2 block
@@ -80,7 +82,7 @@ pub fn from_hex(s: &str) -> Option<Hash> {
 
 /// (start, end) of the bytes [`audio_sha256`] hashes. Mirrors cratelib exactly,
 /// including when the ID3 size runs past the end of the file (nothing is hashed).
-fn id3_audio_range(f: &mut File, size: u64) -> io::Result<(u64, u64)> {
+fn id3_audio_range(f: &mut dyn Media, size: u64) -> io::Result<(u64, u64)> {
     let mut head = [0u8; 10];
     let n = read_up_to(f, &mut head)?;
     let mut start = 0u64;
@@ -99,7 +101,7 @@ fn id3_audio_range(f: &mut File, size: u64) -> io::Result<(u64, u64)> {
 }
 
 /// Payloads of the top-level `mdat` boxes.
-fn mp4_mdat(f: &mut File, size: u64) -> io::Result<Vec<(u64, u64)>> {
+fn mp4_mdat(f: &mut dyn Media, size: u64) -> io::Result<Vec<(u64, u64)>> {
     let mut out = vec![];
     let mut at = 0u64;
     while at + 8 <= size {
@@ -132,7 +134,7 @@ fn mp4_mdat(f: &mut File, size: u64) -> io::Result<Vec<(u64, u64)>> {
 }
 
 /// The audio frames after a FLAC's metadata blocks.
-fn flac_frames(f: &mut File, size: u64) -> io::Result<Vec<(u64, u64)>> {
+fn flac_frames(f: &mut dyn Media, size: u64) -> io::Result<Vec<(u64, u64)>> {
     // Some taggers put an ID3v2 block in front.
     let (mut at, end) = id3_audio_range(f, size)?;
     f.seek(SeekFrom::Start(at))?;
@@ -157,7 +159,7 @@ fn flac_frames(f: &mut File, size: u64) -> io::Result<Vec<(u64, u64)>> {
 }
 
 /// WAV's `data` chunk (little-endian sizes) or AIFF's `SSND` (big-endian).
-fn riff_chunk(f: &mut File, size: u64, aiff: bool) -> io::Result<Vec<(u64, u64)>> {
+fn riff_chunk(f: &mut dyn Media, size: u64, aiff: bool) -> io::Result<Vec<(u64, u64)>> {
     let mut h = [0u8; 12];
     if read_up_to(f, &mut h)? < 12 {
         return Ok(vec![]);
@@ -191,7 +193,7 @@ fn riff_chunk(f: &mut File, size: u64, aiff: bool) -> io::Result<Vec<(u64, u64)>
     Ok(vec![])
 }
 
-fn hash_ranges(f: &mut File, ranges: &[(u64, u64)]) -> io::Result<Hash> {
+fn hash_ranges(f: &mut dyn Media, ranges: &[(u64, u64)]) -> io::Result<Hash> {
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     for &(start, end) in ranges {
@@ -210,7 +212,7 @@ fn hash_ranges(f: &mut File, ranges: &[(u64, u64)]) -> io::Result<Hash> {
     Ok(h.finalize().into())
 }
 
-fn read_up_to(f: &mut File, buf: &mut [u8]) -> io::Result<usize> {
+fn read_up_to(f: &mut dyn Media, buf: &mut [u8]) -> io::Result<usize> {
     let mut n = 0;
     while n < buf.len() {
         match f.read(&mut buf[n..])? {
@@ -230,17 +232,17 @@ fn syncsafe(b: &[u8]) -> u64 {
 
 /// The hash stored in an MP3's (or AAC's) `TXXX:AUDIO_SHA256` frame, if it has one.
 /// Reads only frame headers, skipping over pictures, so it's cheap enough for a scan.
-pub fn tag_hash(path: &Path) -> Option<Hash> {
-    let ext = path.extension()?.to_str()?.to_lowercase();
+pub fn tag_hash(at: &Location) -> Option<Hash> {
+    let ext = at.extension()?;
     if ext != "mp3" && ext != "aac" {
         return None;
     }
-    let mut f = File::open(path).ok()?;
-    read_txxx(&mut f, AUDIO_HASH).and_then(|v| from_hex(&v))
+    let mut f = at.open().ok()?;
+    read_txxx(f.as_mut(), AUDIO_HASH).and_then(|v| from_hex(&v))
 }
 
 /// The value of the first ID3v2 `TXXX` frame with this description.
-fn read_txxx(f: &mut File, desc: &str) -> Option<String> {
+fn read_txxx(f: &mut dyn Media, desc: &str) -> Option<String> {
     let mut head = [0u8; 10];
     if read_up_to(f, &mut head).ok()? < 10 || &head[..3] != b"ID3" {
         return None;
@@ -369,6 +371,14 @@ mod tests {
         p
     }
 
+    fn content_hash_at(p: &Path) -> io::Result<Hash> {
+        content_hash(&p.into())
+    }
+
+    fn tag_hash_at(p: &Path) -> Option<Hash> {
+        tag_hash(&p.into())
+    }
+
     fn sha(b: &[u8]) -> Hash {
         Sha256::digest(b).into()
     }
@@ -384,7 +394,7 @@ mod tests {
             let (name, hex) = line.split_once(' ').unwrap();
             let path = fixture(name);
             assert_eq!(to_hex(&audio_sha256(&path).unwrap()), hex, "{name}");
-            assert_eq!(to_hex(&content_hash(&path).unwrap()), hex, "{name}");
+            assert_eq!(to_hex(&content_hash_at(&path).unwrap()), hex, "{name}");
             n += 1;
         }
         assert!(n >= 3);
@@ -395,7 +405,7 @@ mod tests {
         let expected = std::fs::read_to_string(fixture("expected.txt")).unwrap();
         for line in expected.lines().filter(|l| !l.is_empty()) {
             let (name, hex) = line.split_once(' ').unwrap();
-            let stamped = tag_hash(&fixture(name));
+            let stamped = tag_hash_at(&fixture(name));
             if name.contains("stamped") {
                 assert_eq!(stamped.map(|h| to_hex(&h)).as_deref(), Some(hex), "{name}");
             } else {
@@ -440,8 +450,8 @@ mod tests {
             }
             f
         };
-        let a = content_hash(&temp("a.m4a", &file(b"title one"))).unwrap();
-        let b = content_hash(&temp("b.m4a", &file(b"a much longer title two"))).unwrap();
+        let a = content_hash_at(&temp("a.m4a", &file(b"title one"))).unwrap();
+        let b = content_hash_at(&temp("b.m4a", &file(b"a much longer title two"))).unwrap();
         assert_eq!(a, sha(&mdat));
         assert_eq!(a, b, "retagging doesn't change the hash");
     }
@@ -460,11 +470,11 @@ mod tests {
             f
         };
         assert_eq!(
-            content_hash(&temp("a.flac", &flac(b"x"))).unwrap(),
+            content_hash_at(&temp("a.flac", &flac(b"x"))).unwrap(),
             sha(&frames)
         );
         assert_eq!(
-            content_hash(&temp("b.flac", &flac(b"longer"))).unwrap(),
+            content_hash_at(&temp("b.flac", &flac(b"longer"))).unwrap(),
             sha(&frames)
         );
 
@@ -473,7 +483,7 @@ mod tests {
         wav.extend(b"LIST\x03\0\0\0abc\0"); // odd length: padded
         wav.extend(b"data\x0a\0\0\0");
         wav.extend(&pcm);
-        assert_eq!(content_hash(&temp("a.wav", &wav)).unwrap(), sha(&pcm));
+        assert_eq!(content_hash_at(&temp("a.wav", &wav)).unwrap(), sha(&pcm));
     }
 
     #[test]

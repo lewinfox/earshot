@@ -1402,7 +1402,7 @@ mod tests {
     fn analyses_a_real_track() {
         use earshot_engine::decode;
         let path = std::env::var("EARSHOT_TEST_TRACK").expect("set EARSHOT_TEST_TRACK");
-        let (audio, _) = decode::decode_file(Path::new(&path)).unwrap();
+        let (audio, _) = decode::decode(&Path::new(&path).into()).unwrap();
         let wav = std::env::temp_dir().join(format!("earshot-test-{}.wav", std::process::id()));
         super::super::analysis::write_mono_wav(&wav, &audio).unwrap();
         let client = WorkerClient::start(WorkerConfig::python(Role::Deck, 4));

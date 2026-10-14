@@ -18,6 +18,7 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, RwLock};
 
 use earshot_engine::HOTCUES;
+use earshot_engine::media::Location;
 use rusqlite::{Connection, OpenFlags};
 
 pub use read::{JobRow, LibTrack, Memory, PlaySession, Preview, ResultState, Sources, TrackCues};
@@ -63,6 +64,8 @@ pub enum StoreError {
     TooOld { found: i64 },
     #[error("no track {0}")]
     NoTrack(i64),
+    #[error("{0}: not a file on this computer")]
+    NotLocal(String),
     #[error("no Flow or folder {0}")]
     NoCollection(i64),
     #[error("track {track}'s beatgrid is unreadable: {reason}")]
@@ -592,8 +595,18 @@ impl Reader {
         })
     }
 
+    /// Where a track's audio is now.
+    pub fn track_location(&self, id: i64) -> Result<Location> {
+        self.with(|c| read::track_location(c, id))
+    }
+
+    /// A track's local file, for what needs one (the tempo lock tool, revealing it
+    /// in the file manager); an error for audio that's elsewhere.
     pub fn track_path(&self, id: i64) -> Result<PathBuf> {
-        self.with(|c| read::track_path(c, id))
+        match self.track_location(id)? {
+            Location::File(p) => Ok(p),
+            Location::Url(u) => Err(StoreError::NotLocal(u)),
+        }
     }
 
     /// The active grid's model and where it came from.
@@ -693,27 +706,11 @@ impl Reader {
 
 /// A path as it is stored: the OS's bytes, so names that aren't UTF-8 survive.
 pub fn path_bytes(p: &Path) -> Vec<u8> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        p.as_os_str().as_bytes().to_vec()
-    }
-    #[cfg(not(unix))]
-    {
-        p.to_string_lossy().into_owned().into_bytes()
-    }
+    earshot_engine::media::path_to_bytes(p)
 }
 
 pub fn bytes_path(b: Vec<u8>) -> PathBuf {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStringExt;
-        PathBuf::from(std::ffi::OsString::from_vec(b))
-    }
-    #[cfg(not(unix))]
-    {
-        PathBuf::from(String::from_utf8_lossy(&b).into_owned())
-    }
+    earshot_engine::media::path_from_bytes(b)
 }
 
 fn now() -> i64 {

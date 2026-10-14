@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use earshot_engine::decode;
+use earshot_engine::media::Location;
 
 use super::analysis::Analyser;
 use super::hash;
@@ -220,8 +221,8 @@ fn stamp(meta: &std::fs::Metadata) -> (i64, i64) {
 
 fn scanned(path: &Path, size: i64, mtime_ns: i64) -> ScannedFile {
     ScannedFile {
-        tags: decode::read_tags(path).unwrap_or_default(),
-        tag_hash: hash::tag_hash(path),
+        tags: decode::read_tags(&path.into()).unwrap_or_default(),
+        tag_hash: hash::tag_hash(&path.into()),
         path: path.to_path_buf(),
         size,
         mtime_ns,
@@ -248,7 +249,7 @@ pub fn start_hasher(store: Store) -> std::sync::mpsc::Sender<()> {
                     }
                 };
                 for (file, path) in files {
-                    match hash::content_hash(&path) {
+                    match hash::content_hash(&path.as_path().into()) {
                         Ok(hash) => store.send(StoreCmd::SetContentHash { file, hash }),
                         Err(e) => eprintln!("hashing {}: {e}", path.display()),
                     }
@@ -285,7 +286,7 @@ pub fn start_art_loader(reader: Reader, sink: Sink) -> std::sync::mpsc::Sender<i
         .name("art".into())
         .spawn(move || {
             for id in rx {
-                let art = reader.track_path(id).ok().and_then(|p| cover(&p));
+                let art = reader.track_location(id).ok().and_then(|at| cover(&at));
                 sink(Event::Art(id, art));
             }
         })
@@ -294,8 +295,8 @@ pub fn start_art_loader(reader: Reader, sink: Sink) -> std::sync::mpsc::Sender<i
 }
 
 /// The file's cover, cropped to a square and scaled down.
-fn cover(path: &Path) -> Option<Vec<u8>> {
-    let bytes = decode::read_cover(path).ok()??;
+fn cover(at: &Location) -> Option<Vec<u8>> {
+    let bytes = decode::read_cover(at).ok()??;
     let img = image::load_from_memory(&bytes).ok()?;
     let side = img.width().min(img.height());
     let img = img.crop_imm(

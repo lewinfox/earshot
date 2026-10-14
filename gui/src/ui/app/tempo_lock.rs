@@ -199,7 +199,7 @@ impl Listener {
         let clean = match cached {
             Some(a) => a,
             None => {
-                let a = Arc::new(decode::decode_file(&key.file)?.0);
+                let a = Arc::new(decode::decode(&key.file.as_path().into())?.0);
                 let mut st = self.st.lock().unwrap();
                 st.decoded.retain(|(f, _)| *f != key.file);
                 // The original and one straightened file at most.

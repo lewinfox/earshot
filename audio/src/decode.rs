@@ -1,16 +1,18 @@
-//! Whole-file decoding to stereo f32 with symphonia.
+//! Whole-file decoding to stereo f32 with symphonia, from wherever the audio is
+//! ([`Location`]).
 //!
 //! The spike decodes a whole track into memory (~10 MB per stereo minute at 44.1 kHz).
 //! The real engine will stream with a cache; see docs/design.md.
 
-use std::fs::File;
-use std::path::Path;
+use std::io::{Read, Seek, SeekFrom};
+
+use crate::media::{Location, Media};
 
 use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::errors::Error;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::{MetadataOptions, StandardTag};
 
 /// Decoded audio, stereo interleaved.
@@ -38,18 +40,43 @@ pub struct TrackTags {
     pub duration: Option<f64>,
 }
 
-fn open(path: &Path) -> Result<Box<dyn FormatReader>, String> {
-    let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+/// [`Media`] as symphonia reads it.
+struct Source(Box<dyn Media>);
+
+impl Read for Source {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl Seek for Source {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.0.seek(pos)
+    }
+}
+
+impl MediaSource for Source {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        self.0.len()
+    }
+}
+
+fn open(at: &Location) -> Result<Box<dyn FormatReader>, String> {
+    let media = at.open()?;
+    let mss = MediaSourceStream::new(Box::new(Source(media)), Default::default());
     let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
+    if let Some(ext) = at.extension() {
+        hint.with_extension(&ext);
     }
     // Gapless trimming (encoder delay and padding) is on by default in the decoder options.
     let fmt_opts = FormatOptions::default();
     symphonia::default::get_probe()
         .probe(&hint, mss, fmt_opts, MetadataOptions::default())
-        .map_err(|e| format!("{}: {e}", path.display()))
+        .map_err(|e| format!("{at}: {e}"))
 }
 
 fn tags_of(format: &mut Box<dyn FormatReader>) -> TrackTags {
@@ -80,16 +107,16 @@ fn tags_of(format: &mut Box<dyn FormatReader>) -> TrackTags {
 }
 
 /// Read tags without decoding audio.
-pub fn read_tags(path: &Path) -> Result<TrackTags, String> {
-    let mut format = open(path)?;
+pub fn read_tags(at: &Location) -> Result<TrackTags, String> {
+    let mut format = open(at)?;
     Ok(tags_of(&mut format))
 }
 
 /// The embedded cover picture (front cover if marked, else the first one), still
 /// encoded (usually JPEG or PNG). Doesn't decode audio.
-pub fn read_cover(path: &Path) -> Result<Option<Vec<u8>>, String> {
+pub fn read_cover(at: &Location) -> Result<Option<Vec<u8>>, String> {
     use symphonia::core::meta::StandardVisualKey;
-    let mut format = open(path)?;
+    let mut format = open(at)?;
     let mut meta = format.metadata();
     let Some(rev) = meta.skip_to_latest() else {
         return Ok(None);
@@ -102,9 +129,9 @@ pub fn read_cover(path: &Path) -> Result<Option<Vec<u8>>, String> {
         .map(|v| v.data.to_vec()))
 }
 
-/// Decode a whole file to stereo f32. Mono is duplicated, extra channels are dropped.
-pub fn decode_file(path: &Path) -> Result<(TrackAudio, TrackTags), String> {
-    let mut format = open(path)?;
+/// Decode a whole track to stereo f32. Mono is duplicated, extra channels are dropped.
+pub fn decode(at: &Location) -> Result<(TrackAudio, TrackTags), String> {
+    let mut format = open(at)?;
     let mut tags = tags_of(&mut format);
     let track = format
         .default_track(TrackType::Audio)

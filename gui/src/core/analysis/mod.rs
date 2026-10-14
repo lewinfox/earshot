@@ -495,7 +495,7 @@ impl Shared {
         let has = |a: AnalyserId| todo.iter().any(|t| t.0 == a);
 
         // Which track each lane is on, for the log after a crash.
-        let path = store.reader.track_path(id).map_err(|e| e.to_string())?;
+        let at = store.reader.track_location(id).map_err(|e| e.to_string())?;
         let minutes = store
             .reader
             .track(id)
@@ -504,8 +504,7 @@ impl Shared {
             .unwrap_or(0.0)
             / 60.0;
         crate::core::log::note(&format!(
-            "analysis: {lane:?} starts track {id} ({minutes:.1} min): {}",
-            path.display()
+            "analysis: {lane:?} starts track {id} ({minutes:.1} min): {at}"
         ));
         // A long mix would take gigabytes to decode and analyse, and a single grid
         // means nothing for it.
@@ -520,7 +519,7 @@ impl Shared {
             Some(a) => a.clone(),
             None => {
                 progress(0.0, "decoding");
-                Arc::new(decode::decode_file(&path)?.0)
+                Arc::new(decode::decode(&at)?.0)
             }
         };
 

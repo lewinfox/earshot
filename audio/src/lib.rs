@@ -7,4 +7,5 @@ pub mod decode;
 pub mod demo;
 pub mod energy;
 pub mod loudness;
+pub mod media;
 pub mod waveform;

@@ -296,7 +296,7 @@ impl Waveform {
 
     /// The waveform of the audio file at `path`.
     fn of_file(path: &Path) -> Result<Waveform, String> {
-        let (audio, _) = decode::decode_file(path)?;
+        let (audio, _) = decode::decode(&path.into())?;
         Ok(Waveform::of(&audio))
     }
 }
@@ -918,7 +918,7 @@ impl Shared {
             .reader
             .track_path(track)
             .map_err(|e| format!("track {track}: {e}"))?;
-        let (audio, _) = decode::decode_file(&source)?;
+        let (audio, _) = decode::decode(&source.as_path().into())?;
         if !self.live(op) {
             return Err(CANCELLED.into());
         }

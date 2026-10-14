@@ -279,7 +279,10 @@ fn a_moved_file_hashed_later_is_merged_back() {
     let lib = library(&mut w);
     assert_eq!(lib.len(), 1);
     assert_eq!((lib[0].id, lib[0].bpm), (id, Some(128.0)));
-    assert_eq!(read::track_path(w.conn(), id).unwrap(), new_path);
+    assert_eq!(
+        read::track_location(w.conn(), id).unwrap(),
+        new_path.clone().into()
+    );
     assert_eq!(
         read::flow(w.conn(), 500).unwrap().unwrap().2.nodes[0].track,
         id

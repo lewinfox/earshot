@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use earshot_engine::beatgrid::Beatgrid;
 use earshot_engine::decode;
+use earshot_engine::media::Location;
 use earshot_engine::{
     Command, CueSet, DeckId, Engine, EngineSnapshot, EngineState, HotcueMode, LoadedTrack,
     MAX_DECKS, MixerState, Monitor, OutputInfo, OutputOptions, PreviewCmd, Routing, Set, energy,
@@ -250,8 +251,8 @@ pub fn preview(player: &Player, store: &Store, id: i64, start: f64) -> Result<()
     let audio = match on_deck {
         Some(a) => a,
         None => {
-            let path = store.reader.track_path(id).map_err(|e| e.to_string())?;
-            Arc::new(decode::decode_file(&path)?.0)
+            let at = store.reader.track_location(id).map_err(|e| e.to_string())?;
+            Arc::new(decode::decode(&at)?.0)
         }
     };
     // At the same auto-gain as on a deck.
@@ -389,8 +390,8 @@ pub fn load_track(
     }
     let reader = &lib.store.reader;
     let track = reader.track(id).map_err(|e| e.to_string())?;
-    let path = reader.track_path(id).map_err(|e| e.to_string())?;
-    let (audio, tags) = decode::decode_file(&path)?;
+    let at = reader.track_location(id).map_err(|e| e.to_string())?;
+    let (audio, tags) = decode::decode(&at)?;
     let stored_level = reader.loudness(id).map_err(|e| e.to_string())?;
     let stored = reader.grid(id).map_err(|e| e.to_string())?;
     let cached_wave = reader
@@ -419,7 +420,7 @@ pub fn load_track(
             Some(Beatgrid::from_model(model, audio.duration()).map_err(|e| e.to_string())?),
             src.label().to_string(),
         ),
-        None => grid_for_file(&path, &tags, audio.duration()),
+        None => grid_for_file(&at, &tags, audio.duration()),
     };
     // The library's title and artist, so the deck agrees with the track list.
     let (title, artist) = (track.title, track.artist);
@@ -596,11 +597,14 @@ fn sidecar_path(path: &Path) -> PathBuf {
 }
 
 fn grid_for_file(
-    path: &Path,
+    at: &Location,
     tags: &decode::TrackTags,
     duration: f64,
 ) -> (Option<Beatgrid>, String) {
-    if let Ok(text) = std::fs::read_to_string(sidecar_path(path)) {
+    // A beats sidecar sits beside a local file.
+    if let Some(path) = at.as_file()
+        && let Ok(text) = std::fs::read_to_string(sidecar_path(path))
+    {
         match serde_json::from_str::<TempoLockAnalysis>(&text)
             .map_err(|e| e.to_string())
             .and_then(|a| {
