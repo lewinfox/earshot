@@ -498,6 +498,9 @@ pub struct Imported {
     pub grids: usize,
     /// Hot cues and memory cues saved.
     pub cues: usize,
+    /// Where the import's playlists went: the collection it made for what was
+    /// imported (a playlist, crate or folder), and its section. `None`: only tracks.
+    pub shown_in: Option<(i64, Section)>,
 }
 
 /// A collection's `external`: the source, its section, the names down to it and its

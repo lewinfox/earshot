@@ -12,7 +12,8 @@ use std::sync::Arc;
 use egui::{RichText, Ui};
 use egui_extras::{Column, TableBuilder};
 
-use crate::core::command::Command;
+use crate::core::collections::{CollectionCmd, Section};
+use crate::core::command::{Command, ViewCmd};
 use crate::core::external::{
     ExtLibrary, ExtTrack, ExternalCmd, ExternalEvent, ImportOptions, Imported, Node, NodeKind,
     NodePath, Target,
@@ -20,6 +21,7 @@ use crate::core::external::{
 use crate::core::index::LibraryCmd;
 use crate::core::sources::{Source, SourceId, SourceKind};
 use crate::core::track::TrackId;
+use crate::core::view::Source as PaneSource;
 use crate::ui::panels::CoreView;
 use crate::ui::theme::THEME;
 
@@ -28,6 +30,14 @@ enum Status {
     Reading(String),
     Ready(Arc<ExtLibrary>),
     Failed(String),
+}
+
+/// How an import went, shown until the next one.
+struct Report {
+    ok: bool,
+    text: String,
+    /// The collection it made, to go to.
+    shown_in: Option<(i64, Section)>,
 }
 
 /// The import window, open.
@@ -53,7 +63,7 @@ pub struct ExternalUi {
     /// An import running, and what it's doing.
     importing: Option<(SourceId, String)>,
     /// How the last import went.
-    report: Option<Result<String, String>>,
+    report: Option<Report>,
     /// The selected row (an external track id).
     selected: Option<String>,
     /// Our tracks by path, and the library revision it was made for.
@@ -143,7 +153,18 @@ impl ExternalUi {
                     self.importing = None;
                 }
                 let name = self.source(source).map_or("a library", |s| s.name.as_str());
-                self.report = Some(result.map(|r| summary(name, &r)));
+                self.report = Some(match result {
+                    Ok(r) => Report {
+                        ok: r.tracks > 0 || r.missing == 0,
+                        text: summary(name, &r),
+                        shown_in: r.shown_in,
+                    },
+                    Err(e) => Report {
+                        ok: false,
+                        text: format!("Importing from {name} failed: {e}"),
+                        shown_in: None,
+                    },
+                });
             }
         }
     }
@@ -180,20 +201,54 @@ impl ExternalUi {
                 out.push(ExternalCmd::Find.into());
             }
         });
-        if let Some((_, m)) = &self.importing {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(RichText::new(format!("Importing… {m}")).size(11.0));
-            });
-        }
-        if let Some(r) = &self.report {
-            let (text, colour) = match r {
-                Ok(t) => (t.as_str(), THEME.muted),
-                Err(e) => (e.as_str(), THEME.bad),
-            };
-            ui.label(RichText::new(text).size(11.0).color(colour));
-        }
+        self.status_box(ui, out);
         self.dialog(ui.ctx(), out);
+    }
+
+    /// What an import is doing, or how the last one went, in a box: where its
+    /// playlists went, with a button to go there.
+    fn status_box(&mut self, ui: &mut Ui, out: &mut Vec<Command>) {
+        if self.importing.is_none() && self.report.is_none() {
+            return;
+        }
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if let Some((_, m)) = &self.importing {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    let m = if m.is_empty() { "starting" } else { m };
+                    ui.label(format!("Importing… {m}"));
+                });
+                return;
+            }
+            let Some(r) = &self.report else { return };
+            let (mark, colour) = if r.ok {
+                ("✔", THEME.ok)
+            } else {
+                ("⚠", THEME.bad)
+            };
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(mark).color(colour));
+                ui.label(&r.text);
+            });
+            let mut dismiss = false;
+            ui.horizontal(|ui| {
+                if let Some((id, section)) = r.shown_in
+                    && ui.button("Show it").clicked()
+                {
+                    let pane = match section {
+                        Section::Crates => PaneSource::Crates,
+                        _ => PaneSource::Playlists,
+                    };
+                    out.push(ViewCmd::Source(Some(pane)).into());
+                    out.push(CollectionCmd::Open(id).into());
+                }
+                dismiss = ui.small_button("Dismiss").clicked();
+            });
+            if dismiss {
+                self.report = None;
+            }
+        });
     }
 
     /// Stop listing a library's tracks in the middle (a folder was picked).
@@ -416,6 +471,7 @@ impl ExternalUi {
                 }
             });
         }
+        self.status_box(ui, out);
         ui.separator();
         let row_h = 20.0;
         TableBuilder::new(ui)
@@ -636,6 +692,13 @@ fn unset(ui: &mut Ui, kind: SourceKind, out: &mut Vec<Command>) {
 
 /// "Imported 120 tracks (3 not on this computer), 4 playlists, 80 grids, 300 cues."
 fn summary(name: &str, r: &Imported) -> String {
+    if r.tracks == 0 && r.missing > 0 {
+        return format!(
+            "Nothing imported from {name}: none of its {} tracks' files were found on this \
+             computer.",
+            r.missing
+        );
+    }
     let mut parts = vec![format!("{} tracks", r.tracks)];
     if r.collections > 0 {
         parts.push(format!("{} playlists and crates", r.collections));

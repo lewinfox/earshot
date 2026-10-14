@@ -142,6 +142,9 @@ pub struct SavedCollection {
     pub query: Option<String>,
     /// The Flow a playlist was baked from.
     pub source_flow: Option<CollectionId>,
+    /// What an import made it from (`collections.external`), so importing again
+    /// still updates it after an undo.
+    pub external: Option<String>,
     /// A crate's or playlist's tracks (a playlist's in order).
     pub tracks: Vec<TrackId>,
     /// A Flow's cards and links.

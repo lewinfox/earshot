@@ -216,6 +216,7 @@ impl Writer {
                         name,
                         query,
                         source_flow: None,
+                        external: None,
                         tracks,
                         graph,
                     }],
@@ -229,6 +230,8 @@ impl Writer {
                 }
                 copy.id = to;
                 copy.name.push_str(" copy");
+                // The copy is the user's own: importing again updates the original.
+                copy.external = None;
                 Edit::Collections {
                     saved: vec![copy],
                     exists: true,
@@ -395,8 +398,8 @@ impl Writer {
                 for s in saved {
                     tx.execute(
                         "INSERT INTO collections(id, parent_id, kind, section, name, query,
-                           source_flow_id, created_at, updated_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+                           source_flow_id, external, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
                         params![
                             s.id,
                             s.parent,
@@ -405,6 +408,7 @@ impl Writer {
                             s.name,
                             s.query,
                             s.source_flow,
+                            s.external,
                             t
                         ],
                     )?;
@@ -484,16 +488,17 @@ impl Writer {
 
 /// A collection as it is now, with what's in it.
 fn saved(c: &Connection, id: i64) -> Result<SavedCollection> {
-    let (parent, kind, section, name, query, source_flow): (
+    let (parent, kind, section, name, query, source_flow, external): (
         Option<i64>,
         String,
         String,
         String,
         Option<String>,
         Option<i64>,
+        Option<String>,
     ) = c
         .query_row(
-            "SELECT parent_id, kind, section, name, query, source_flow_id
+            "SELECT parent_id, kind, section, name, query, source_flow_id, external
              FROM collections WHERE id = ?1",
             [id],
             |r| {
@@ -504,6 +509,7 @@ fn saved(c: &Connection, id: i64) -> Result<SavedCollection> {
                     r.get(3)?,
                     r.get(4)?,
                     r.get(5)?,
+                    r.get(6)?,
                 ))
             },
         )
@@ -527,6 +533,7 @@ fn saved(c: &Connection, id: i64) -> Result<SavedCollection> {
         name,
         query,
         source_flow,
+        external,
         tracks,
         graph,
     })

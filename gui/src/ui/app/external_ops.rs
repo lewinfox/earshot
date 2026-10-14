@@ -90,6 +90,10 @@ impl EarshotApp {
             } => {
                 let roots = self.roots();
                 let (store, hasher) = (self.lib.store.clone(), self.hasher.clone());
+                crate::core::log::note(&format!(
+                    "import from {} ({:?}): {target:?}, {options:?}",
+                    source.name, source.location
+                ));
                 std::thread::spawn(move || {
                     let id = source.id;
                     let progress = |message| {
@@ -166,10 +170,26 @@ impl EarshotApp {
                     self.lib.store.send(StoreCmd::AddSource(new));
                 }
             }
+            ExternalEvent::Imported { source, result } => match result {
+                Ok(r) => crate::core::log::note(&format!("import from source {source}: {r:?}")),
+                Err(e) => {
+                    crate::core::log::note(&format!("import from source {source} failed: {e}"))
+                }
+            },
+            ExternalEvent::Read {
+                source,
+                result: Err(e),
+            } => crate::core::log::note(&format!("reading source {source} failed: {e}")),
             ExternalEvent::Read {
                 source,
                 result: Ok(lib),
             } => {
+                let missing = lib.tracks.iter().filter(|t| t.file.is_none()).count();
+                crate::core::log::note(&format!(
+                    "read source {source}: {} tracks ({missing} not found here), path rules {:?}",
+                    lib.tracks.len(),
+                    lib.paths
+                ));
                 for w in &lib.warnings {
                     eprintln!("reading source {source}: {w}");
                 }

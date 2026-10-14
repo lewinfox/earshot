@@ -80,6 +80,19 @@ impl Writer {
         let mut ids = ids;
         for (section, root) in &save.roots {
             put_node(&tx, root, None, *section, &mut ids, &ours, t, &mut done)?;
+            // What was imported: down the folders made only to hold it.
+            if done.shown_in.is_none() {
+                let mut n = root;
+                while n.children.len() == 1 {
+                    n = &n.children[0];
+                }
+                let id: i64 = tx.query_row(
+                    "SELECT id FROM collections WHERE external = ?1",
+                    [&n.external],
+                    |r| r.get(0),
+                )?;
+                done.shown_in = Some((id, *section));
+            }
         }
         tx.commit()?;
         self.emit_library()?;

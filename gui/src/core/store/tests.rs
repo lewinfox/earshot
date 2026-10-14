@@ -2092,6 +2092,16 @@ mod import {
             (done.tracks, done.collections, done.grids, done.cues),
             (2, 1, 2, 8)
         );
+        // Where "Show it" goes: the playlist, not the folder made to hold it.
+        let friday: i64 = w
+            .conn()
+            .query_row(
+                "SELECT id FROM collections WHERE name = 'Friday'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(done.shown_in, Some((friday, Section::Playlists)));
 
         // Without overwrite, the file's title stays; the genre it lacked comes in.
         let ta = by_title(&mut w, "Tag A");
@@ -2227,6 +2237,35 @@ mod sources {
         assert_eq!(library(&mut w)[0].genre, "House");
         w.remove_source(xml).unwrap();
         let t = library(&mut w);
-        assert_eq!((t.len(), t[0].genre.as_str()), (1, ""), "still in its folder");
+        assert_eq!(
+            (t.len(), t[0].genre.as_str()),
+            (1, ""),
+            "still in its folder"
+        );
     }
+}
+
+#[test]
+fn an_imported_playlist_deleted_and_undone_is_still_updated_by_importing_again() {
+    use crate::core::edit::EditCmd;
+    let (_dir, mut w) = setup("import-undo");
+    w.create_collection(1, None, Playlist, "P", None).unwrap();
+    w.conn()
+        .execute("UPDATE collections SET external = 'x' WHERE id = 1", [])
+        .unwrap();
+    let external = |w: &mut Writer, id: i64| -> Option<String> {
+        w.conn()
+            .query_row(
+                "SELECT external FROM collections WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    // A duplicate is the user's own.
+    w.edit(EditCmd::Duplicate { from: 1, to: 2 }).unwrap();
+    assert_eq!(external(&mut w, 2), None);
+    let deleted = w.edit(EditCmd::Delete(1)).unwrap().unwrap();
+    w.apply_edit(&deleted.inverse()).unwrap();
+    assert_eq!(external(&mut w, 1).as_deref(), Some("x"));
 }
