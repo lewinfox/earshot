@@ -77,8 +77,11 @@ HELLO_S, RESULT_S = 180, 300
 
 
 def analyse(label: str, extra: dict) -> None:
+    # As `python -m earshot_worker`, printing every thread's stack and stopping if
+    # it's still running after STACKS_S (so a stuck one shows where).
+    run = f"import faulthandler, runpy; faulthandler.dump_traceback_later({STACKS_S}, exit=True); runpy.run_module('earshot_worker', run_name='__main__', alter_sys=True)"
     proc = subprocess.Popen(
-        [str(python), "-m", "earshot_worker"],
+        [str(python), "-c", run],
         cwd=root / "worker",
         env=env | extra,
         stdin=subprocess.PIPE,
