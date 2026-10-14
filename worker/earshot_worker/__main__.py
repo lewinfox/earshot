@@ -386,12 +386,38 @@ def handle(req: dict, queue: Queue) -> None:
         raise ValueError(f"unknown request type {kind!r}")
 
 
+def _load_native_libraries() -> None:
+    """Windows: load now, before reading requests, every compiled library a job may
+    load later. While this (main) thread waits on stdin, Windows holds the pipe, and
+    a library whose start-up code looks at the program's stdin (scipy's maths library,
+    loaded by librosa on first use) waits for that read to end: the job hangs until
+    the next request comes, which the app won't send while it waits for the job.
+    Running librosa once also builds its numba functions, which load llvmlite."""
+    try:
+        import librosa
+        import scipy.interpolate
+        import scipy.linalg
+        import scipy.ndimage
+        import scipy.signal
+        import soxr  # noqa: F401
+
+        y = np.zeros(22050, dtype=np.float32)
+        librosa.onset.onset_strength(y=y, sr=22050)
+        librosa.beat.beat_track(y=y, sr=22050)
+        scipy.signal.get_window("hann", 512)
+        del scipy
+    except Exception:
+        log.warning("loading the analysis libraries up front failed", exc_info=True)
+
+
 def main() -> int:
     # Ctrl+C in the app's terminal reaches its workers too. The app stops them (it
     # closes stdin), so ignore it rather than dying with a traceback.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="worker: %(levelname)s %(name)s: %(message)s")
     detector_name()  # import torch / beat_this now so hello and the first job are quick
+    if os.name == "nt":
+        _load_native_libraries()
     queue = Queue()
     run = threading.Thread(target=runner, args=(queue,), name="earshot-worker-runner")
     run.start()

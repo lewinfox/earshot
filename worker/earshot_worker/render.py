@@ -92,7 +92,7 @@ POLL_S = 0.2
 def _run_rubberband(cmd: list[str], progress) -> None:
     """Run Rubber Band, passing its progress (0..1 over both passes) to `progress`. If
     `progress` raises, Rubber Band is killed and the exception goes on up."""
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     state = {"pass": 1, "pct": 0}
     tail: list[str] = []
 

@@ -69,6 +69,7 @@ def load(path: str | Path) -> tuple[np.ndarray, int]:
                 str(tmp),
             ],
             check=True,
+            stdin=subprocess.DEVNULL,
         )
         y, sr = sf.read(str(tmp), always_2d=True, dtype="float32")
     return y, int(sr)
@@ -99,6 +100,7 @@ def probe(path: str | Path) -> dict:
             text=True,
             check=True,
             timeout=30,
+            stdin=subprocess.DEVNULL,
         ).stdout
         data = json.loads(out)
     except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
@@ -202,7 +204,7 @@ def write_mp3(
             cmd += ["-metadata", f"{tag}="]  # an empty value removes the tag
         cmd += [str(path)]
         try:
-            subprocess.run(cmd, check=True)
+            subprocess.run(cmd, check=True, stdin=subprocess.DEVNULL)
         finally:
             tmp.unlink(missing_ok=True)
         return
