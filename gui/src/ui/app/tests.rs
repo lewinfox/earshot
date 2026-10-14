@@ -1127,6 +1127,7 @@ fn master_in_prepare_is_the_player() {
     );
 }
 
+mod audio_watch;
 mod external;
 mod history;
 mod metadata;

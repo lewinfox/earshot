@@ -26,6 +26,8 @@ pub struct AnalysisSummary {
 
 pub struct TopBar<'a> {
     pub audio: &'a Result<OutputInfo, String>,
+    /// The audio stalled and was restarted, or keeps stalling (`core::audio_watch`).
+    pub audio_note: Option<&'a str>,
     pub midi_ports: &'a [String],
     pub analysis: &'a AnalysisSummary,
     /// Frame timing, and the audio callback's.
@@ -128,6 +130,10 @@ impl Panel for TopBar<'_> {
                     !i.null,
                 ),
                 Err(e) => (format!("no audio: {e}"), false),
+            };
+            let (audio, ok) = match self.audio_note {
+                Some(note) => (format!("⚠ {note}"), false),
+                None => (audio, ok),
             };
             if t.pill(ui, &audio, if ok { t.ok } else { t.warn })
                 .on_hover_text("Audio settings")

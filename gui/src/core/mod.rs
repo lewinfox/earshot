@@ -5,6 +5,7 @@
 //! functions and sending Store commands, and hears back through [`Event`]s.
 
 pub mod analysis;
+pub mod audio_watch;
 pub mod bus;
 pub mod collections;
 pub mod command;

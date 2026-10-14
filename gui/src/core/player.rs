@@ -76,6 +76,15 @@ impl Inner {
         self.engine.as_ref().map(|e| e.snapshot())
     }
 
+    /// The latest snapshot, if a sound card is playing (not the null output): what
+    /// `core::audio_watch` watches.
+    pub fn device_snapshot(&self) -> Option<EngineSnapshot> {
+        self.engine
+            .as_ref()
+            .filter(|e| !e.info().null)
+            .map(|e| e.snapshot())
+    }
+
     pub fn session(&self, deck: DeckId) -> &DeckSession {
         &self.decks[deck.index()]
     }

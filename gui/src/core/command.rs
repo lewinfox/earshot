@@ -7,6 +7,7 @@
 //! and run on the UI thread.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use earshot_engine::{
     Command as EngineCommand, CommandSender, DeckCmd as EngineCmd, DeckId, LEAD_IN, ParamId,
@@ -102,6 +103,9 @@ pub enum AudioCmd {
     Restart(AudioSettings),
     /// Change where the master and headphone buses go, live.
     Route(Routing),
+    /// The sound card stopped asking for audio for `quiet` (`core::audio_watch`):
+    /// reopen it. `decks` is what they were doing, for the log.
+    Stalled { quiet: Duration, decks: String },
 }
 
 #[derive(Debug, Clone, Copy)]

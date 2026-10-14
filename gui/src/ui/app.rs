@@ -29,6 +29,7 @@ use super::prefs::{self, UiPrefs};
 use super::theme::THEME;
 use super::views::{self, Panels};
 use crate::core::analysis::{self, Analyser, Mode as AnalysisMode};
+use crate::core::audio_watch;
 use crate::core::collections::{
     CollectionCmd, CollectionId, CollectionKind, Collections, FlowCmd, FlowGraph, Section,
 };
@@ -62,6 +63,11 @@ pub struct EarshotApp {
     rx: Receiver<Event>,
     monitor: Option<Monitor>,
     audio: Result<OutputInfo, String>,
+    /// Audio stalls (`core::audio_watch`): when each reopened the device, the last
+    /// minute's, and what to show about them (until when; or for good, once reopening
+    /// stopped helping).
+    audio_stalls: VecDeque<Instant>,
+    audio_note: Option<(String, Option<Instant>)>,
     /// Always the null output (tests).
     null_audio: bool,
     midi: Midi,
@@ -182,6 +188,15 @@ impl EarshotApp {
         let audio = start_audio(&player, &settings.audio, services.null_audio);
         let monitor = player.lock().unwrap().monitor();
 
+        {
+            let sink = sink.clone();
+            audio_watch::start(player.clone(), move |quiet, decks| {
+                sink(Event::Command(Command::Audio(AudioCmd::Stalled {
+                    quiet,
+                    decks,
+                })))
+            });
+        }
         let analyser =
             Analyser::start(sink.clone(), player.clone(), store.clone(), services.worker);
         let hasher = library::start_hasher(store.clone());
@@ -216,6 +231,8 @@ impl EarshotApp {
             rx,
             monitor,
             audio,
+            audio_stalls: VecDeque::new(),
+            audio_note: None,
             null_audio: services.null_audio,
             midi: Midi::default(),
             midi_ports: vec![],
@@ -441,6 +458,8 @@ impl EarshotApp {
             Command::Preview(PreviewCmd::Seek(id, at)) => self.seek_preview(id, at),
             Command::Preview(PreviewCmd::Stop(id)) => self.stop_preview(id),
             Command::Audio(AudioCmd::Restart(settings)) => {
+                self.audio_stalls.clear();
+                self.audio_note = None;
                 self.settings.audio = settings;
                 self.save_audio_settings();
                 self.preview = None;
@@ -448,8 +467,43 @@ impl EarshotApp {
                 self.monitor = self.player.lock().unwrap().monitor();
                 self.frame.snap = self.monitor.as_ref().map(|m| m.snapshot());
             }
+            Command::Audio(AudioCmd::Stalled { quiet, decks }) => self.audio_stalled(quiet, &decks),
             other => eprintln!("command: nothing handles {other:?}"),
         }
+    }
+
+    /// The sound card stopped asking for audio: reopen it, as changing the device by
+    /// hand does, unless that has already been tried three times in the last minute.
+    fn audio_stalled(&mut self, quiet: Duration, decks: &str) {
+        const TRIES: usize = 3;
+        let now = Instant::now();
+        while self
+            .audio_stalls
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > Duration::from_secs(60))
+        {
+            self.audio_stalls.pop_front();
+        }
+        let ms = quiet.as_millis();
+        if self.audio_stalls.len() >= TRIES {
+            crate::core::log::note(&format!(
+                "audio stalled ({ms} ms); not reopening it again ({TRIES} times in a minute): {decks}"
+            ));
+            self.audio_note = Some((
+                "audio keeps stopping: pick the device again in Audio settings".into(),
+                None,
+            ));
+            return;
+        }
+        self.audio_stalls.push_back(now);
+        crate::core::log::note(&format!("audio stalled ({ms} ms); reopening it: {decks}"));
+        self.audio = start_audio(&self.player, &self.settings.audio, self.null_audio);
+        self.monitor = self.player.lock().unwrap().monitor();
+        self.frame.snap = self.monitor.as_ref().map(|m| m.snapshot());
+        self.audio_note = Some((
+            format!("audio stopped for {ms} ms; restarted it"),
+            Some(now + Duration::from_secs(30)),
+        ));
     }
 
     /// What's on screen: the mode, the layout, focus, windows and zoom.
@@ -614,8 +668,16 @@ impl EarshotApp {
         egui::TopBottomPanel::top("top")
             .frame(THEME.bar_frame())
             .show(ctx, |ui| {
+                if self
+                    .audio_note
+                    .as_ref()
+                    .is_some_and(|(_, until)| until.is_some_and(|u| Instant::now() > u))
+                {
+                    self.audio_note = None;
+                }
                 TopBar {
                     audio: &self.audio,
+                    audio_note: self.audio_note.as_ref().map(|(n, _)| n.as_str()),
                     midi_ports: &self.midi_ports,
                     analysis: &self.analysis,
                     hud: [&self.hud.text, &self.hud.audio],
