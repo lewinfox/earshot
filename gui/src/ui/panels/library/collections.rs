@@ -10,7 +10,7 @@ use super::drag::{self, DragPayload};
 use crate::core::collections::{
     Collection, CollectionCmd, CollectionId, CollectionKind, Collections, Section,
 };
-use crate::ui::theme::THEME;
+use crate::ui::theme::{THEME, fs};
 
 #[derive(Default)]
 pub struct CollectionsUi {
@@ -51,7 +51,7 @@ impl CollectionsUi {
                     .horizontal(|ui| {
                         ui.label(
                             RichText::new(section.label().to_uppercase())
-                                .size(10.0)
+                                .size(fs(10.0))
                                 .color(THEME.muted),
                         );
                         ui.menu_button(RichText::new("+").color(THEME.muted), |ui| {
@@ -70,7 +70,7 @@ impl CollectionsUi {
                             Section::Crates => "Crates you make are kept here.",
                             Section::Flows => "Flows you plan are kept here.",
                         })
-                        .size(11.0)
+                        .size(fs(11.0))
                         .color(THEME.muted),
                     );
                 }

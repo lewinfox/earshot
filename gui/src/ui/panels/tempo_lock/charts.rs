@@ -6,7 +6,7 @@
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Response, Sense, Shape, Stroke, Ui};
 
 use crate::core::tempo_lock::{TempoAnalysis, nice_step};
-use crate::ui::theme::Theme;
+use crate::ui::theme::{Theme, fs};
 
 /// "1:23.456".
 pub fn fmt_time(t: f64) -> String {
@@ -19,7 +19,7 @@ pub fn fmt_time(t: f64) -> String {
 }
 
 fn small(size: f32) -> FontId {
-    FontId::proportional(size)
+    FontId::proportional(fs(size))
 }
 
 /// x of time `t` in a window `(v0, v1)` across `rect`.

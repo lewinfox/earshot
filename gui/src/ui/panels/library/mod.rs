@@ -39,6 +39,7 @@ use crate::core::command::{Command, ViewCmd};
 use crate::core::sources::STREAMING;
 use crate::core::track::TrackId;
 use crate::core::view::{Aside, Mode, Pane, Region, Source};
+use crate::ui::theme::{fs, sized_panel, text_scale};
 use crate::ui::widgets::{Opens, StackItem, icon_stack, icon_stack::WIDTH};
 
 /// The left icon stack.
@@ -201,17 +202,17 @@ impl LibraryPane {
     /// panes. One width for every tool, so the library stays put when switching.
     pub fn show_beside(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let saved = cx.prefs.prepare.sizes.flow_library;
-        let r = egui::SidePanel::left("tool-library")
+        let r = egui::SidePanel::left(sized_panel("tool-library"))
             .resizable(true)
-            .default_width(saved)
-            .width_range(320.0..=1400.0)
+            .default_width(fs(saved))
+            .width_range(fs(320.0)..=fs(1400.0))
             .frame(egui::Frame::new().fill(cx.theme.bg))
             .show_inside(ui, |ui| {
                 // The panel keeps the width its contents take: all of it.
                 ui.expand_to_include_rect(ui.max_rect());
                 self.show(ui, cx, false)
             });
-        let w = r.response.rect.width();
+        let w = r.response.rect.width() / text_scale();
         resized(ui.ctx(), w, Region::FlowLibrary, saved, cx);
     }
 
@@ -237,14 +238,14 @@ impl LibraryPane {
                 }
             });
         if let Some(source) = layout.source {
-            let r = egui::SidePanel::left(id("source"))
+            let r = egui::SidePanel::left(sized_panel(id("source")))
                 .resizable(true)
-                .default_width(layout.sizes.source)
-                .width_range(140.0..=600.0)
+                .default_width(fs(layout.sizes.source))
+                .width_range(fs(140.0)..=fs(600.0))
                 .show_inside(ui, |ui| self.source(ui, source, cx));
             resized(
                 ui.ctx(),
-                r.response.rect.width(),
+                r.response.rect.width() / text_scale(),
                 Region::Source,
                 layout.sizes.source,
                 cx,
@@ -260,15 +261,15 @@ impl LibraryPane {
                 }
             });
         if let Some(aside) = layout.aside {
-            let r = egui::SidePanel::right(id("aside"))
+            let r = egui::SidePanel::right(sized_panel(id("aside")))
                 .resizable(true)
-                .default_width(layout.sizes.aside)
-                .width_range(240.0..=700.0)
+                .default_width(fs(layout.sizes.aside))
+                .width_range(fs(240.0)..=fs(700.0))
                 .show_animated_inside(ui, asides, |ui| self.aside(ui, aside, cx));
             if let Some(r) = r {
                 resized(
                     ui.ctx(),
-                    r.response.rect.width(),
+                    r.response.rect.width() / text_scale(),
                     Region::Aside,
                     layout.sizes.aside,
                     cx,
@@ -298,7 +299,7 @@ const HANDLE_GAP: i8 = 4;
 fn heading(ui: &mut Ui, cx: &Cx, title: &str) {
     ui.label(
         RichText::new(title.to_uppercase())
-            .size(10.0)
+            .size(fs(10.0))
             .color(cx.theme.muted),
     );
     ui.add_space(2.0);

@@ -10,6 +10,7 @@ use super::{Cx, Panel};
 use crate::core::command::{AppCmd, Command, ViewCmd};
 use crate::core::index::LibraryCmd;
 use crate::core::view::{Modal, Mode, SettingsTab};
+use crate::ui::theme::fs;
 use crate::ui::widgets::{Seg, segmented};
 
 /// Tracks being analysed, and failures since they were last dismissed.
@@ -87,13 +88,10 @@ impl Panel for TopBar<'_> {
                     ui.close();
                 }
                 ui.menu_button("View", |ui| {
-                    ui.menu_button("Size", |ui| {
-                        let now = ui.ctx().zoom_factor();
-                        for z in [0.8, 0.9, 1.0, 1.1, 1.25] {
-                            if ui
-                                .radio((now - z).abs() < 0.01, format!("{:.0}%", z * 100.0))
-                                .clicked()
-                            {
+                    ui.menu_button("Text size", |ui| {
+                        let now = cx.prefs.ui_scale;
+                        for (z, name) in crate::ui::prefs::TEXT_SIZES {
+                            if ui.radio((now - z).abs() < 0.01, name).clicked() {
                                 cx.send(ViewCmd::UiScale(z));
                                 ui.close();
                             }
@@ -162,8 +160,8 @@ impl Panel for TopBar<'_> {
                 if ui.button("Keys").clicked() {
                     cx.send(ViewCmd::ToggleModal(Modal::Keys));
                 }
-                ui.label(RichText::new(self.hud[1]).monospace().size(11.0));
-                ui.label(RichText::new(self.hud[0]).monospace().size(11.0));
+                ui.label(RichText::new(self.hud[1]).monospace().size(fs(11.0)));
+                ui.label(RichText::new(self.hud[0]).monospace().size(fs(11.0)));
             });
         });
     }
@@ -266,7 +264,7 @@ impl Panel for MidiLog<'_> {
         ui.label(
             RichText::new(format!("MIDI  {}", log.join("   |   ")))
                 .monospace()
-                .size(11.0)
+                .size(fs(11.0))
                 .color(cx.theme.muted),
         );
     }

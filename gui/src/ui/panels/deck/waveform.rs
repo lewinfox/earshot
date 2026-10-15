@@ -144,6 +144,7 @@ pub struct WavePanel<'a> {
 
 impl Panel for WavePanel<'_> {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        crate::ui::theme::normal_text(ui);
         let info = cx.engine.deck(self.deck.id);
         self.deck
             .show_wave(ui, self.height, info, cx.prefs.wave_zoom, cx.out);

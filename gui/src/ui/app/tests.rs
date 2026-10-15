@@ -193,6 +193,25 @@ fn perform() {
     render(&mut h, "perform");
 }
 
+/// Large text grows the lists and bars but leaves the decks' text (and egui's zoom)
+/// alone; Ctrl - steps back down.
+#[test]
+fn text_size() {
+    let mut h = start("text-size");
+    h.state_mut().dispatch(ViewCmd::UiScale(1.2).into());
+    steps(&mut h, 3);
+    let ctx = h.ctx.clone();
+    assert_eq!(ctx.zoom_factor(), 1.0);
+    let body = |ctx: &egui::Context| egui::TextStyle::Body.resolve(&ctx.style()).size;
+    let normal = egui::TextStyle::Body.resolve(&egui::Style::default()).size;
+    assert!((body(&ctx) - normal * 1.2).abs() < 0.01, "{}", body(&ctx));
+    render(&mut h, "text-size");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Minus);
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.ui_scale, 1.0);
+    assert!((body(&ctx) - normal).abs() < 0.01);
+}
+
 /// The Duplicates view lists tracks with the same audio; removing one from the
 /// library (never the file) leaves none, and undo puts it back.
 #[test]

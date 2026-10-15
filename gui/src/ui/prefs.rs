@@ -19,12 +19,24 @@ pub struct UiPrefs {
     pub prepare: Layout,
     /// Real seconds of waveform either side of the playhead, shared by every deck.
     pub wave_zoom: f64,
-    /// The size of everything (egui's zoom factor).
+    /// The text size, as a multiple of normal (see [`crate::ui::theme::fs`]).
     pub ui_scale: f32,
     /// Four decks in Perform instead of two. The engine always runs four.
     pub four_decks: bool,
     /// Each kind of track list's columns, widths and sort.
     pub tables: Tables,
+}
+
+/// View > Text size's sizes, which Ctrl +/- step through, with their names.
+pub const TEXT_SIZES: [(f32, &str); 3] = [(0.9, "Small"), (1.0, "Normal"), (1.2, "Large")];
+
+/// The nearest of [`TEXT_SIZES`] to `k` (a size saved before there were three).
+pub fn text_size(k: f32) -> f32 {
+    TEXT_SIZES
+        .iter()
+        .map(|&(z, _)| z)
+        .min_by(|a, b| (a - k).abs().total_cmp(&(b - k).abs()))
+        .unwrap_or(1.0)
 }
 
 impl Default for UiPrefs {

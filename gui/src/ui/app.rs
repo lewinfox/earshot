@@ -26,7 +26,7 @@ use super::panels::library::{LibraryPane, drag};
 use super::panels::status::{AnalysisSummary, MidiLog, TopBar};
 use super::panels::{CoreView, Cx, EngineFrame, Panel, PreviewState};
 use super::prefs::{self, UiPrefs};
-use super::theme::THEME;
+use super::theme::{self, THEME};
 use super::views::{self, Panels};
 use crate::core::analysis::{self, Analyser, Mode as AnalysisMode};
 use crate::core::audio_watch;
@@ -217,11 +217,16 @@ impl EarshotApp {
         };
         let art_loader = library::start_art_loader(store.reader.clone(), sink.clone());
         let lib = Arc::new(Library { store, analyser });
-        let prefs: UiPrefs = cc
+        let mut prefs: UiPrefs = cc
             .storage
             .and_then(|s| eframe::get_value(s, prefs::KEY))
             .unwrap_or_default();
-        cc.egui_ctx.set_zoom_factor(prefs.ui_scale);
+        prefs.ui_scale = prefs::text_size(prefs.ui_scale);
+        // View > Text size changes the text, not everything: egui's own zoom stays at 1
+        // (Ctrl +/- are ours, below).
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        cc.egui_ctx.set_zoom_factor(1.0);
+        theme::set_text_scale(&cc.egui_ctx, prefs.ui_scale);
         let tables = prefs.tables.clone();
         let mut app = EarshotApp {
             ctx: cc.egui_ctx.clone(),
@@ -555,9 +560,7 @@ impl EarshotApp {
             ViewCmd::WaveZoom(z) => self.prefs.wave_zoom = z,
             ViewCmd::UiScale(z) => {
                 self.prefs.ui_scale = z;
-                if (self.ctx.zoom_factor() - z).abs() > 1e-3 {
-                    self.ctx.set_zoom_factor(z);
-                }
+                theme::set_text_scale(&self.ctx, z);
             }
             ViewCmd::Resize(region, size) => {
                 let sizes = &mut self.prefs.layout_mut().sizes;
@@ -735,9 +738,9 @@ impl eframe::App for EarshotApp {
                 .is_some_and(|sh| sh.live().iter().any(|d| d.playing));
         self.lib.analyser.set_playing(playing);
         self.keyboard(ctx);
-        // Ctrl +/- (egui's own) changes the size too.
-        if (ctx.zoom_factor() - self.prefs.ui_scale).abs() > 1e-3 {
-            self.dispatch(ViewCmd::UiScale(ctx.zoom_factor()).into());
+        // Ctrl +/- and Ctrl 0 change the text size too (egui's shortcuts, our steps).
+        if let Some(z) = self.text_size_keys(ctx) {
+            self.dispatch(ViewCmd::UiScale(z).into());
         }
         self.tick_hud(ctx);
         self.track_plays();

@@ -23,7 +23,7 @@ use crate::core::sources::{Source, SourceId, SourceKind};
 use crate::core::track::TrackId;
 use crate::core::view::Source as PaneSource;
 use crate::ui::panels::CoreView;
-use crate::ui::theme::THEME;
+use crate::ui::theme::{THEME, fs};
 
 /// How far reading a library has got.
 enum Status {
@@ -177,7 +177,7 @@ impl ExternalUi {
             out.push(ExternalCmd::Find.into());
         }
         if let Some(e) = &self.find_error {
-            ui.label(RichText::new(e).size(11.0).color(THEME.bad));
+            ui.label(RichText::new(e).size(fs(11.0)).color(THEME.bad));
         }
         for (kind, source) in self.entries() {
             match source {
@@ -302,16 +302,22 @@ impl ExternalUi {
             Some(Status::Reading(m)) => {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(RichText::new(if m.is_empty() { "Reading…" } else { m }).size(11.0));
+                    ui.label(
+                        RichText::new(if m.is_empty() { "Reading…" } else { m }).size(fs(11.0)),
+                    );
                 });
             }
             Some(Status::Failed(e)) => {
-                ui.label(RichText::new(e).size(11.0).color(THEME.bad));
+                ui.label(RichText::new(e).size(fs(11.0)).color(THEME.bad));
             }
             Some(Status::Ready(lib)) => {
                 let lib = lib.clone();
                 if lib.playlists.is_empty() {
-                    ui.label(RichText::new("No playlists").size(11.0).color(THEME.muted));
+                    ui.label(
+                        RichText::new("No playlists")
+                            .size(fs(11.0))
+                            .color(THEME.muted),
+                    );
                 }
                 for (i, n) in lib.playlists.iter().enumerate() {
                     self.node(ui, source, n, vec![i], out);
@@ -460,7 +466,7 @@ impl ExternalUi {
                 if n == 1 { "" } else { "s" }
             );
             ui.add(
-                egui::Label::new(RichText::new(text).size(11.0).color(THEME.warn))
+                egui::Label::new(RichText::new(text).size(fs(11.0)).color(THEME.warn))
                     .selectable(false)
                     .sense(egui::Sense::hover()),
             )
@@ -473,7 +479,7 @@ impl ExternalUi {
         }
         self.status_box(ui, out);
         ui.separator();
-        let row_h = 20.0;
+        let row_h = fs(20.0);
         TableBuilder::new(ui)
             .striped(true)
             .sense(egui::Sense::click())
@@ -486,7 +492,7 @@ impl ExternalUi {
             .header(row_h, |mut h| {
                 for name in ["", "Title", "Artist", "BPM", "Key", "Cues"] {
                     h.col(|ui| {
-                        ui.label(RichText::new(name).size(11.0).color(THEME.muted));
+                        ui.label(RichText::new(name).size(fs(11.0)).color(THEME.muted));
                     });
                 }
             })
@@ -609,7 +615,7 @@ impl ExternalUi {
                         "Tracks whose files are on this computer, with their title, artist, \
                          BPM, key and the like, and the playlists and crates they're in.",
                     )
-                    .size(11.0)
+                    .size(fs(11.0))
                     .color(THEME.muted),
                 );
                 ui.add_space(6.0);
@@ -632,7 +638,7 @@ impl ExternalUi {
                 if o.needs_cues() && d.source.kind == SourceKind::Serato {
                     ui.label(
                         RichText::new("Serato keeps cues and grids in the audio files: reading them takes a while.")
-                            .size(11.0)
+                            .size(fs(11.0))
                             .color(THEME.muted),
                     );
                 }

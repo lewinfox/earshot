@@ -12,7 +12,7 @@ use crate::core::track::{Track, TrackId};
 use crate::ui::panels::CoreView;
 use crate::ui::panels::library::suggest::directions;
 use crate::ui::panels::library::tracks::Media;
-use crate::ui::theme::THEME;
+use crate::ui::theme::{THEME, fs};
 use crate::ui::widgets::{Button, segmented};
 
 impl FlowUi {
@@ -228,12 +228,12 @@ fn pick_tile(
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.add(
-                egui::Label::new(RichText::new(&t.title).strong().size(12.0))
+                egui::Label::new(RichText::new(&t.title).strong().size(fs(12.0)))
                     .truncate()
                     .selectable(false),
             );
             ui.add(
-                egui::Label::new(RichText::new(&t.artist).size(11.0).color(THEME.muted))
+                egui::Label::new(RichText::new(&t.artist).size(fs(11.0)).color(THEME.muted))
                     .truncate()
                     .selectable(false),
             );
@@ -242,7 +242,7 @@ fn pick_tile(
     chips_row(&mut ui, t, |ui| {
         ui.label(
             RichText::new(format!("{:.0}", score * 100.0))
-                .size(11.0)
+                .size(fs(11.0))
                 .strong()
                 .color(THEME.muted),
         )

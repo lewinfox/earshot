@@ -14,7 +14,7 @@ use crate::core::index::LibraryCmd;
 use crate::core::track::Track;
 use crate::ui::panels::library::tracks::{MenuAt, track_menu};
 use crate::ui::panels::{CoreView, PreviewState};
-use crate::ui::theme::THEME;
+use crate::ui::theme::{THEME, fs};
 use crate::ui::util;
 use crate::ui::widgets::{RoundButton, key_chip};
 
@@ -119,7 +119,7 @@ pub fn card(
                         .selectable(false),
                 );
                 ui.add(
-                    egui::Label::new(RichText::new(&t.artist).size(11.0).color(THEME.muted))
+                    egui::Label::new(RichText::new(&t.artist).size(fs(11.0)).color(THEME.muted))
                         .truncate()
                         .selectable(false),
                 );
@@ -141,7 +141,7 @@ pub fn card(
     chips_row(&mut ui, t, |ui| {
         ui.label(
             RichText::new(t.duration.map(util::mmss).unwrap_or_default())
-                .size(11.0)
+                .size(fs(11.0))
                 .color(THEME.muted),
         );
     });
@@ -267,7 +267,7 @@ fn plus(ui: &Ui, c: Pos2, node: NodeId, acts: &mut Vec<CardAction>) {
         c,
         Align2::CENTER_CENTER,
         "+",
-        FontId::proportional(17.0),
+        FontId::proportional(fs(17.0)),
         if plus.hovered() {
             THEME.accent
         } else {
@@ -368,9 +368,9 @@ pub fn chips_row(ui: &mut Ui, t: &Track, right: impl FnOnce(&mut Ui)) {
 }
 
 fn chip(ui: &mut Ui, text: &str, fill: Color32, colour: Color32) -> egui::Response {
-    let galley = ui
-        .painter()
-        .layout_no_wrap(text.to_string(), FontId::proportional(11.0), colour);
+    let galley =
+        ui.painter()
+            .layout_no_wrap(text.to_string(), FontId::proportional(fs(11.0)), colour);
     let (rect, resp) = ui.allocate_exact_size(galley.size() + vec2(10.0, 2.0), Sense::hover());
     ui.painter().rect_filled(rect, CornerRadius::same(4), fill);
     ui.painter()
@@ -415,7 +415,7 @@ pub fn art(ui: &mut Ui, size: f32, t: &Track, tex: Option<egui::TextureId>) {
         rect.center(),
         Align2::CENTER_CENTER,
         initials,
-        FontId::proportional(size * 0.35),
+        FontId::proportional(fs(size * 0.35)),
         THEME.marker,
     );
 }

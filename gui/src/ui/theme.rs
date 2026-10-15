@@ -3,10 +3,57 @@
 //! No other UI file names a colour by its numbers; they read [`THEME`] (panels get it
 //! as `cx.theme`).
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use earshot_engine::{DeckId, MAX_DECKS};
 use egui::{Color32, CornerRadius, Margin, RichText, Stroke, Ui, Vec2, vec2};
 
 use crate::core::store::Memory;
+
+/// The text size, as a multiple of normal (View > Text size, Ctrl +/-). Only the
+/// lists, bars, menus and windows' text grows, with what sits in a line of it (table
+/// rows, their waveforms); the decks and mixer keep their hand-fitted sizes
+/// ([`normal_text`]). An `f32`'s bits.
+static TEXT_SCALE: AtomicU32 = AtomicU32::new(0x3f80_0000);
+
+/// The text size, as a multiple of normal.
+pub fn text_scale() -> f32 {
+    f32::from_bits(TEXT_SCALE.load(Ordering::Relaxed))
+}
+
+/// A font size (or a text line's height) at the chosen text size.
+pub fn fs(size: f32) -> f32 {
+    size * text_scale()
+}
+
+/// Set the text size: earshot's own fonts read [`fs`], egui's widgets its text styles.
+pub fn set_text_scale(ctx: &egui::Context, k: f32) {
+    TEXT_SCALE.store(k.to_bits(), Ordering::Relaxed);
+    ctx.all_styles_mut(|s| s.text_styles = text_styles(k));
+}
+
+/// egui's text styles at `k` times their normal size.
+fn text_styles(k: f32) -> std::collections::BTreeMap<egui::TextStyle, egui::FontId> {
+    let mut styles = egui::Style::default().text_styles;
+    for font in styles.values_mut() {
+        font.size *= k;
+    }
+    styles
+}
+
+/// A resizable side panel's id, new for each text size: egui keeps a panel's width
+/// under its id, so a new id opens it at its saved width at this size.
+pub fn sized_panel(name: impl std::hash::Hash) -> egui::Id {
+    egui::Id::new((name, text_scale().to_bits()))
+}
+
+/// This part of the UI (a deck, the mixer) keeps normal-sized text whatever the
+/// text size: its layout is fitted by hand.
+pub fn normal_text(ui: &mut Ui) {
+    if text_scale() != 1.0 {
+        ui.style_mut().text_styles = text_styles(1.0);
+    }
+}
 
 const fn rgb8(r: u8, g: u8, b: u8) -> Color32 {
     Color32::from_rgb(r, g, b)
@@ -290,7 +337,7 @@ impl Theme {
             .stroke(Stroke::new(1.0_f32, border))
             .corner_radius(CornerRadius::same(10))
             .inner_margin(Margin::symmetric(8, 2))
-            .show(ui, |ui| ui.label(RichText::new(text).size(11.0)))
+            .show(ui, |ui| ui.label(RichText::new(text).size(fs(11.0))))
             .response
             .interact(egui::Sense::click())
     }

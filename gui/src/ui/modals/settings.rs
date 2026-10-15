@@ -10,7 +10,7 @@ use super::audio::AudioUi;
 use crate::core::command::{AppCmd, Command};
 use crate::core::keymap::Origin;
 use crate::core::view::SettingsTab;
-use crate::ui::theme::THEME;
+use crate::ui::theme::{THEME, fs};
 use crate::ui::widgets::{Button, Seg, Slider, segmented};
 use earshot_engine::HotcueMode;
 
@@ -99,7 +99,7 @@ impl SettingsUi {
 }
 
 fn note(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).size(11.0).color(THEME.muted));
+    ui.label(RichText::new(text).size(fs(11.0)).color(THEME.muted));
 }
 
 fn decks(ui: &mut Ui, mode: HotcueMode) -> Vec<Command> {

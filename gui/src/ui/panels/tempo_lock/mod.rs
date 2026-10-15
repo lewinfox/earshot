@@ -25,7 +25,7 @@ use crate::core::tempo_lock::{
     TempoLockCmd, TempoLockEvent, Version, Waveform, histogram_range, version_beats,
 };
 use crate::core::track::TrackId;
-use crate::ui::theme::Theme;
+use crate::ui::theme::{Theme, fs};
 use crate::ui::widgets::{Button, RoundButton, RoundSize, Seg, Toggle, segmented};
 
 /// The shortest stretch the waveforms zoom in to, s.
@@ -342,13 +342,13 @@ fn header(ui: &mut Ui, tab: &mut TempoLockUi, cx: &mut Cx) {
     ui.horizontal_wrapped(|ui| {
         match tab.track.and_then(|id| cx.core.lib.get(id)) {
             Some(t) => {
-                ui.label(RichText::new(&t.title).size(16.0).strong());
+                ui.label(RichText::new(&t.title).size(fs(16.0)).strong());
                 if !t.artist.is_empty() {
                     ui.label(RichText::new(&t.artist).color(theme.muted));
                 }
             }
             None => {
-                ui.label(RichText::new("Tempo lock").size(16.0).strong());
+                ui.label(RichText::new("Tempo lock").size(fs(16.0)).strong());
             }
         }
         if let Some(c) = &tab.chart {
@@ -360,7 +360,7 @@ fn header(ui: &mut Ui, tab: &mut TempoLockUi, cx: &mut Cx) {
                     a.beats.len(),
                     detector_name(&a.detector)
                 ))
-                .size(11.0)
+                .size(fs(11.0))
                 .color(theme.muted),
             );
         }
@@ -443,7 +443,7 @@ fn controls(ui: &mut Ui, tab: &mut TempoLockUi, roots: &[String], cx: &mut Cx) {
             && tab.busy.is_none()
         {
             b.on_disabled_hover_text(&why);
-            ui.label(RichText::new(why).size(11.0).color(theme.warn));
+            ui.label(RichText::new(why).size(fs(11.0)).color(theme.warn));
         }
     });
 
@@ -531,7 +531,7 @@ fn transport(ui: &mut Ui, tab: &mut TempoLockUi, cx: &mut Cx) {
         }
         ui.add(Toggle::new(&mut tab.follow, "follow playhead"));
         let at = tab.from_original(tab.cursor, tab.version);
-        ui.label(RichText::new(fmt_time(at)).monospace().size(14.0));
+        ui.label(RichText::new(fmt_time(at)).monospace().size(fs(14.0)));
         if tab.listen.decoding {
             ui.spinner();
             ui.label(RichText::new("decoding…").color(theme.muted));
@@ -637,7 +637,7 @@ fn body(ui: &mut Ui, tab: &mut TempoLockUi, chart: &Chart, cx: &mut Cx) {
             ui.spinner();
             ui.label(
                 RichText::new("detecting beats in the output…")
-                    .size(11.0)
+                    .size(fs(11.0))
                     .color(theme.warn),
             );
         } else if let Some(Note::Failed(Stage::Measure, e)) = &tab.note {
@@ -665,7 +665,7 @@ fn body(ui: &mut Ui, tab: &mut TempoLockUi, chart: &Chart, cx: &mut Cx) {
 fn title(ui: &mut Ui, theme: &Theme, name: &str, hint: &str) {
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new(name).strong());
-        ui.label(RichText::new(hint).size(11.0).color(theme.muted));
+        ui.label(RichText::new(hint).size(fs(11.0)).color(theme.muted));
     });
 }
 
@@ -876,13 +876,13 @@ fn stat(ui: &mut Ui, theme: &Theme, name: &str, value: &str, note: &str, flag: b
                 ui.spacing_mut().item_spacing.y = 1.0;
                 ui.label(
                     RichText::new(name.to_uppercase())
-                        .size(10.0)
+                        .size(fs(10.0))
                         .color(theme.muted),
                 );
                 ui.horizontal(|ui| {
-                    let v = RichText::new(value).size(17.0).strong();
+                    let v = RichText::new(value).size(fs(17.0)).strong();
                     ui.label(if flag { v.color(theme.warn) } else { v });
-                    ui.label(RichText::new(note).size(10.0).color(theme.muted));
+                    ui.label(RichText::new(note).size(fs(10.0)).color(theme.muted));
                 });
             });
         });
@@ -1073,7 +1073,7 @@ fn tempo_changes(ui: &mut Ui, tab: &mut TempoLockUi, a: &TempoAnalysis, cx: &mut
                     "Straightening to one BPM will speed up or slow down whole sections, not \
                      just tidy the drift. Check the histogram: separate humps are separate tempos.",
                 )
-                .size(11.0)
+                .size(fs(11.0))
                 .color(theme.muted),
             );
         });

@@ -291,6 +291,7 @@ pub struct MixerPanel<'a> {
 
 impl Panel for MixerPanel<'_> {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        crate::ui::theme::normal_text(ui);
         cx.theme.panel_frame().show(ui, |ui| {
             ui.set_width(self.width - 16.0);
             show(ui, cx.engine.snap.as_ref(), self.decks, cx.out);

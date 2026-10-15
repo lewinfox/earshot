@@ -794,6 +794,7 @@ pub struct DeckPanel<'a> {
 
 impl Panel for DeckPanel<'_> {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        crate::ui::theme::normal_text(ui);
         let info = cx.engine.deck(self.deck.id);
         self.deck.show(
             ui,
@@ -816,6 +817,7 @@ pub struct PreparePlayer<'a> {
 
 impl Panel for PreparePlayer<'_> {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        crate::ui::theme::normal_text(ui);
         let info = cx.engine.deck(self.deck.id);
         self.deck
             .show_prepare(ui, self.width, self.height, info, cx.out);

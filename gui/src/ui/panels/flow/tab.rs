@@ -10,6 +10,7 @@ use crate::core::view::{Aside, Pane, Region};
 use crate::ui::panels::library::LibraryPane;
 use crate::ui::panels::library::table::TableView;
 use crate::ui::panels::{Cx, Panel, resized};
+use crate::ui::theme::{fs, sized_panel, text_scale};
 use crate::ui::widgets::{Opens, StackItem, icon_stack, icon_stack::WIDTH};
 
 /// The right icon stack.
@@ -39,10 +40,10 @@ impl Panel for FlowTab<'_> {
                     cx.send(ViewCmd::Aside(a));
                 }
             });
-        let r = egui::SidePanel::right("flow-aside")
+        let r = egui::SidePanel::right(sized_panel("flow-aside"))
             .resizable(true)
-            .default_width(layout.sizes.aside)
-            .width_range(240.0..=700.0)
+            .default_width(fs(layout.sizes.aside))
+            .width_range(fs(240.0)..=fs(700.0))
             .show_animated_inside(ui, layout.aside.is_some(), |ui| match layout.aside {
                 Some(Aside::Suggestions) | None => {
                     let lib = &mut *self.library;
@@ -57,7 +58,7 @@ impl Panel for FlowTab<'_> {
                 }
             });
         if let Some(r) = r {
-            let w = r.response.rect.width();
+            let w = r.response.rect.width() / text_scale();
             resized(ui.ctx(), w, Region::Aside, layout.sizes.aside, cx);
         }
         self.library.show_beside(ui, cx);

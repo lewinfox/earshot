@@ -21,7 +21,7 @@ use crate::core::selection::Selection;
 use crate::core::store::PlaySession;
 use crate::core::track::{Status, TrackId};
 use crate::ui::panels::CoreView;
-use crate::ui::theme::THEME;
+use crate::ui::theme::{THEME, fs};
 
 /// What the track list shows.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -257,7 +257,7 @@ impl LibraryUi {
         if self.folders.is_empty() {
             ui.label(
                 RichText::new("No music folders yet.")
-                    .size(11.0)
+                    .size(fs(11.0))
                     .color(THEME.muted),
             );
         }
@@ -352,7 +352,11 @@ impl LibraryUi {
             clicked = true;
         }
         ui.add_space(4.0);
-        ui.label(RichText::new("BY ANALYSIS").size(10.0).color(THEME.muted));
+        ui.label(
+            RichText::new("BY ANALYSIS")
+                .size(fs(10.0))
+                .color(THEME.muted),
+        );
         for s in [Status::None, Status::Busy, Status::Attention, Status::Done] {
             let text = format!("{}  ({})", s.label(), count[s as usize]);
             if ui
@@ -370,7 +374,7 @@ impl LibraryUi {
             }
         }
         ui.add_space(4.0);
-        ui.label(RichText::new("LIBRARY").size(10.0).color(THEME.muted));
+        ui.label(RichText::new("LIBRARY").size(fs(10.0)).color(THEME.muted));
         let dups = match (&self.duplicates, self.scope == Scope::Duplicates) {
             (Some(g), true) => format!("Duplicates  ({})", g.len()),
             _ => "Duplicates".to_string(),

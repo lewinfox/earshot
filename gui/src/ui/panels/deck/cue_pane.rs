@@ -221,6 +221,7 @@ pub struct CuePane<'a>(pub &'a mut DeckUi);
 
 impl Panel for CuePane<'_> {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        crate::ui::theme::normal_text(ui);
         let info = cx.engine.deck(self.0.id);
         self.0.cue_pane(ui, info, cx.out);
     }
