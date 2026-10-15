@@ -60,8 +60,9 @@ Environment variables:
 | Variable | Default | |
 |---|---|---|
 | `EARSHOT_AUDIO_DEVICE` | system default | Case-insensitive part of the output device name, e.g. `DDJ` |
-| `EARSHOT_BUFFER` | `512` | Buffer size in frames (ignored if the device doesn't support it) |
+| `EARSHOT_BUFFER` | `256` | Buffer size in frames (ignored if the device doesn't support it) |
 | `EARSHOT_NULL_AUDIO` | unset | `1` runs the engine on a timer with no sound card |
+| `PIPEWIRE_LATENCY` | `256/48000` under PipeWire | The audio chunk size PipeWire uses (frames/rate); earshot sets it unless you do |
 | `EARSHOT_WORKER_DIR` | the release's own, else `earshot/worker` | A worker folder with its own `.venv` to use instead |
 | `EARSHOT_DATA_DIR` | `~/.local/share/io.github.lewinfox.earshot` | Where `library.db` lives (e.g. to try things on a copy) |
 

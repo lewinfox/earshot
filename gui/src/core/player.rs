@@ -202,10 +202,10 @@ pub struct AudioSettings {
     pub routing: Option<Routing>,
 }
 
-/// The buffer size when none is chosen, in frames. 512 (about 12 ms at 44.1 kHz,
-/// two of them queued): at 256, PipeWire, which hands over about 21 ms at a time,
-/// keeps finding the queue empty and the sound stutters, however idle the CPU.
-pub const DEFAULT_BUFFER: u32 = 512;
+/// The buffer size when none is chosen, in frames: about 5 ms, two of them queued.
+/// Under PipeWire it needs PipeWire's chunks no bigger
+/// ([`earshot_engine::output::ask_pipewire_for_small_chunks`]).
+pub const DEFAULT_BUFFER: u32 = 256;
 
 /// Output options from saved settings, with environment variables taking precedence.
 pub fn output_options(saved: &AudioSettings) -> OutputOptions {

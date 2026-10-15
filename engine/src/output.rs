@@ -89,6 +89,45 @@ impl Drop for OutputHandle {
     }
 }
 
+/// The audio chunk earshot asks PipeWire for, in frames at [`PIPEWIRE_RATE`]: about
+/// 5 ms. It suits the default buffer (256 frames, two queued); a smaller buffer would
+/// need a smaller chunk.
+pub const PIPEWIRE_CHUNK: u32 = 256;
+/// The rate PipeWire runs at unless set otherwise.
+pub const PIPEWIRE_RATE: u32 = 48_000;
+
+/// Whether PipeWire is the sound server: its socket is there.
+pub fn pipewire_running() -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    let dir =
+        std::env::var_os("PIPEWIRE_RUNTIME_DIR").or_else(|| std::env::var_os("XDG_RUNTIME_DIR"));
+    dir.is_some_and(|d| std::path::Path::new(&d).join("pipewire-0").exists())
+}
+
+/// Under PipeWire, ask it for small chunks of audio. cpal reaches PipeWire through its
+/// stand-in ALSA card, which doesn't pass our buffer size on, so PipeWire works in its
+/// default chunks (1024 frames, 21 ms): bigger than our queue, which runs dry and
+/// stutters. PipeWire reads `PIPEWIRE_LATENCY` from each program it serves. Without
+/// PipeWire (older Linux, raw ALSA, Mac, Windows) this does nothing. A value set by
+/// the user stays.
+///
+/// # Safety
+/// Sets an environment variable: call it first thing in `main`, before any other
+/// thread starts (one reading the environment meanwhile is undefined behaviour).
+pub unsafe fn ask_pipewire_for_small_chunks() {
+    if std::env::var_os("PIPEWIRE_LATENCY").is_none() && pipewire_running() {
+        // SAFETY: the caller promises no other thread is running.
+        unsafe {
+            std::env::set_var(
+                "PIPEWIRE_LATENCY",
+                format!("{PIPEWIRE_CHUNK}/{PIPEWIRE_RATE}"),
+            )
+        };
+    }
+}
+
 /// Start output. `make_renderer` is called once the sample rate is known.
 pub fn start(
     opts: &OutputOptions,
@@ -161,7 +200,20 @@ fn build_stream(
         .map(|x| x.name().to_string())
         .unwrap_or_else(|_| "unknown".into());
 
-    // Prefer 4+ channels (master + headphones), 44.1/48 kHz, float samples.
+    // Prefer 4+ channels (master + headphones), 44.1/48 kHz, float samples. Of the
+    // rates, the one the system runs at (PipeWire's 48 kHz, CoreAudio's or Windows'
+    // current rate): any other is converted on the way, which costs time and smooth
+    // timing.
+    let native = if pipewire_running() {
+        Some(PIPEWIRE_RATE)
+    } else {
+        device.default_output_config().ok().map(|c| c.sample_rate())
+    };
+    let rate_score = |rate: u32| match (Some(rate) == native, rate) {
+        (true, _) => 0,
+        (false, 44_100) => 1,
+        _ => 2,
+    };
     let rank = |f: SampleFormat| match f {
         SampleFormat::F32 => 0,
         SampleFormat::I32 => 1,
@@ -179,8 +231,7 @@ fn build_stream(
         let ch_score = if range.channels() >= 4 { 0 } else { 10 };
         for rate in [44_100u32, 48_000] {
             if let Some(cfg) = range.try_with_sample_rate(rate) {
-                let score =
-                    ch_score + rank(cfg.sample_format()) + if rate == 44_100 { 0 } else { 1 };
+                let score = ch_score + rank(cfg.sample_format()) + rate_score(rate);
                 if best.as_ref().is_none_or(|(s, _)| score < *s) {
                     best = Some((score, cfg));
                 }

@@ -5,6 +5,8 @@ mod core;
 mod ui;
 
 fn main() -> eframe::Result {
+    // SAFETY: first thing, before any other thread starts.
+    unsafe { earshot_engine::output::ask_pipewire_for_small_chunks() };
     // A log per run in the data folder, for after a crash or freeze.
     if let Err(e) = core::log::start(&core::services::data_dir()) {
         eprintln!("not logging to a file: {e}");
