@@ -202,6 +202,11 @@ pub struct AudioSettings {
     pub routing: Option<Routing>,
 }
 
+/// The buffer size when none is chosen, in frames. 512 (about 12 ms at 44.1 kHz,
+/// two of them queued): at 256, PipeWire, which hands over about 21 ms at a time,
+/// keeps finding the queue empty and the sound stutters, however idle the CPU.
+pub const DEFAULT_BUFFER: u32 = 512;
+
 /// Output options from saved settings, with environment variables taking precedence.
 pub fn output_options(saved: &AudioSettings) -> OutputOptions {
     OutputOptions {
@@ -214,7 +219,7 @@ pub fn output_options(saved: &AudioSettings) -> OutputOptions {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .or(saved.buffer_frames)
-                .unwrap_or(256),
+                .unwrap_or(DEFAULT_BUFFER),
         ),
         null: std::env::var("EARSHOT_NULL_AUDIO").is_ok_and(|v| v == "1"),
     }

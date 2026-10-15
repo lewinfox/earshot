@@ -9,7 +9,7 @@ use earshot_engine::{Out, OutputInfo, Routing};
 use egui::{RichText, Ui};
 
 use crate::core::command::{AudioCmd, Command};
-use crate::core::player::AudioSettings;
+use crate::core::player::{AudioSettings, DEFAULT_BUFFER};
 use crate::ui::theme::{THEME, fs};
 use crate::ui::widgets::Button;
 
@@ -139,7 +139,9 @@ impl AudioUi {
                     .selected_text(
                         draft
                             .buffer_frames
-                            .map_or("256 frames".into(), |b| format!("{b} frames")),
+                            .map_or(format!("{DEFAULT_BUFFER} frames"), |b| {
+                                format!("{b} frames")
+                            }),
                     )
                     .show_ui(ui, |ui| {
                         for b in BUFFERS {
