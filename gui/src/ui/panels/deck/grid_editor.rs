@@ -19,11 +19,10 @@ impl DeckUi {
                 .add(
                     HwButton::new(
                         "Anchor 1 here",
-                        self.colour(),
+                        THEME.text,
                         vec2(self.dims.btn_w, self.dims.double()),
                     )
-                    .icon(Icon::Downbeat)
-                    .tinted(true),
+                    .icon(Icon::Downbeat),
                 )
                 .on_hover_text(
                     "Put the 1 here: move the grid so a beat lands exactly on the playhead, \
