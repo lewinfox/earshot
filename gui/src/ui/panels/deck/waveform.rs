@@ -1,11 +1,13 @@
 //! A player's waveforms: the scrolling one (drawn in the row above the decks, or
 //! across the top in Prepare) and the whole-track overview under its title.
 
+use std::time::Instant;
+
 use earshot_engine::{DeckCmd as EngineCmd, LEAD_IN, Set};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 
 use super::wave;
-use super::{DeckInfo, DeckUi};
+use super::{DeckInfo, DeckUi, Scrub};
 use crate::core::bus::DeckControl;
 use crate::core::command::{Command, DeckCmd, ViewCmd};
 use crate::ui::panels::library::drag;
@@ -60,29 +62,58 @@ impl DeckUi {
             );
         }
 
-        // Drag to scrub: the track moves with the pointer, like pushing a record. A
-        // playing deck is held while you drag and carries on when you let go.
+        // Drag to scratch, in vinyl mode: a hand on the record. The track follows the
+        // pointer, forwards or back, and you hear what passes; let go and a playing deck
+        // carries on. Out of vinyl mode the drag moves the playhead silently, the deck
+        // held meanwhile.
         let duration = self.state.duration;
         if resp.drag_started() && duration > 0.0 {
             let x = resp.interact_pointer_pos().map_or(0.0, |p| p.x);
-            self.scrub = Some((x, self.shown, self.state.playing));
-            if self.state.playing {
+            let (hand, playing) = (self.state.vinyl, self.state.playing);
+            self.scrub = Some(Scrub {
+                x0: x,
+                t0: self.shown,
+                last: x,
+                hand,
+                resume: !hand && playing,
+            });
+            if hand {
+                self.engine(out, EngineCmd::Hand(true));
+            } else if playing {
                 self.engine(out, EngineCmd::Play(Set::Off));
             }
         }
-        if let (Some((x0, t0, _)), Some(p)) = (self.scrub, resp.interact_pointer_pos())
+        if let (Some(sc), Some(p)) = (self.scrub, resp.interact_pointer_pos())
             && resp.dragged()
         {
-            let t = (t0 - (p.x - x0) as f64 * (2.0 * half / rect.width() as f64))
-                .clamp(-LEAD_IN, duration);
+            // Seconds of track per pixel; dragging right pulls the record back.
+            let per_px = 2.0 * half / rect.width() as f64;
+            let t = (sc.t0 - (p.x - sc.x0) as f64 * per_px).clamp(-LEAD_IN, duration);
             self.shown = t;
-            self.control(out, DeckControl::Position, t / duration);
+            if p.x != sc.last {
+                if sc.hand {
+                    let by = -((p.x - sc.last) as f64) * per_px;
+                    self.engine(
+                        out,
+                        EngineCmd::HandMove {
+                            by,
+                            at: Instant::now(),
+                        },
+                    );
+                } else {
+                    self.control(out, DeckControl::Position, t / duration);
+                }
+                self.scrub = Some(Scrub { last: p.x, ..sc });
+            }
         }
-        if resp.drag_stopped() {
-            if let Some((_, _, true)) = self.scrub {
+        if resp.drag_stopped()
+            && let Some(sc) = self.scrub.take()
+        {
+            if sc.hand {
+                self.engine(out, EngineCmd::Hand(false));
+            } else if sc.resume {
                 self.engine(out, EngineCmd::Play(Set::On));
             }
-            self.scrub = None;
         }
         if resp.hovered() {
             let scroll = ui.input(|i| i.raw_scroll_delta.y);

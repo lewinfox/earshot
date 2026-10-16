@@ -10,6 +10,7 @@ pub mod engine;
 pub mod keylock;
 pub mod output;
 pub mod processor;
+pub mod scratch;
 pub mod snapshot;
 pub mod tempo;
 pub mod transport;

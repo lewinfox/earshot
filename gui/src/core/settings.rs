@@ -33,11 +33,23 @@ pub struct Settings {
 }
 
 /// A player's options that stay as they were set, from one run to the next.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DeckOptions {
     pub keylock: bool,
     pub quantize: bool,
+    /// Vinyl mode (on unless turned off: options saved before it had it say nothing).
+    pub vinyl: bool,
+}
+
+impl Default for DeckOptions {
+    fn default() -> DeckOptions {
+        DeckOptions {
+            keylock: false,
+            quantize: false,
+            vinyl: true,
+        }
+    }
 }
 
 impl Settings {

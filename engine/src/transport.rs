@@ -5,6 +5,7 @@
 use crate::command::LoopState;
 use crate::decode::TrackAudio;
 use crate::keylock::{self, Keylock};
+use crate::scratch::Scratch;
 
 /// How far before the start of a track a deck's playhead may go (seconds).
 pub const LEAD_IN: f64 = 30.0;
@@ -96,6 +97,9 @@ pub struct Player {
     /// Keep the key when the speed changes (needs a shifter, see [`Player::new`]).
     pub keylock: bool,
     shifter: Option<Keylock>,
+    /// A hand on the record (the mouse on the waveform, a jog wheel): see
+    /// [`crate::scratch`].
+    pub scratch: Scratch,
 }
 
 impl Player {
@@ -107,6 +111,22 @@ impl Player {
             speed: 1.0,
             keylock: false,
             shifter: keylock.map(|(sr, block)| Keylock::new(sr, block)),
+            scratch: Scratch::default(),
+        }
+    }
+
+    /// The hand goes on the record (`true`) or comes off, at `now` (the engine's
+    /// clock). Let go, a playing deck carries on at its speed.
+    pub fn hand(&mut self, on: bool, now: f64) {
+        let speed = if self.transport.playing {
+            self.speed
+        } else {
+            0.0
+        };
+        if on {
+            self.scratch.touch(now, speed);
+        } else {
+            self.scratch.release(speed);
         }
     }
 
@@ -118,8 +138,13 @@ impl Player {
     }
 
     /// Play `audio` into `buf` (interleaved stereo, already zeroed) at an output rate of
-    /// `sr`. Returns true if the track ended during this block.
-    pub fn render(&mut self, audio: &TrackAudio, buf: &mut [f32], sr: f64) -> bool {
+    /// `sr`, the block starting at `now` (the engine's clock, seconds). Returns true if
+    /// the track ended during this block.
+    pub fn render(&mut self, audio: &TrackAudio, buf: &mut [f32], sr: f64, now: f64) -> bool {
+        if self.scratch.active() {
+            self.render_scratch(audio, buf, sr, now);
+            return false;
+        }
         if !self.transport.playing {
             self.idle();
             return false;
@@ -168,6 +193,24 @@ impl Player {
             k.process(&mut buf[..played * 2], speed, t.pos);
         }
         ended
+    }
+}
+
+impl Player {
+    /// Play a block at the speed the hand gives, forwards or back, like a turntable
+    /// (so without keylock). Loops don't apply: the hand goes where it likes, between
+    /// the lead-in and the end.
+    fn render_scratch(&mut self, audio: &TrackAudio, buf: &mut [f32], sr: f64, now: f64) {
+        if let Some(k) = &mut self.shifter {
+            k.idle();
+        }
+        let src_rate = audio.sample_rate as f64;
+        let t = &mut self.transport;
+        for (i, frame) in buf.chunks_exact_mut(2).enumerate() {
+            let v = self.scratch.step(now + i as f64 / sr, sr);
+            t.pos = (t.pos + v / sr).clamp(-t.lead_in, t.duration);
+            (frame[0], frame[1]) = sample_at(audio, t.pos * src_rate);
+        }
     }
 }
 

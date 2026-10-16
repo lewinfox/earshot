@@ -2,7 +2,7 @@
 
 use std::f32::consts::TAU;
 
-use egui::{FontId, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Align2, FontId, Sense, Stroke, Ui, pos2, vec2};
 
 use super::{DeckUi, Dims};
 use crate::core::bus::DeckControl;
@@ -16,7 +16,7 @@ impl DeckUi {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             self.cue_play(ui, out);
-            self.jog(ui);
+            self.jog(ui, out);
         });
     }
 
@@ -57,15 +57,23 @@ impl DeckUi {
     }
 
     /// A jog-wheel ring, like Rekordbox's: the BPM at the current tempo in the middle,
-    /// the tempo change and fader range under it, and a dot on the rim that turns like
-    /// a record at 33⅓ rpm (1.8 s a turn).
-    pub(super) fn jog(&self, ui: &mut Ui) {
+    /// the tempo change and fader range under it, VINYL over it (lit in vinyl mode;
+    /// a click turns it on or off), and a dot on the rim that turns like a record at
+    /// 33⅓ rpm (1.8 s a turn).
+    pub(super) fn jog(&self, ui: &mut Ui, out: &mut Vec<Command>) {
         let s = self.state;
         let jog = self.dims.jog();
         // The text scales with the ring (it is smaller on a compact deck).
         let k = jog / Dims::FULL.jog();
-        let (rect, resp) = ui.allocate_exact_size(vec2(jog, jog), Sense::hover());
-        resp.on_hover_text("BPM at the current tempo; the tempo change and the fader's range");
+        let (rect, resp) = ui.allocate_exact_size(vec2(jog, jog), Sense::click());
+        let resp = resp.on_hover_text(
+            "BPM at the current tempo; the tempo change and the fader's range. \
+             VINYL: the jog wheel's top and the waveform scratch (click to turn off: \
+             then the jog wheel only bends)",
+        );
+        if resp.clicked() {
+            self.control(out, DeckControl::Vinyl, 1.0);
+        }
         let p = ui.painter();
         let c = rect.center();
         let r = jog / 2.0 - 2.0 * k;
@@ -109,5 +117,13 @@ impl DeckUi {
         let y = c.y + 7.0 * k;
         p.galley(pos2(c.x - w / 2.0, y), pct.clone(), THEME.muted);
         p.galley(pos2(c.x - w / 2.0 + pct.size().x, y), range, self.colour());
+        let vinyl = if s.vinyl { self.colour() } else { THEME.line };
+        p.text(
+            pos2(c.x, top - 2.0 * k),
+            Align2::CENTER_BOTTOM,
+            "VINYL",
+            FontId::proportional(8.0 * k),
+            vinyl,
+        );
     }
 }

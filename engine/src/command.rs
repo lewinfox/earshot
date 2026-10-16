@@ -4,6 +4,7 @@
 //! needs no allocation to apply, and can't name a deck that doesn't exist.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::beatgrid::Beatgrid;
 use crate::decode::TrackAudio;
@@ -137,6 +138,25 @@ pub enum DeckCmd {
     TempoRangeNext,
     /// Temporary speed offset while a nudge button is held; 0 releases it.
     Nudge(f64),
+    /// Vinyl mode: a hand on the record (the mouse on the waveform, a jog wheel's top)
+    /// scratches. Off, jog wheels only bend the speed (see [`DeckCmd::Bend`]).
+    Vinyl(Set),
+    /// A hand on the record, or off: see [`crate::scratch`]. Only in vinyl mode.
+    Hand(bool),
+    /// The hand on the record moved this many seconds of track (negative: back), at
+    /// this time. With no hand on it (out of vinyl mode, say), a bend.
+    HandMove {
+        by: f64,
+        at: Instant,
+    },
+    /// A jog wheel's side (or its top, out of vinyl mode) turned this many seconds of
+    /// track, at this time: a playing deck speeds up or slows down while it turns and
+    /// springs back; a stopped one moves through the track as far as the bend would
+    /// have taken it (a fifth of the turn: see `BEND`), playing what passes.
+    Bend {
+        by: f64,
+        at: Instant,
+    },
     Sync(Set),
     Quantize(Set),
     Keylock(Set),
@@ -268,6 +288,7 @@ pub struct DeckState {
     pub sync: bool,
     pub quantize: bool,
     pub keylock: bool,
+    pub vinyl: bool,
     pub channel: ChannelState,
 }
 
@@ -286,6 +307,7 @@ impl Default for DeckState {
             sync: false,
             quantize: true,
             keylock: false,
+            vinyl: true,
             channel: ChannelState::default(),
         }
     }

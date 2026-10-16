@@ -203,6 +203,11 @@ struct Deck {
     fader: f64,
     fader_live: bool,
     nudge: f64,
+    /// A jog wheel's bend: how fast it's turning (seconds of track a second), easing
+    /// back to 0 over [`BEND_SECS`] when it stops.
+    bend: f64,
+    /// See [`DeckCmd::Vinyl`].
+    vinyl: bool,
     sync: bool,
     quantize: bool,
     cue_point: f64,
@@ -234,6 +239,12 @@ const SYNC_PHASE_SECS: f64 = 0.25;
 /// Phase errors smaller than this (beats; ~4 ms at 120 BPM) are left alone.
 const SYNC_DEADBAND: f64 = 0.008;
 
+/// A jog wheel's bend: turning it as fast as a record goes (1.8 s a turn at 33⅓ rpm)
+/// speeds the deck up by this much (0.2 = 20%), about as Mixxx's DDJ-400 mapping does.
+/// The turning speed is measured over [`BEND_SECS`], and springs back over it.
+const BEND: f64 = 0.2;
+const BEND_SECS: f64 = 0.1;
+
 /// The tempo fader picks the tempo up when it comes this close (in fader travel,
 /// -1..1) or moves past it.
 const PICKUP: f64 = 0.01;
@@ -254,6 +265,8 @@ impl Deck {
             fader: 0.0,
             fader_live: true,
             nudge: 0.0,
+            bend: 0.0,
+            vinyl: true,
             sync: false,
             quantize: true,
             cue_point: 0.0,
@@ -338,7 +351,26 @@ impl Deck {
     }
 
     fn base_speed(&self) -> f64 {
-        (1.0 + self.rate) * (1.0 + self.nudge)
+        (1.0 + self.rate) * self.bent()
+    }
+
+    /// A jog wheel turned `by` seconds of track at `at` (the engine's clock; heard of
+    /// at `now`): see [`DeckCmd::Bend`].
+    fn bend(&mut self, by: f64, at: f64, now: f64) {
+        if self.track.is_none() || self.player.scratch.held() {
+            return;
+        }
+        if self.playing() {
+            self.bend += by / BEND_SECS;
+        } else {
+            self.untouched = false;
+            self.player.scratch.nudge(by * BEND, at, now);
+        }
+    }
+
+    /// The nudge and the jog wheel's bend, as a factor on the speed.
+    fn bent(&self) -> f64 {
+        (1.0 + self.nudge + BEND * self.bend).max(0.0)
     }
 
     /// Put `track` on the deck, stopped at its cue point (the grid's first beat if it
@@ -357,6 +389,7 @@ impl Deck {
         t.loop_ = LoopState::default();
         t.jump(cue, JumpReason::Load);
         self.player.speed = 1.0;
+        self.player.scratch.cancel();
         self.cue_point = cue;
         self.untouched = true;
         self.hotcues = track.cues.hot;
@@ -375,6 +408,7 @@ impl Deck {
         self.player.transport.playing = loaded && s.playing;
         self.player.transport.loop_ = s.loop_;
         self.player.keylock = s.keylock;
+        self.vinyl = s.vinyl;
         if let Some(c) = s.cues.main {
             self.cue_point = c;
         }
@@ -643,6 +677,9 @@ impl Deck {
             DeckCmd::TempoRange(range) => self.set_range(range),
             DeckCmd::TempoRangeNext => self.set_range(self.range.next()),
             DeckCmd::Nudge(amount) => self.nudge = amount,
+            // With the clock: the renderer does these.
+            DeckCmd::Vinyl(_) | DeckCmd::Hand(_) | DeckCmd::HandMove { .. } | DeckCmd::Bend { .. } => {
+            }
             DeckCmd::Quantize(set) => self.quantize = set.apply(self.quantize),
             DeckCmd::Keylock(set) => self.player.keylock = set.apply(self.player.keylock),
             // Handled by the renderer.
@@ -665,7 +702,11 @@ impl Deck {
             position: self.pos(),
             duration: self.duration(),
             playing: self.playing(),
-            speed: self.player.speed,
+            speed: if self.player.scratch.active() {
+                self.player.scratch.speed()
+            } else {
+                self.player.speed
+            },
             tempo: self.tempo,
             rate: self.rate,
             range: self.range,
@@ -679,6 +720,7 @@ impl Deck {
             following: self.following,
             quantize: self.quantize,
             keylock: self.player.keylock,
+            vinyl: self.vinyl,
             loop_in: l.start,
             loop_out: l.end,
             loop_active: l.active,
@@ -735,6 +777,17 @@ pub struct Renderer {
     vu_main: [f32; 2],
     /// Per-sample easing for faders; see [`KNOB_SECS`].
     knob_ease: f64,
+    /// The engine's clock: seconds of audio rendered. [`Renderer::clock_at`] places a
+    /// moment (a hand's move on the mouse or a jog wheel) on it.
+    frames: u64,
+    epoch: Instant,
+    /// The clock minus seconds since `epoch`, as of the last callback, smoothed:
+    /// callbacks come a little unevenly.
+    clock_offset: Option<f64>,
+    /// Tests render faster than real time: they set this to have callbacks come at the
+    /// times they would in real time ([`Renderer::moment`]).
+    #[cfg(test)]
+    simulated_time: bool,
 }
 
 /// Prepare mode's slot, after the decks.
@@ -796,6 +849,11 @@ impl Renderer {
             limiting: 0.0,
             vu_main: [0.0; 2],
             knob_ease: dsp::ease_per_sample(KNOB_SECS, sr),
+            frames: 0,
+            epoch: Instant::now(),
+            clock_offset: None,
+            #[cfg(test)]
+            simulated_time: false,
         };
         r.set_crossfader(0.0);
         for g in &mut r.xf_gain {
@@ -808,6 +866,7 @@ impl Renderer {
     /// master and headphone buses as set by [`Command::SetRouting`].
     pub fn process(&mut self, out: &mut [f32], channels: usize) {
         let started = Instant::now();
+        self.sync_clock(self.now(started));
         let channels = channels.max(1);
         let total = out.len() / channels;
         let mut done = 0;
@@ -828,6 +887,7 @@ impl Renderer {
                 }
             }
             done += n;
+            self.frames += n as u64;
         }
         self.callbacks += 1;
         self.last_block_frames = total as u32;
@@ -841,6 +901,42 @@ impl Renderer {
         }
     }
 
+    /// The engine's clock now, seconds.
+    fn clock(&self) -> f64 {
+        self.frames as f64 / self.sample_rate
+    }
+
+    /// The moment a callback starts (`real`, unless a test is simulating time).
+    fn now(&self, real: Instant) -> Instant {
+        #[cfg(test)]
+        if self.simulated_time {
+            return self.moment(self.clock());
+        }
+        real
+    }
+
+    /// The moment the engine's clock reads `t` in simulated time (tests).
+    #[cfg(test)]
+    fn moment(&self, t: f64) -> Instant {
+        self.epoch + std::time::Duration::from_secs_f64(t)
+    }
+
+    /// Line the clock up with real time at the start of a callback.
+    fn sync_clock(&mut self, now: Instant) {
+        let offset = self.clock() - now.duration_since(self.epoch).as_secs_f64();
+        self.clock_offset = Some(match self.clock_offset {
+            // Far out (the first callback, a stall): start again from here.
+            Some(o) if (offset - o).abs() < 0.05 => o + (offset - o) * 0.02,
+            _ => offset,
+        });
+    }
+
+    /// Where moment `at` falls on the engine's clock.
+    fn clock_at(&self, at: Instant) -> f64 {
+        let secs = at.saturating_duration_since(self.epoch).as_secs_f64();
+        secs + self.clock_offset.unwrap_or(0.0)
+    }
+
     fn render_block(&mut self, n: usize) {
         for ring in 0..COMMAND_RINGS {
             while let Ok(cmd) = self.commands[ring].pop() {
@@ -850,6 +946,7 @@ impl Renderer {
         self.update_speeds(n);
 
         let sr = self.sample_rate;
+        let now = self.clock();
         let live = self.live;
         for d in slots(live) {
             let deck = &mut self.decks[d];
@@ -859,7 +956,7 @@ impl Renderer {
                 deck.player.idle();
                 continue;
             };
-            if deck.player.render(&track.audio, buf, sr) {
+            if deck.player.render(&track.audio, buf, sr, now) {
                 deck.preview = Preview::None;
                 self.outbox.send(EngineEvent::TrackEnded {
                     deck: deck.id,
@@ -940,7 +1037,7 @@ impl Renderer {
         if let Some(audio) = self.preview.as_deref() {
             let buf = &mut self.preview_buf[..n * 2];
             buf.fill(0.0);
-            self.preview_player.render(audio, buf, sr);
+            self.preview_player.render(audio, buf, sr, now);
             let g = 0.8 * self.head_gain.current as f32 * self.preview_gain;
             for (o, s) in self.phones.iter_mut().zip(buf.iter()) {
                 *o += g * s;
@@ -986,8 +1083,13 @@ impl Renderer {
     /// are right when it starts) but doesn't correct phase: it isn't moving, so the
     /// error would just sweep round with every one of the leader's beats.
     fn update_speeds(&mut self, n: usize) {
+        let fade = (-(n as f64 / self.sample_rate) / BEND_SECS).exp();
         for d in slots(self.live) {
             let dk = &mut self.decks[d];
+            dk.bend *= fade;
+            if dk.bend.abs() < 1e-4 {
+                dk.bend = 0.0;
+            }
             dk.player.speed = dk.base_speed();
             dk.tempo = 1.0 + dk.rate;
         }
@@ -1041,7 +1143,7 @@ impl Renderer {
             } else {
                 0.0
             };
-            me.player.speed = me.sync_ratio * (1.0 + me.sync_correction) * (1.0 + me.nudge);
+            me.player.speed = me.sync_ratio * (1.0 + me.sync_correction) * me.bent();
             me.tempo = me.sync_ratio;
             me.rate = shown - 1.0;
             me.check_pickup();
@@ -1181,6 +1283,39 @@ impl Renderer {
                 ch.pfl = set.apply(ch.pfl);
             }
             DeckCmd::Crossfader(side) => self.channels[d].crossfader = side,
+            DeckCmd::Vinyl(set) => {
+                let now = self.clock();
+                let dk = &mut self.decks[d];
+                dk.vinyl = set.apply(dk.vinyl);
+                if !dk.vinyl && dk.player.scratch.held() {
+                    dk.player.hand(false, now);
+                }
+            }
+            DeckCmd::Hand(on) => {
+                let now = self.clock();
+                let dk = &mut self.decks[d];
+                // Out of vinyl mode a touch does nothing; letting go always counts.
+                if dk.track.is_some() && (dk.vinyl || !on) {
+                    dk.untouched = false;
+                    dk.preview = Preview::None;
+                    dk.player.hand(on, now);
+                }
+            }
+            DeckCmd::HandMove { by, at } => {
+                let now = self.clock();
+                let at = self.clock_at(at).min(now);
+                let dk = &mut self.decks[d];
+                if dk.player.scratch.held() {
+                    dk.player.scratch.moved(by, at, now);
+                } else {
+                    dk.bend(by, at, now);
+                }
+            }
+            DeckCmd::Bend { by, at } => {
+                let now = self.clock();
+                let at = self.clock_at(at).min(now);
+                self.decks[d].bend(by, at, now);
+            }
             other => self.decks[d].apply(other, &mut self.outbox),
         }
     }
@@ -1724,6 +1859,120 @@ mod tests {
                 deck: p,
                 generation: 3
             }));
+    }
+
+    /// Scratch deck `d` forward by `by` seconds over `secs`, reporting every block.
+    fn scratch(rig: &mut Rig, d: usize, by: f64, secs: f64) -> Vec<f32> {
+        rig.r.simulated_time = true;
+        let n = (secs * SR as f64 / 256.0) as usize;
+        let mut out = vec![];
+        for _ in 0..n {
+            let at = rig.r.moment(rig.r.clock());
+            rig.deck(
+                d,
+                DeckCmd::HandMove {
+                    by: by / n as f64,
+                    at,
+                },
+            );
+            rig.r.process(&mut rig.out, 4);
+            out.extend(rig.out.chunks_exact(4).map(|f| f[0]));
+        }
+        out
+    }
+
+    #[test]
+    fn scratching_a_stopped_deck_plays_what_passes() {
+        let mut rig = Rig::new();
+        load_fn(&mut rig, 0, 20.0, sine(440.0));
+        rig.run(0.05);
+        let start = rig.pos(0);
+        rig.deck(0, DeckCmd::Hand(true));
+        let fwd = scratch(&mut rig, 0, 1.0, 1.0);
+
+        assert!(fwd.iter().any(|s| s.abs() > 0.05), "makes sound");
+        // Forward at about normal speed: the tone at about its own pitch.
+        let f = frequency(&fwd[fwd.len() / 4..fwd.len() * 3 / 4]);
+        assert!((f - 440.0).abs() < 25.0, "{f}");
+        let back = scratch(&mut rig, 0, -1.0, 1.0);
+        assert!(back.iter().any(|s| s.abs() > 0.05), "backwards too");
+        rig.run(0.1);
+        assert!((rig.pos(0) - start).abs() < 0.01, "back where it started");
+        rig.deck(0, DeckCmd::Hand(false));
+        rig.run(0.1);
+        assert!(!rig.snap().decks[0].playing);
+        assert!((rig.pos(0) - start).abs() < 0.01, "and stays there");
+    }
+
+    #[test]
+    fn a_hand_on_a_playing_deck_holds_it_and_letting_go_plays_on() {
+        let mut rig = Rig::new();
+        rig.load(0, 124.0, 124.0);
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.run(0.5);
+        rig.deck(0, DeckCmd::Hand(true));
+        rig.run(0.1);
+        let held = rig.pos(0);
+        rig.run(0.5);
+        assert!((rig.pos(0) - held).abs() < 0.001, "held still");
+        assert!(rig.snap().decks[0].playing, "still a playing deck");
+        rig.deck(0, DeckCmd::Hand(false));
+        rig.run(1.0);
+        assert!((rig.pos(0) - held - 1.0).abs() < 0.02, "plays on");
+    }
+
+    #[test]
+    fn out_of_vinyl_mode_the_jog_wheel_only_bends() {
+        let mut rig = Rig::new();
+        rig.load(0, 124.0, 124.0);
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.run(0.2);
+        rig.deck(0, DeckCmd::Vinyl(Set::Off));
+        rig.run(0.01);
+        assert!(!rig.snap().decks[0].vinyl);
+        // A touch doesn't hold it, and turning the top speeds it up while it turns.
+        rig.deck(0, DeckCmd::Hand(true));
+        let start = rig.pos(0);
+        for _ in 0..50 {
+            rig.deck(
+                0,
+                DeckCmd::HandMove {
+                    by: 0.01,
+                    at: Instant::now(),
+                },
+            );
+            rig.run(0.01);
+        }
+        // 50 blocks, the wheel turning 0.01 s a block: about 1.7 times as fast as a
+        // record, so about a third faster.
+        let secs = 50.0 * 256.0 / SR as f64;
+        let moved = (rig.pos(0) - start) / secs;
+        assert!(moved > 1.2 && moved < 1.4, "{moved}");
+        // Then it springs back to normal speed.
+        rig.run(0.5);
+        let t = rig.pos(0);
+        rig.run(1.0);
+        assert!((rig.pos(0) - t - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn turning_the_jog_wheel_moves_a_stopped_deck_a_little() {
+        let mut rig = Rig::new();
+        load_fn(&mut rig, 0, 20.0, sine(440.0));
+        rig.r.simulated_time = true;
+        rig.run(0.05);
+        let start = rig.pos(0);
+        // A tenth of a turn (0.18 s of record): the deck moves a fifth of that.
+        let mut out = vec![];
+        for _ in 0..18 {
+            let at = rig.r.moment(rig.r.clock());
+            rig.deck(0, DeckCmd::Bend { by: 0.01, at });
+            out.extend(record(&mut rig, 0.01));
+        }
+        rig.run(0.3);
+        assert!((rig.pos(0) - start - 0.036).abs() < 0.001, "{}", rig.pos(0) - start);
+        assert!(out.iter().any(|s| s.abs() > 0.01), "you hear it");
+        assert!(!rig.snap().decks[0].playing);
     }
 
     #[test]

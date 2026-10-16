@@ -8,6 +8,8 @@
 //! `[Group] key` names exist only for the MIDI edge ([`Control::mixxx`],
 //! [`Control::from_mixxx`]).
 
+use std::time::Instant;
+
 use earshot_engine::{
     ChannelParam, DeckCmd as EngineCmd, DeckId, DeckSnap, EQ_HIGH, EQ_LOW, EQ_MID, EngineSnapshot,
     MasterParam, ParamId, Press, Set,
@@ -327,6 +329,18 @@ pub enum DeckControl {
     LoadSelected,
     /// Load the previous (-1) or next (1) track in the library's focused list.
     LoadStep(i32),
+    /// Vinyl mode: the jog wheels' tops (and the mouse on the waveform) scratch. Off,
+    /// they only bend.
+    Vinyl,
+    /// A hand on the record: the jog wheel's top touched (1) or let go (0). Only in
+    /// vinyl mode.
+    JogTouch,
+    /// The jog wheel's top turned this many seconds of track (negative: back):
+    /// scratching while touched in vinyl mode, else a bend.
+    JogTurn,
+    /// The jog wheel's side turned this many seconds of track: speed up or slow down
+    /// while it turns.
+    JogBend,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -385,12 +399,16 @@ impl DeckControl {
             GridNudge(_) => spec("grid_nudge", "nudge the grid", Button),
             LoadSelected => spec("load_selected", "load the selected track", Button),
             LoadStep(_) => spec("load_step", "load the next track", Button),
+            Vinyl => spec("vinyl", "vinyl mode (jog wheels scratch)", Toggle),
+            JogTouch => spec("jog_touch", "hand on the record (scratch)", Button),
+            JogTurn => spec("jog_turn", "scratch", Relative),
+            JogBend => spec("jog_bend", "bend the speed", Relative),
         }
     }
 
     /// Every deck control, with sample parameters for the parametrised ones (for
     /// looking names up and for tests).
-    pub const ALL: [DeckControl; 34] = {
+    pub const ALL: [DeckControl; 38] = {
         use DeckControl::*;
         [
             Play,
@@ -427,6 +445,10 @@ impl DeckControl {
             Filter,
             SaveMemory,
             GridNudge(10.0),
+            Vinyl,
+            JogTouch,
+            JogTurn,
+            JogBend,
         ]
     };
 
@@ -476,6 +498,7 @@ impl DeckControl {
             Sync => on(d.sync),
             Quantize => on(d.quantize),
             Keylock => on(d.keylock),
+            Vinyl => on(d.vinyl),
             Pfl => on(d.pfl),
             Hotcue(n) => on(d.hotcues.get(n as usize).is_some_and(Option::is_some)),
             Loop | Reloop => on(d.loop_active),
@@ -503,8 +526,9 @@ impl DeckControl {
             Sync if pressed => engine(EngineCmd::Sync(Set::Toggle)),
             Quantize if pressed => engine(EngineCmd::Quantize(Set::Toggle)),
             Keylock if pressed => engine(EngineCmd::Keylock(Set::Toggle)),
+            Vinyl if pressed => engine(EngineCmd::Vinyl(Set::Toggle)),
             Pfl if pressed => engine(EngineCmd::Pfl(Set::Toggle)),
-            Play | Sync | Quantize | Keylock | Pfl => None,
+            Play | Sync | Quantize | Keylock | Pfl | Vinyl => None,
             Cue => engine(EngineCmd::Cue(press)),
             SetCue => on_press(DeckCmd::SetCue),
             Hotcue(slot) => engine(EngineCmd::Hotcue { slot, press }),
@@ -534,6 +558,15 @@ impl DeckControl {
             GridNudge(ms) => on_press(DeckCmd::Grid(GridOp::Nudge(ms))),
             LoadSelected if pressed => Some(Command::View(ViewCmd::LoadSelected(deck))),
             LoadStep(n) if pressed => Some(Command::View(ViewCmd::LoadAdjacent(deck, n))),
+            JogTouch => engine(EngineCmd::Hand(pressed)),
+            JogTurn if value != 0.0 => engine(EngineCmd::HandMove {
+                by: value,
+                at: Instant::now(),
+            }),
+            JogBend if value != 0.0 => engine(EngineCmd::Bend {
+                by: value,
+                at: Instant::now(),
+            }),
             _ => None,
         }
     }
@@ -577,6 +610,12 @@ impl DeckControl {
             // ours, so a MIDI knob maps onto it the same way.
             Filter => Some((MixxxGroup::QuickEffect, "super1".into())),
             LoadSelected => key("LoadSelectedTrack"),
+            // Mixxx's mappings scratch through script functions; these names are
+            // earshot's own, for MIDI mappings.
+            Vinyl => key("vinyl"),
+            JogTouch => key("jog_touch"),
+            JogTurn => key("jog_turn"),
+            JogBend => key("jog_bend"),
             SaveMemory | GridNudge(_) | LoadStep(_) => None,
         }
     }

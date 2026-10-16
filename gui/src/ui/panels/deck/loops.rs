@@ -149,7 +149,7 @@ impl DeckUi {
             let r = ui
                 .add(
                     HwButton::new(
-                        &format!("STEP {n}"),
+                        &format!("BEAT JUMP {n}"),
                         THEME.text,
                         vec2(2.0 * (self.dims.btn_w + 6.0) + 3.0, self.dims.btn_h),
                     )

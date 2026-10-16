@@ -233,13 +233,27 @@ impl LabelEdit {
     }
 }
 
+/// A drag on the scrolling waveform.
+#[derive(Clone, Copy)]
+struct Scrub {
+    /// Where it started: the pointer's x and the time under it.
+    x0: f32,
+    t0: f64,
+    /// The pointer's x as last sent.
+    last: f32,
+    /// In vinyl mode: a hand on the record (scratching). Otherwise the deck is held and
+    /// the playhead moved silently, and `resume` says whether it plays on after.
+    hand: bool,
+    resume: bool,
+}
+
 pub struct DeckUi {
     pub id: DeckId,
     /// Smoothed playhead used for drawing.
     shown: f64,
     seen_generation: u64,
-    /// While dragging the waveform: (start x, start time, was playing).
-    scrub: Option<(f32, f64, bool)>,
+    /// While dragging the waveform.
+    scrub: Option<Scrub>,
     pub wave: Option<DeckWave>,
     /// What the controls between the tabs and CUE / play show.
     page: Page,

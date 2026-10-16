@@ -187,6 +187,7 @@ impl DeckSession {
         st.sync = d.sync;
         st.quantize = d.quantize;
         st.keylock = d.keylock;
+        st.vinyl = d.vinyl;
         let ch = &mut st.channel;
         ch.volume = d.volume;
         ch.trim = d.pregain;

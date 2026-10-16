@@ -27,7 +27,14 @@ enum Input {
     Cc,
     /// A relative encoder: 1..63 = +n steps, 65..127 = -(128 - v) steps.
     Relative,
+    /// A jog wheel's turn, centred on 64 (65 = one tick forward, 63 one back), with
+    /// this many ticks to a turn. The value is seconds of track: a turn is as far as
+    /// a record goes in one turn at 33⅓ rpm, 1.8 s.
+    Jog(u32),
 }
+
+/// Seconds of a record that pass in one turn at 33⅓ rpm.
+const SECS_PER_TURN: f64 = 60.0 / (100.0 / 3.0);
 
 struct Mapping {
     status: u8,
@@ -59,6 +66,13 @@ fn ddj400_names() -> Vec<(u8, u8, String, String, Input)> {
         // top of the fader is minus on Pioneer gear).
         m(cc, 0x00, &g, "rate", Input::Cc);
         m(cc, 0x13, &g, "volume", Input::Cc);
+        // The jog wheel (Mixxx's mapping, 720 ticks a turn): its top touched, the top
+        // turned while touched (scratch in vinyl mode), the top turned untouched (still
+        // spinning) and the side turned (both bend).
+        m(note, 0x36, &g, "jog_touch", Input::Note);
+        m(cc, 0x22, &g, "jog_turn", Input::Jog(720));
+        m(cc, 0x23, &g, "jog_bend", Input::Jog(720));
+        m(cc, 0x21, &g, "jog_bend", Input::Jog(720));
         // Performance pads in hot cue mode, unshifted / shifted.
         for k in 0..8u8 {
             let n = k + 1;
@@ -170,6 +184,7 @@ fn translate<'a>(bytes: &[u8], table: &'a [Mapping]) -> Option<(&'a Mapping, Opt
         }
         Input::Relative if data2 < 64 => data2 as f64,
         Input::Relative => data2 as f64 - 128.0,
+        Input::Jog(ticks) => (data2 as f64 - 64.0) * SECS_PER_TURN / ticks as f64,
     };
     Some((mp, mp.control.command(value)))
 }
@@ -252,6 +267,31 @@ mod tests {
         assert!(matches!(
             cmd([0xB1, 0x00, 127]),
             Some(Command::Deck(d, DeckCmd::Engine(EngineCmd::TempoFader(v)))) if v == 1.0 && d == deck(1)
+        ));
+    }
+
+    #[test]
+    fn the_jog_wheel_scratches() {
+        assert!(matches!(
+            cmd([0x91, 0x36, 0x7F]),
+            Some(Command::Deck(d, DeckCmd::Engine(EngineCmd::Hand(true)))) if d == deck(1)
+        ));
+        assert!(matches!(
+            cmd([0x80, 0x36, 0x00]),
+            Some(Command::Deck(_, DeckCmd::Engine(EngineCmd::Hand(false))))
+        ));
+        // Two ticks back: 2/720 of 1.8 s.
+        let Some(Command::Deck(_, DeckCmd::Engine(EngineCmd::HandMove { by, .. }))) =
+            cmd([0xB0, 0x22, 62])
+        else {
+            panic!("not a hand move")
+        };
+        assert!((by + 0.005).abs() < 1e-9, "{by}");
+        assert!(command::direct(cmd([0xB0, 0x22, 65]).unwrap()).is_ok());
+        // The side bends.
+        assert!(matches!(
+            cmd([0xB1, 0x21, 66]),
+            Some(Command::Deck(d, DeckCmd::Engine(EngineCmd::Bend { by, .. }))) if d == deck(1) && by > 0.0
         ));
     }
 

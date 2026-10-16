@@ -294,6 +294,13 @@ impl EarshotApp {
                 )
                     .into(),
             );
+            app.dispatch(
+                (
+                    deck,
+                    EngineCmd::Vinyl(earshot_engine::Set::from_bool(o.vinyl)),
+                )
+                    .into(),
+            );
         }
         app.restore_flow();
         app.rescan();
@@ -352,6 +359,7 @@ impl EarshotApp {
                 settings::DeckOptions {
                     keylock: d.keylock,
                     quantize: d.quantize,
+                    vinyl: d.vinyl,
                 }
             })
             .collect();
