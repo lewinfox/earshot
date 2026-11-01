@@ -1158,8 +1158,10 @@ impl Renderer {
                 continue;
             };
             // The leader's own sync correction is left out, so two synced decks don't
-            // chase each other's corrections.
-            let leader_speed = other.player.speed / (1.0 + other.sync_correction);
+            // chase each other's corrections; so is its nudge and jog-wheel bend, so
+            // nudging one deck leaves the others' speed (and waveform zoom) alone.
+            let leader_speed =
+                other.player.speed / ((1.0 + other.sync_correction) * other.bent().max(1e-9));
             let target = leader_bpm * leader_speed / my_bpm;
             // The readout shows the leader's readout: both tracks' one tempo, not the
             // local tempo the speed follows (they are the same for straight grids).
@@ -2292,6 +2294,52 @@ mod tests {
         rig.deck(1, DeckCmd::Nudge(0.01));
         rig.run(0.2);
         assert!(range(&mut rig, |d| d.tempo) < 1e-5, "playing tempo moves");
+    }
+
+    /// Nudging the leader (button or jog wheel) moves only the leader: a follower's
+    /// speed and tempo (its waveform zoom) stay put.
+    #[test]
+    fn nudging_the_leader_leaves_followers_alone() {
+        let mut rig = Rig::new();
+        rig.load(0, 124.0, 124.0);
+        rig.load(1, 126.0, 126.0);
+        rig.deck(1, DeckCmd::Sync(Set::On));
+        rig.run(0.5);
+        let before = rig.snap().decks[1];
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.deck(0, DeckCmd::Nudge(0.04));
+        rig.run(0.5);
+        let d = rig.snap().decks[1];
+        assert!(
+            (d.speed - before.speed).abs() < 1e-6,
+            "follower speed {}",
+            d.speed
+        );
+        assert!(
+            (d.tempo - before.tempo).abs() < 1e-6,
+            "follower tempo {}",
+            d.tempo
+        );
+        rig.deck(0, DeckCmd::Nudge(0.0));
+        rig.deck(
+            0,
+            DeckCmd::Bend {
+                by: 0.05,
+                at: Instant::now(),
+            },
+        );
+        rig.run(0.05);
+        let d = rig.snap().decks[1];
+        assert!(
+            (d.speed - before.speed).abs() < 1e-6,
+            "follower speed {}",
+            d.speed
+        );
+        assert!(
+            (d.tempo - before.tempo).abs() < 1e-6,
+            "follower tempo {}",
+            d.tempo
+        );
     }
 
     fn peaks(out: &[f32], channels: usize) -> Vec<f32> {
