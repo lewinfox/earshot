@@ -4,7 +4,10 @@
 //! - A track list sets [`DragPayload::Tracks`] with the whole selection (or the
 //!   row grabbed, outside it). Decks, the Flow canvas, collections and playlist rows
 //!   take it: [`take_tracks`], [`hovering_tracks`].
-//! - The collection tree sets [`DragPayload::Collection`] to move one into a folder.
+//! - The collection tree sets [`DragPayload::Collection`] to move one into a folder
+//!   (or onto a USB stick, to export it there).
+//! - Another library's tree (the Sources pane) sets [`DragPayload::External`]: drop
+//!   it on Playlists or Crates to import it, or on a USB stick to export it there.
 //!
 //! The shell paints the ghost once a frame ([`paint_ghost`]); anything else that
 //! drags (Flow cards) can show one too with [`ghost`].
@@ -12,7 +15,9 @@
 use egui::{Color32, FontId, Id, LayerId, Order, Response, Stroke, StrokeKind, vec2};
 
 use crate::core::collections::CollectionId;
+use crate::core::external::NodePath;
 use crate::core::index::LibraryIndex;
+use crate::core::sources::SourceId;
 use crate::core::track::TrackId;
 use crate::ui::theme::{THEME, fs};
 
@@ -35,6 +40,12 @@ pub enum DragPayload {
     Tracks { ids: Vec<TrackId>, origin: Origin },
     /// A collection being moved round its tree.
     Collection(CollectionId),
+    /// Another library's folder, playlist or crate.
+    External {
+        source: SourceId,
+        path: NodePath,
+        name: String,
+    },
 }
 
 impl DragPayload {
@@ -56,6 +67,7 @@ impl DragPayload {
                 many => format!("{} tracks", many.len()),
             },
             DragPayload::Collection(_) => String::new(),
+            DragPayload::External { name, .. } => name.clone(),
         }
     }
 }
@@ -81,7 +93,7 @@ pub fn take_tracks(resp: &Response) -> Option<(Vec<TrackId>, Origin)> {
     }
     match resp.dnd_release_payload::<DragPayload>()?.as_ref() {
         DragPayload::Tracks { ids, origin } => Some((ids.clone(), *origin)),
-        DragPayload::Collection(_) => None,
+        DragPayload::Collection(_) | DragPayload::External { .. } => None,
     }
 }
 
@@ -92,10 +104,11 @@ pub fn take_track(resp: &Response) -> Option<TrackId> {
 
 /// The ghost for whatever track drag is under way.
 pub fn paint_ghost(ctx: &egui::Context, lib: &LibraryIndex) {
-    if let Some(p) = payload(ctx)
-        && let DragPayload::Tracks { ids, .. } = p.as_ref()
-    {
-        ghost(ctx, &p.label(lib), ids.len());
+    let Some(p) = payload(ctx) else { return };
+    match p.as_ref() {
+        DragPayload::Tracks { ids, .. } => ghost(ctx, &p.label(lib), ids.len()),
+        DragPayload::External { name, .. } => ghost(ctx, name, 1),
+        DragPayload::Collection(_) => {}
     }
 }
 

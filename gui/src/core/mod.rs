@@ -9,9 +9,11 @@ pub mod audio_watch;
 pub mod bus;
 pub mod collections;
 pub mod command;
+pub mod drives;
 pub mod edit;
 #[allow(dead_code)] // searched by the Vibe suggestion feature to come; tests use it
 pub mod embeddings;
+pub mod export;
 pub mod external;
 pub mod hash;
 pub mod history;
@@ -21,6 +23,7 @@ pub mod keys;
 pub mod library;
 pub mod log;
 pub mod midi;
+pub mod outside;
 pub mod player;
 pub mod query;
 pub mod selection;
@@ -72,6 +75,10 @@ pub enum Event {
     },
     /// Other DJ software's libraries: found, read, imported.
     External(external::ExternalEvent),
+    /// The USB sticks plugged in, whenever that changes (`drives::watch`).
+    Drives(Vec<drives::Drive>),
+    /// Writing to other DJ software's libraries and sticks.
+    Export(export::ExportEvent),
     /// News from the tempo lock tool.
     #[allow(dead_code)] // read by the tempo lock tab (step 7, B4)
     TempoLock(tempo_lock::TempoLockEvent),

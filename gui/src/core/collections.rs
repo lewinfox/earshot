@@ -796,6 +796,13 @@ pub enum CollectionCmd {
 pub enum FlowCmd {
     /// New starting cards on the open Flow (opening the canvas).
     AddTracks(Vec<TrackId>),
+    /// New cards where tracks were dropped on the canvas (canvas coordinates), once
+    /// another library's have been imported.
+    AddAt {
+        tracks: Vec<TrackId>,
+        x: f32,
+        y: f32,
+    },
     /// Save a path through a Flow as a new playlist beside it.
     BakePath {
         flow: CollectionId,

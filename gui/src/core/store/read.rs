@@ -9,7 +9,9 @@ use earshot_engine::loudness::Loudness;
 use earshot_engine::media::Location;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::{CueKind, FlowCamera, GridSource, Result, StoreError, WAVEFORM_VERSION, bytes_path};
+use super::{
+    CueKind, FlowCamera, GridSource, Result, StoreError, WAVEFORM_VERSION, bytes_path, path_bytes,
+};
 use crate::core::collections::{Collection, CollectionKind, FlowGraph, FlowNode, NodeId, Section};
 use crate::core::query;
 use crate::core::sources::{Source, SourceKind};
@@ -258,6 +260,16 @@ pub fn sources(c: &Connection) -> Result<Vec<Source>> {
         .collect())
 }
 
+/// The track a file is, if earshot has it.
+pub fn track_at(c: &Connection, path: &std::path::Path) -> Result<Option<i64>> {
+    Ok(c.query_row(
+        "SELECT track_id FROM files WHERE path = ?1",
+        [path_bytes(path)],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
 /// Where a track's audio is now: its first file that isn't missing.
 pub fn track_location(c: &Connection, id: i64) -> Result<Location> {
     c.query_row(
@@ -471,6 +483,55 @@ pub fn memories(c: &Connection, track: i64) -> Result<Vec<Memory>> {
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// A saved cue of any kind, as stored.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CueRow {
+    pub kind: CueKind,
+    /// A hot cue's pad.
+    pub slot: Option<u8>,
+    pub start: f64,
+    pub end: Option<f64>,
+    pub label: Option<String>,
+    /// 0xRRGGBB.
+    pub color: Option<u32>,
+}
+
+/// Every cue a track has: hot cues, memory cues and loops, in order through it.
+pub fn all_cues(c: &Connection, track: i64) -> Result<Vec<CueRow>> {
+    let mut st = c.prepare_cached(
+        "SELECT kind, slot, start_s, end_s, label, color FROM cues
+         WHERE track_id = ?1 ORDER BY start_s, end_s",
+    )?;
+    let rows = st.query_map([track], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, Option<i64>>(1)?,
+            CueRow {
+                kind: CueKind::Hot,
+                slot: None,
+                start: r.get(2)?,
+                end: r.get(3)?,
+                label: r.get(4)?,
+                color: r.get(5)?,
+            },
+        ))
+    })?;
+    let mut out = vec![];
+    for row in rows {
+        let (kind, slot, mut cue) = row?;
+        let Some(kind) = [CueKind::Hot, CueKind::Memory, CueKind::Loop]
+            .into_iter()
+            .find(|k| k.as_i64() == kind)
+        else {
+            continue;
+        };
+        cue.kind = kind;
+        cue.slot = slot.and_then(|s| u8::try_from(s).ok());
+        out.push(cue);
+    }
+    Ok(out)
+}
+
 pub fn cues(c: &Connection, track: i64) -> Result<TrackCues> {
     Ok(TrackCues {
         hot_labels: hot_labels(c, track)?,
@@ -486,6 +547,39 @@ pub fn files_without_hash(c: &Connection) -> Result<Vec<(i64, PathBuf)>> {
     Ok(st
         .query_map([], |r| Ok((r.get(0)?, bytes_path(r.get(1)?))))?
         .collect::<rusqlite::Result<_>>()?)
+}
+
+/// A file of earshot's with this audio (`core::hash`), that's still there.
+pub fn file_with_hash(c: &Connection, hash: &[u8]) -> Result<Option<PathBuf>> {
+    let path: Option<Vec<u8>> = c
+        .query_row(
+            "SELECT path FROM files WHERE content_hash = ?1 AND missing_since IS NULL LIMIT 1",
+            [hash],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(path.map(bytes_path).filter(|p| p.is_file()))
+}
+
+pub fn file_cache(
+    c: &Connection,
+    (path, size, mtime): &crate::core::outside::FileKey,
+) -> Result<Option<(Vec<u8>, Loudness)>> {
+    Ok(c.query_row(
+        "SELECT waveform, lufs, peak FROM file_cache
+         WHERE path = ?1 AND size = ?2 AND mtime_ns = ?3",
+        params![path_bytes(path), *size as i64, mtime],
+        |r| {
+            Ok((
+                r.get(0)?,
+                Loudness {
+                    lufs: r.get(1)?,
+                    peak: r.get(2)?,
+                },
+            ))
+        },
+    )
+    .optional()?)
 }
 
 pub fn known_files(c: &Connection) -> Result<HashMap<Vec<u8>, (i64, i64)>> {

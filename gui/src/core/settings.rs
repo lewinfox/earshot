@@ -21,6 +21,9 @@ pub const HOTCUE_MODE: &str = "decks.hotcue_mode";
 /// The Flow that was on the canvas last. (Where its canvas was looking is kept with
 /// the Flow: `StoreCmd::SaveFlowCamera`.)
 pub const FLOW_OPEN: &str = "flow.open";
+/// Add another library's tracks to earshot without asking, when they're put in a
+/// playlist, crate or Flow.
+pub const IMPORT_WITHOUT_ASKING: &str = "import.without_asking";
 
 /// What was saved, read once at startup.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -30,6 +33,7 @@ pub struct Settings {
     pub deck_options: Vec<DeckOptions>,
     pub hotcue_mode: HotcueMode,
     pub flow_open: Option<CollectionId>,
+    pub import_without_asking: bool,
 }
 
 /// A player's options that stay as they were set, from one run to the next.
@@ -60,6 +64,7 @@ impl Settings {
             deck_options: read(reader, DECK_OPTIONS).unwrap_or_default(),
             hotcue_mode: read(reader, HOTCUE_MODE).unwrap_or_default(),
             flow_open: read(reader, FLOW_OPEN).unwrap_or_default(),
+            import_without_asking: read(reader, IMPORT_WITHOUT_ASKING).unwrap_or_default(),
         }
     }
 }

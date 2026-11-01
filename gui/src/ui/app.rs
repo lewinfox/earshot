@@ -90,6 +90,11 @@ pub struct EarshotApp {
     edits: edit::History,
     /// Where tracks come from (music folders, other libraries), as the Store has them.
     sources: Vec<crate::core::sources::Source>,
+    /// The USB sticks plugged in (`core::drives`), and which earshot is using.
+    drives: Vec<crate::core::drives::Drive>,
+    uses: crate::core::drives::Uses,
+    /// Stick libraries asked to become sources, so they're asked for once.
+    sticks_added: std::collections::HashSet<(crate::core::sources::SourceKind, std::path::PathBuf)>,
     /// Hot cue labels and memory cues of the tracks on the players, by track id.
     cues: HashMap<i64, Arc<store::TrackCues>>,
     analysis: AnalysisSummary,
@@ -197,6 +202,10 @@ impl EarshotApp {
                 })))
             });
         }
+        {
+            let sink = sink.clone();
+            crate::core::drives::watch(move |d| sink(Event::Drives(d)));
+        }
         let analyser =
             Analyser::start(sink.clone(), player.clone(), store.clone(), services.worker);
         let hasher = library::start_hasher(store.clone());
@@ -251,6 +260,9 @@ impl EarshotApp {
             history: History::default(),
             edits: edit::History::default(),
             sources: vec![],
+            drives: vec![],
+            uses: Default::default(),
+            sticks_added: Default::default(),
             cues: HashMap::new(),
             analysis: AnalysisSummary::default(),
             preview: None,
@@ -460,6 +472,7 @@ impl EarshotApp {
             Command::Deck(deck, DeckCmd::Load(id)) => self.load(Some(deck), id),
             Command::Library(c) => self.library_cmd(c),
             Command::External(c) => self.external_cmd(c),
+            Command::Export(c) => self.export_cmd(c),
             Command::TempoLock(TempoLockCmd::Listen(c)) => self.listen(c),
             Command::TempoLock(c) => self.tempo_lock.run(c),
             Command::Collection(c) => self.collection_cmd(c),
@@ -655,6 +668,8 @@ impl EarshotApp {
             collections: &self.collections,
             open_flow: flow.flow,
             decks: self.prefs.decks().len(),
+            drives: &self.drives,
+            uses: &self.uses,
         };
         lib.suggest
             .refresh(&view, &decks, prepare.as_ref(), selected);
@@ -670,6 +685,8 @@ impl EarshotApp {
                 collections: &self.collections,
                 open_flow: self.panels.flow.flow,
                 decks: self.prefs.decks().len(),
+                drives: &self.drives,
+                uses: &self.uses,
             },
             engine: &self.frame,
             theme: &THEME,
@@ -794,6 +811,7 @@ fn store_sink(sink: &Sink) -> EventSink {
 
 mod edits;
 mod events;
+mod export_ops;
 mod external_ops;
 #[cfg(test)]
 mod flow_tests;

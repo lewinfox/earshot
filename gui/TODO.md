@@ -55,7 +55,8 @@ The first pass was only checked off-screen (kittest renders and frame timing).
 - [x] Previewing an unanalysed track queues its analysis; the top bar shows
       "analysing N tracks".
 - [x] Import from other libraries (cratelib): playlists, crates, metadata, grids, cues.
-- [ ] Export to other libraries (cratelib), and a list view for linear Flows.
+- [x] Export to other libraries (cratelib): Prepare's Export tab.
+- [ ] A list view for linear Flows.
 - [ ] Check imported MP3 cues against Rekordbox on real files (LAME-tagged ones especially).
 - [ ] Try saved Flows and the seek bar on a real screen.
 - [x] Drag a card onto a deck to load it (the card goes back to where it was).

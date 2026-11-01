@@ -2,10 +2,12 @@
 
     python -m earshot_worker.libraries find [PATH]
     python -m earshot_worker.libraries read FORMAT PATH [--volume-root R] [--root DIR]... [--cues] [--paths JSON]
+    python -m earshot_worker.libraries write < SPEC
 
 stdout carries JSON lines only (logs go to stderr): any number of
 `{"progress": "..."}`, then one of `{"libraries": [...]}` (find), `{"library": {...}}`
-(read) or `{"error": "..."}` (and exit status 1). See ../README.md, "Other libraries".
+(read), `{"written": {...}}` or `{"error": "..."}` (and exit
+status 1). See ../README.md, "Other libraries".
 
 Separate from the analysis worker (`python -m earshot_worker`): it never imports
 torch, so it starts in well under a second, and the app runs it only when the user
@@ -19,6 +21,7 @@ import logging
 import os
 import sys
 import traceback
+from datetime import datetime
 from pathlib import Path
 
 
@@ -35,7 +38,7 @@ def _claim_stdout():
 _proto = _claim_stdout()
 
 import cratelib  # noqa: E402
-from cratelib.keys import KeyNotation, format_key  # noqa: E402
+from cratelib.keys import KeyNotation, format_key, parse_key  # noqa: E402
 from cratelib.offsets import mp3_gapless_offset_ms  # noqa: E402
 from cratelib.paths import discover  # noqa: E402
 
@@ -206,6 +209,192 @@ def read(source: cratelib.Source, roots: list[Path], cues: bool, known: dict[str
     }
 
 
+# ---- writing ---------------------------------------------------------------------------
+
+
+def pick(library: cratelib.Library, nodes: list[list[int]] | None) -> cratelib.Library:
+    """Only the playlists at `nodes` (index paths into the playlist tree, as `read`
+    lists it), inside the folders above them, and their tracks. `None`: everything."""
+    if nodes is None:
+        return library
+    root = cratelib.Playlist.folder("ROOT")
+    wanted: set[str] = set()
+    for path in nodes:
+        src, dst = library.playlists, root
+        for depth, i in enumerate(path):
+            src = src.children[i]
+            if depth == len(path) - 1:
+                if not any(c is src for c in dst.children):
+                    dst.children.append(src)
+                leaves = [p for _, p in src.walk()] if src.is_folder else [src]
+                wanted.update(tid for p in leaves for tid in p.track_ids or [])
+            else:
+                existing = next((c for c in dst.children if c.is_folder and c.name == src.name), None)
+                if existing is None:
+                    existing = cratelib.Playlist.folder(src.name)
+                    dst.children.append(existing)
+                dst = existing
+    out = cratelib.Library(library.source, warnings=list(library.warnings))
+    out.tracks = {k: t for k, t in library.tracks.items() if k in wanted}
+    out.playlists = root
+    return out
+
+
+def earshot_track(t: dict) -> cratelib.Track:
+    """A track as earshot sends it: times in seconds of earshot's decode, put back
+    on Rekordbox's timeline (the reverse of `read --cues`)."""
+    file = Path(t["file"])
+    track = cratelib.Track(
+        str(t["id"]),
+        str(file),
+        title=t.get("title") or "",
+        artist=t.get("artist") or "",
+        album=t.get("album") or "",
+        genre=t.get("genre") or "",
+        comment=t.get("comment") or "",
+        bpm=t.get("bpm") or 0.0,
+        key=parse_key(t.get("key")),
+        rating=t.get("rating") or 0,
+        colour=t.get("colour"),
+        duration_s=t.get("duration_s") or 0.0,
+        file_size=file.stat().st_size if file.is_file() else 0,
+    )
+    track.file = file
+    shift = shift_s(track)
+    ms = lambda s: (s + shift) * 1000
+    track.cues = [
+        cratelib.Cue(
+            cratelib.CueRole(c["role"]),
+            ms(c["start_s"]),
+            ms(c["end_s"]) if c.get("end_s") is not None else None,
+            c.get("slot"),
+            c.get("name") or "",
+            c.get("colour"),
+        )
+        for c in t.get("cues", [])
+    ]
+    track.grid = [cratelib.TempoMarker(ms(m["start_s"]), m["bpm"], m["beat"]) for m in t.get("grid", [])]
+    return track
+
+
+def earshot_playlist(n: dict, known: dict) -> cratelib.Playlist:
+    """A playlist, crate or folder, without the tracks earshot left out (no file here)."""
+    if n["kind"] == "folder":
+        return cratelib.Playlist.folder(n["name"], [earshot_playlist(c, known) for c in n.get("children", [])])
+    tracks = [str(i) for i in n.get("tracks", []) if str(i) in known]
+    return cratelib.Playlist(n["name"], tracks, is_crate=n["kind"] == "crate")
+
+
+def earshot_library(spec: dict) -> cratelib.Library:
+    library = cratelib.Library("earshot")
+    for t in spec["tracks"]:
+        library.add_track(earshot_track(t))
+    library.playlists.children = [earshot_playlist(n, library.tracks) for n in spec["playlists"]]
+    return library
+
+
+def options_for(target: cratelib.Source, o: dict):
+    match target:
+        case cratelib.RekordboxUsb():
+            return cratelib.RekordboxUsbOptions(
+                copy_missing=o.get("copy_missing", True),
+                waveforms=o.get("waveforms", True),
+                transcode=o.get("transcode", True),
+                xml=o.get("xml", True),
+            )
+        case cratelib.Serato():
+            return cratelib.SeratoOptions(
+                file_tags=o.get("file_tags", False), copy_missing=o.get("copy_missing", True)
+            )
+        case cratelib.Mixxx():
+            return cratelib.MixxxOptions(overwrite_existing=o.get("overwrite", True))
+        case cratelib.RekordboxXml():
+            return cratelib.RekordboxXmlOptions()
+    return None
+
+
+# The folders each format keeps a drive's library in.
+LIBRARY_DIRS = {
+    cratelib.Format.REKORDBOX_USB: ("PIONEER", ".PIONEER"),
+    cratelib.Format.SERATO: ("_Serato_",),
+}
+
+
+def drive_of(target: cratelib.Source) -> Path | None:
+    """The drive a stick's library goes on, if the target is one."""
+    match target:
+        case cratelib.RekordboxUsb():
+            return Path(target.path)
+        case cratelib.Serato():
+            drive = Path(target.volume_root or "/")
+            return drive if drive.is_dir() and drive.anchor != str(drive) else None
+    return None
+
+
+def move_aside(target: cratelib.Source, stamp: str) -> list[tuple[Path, Path]]:
+    """Another program's library on the target's drive, renamed out of the way (a
+    drive holds one library): `PIONEER` becomes `PIONEER.earshot-<time>`. The audio
+    files stay where they are. Returns (old, new) for each folder moved."""
+    drive = drive_of(target)
+    if drive is None:
+        return []
+    moved = []
+    for fmt, dirs in LIBRARY_DIRS.items():
+        if fmt == target.format:
+            continue
+        for name in dirs:
+            old = drive / name
+            if old.is_dir():
+                new = drive / f"{name}.earshot-{stamp}"
+                send({"progress": f"Moving {old} aside to {new.name}"})
+                old.rename(new)
+                moved.append((old, new))
+    return moved
+
+
+def write(spec: dict) -> dict:
+    """Write a library (`spec["from"]`: one read from another program, maybe only some
+    of its playlists, or earshot's) to `spec["target"]`. With `replace`, another
+    program's library on the target drive is moved aside first, and back if the
+    write fails."""
+    progress = lambda m: send({"progress": m})
+    src = spec["from"]
+    if "earshot" in src:
+        library = earshot_library(src["earshot"])
+    else:
+        s = src["source"]
+        source = make_source(s["format"], s["path"], s.get("volume_root"))
+        known = s.get("paths") or {}
+        library = cratelib.read(source, cratelib.PathMap(seed(known)), progress=progress)
+        find_files(library, [Path(r) for r in spec.get("roots", [])], known)
+        library = pick(library, src.get("playlists"))
+    t = spec["target"]
+    target = make_source(t["format"], t["path"], t.get("volume_root"))
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    moved = move_aside(target, stamp) if spec.get("replace") else []
+    try:
+        result = cratelib.write(
+            library,
+            target,
+            options_for(target, spec.get("options", {})),
+            merge=spec.get("merge", False),
+            progress=progress,
+        )
+    except BaseException:
+        for old, new in reversed(moved):
+            if not old.exists():
+                new.rename(old)
+        raise
+    return {
+        "files": [str(f) for f in result.files],
+        "warnings": result.warnings,
+        "tracks": len(library.tracks),
+        "playlists": library.playlists.count(),
+        "on_target": result.summary.get("tracks", 0),
+        "moved": [str(new) for _, new in moved],
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
     parser = argparse.ArgumentParser(prog="earshot_worker.libraries")
@@ -219,11 +408,14 @@ def main(argv: list[str] | None = None) -> int:
     rd.add_argument("--root", action="append", default=[], help="a music folder, to find files under")
     rd.add_argument("--cues", action="store_true", help="with cues and grids, on earshot's timeline")
     rd.add_argument("--paths", default="{}", help="path rules found before, JSON {our folder: the program's}")
+    sub.add_parser("write", help="write a library; the spec (JSON) comes on stdin")
     args = parser.parse_args(argv)
     try:
         if args.cmd == "find":
             found = cratelib.detect(Path(args.path)) if args.path else cratelib.installed()
             send({"libraries": [source_json(s) for s in found]})
+        elif args.cmd == "write":
+            send({"written": write(json.load(sys.stdin))})
         else:
             source = make_source(args.format, args.path, args.volume_root)
             send({"library": read(source, [Path(r) for r in args.root], args.cues, json.loads(args.paths))})

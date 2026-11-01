@@ -6,8 +6,11 @@ use egui::{Align2, FontId, Pos2, Rect, Response, Ui};
 
 use super::cards::{CardAction, CardState, card};
 use super::{FlowUi, Moving, Pop, Port, ZOOM, camera};
+use crate::core::collections::FlowCmd;
 use crate::core::collections::GraphOp;
 use crate::core::command::{Command, PreviewCmd};
+use crate::core::external::ExternalCmd;
+use crate::core::outside::is_outside;
 use crate::ui::panels::library::drag::{self, DragPayload, Origin};
 use crate::ui::panels::library::tracks::Media;
 use crate::ui::panels::{CoreView, PreviewState};
@@ -99,7 +102,7 @@ impl FlowUi {
                 THEME.muted,
             );
         }
-        self.drop_tracks(ui, &resp);
+        self.drop_tracks(ui, &resp, out);
         if resp.clicked() || resp.drag_started() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.pop = None;
             self.selected = None;
@@ -183,7 +186,7 @@ impl FlowUi {
     /// Tracks dragged here from the library (or the suggestions) become cards where
     /// they're dropped, one under the other. A card brought back onto the canvas only
     /// moves.
-    fn drop_tracks(&mut self, ui: &Ui, resp: &Response) {
+    fn drop_tracks(&mut self, ui: &Ui, resp: &Response, out: &mut Vec<Command>) {
         if self.moving.is_some() {
             return;
         }
@@ -193,7 +196,26 @@ impl FlowUi {
         if origin != Origin::Flow
             && let Some(p) = ui.input(|i| i.pointer.interact_pos())
         {
-            self.add_at(&tracks, self.to_screen.inverse() * p);
+            let at = self.to_screen.inverse() * p;
+            // Another library's tracks join earshot's first (it asks).
+            if tracks.iter().any(|&t| is_outside(t)) {
+                out.push(
+                    ExternalCmd::ImportThen {
+                        tracks: tracks.clone(),
+                        then: Box::new(
+                            FlowCmd::AddAt {
+                                tracks,
+                                x: at.x,
+                                y: at.y,
+                            }
+                            .into(),
+                        ),
+                    }
+                    .into(),
+                );
+                return;
+            }
+            self.add_at(&tracks, at);
         }
     }
 

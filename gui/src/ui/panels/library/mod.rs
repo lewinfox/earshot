@@ -12,8 +12,10 @@
 //! [`drag::DragPayload`] (dragging tracks and collections, with a ghost),
 //! [`tracks::track_menu`] (the one right-click menu).
 //!
-//! To add a source: a variant of `core::view::Source`, an item in [`SOURCES`], and an
-//! arm in [`LibraryPane::source`]. A side pane: a variant of `core::view::Aside`, an
+//! The other sources (DJ programs' libraries, USB sticks, Manage) come after
+//! [`VIEWS`], from `external::panes`. To add a view of earshot's library: a variant
+//! of `core::view::Source`, an item in [`VIEWS`], and an arm in
+//! [`LibraryPane::source`]. A side pane: a variant of `core::view::Aside`, an
 //! item in [`ASIDES`] and an arm in [`LibraryPane::aside`].
 
 pub mod browser;
@@ -28,13 +30,13 @@ use egui::{RichText, Ui};
 
 use self::browser::{LibraryUi, Scope};
 use self::collections::{CollectionsUi, TreeCtx};
-use self::external::ExternalUi;
+use self::external::{ExternalUi, Middle};
 use self::suggest::SuggestUi;
 use self::table::{TableView, Tables};
 use self::tracks::Media;
 use super::flow::FlowUi;
 use super::{Cx, Panel, resized};
-use crate::core::collections::CollectionCmd;
+use crate::core::collections::{CollectionCmd, Section};
 use crate::core::command::{Command, ViewCmd};
 use crate::core::sources::STREAMING;
 use crate::core::track::TrackId;
@@ -42,17 +44,12 @@ use crate::core::view::{Aside, Mode, Pane, Region, Source};
 use crate::ui::theme::{fs, sized_panel, text_scale};
 use crate::ui::widgets::{Opens, StackItem, icon_stack, icon_stack::WIDTH};
 
-/// The left icon stack.
-const SOURCES: [StackItem<Source>; 5] = [
+/// The left icon stack's views of earshot's own library (the other sources follow).
+const VIEWS: [StackItem<Source>; 4] = [
     StackItem::new(Source::AllTracks, "🎵", "All tracks"),
     StackItem::new(Source::Playlists, "☰", "Playlists and smart playlists"),
     StackItem::new(Source::Crates, "📦", "Crates"),
     StackItem::new(Source::Flows, "🔀", "Flows: sets planned on a canvas"),
-    StackItem::new(
-        Source::Sources,
-        "🖴",
-        "Sources: music folders, Rekordbox, Serato, Mixxx, drives",
-    ),
 ];
 
 /// The right icon stack.
@@ -129,6 +126,10 @@ impl LibraryPane {
             let mut cmds: Vec<CollectionCmd> = vec![];
             self.collections.show(ui, section, &tree, &mut cmds);
             cx.out.extend(cmds.into_iter().map(Command::Collection));
+            // Another library's playlist dropped here: import it.
+            if section != Section::Flows {
+                self.external.import_drop(ui, ui.max_rect());
+            }
             return;
         }
         match source {
@@ -136,25 +137,32 @@ impl LibraryPane {
                 let table = self.tables.get_mut(TableView::Library);
                 self.browser.all_tracks(ui, &cx.core, table, cx.out);
             }
-            Source::Sources => self.sources(ui, cx),
+            Source::Manage => self.manage(ui, cx),
+            Source::Program(_) | Source::Library(_) | Source::Stick(_) => {
+                if self.external.pane_gone(source) {
+                    cx.send(ViewCmd::Source(None));
+                    return;
+                }
+                self.external.pane(ui, source, &cx.core, cx.out);
+            }
             Source::Playlists | Source::Crates | Source::Flows => {
                 unreachable!("sections are drawn above")
             }
         }
     }
 
-    /// The Sources pane: where tracks come from, a section per kind. Picking a
-    /// folder lists its files in the middle; picking a library, its tracks.
-    fn sources(&mut self, ui: &mut Ui, cx: &mut Cx) {
+    /// Managing sources: the music folders (picking one lists its files in the
+    /// middle), adding libraries, and streaming services to come.
+    fn manage(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let before = self.browser.scope().clone();
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
-                heading(ui, cx, "Folders");
+                heading(ui, cx, "Music folders");
                 self.browser.folder_tree(ui, &cx.core, cx.out);
                 ui.add_space(10.0);
-                heading(ui, cx, "DJ software");
-                self.external.section(ui, cx.out);
+                heading(ui, cx, "Other libraries");
+                self.external.manage(ui, cx.out);
                 ui.add_space(10.0);
                 heading(ui, cx, "Streaming");
                 for name in STREAMING {
@@ -185,9 +193,20 @@ impl LibraryPane {
 
     /// The middle: the track list (another library's, while one is picked there).
     fn middle(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        if cx.prefs.layout().source == Some(Source::Sources) && self.external.showing() {
-            self.external.list(ui, &cx.core, cx.out);
-            return;
+        match cx
+            .prefs
+            .layout()
+            .source
+            .and_then(|s| self.external.middle(s))
+        {
+            Some(Middle::Stick) => return self.external.stick_view(ui, &cx.core, cx.out),
+            Some(Middle::Tracks) => {
+                let table = self.tables.get_mut(TableView::External);
+                return self
+                    .external
+                    .list(ui, &cx.core, &mut self.media, table, cx.out);
+            }
+            None => {}
         }
         let table = self.tables.get_mut(self.browser.view(&cx.core));
         if self
@@ -220,6 +239,9 @@ impl LibraryPane {
     /// Flow editor has its own).
     pub fn show(&mut self, ui: &mut Ui, cx: &mut Cx, asides: bool) {
         let layout = cx.prefs.layout().clone();
+        // The import and add-to-stick windows, wherever their drop was.
+        self.external.set_music(&self.browser.folders);
+        self.external.windows(ui.ctx(), &cx.core, cx.out);
         // Panel ids per mode, so each mode keeps its own sizes.
         let id = |name: &str| match cx.prefs.mode {
             Mode::Perform => format!("{name}-perform"),
@@ -233,7 +255,9 @@ impl LibraryPane {
             .exact_width(WIDTH + 6.0)
             .frame(stack_frame)
             .show_inside(ui, |ui| {
-                if let Some(s) = icon_stack(ui, &SOURCES, layout.source, Opens::Right) {
+                let mut items: Vec<StackItem<Source>> = VIEWS.into_iter().collect();
+                items.extend(self.external.stack_items(&cx.core));
+                if let Some(s) = icon_stack(ui, &items, layout.source, Opens::Right) {
                     cx.send(ViewCmd::Source(s));
                 }
             });

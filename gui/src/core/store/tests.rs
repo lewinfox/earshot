@@ -62,6 +62,8 @@ fn grid(bpm: f64) -> Beatgrid {
 #[test]
 fn an_old_development_database_is_refused() {
     let (dir, w) = setup("older");
+    // Made before there were migrations: no application id.
+    w.conn().pragma_update(None, "application_id", 0).unwrap();
     w.conn().pragma_update(None, "user_version", 2).unwrap();
     drop(w);
     let err = open_writer(&dir.join(FILE_NAME)).unwrap_err();
@@ -132,6 +134,68 @@ fn opens_twice_and_is_strict() {
     assert!(
         c.execute("INSERT INTO tracks(added_at) VALUES ('yesterday')", [])
             .is_err()
+    );
+}
+
+#[test]
+fn a_database_made_before_the_schema_changed_is_refused() {
+    let (dir, w) = setup("init-changed");
+    w.conn()
+        .execute(
+            "UPDATE settings SET value = 'old' WHERE key = 'schema.init'",
+            [],
+        )
+        .unwrap();
+    drop(w);
+    let err = open_writer(&dir.join(FILE_NAME)).unwrap_err();
+    assert!(matches!(err, StoreError::InitChanged), "{err}");
+    assert!(err.to_string().contains("make clean-db"), "{err}");
+}
+
+#[test]
+fn migrations_bring_a_database_up_to_date_after_a_backup() {
+    let (dir, w) = setup("migrate");
+    w.conn()
+        .execute(
+            "INSERT INTO settings(key, value) VALUES ('kept', 'yes')",
+            [],
+        )
+        .unwrap();
+    drop(w);
+    let path = dir.join(FILE_NAME);
+    let next = "CREATE TABLE added_later (x INTEGER) STRICT;";
+    let mut conn = Connection::open(&path).unwrap();
+    super::migrate_with(&mut conn, &path, &[MIGRATIONS[0], next]).unwrap();
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 2);
+    conn.execute("INSERT INTO added_later VALUES (1)", [])
+        .unwrap();
+    let kept: String = conn
+        .query_row("SELECT value FROM settings WHERE key = 'kept'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(kept, "yes");
+    // The backup is the database as it was, before the new migration.
+    let bak = Connection::open(dir.join(format!("{FILE_NAME}.v1.bak"))).unwrap();
+    let v: i64 = bak
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(v, 1);
+    // Up to date: nothing more to do, and no new backup.
+    super::migrate_with(&mut conn, &path, &[MIGRATIONS[0], next]).unwrap();
+}
+
+#[test]
+fn the_init_fingerprint_ignores_comments_and_spacing() {
+    let a = "-- a table\nCREATE TABLE t (\n  x  INTEGER -- the x\n);\n";
+    let b = "CREATE TABLE t (\nx INTEGER\n);";
+    assert_eq!(super::init_fingerprint(a), super::init_fingerprint(b));
+    assert_ne!(
+        super::init_fingerprint(a),
+        super::init_fingerprint("CREATE TABLE t (y INTEGER);")
     );
 }
 

@@ -1,10 +1,10 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform != 'darwin'",
-    "python_full_version < '3.14' and sys_platform != 'darwin'",
     "python_full_version >= '3.14' and sys_platform == 'darwin'",
+    "python_full_version < '3.14' and sys_platform != 'darwin'",
     "python_full_version < '3.14' and sys_platform == 'darwin'",
 ]
 
@@ -290,8 +290,8 @@ wheels = [
 
 [[package]]
 name = "cratelib"
-version = "0.1.0"
-source = { git = "https://github.com/lewinfox/cratelib?rev=7997d9f037860f4152c065c12aa06ebd725f5ca4#7997d9f037860f4152c065c12aa06ebd725f5ca4" }
+version = "0.2.0"
+source = { git = "https://github.com/lewinfox/cratelib?rev=d2f4c36ca7e96a488b27148d94994ffb308a8566#d2f4c36ca7e96a488b27148d94994ffb308a8566" }
 dependencies = [
     { name = "mutagen" },
     { name = "psutil" },
@@ -334,7 +334,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "beat-this", specifier = ">=1.1" },
-    { name = "cratelib", git = "https://github.com/lewinfox/cratelib?rev=7997d9f037860f4152c065c12aa06ebd725f5ca4" },
+    { name = "cratelib", git = "https://github.com/lewinfox/cratelib?rev=d2f4c36ca7e96a488b27148d94994ffb308a8566" },
     { name = "librosa", specifier = ">=0.10" },
     { name = "numpy" },
     { name = "scipy" },

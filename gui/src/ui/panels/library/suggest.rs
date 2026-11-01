@@ -118,7 +118,7 @@ impl SuggestUi {
         self.settling = None;
         self.list = v
             .history
-            .suggest(v.lib, &r, self.direction, &Default::default(), 80);
+            .suggest(v.lib, &r, self.direction, &Default::default(), 80, true);
         self.reference = Some(r);
         self.computed_for = Some((stamp, tempo));
     }

@@ -341,6 +341,8 @@ fn drop_target(
                     .is_some_and(|c| c.parent != target.map(|t| t.id))
         }
         DragPayload::Tracks { .. } => target.is_some_and(|t| t.kind.takes_tracks()),
+        // The pane takes it (an import), not one collection.
+        DragPayload::External { .. } => false,
     };
     if !fits {
         return;
@@ -365,6 +367,7 @@ fn drop_target(
                 });
             }
         }
+        DragPayload::External { .. } => {}
     }
 }
 

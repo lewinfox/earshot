@@ -1279,7 +1279,10 @@ fn hotcue_mode_setting() {
     use crate::core::view::SettingsTab;
     use earshot_engine::HotcueMode;
     let mut h = start("hotcue-mode");
-    assert_eq!(h.state().player.lock().unwrap().hotcue_mode, HotcueMode::PlayOnPress);
+    assert_eq!(
+        h.state().player.lock().unwrap().hotcue_mode,
+        HotcueMode::PlayOnPress
+    );
     h.state_mut()
         .dispatch(ViewCmd::Settings(SettingsTab::Decks).into());
     steps(&mut h, 3);
@@ -1294,4 +1297,302 @@ fn hotcue_mode_setting() {
         settings::read::<HotcueMode>(&a.lib.store.reader, settings::HOTCUE_MODE)
             == Some(HotcueMode::PlayWhileHeld)
     });
+}
+
+/// Prepare's Export tab draws: what to export on the left, where to on the right.
+#[test]
+fn export_tab() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = start("export_tab");
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
+    h.state_mut()
+        .dispatch(ViewCmd::Tool(crate::core::view::Tool::Export).into());
+    steps(&mut h, 3);
+    h.get_by_label("From");
+    h.get_by_label("To");
+    // The tab and its button.
+    assert_eq!(h.query_all_by_label("Export").count(), 2);
+    render(&mut h, "export_tab");
+}
+
+/// A stick plugged in gets an icon of its own, with its light; its pane shows the
+/// stick in the middle with its files, and a job holding it turns the light red.
+#[test]
+fn usb_stick() {
+    use egui_kittest::kittest::Queryable;
+    let stick = scratch_dir("STICK");
+    let _ = std::fs::remove_dir_all(&stick);
+    std::fs::create_dir_all(stick.join("Contents/Artist")).unwrap();
+    std::fs::write(stick.join("Contents/Artist/a.mp3"), b"not audio").unwrap();
+    std::fs::write(stick.join("notes.txt"), b"").unwrap();
+    let drive = crate::core::drives::Drive {
+        path: stick.clone(),
+        label: "STICK".into(),
+        device: String::new(),
+        fstype: "vfat".into(),
+        total_bytes: 32_000_000_000,
+        free_bytes: 12_300_000_000,
+        writable: true,
+        libraries: vec![],
+    };
+    let mut h = start("usb_stick");
+    let id = drive.id();
+    h.state_mut().drives_changed(vec![drive]);
+    steps(&mut h, 2);
+    h.get_by_label("STICK: safe to remove").click();
+    steps(&mut h, 3);
+    assert_eq!(
+        h.state().prefs.layout().source,
+        Some(crate::core::view::Source::Stick(id))
+    );
+    h.get_by_label("Safe to remove");
+    h.get_by_label("📁 Contents").click();
+    steps(&mut h, 3);
+    h.get_by_label("📁 Artist");
+    let hold = h.state().uses.hold(&stick);
+    steps(&mut h, 2);
+    h.get_by_label("In use");
+    render(&mut h, "usb_stick");
+    drop(hold);
+    let _ = std::fs::remove_dir_all(&stick);
+}
+
+/// An outside track (another library's, not in earshot's) plays on a deck with its
+/// library's grid and cues; edits to it last for the session, and nothing about it
+/// is saved but its waveform (in the file cache).
+#[test]
+fn outside_track_on_a_deck() {
+    use crate::core::external::{ExtCue, ExtTrack, Marker};
+    let mut h = start("outside_track");
+    let file = {
+        let a = h.state();
+        let id = ids(&h)[0];
+        PathBuf::from(&a.index.get(id).unwrap().path)
+    };
+    let cue = |role: &str, start_s, slot| ExtCue {
+        role: role.into(),
+        start_s,
+        end_s: None,
+        slot,
+        name: "drop".into(),
+        colour: None,
+    };
+    let ext = ExtTrack {
+        id: "mixxx:7".into(),
+        location: file.to_string_lossy().into(),
+        file: Some(file.clone()),
+        title: "From Mixxx".into(),
+        artist: "Someone".into(),
+        album: String::new(),
+        genre: String::new(),
+        comment: String::new(),
+        bpm: Some(120.0),
+        key: Some("Am".into()),
+        rating: 0,
+        colour: None,
+        duration_s: None,
+        cues: vec![cue("cue", 2.0, Some(0)), cue("cue", 3.0, None)],
+        grid: vec![Marker {
+            start_s: 0.25,
+            bpm: 120.0,
+            beat: 1,
+        }],
+    };
+    let outside = h.state().lib.store.outside.clone();
+    let id = outside.register(99, &ext, false).unwrap();
+    assert!(id < 0);
+    assert_eq!(
+        outside.register(99, &ext, false),
+        Some(id),
+        "the same id each read"
+    );
+
+    let deck = h.state().prefs.decks()[0];
+    h.state_mut().load(Some(deck), id);
+    settle_until(&mut h, |a| a.panels.decks[deck.index()].wave.is_some());
+    {
+        let inner = h.state().player.lock().unwrap();
+        let s = inner.session(deck);
+        assert_eq!(s.track_id, Some(id));
+        assert_eq!(s.title, "From Mixxx");
+    }
+    let grid = h
+        .state()
+        .player
+        .lock()
+        .unwrap()
+        .session(deck)
+        .grid
+        .clone()
+        .unwrap();
+    assert!(
+        (grid.time_at(0.0) - 0.25).abs() < 1e-6,
+        "the library's grid"
+    );
+    settle_until(&mut h, |a| {
+        a.cues
+            .get(&id)
+            .is_some_and(|c| c.memories.len() == 1 && c.hot_labels[0].as_deref() == Some("drop"))
+    });
+
+    // An edit: kept for the session, not saved.
+    h.state()
+        .lib
+        .store
+        .send(crate::core::store::StoreCmd::AddMemory {
+            track: id,
+            start: 5.0,
+            end: None,
+        });
+    settle_until(&mut h, |a| {
+        a.cues.get(&id).is_some_and(|c| c.memories.len() == 2)
+    });
+    let reader = h.state().lib.store.reader.clone();
+    let saved: i64 = reader
+        .with(|c| {
+            Ok(c.query_row(
+                "SELECT (SELECT count(*) FROM cues WHERE track_id < 0)
+                      + (SELECT count(*) FROM blobs WHERE track_id < 0)
+                      + (SELECT count(*) FROM track_features WHERE track_id < 0)",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(saved, 0, "nothing saved for an outside track");
+    let key = crate::core::player::file_key(&file).unwrap();
+    settle_until(&mut h, |_| reader.file_cache(&key).unwrap().is_some());
+}
+
+/// Another library's tracks show in earshot's own track table: one earshot has is
+/// that track, one it hasn't is an outside track, which loads onto a deck.
+#[test]
+fn library_tracks_in_the_table() {
+    use std::sync::Arc;
+
+    use crate::core::external::{ExtLibrary, ExtTrack, ExternalEvent, Node, NodeKind};
+    use crate::core::sources::{Source as Src, SourceConfig, SourceKind};
+    let mut h = start("library_tracks");
+    let ours = ids(&h)[0];
+    let ours_path = PathBuf::from(&h.state().index.get(ours).unwrap().path);
+    // A file earshot hasn't got: a copy of one it has, elsewhere.
+    let dir = scratch_dir("library_tracks");
+    std::fs::create_dir_all(&dir).unwrap();
+    let theirs = dir.join("theirs.wav");
+    std::fs::copy(&ours_path, &theirs).unwrap();
+    let t = |id: &str, file: &PathBuf, title: &str| ExtTrack {
+        id: id.into(),
+        location: file.to_string_lossy().into(),
+        file: Some(file.clone()),
+        title: title.into(),
+        artist: "Mixxx person".into(),
+        album: String::new(),
+        genre: String::new(),
+        comment: String::new(),
+        bpm: Some(126.0),
+        key: Some("8A".into()),
+        rating: 0,
+        colour: None,
+        duration_s: None,
+        cues: vec![],
+        grid: vec![],
+    };
+    let lib = ExtLibrary::for_test(
+        vec![
+            t("1", &ours_path, "Known"),
+            t("2", &theirs, "Only in Mixxx"),
+        ],
+        vec![Node {
+            name: "Set".into(),
+            kind: NodeKind::Playlist,
+            children: vec![],
+            tracks: vec!["2".into()],
+        }],
+    );
+    h.state()
+        .lib
+        .store
+        .send(crate::core::store::StoreCmd::AddSource(
+            crate::core::sources::NewSource {
+                kind: SourceKind::Mixxx,
+                name: "Mixxx".into(),
+                location: Some(dir.clone()),
+                config: SourceConfig::default(),
+            },
+        ));
+    settle_until(&mut h, |a| {
+        a.sources.iter().any(|s| s.kind == SourceKind::Mixxx)
+    });
+    let source: Src = h
+        .state()
+        .sources
+        .iter()
+        .find(|s| s.kind == SourceKind::Mixxx)
+        .cloned()
+        .unwrap();
+    h.state_mut().external_event(ExternalEvent::Read {
+        source: source.id,
+        result: Ok(Arc::new(lib)),
+    });
+    let outside = h
+        .state()
+        .index
+        .outside()
+        .find(|t| t.title == "Only in Mixxx")
+        .map(|t| t.id)
+        .expect("an outside track");
+    assert!(outside < 0);
+    assert!(
+        h.state().index.tracks().iter().all(|t| t.id >= 0),
+        "the library itself has only earshot's tracks"
+    );
+
+    h.state_mut().dispatch(
+        ViewCmd::Source(Some(crate::core::view::Source::Program(SourceKind::Mixxx))).into(),
+    );
+    steps(&mut h, 3);
+    h.get_by_label("All tracks (2)").click();
+    steps(&mut h, 3);
+    h.get_by_label("Only in Mixxx");
+    // The one earshot has is earshot's track, under its own title.
+    let title = h.state().index.get(ours).unwrap().title.clone();
+    h.get_by_label(&title);
+    render(&mut h, "library_tracks");
+
+    let deck = h.state().prefs.decks()[0];
+    h.state_mut()
+        .dispatch(Command::Deck(deck, DeckCmd::Load(outside)));
+    settle_until(&mut h, |a| {
+        a.player.lock().unwrap().session(deck).track_id == Some(outside)
+            && a.panels.decks[deck.index()].wave.is_some()
+    });
+
+    // Into a playlist: it asks, then imports it and the playlist has earshot's track.
+    let save = Command::from(crate::core::collections::CollectionCmd::SavePlaylist {
+        name: "From Mixxx".into(),
+        tracks: vec![outside],
+    });
+    h.state_mut().dispatch(save.clone());
+    steps(&mut h, 2);
+    h.get_by_label("Don't ask again");
+    h.state_mut().dispatch(
+        crate::core::external::ExternalCmd::ImportNow {
+            tracks: vec![outside],
+            then: Box::new(save),
+            remember: false,
+        }
+        .into(),
+    );
+    settle_until(&mut h, |a| {
+        a.collections.children(None).iter().any(|c| {
+            c.name == "From Mixxx"
+                && c.tracks.len() == 1
+                && c.tracks[0] > 0
+                && a.index
+                    .get(c.tracks[0])
+                    .is_some_and(|t| t.path == theirs.to_string_lossy())
+        })
+    });
+    let _ = std::fs::remove_dir_all(&dir);
 }

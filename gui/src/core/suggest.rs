@@ -43,8 +43,9 @@ pub struct Candidate {
     pub id: i64,
     pub bpm: Option<f64>,
     pub key: Option<Camelot>,
-    /// Ranked across the library, 0..1.
-    pub energy: f32,
+    /// Ranked across the library, 0..1. `None`: not measured (another library's
+    /// track), so it's scored on BPM and key.
+    pub energy: Option<f32>,
 }
 
 pub struct Reference<'a> {
@@ -53,7 +54,7 @@ pub struct Reference<'a> {
     pub bpm: Option<f64>,
     /// Effective key: shifted by the tempo fader unless the deck has keylock on.
     pub key: Option<Camelot>,
-    pub energy: f32,
+    pub energy: Option<f32>,
     pub direction: Direction,
     /// Tracks already played this session score lower.
     pub played: &'a HashSet<i64>,
@@ -126,7 +127,7 @@ impl Feature for Energy {
         "energy"
     }
     fn score(&self, r: &Reference, c: &Candidate) -> Option<f64> {
-        let off = (c.energy - r.energy - r.direction.delta()).abs() as f64;
+        let off = (c.energy? - r.energy? - r.direction.delta()).abs() as f64;
         Some((1.0 - off * 3.0).max(0.0))
     }
 }
@@ -266,7 +267,7 @@ mod tests {
             id,
             bpm: Some(bpm),
             key: parse_key(key),
-            energy,
+            energy: Some(energy),
         }
     }
 
@@ -275,11 +276,28 @@ mod tests {
             id: 0,
             bpm: Some(125.0),
             key: parse_key("8A"),
-            energy: 0.5,
+            energy: Some(0.5),
             direction: Direction::Build,
             played,
             exclude,
         }
+    }
+
+    #[test]
+    fn a_track_without_energy_is_scored_on_bpm_and_key() {
+        let (played, exclude) = (HashSet::new(), HashSet::new());
+        let r = reference(&played, &exclude);
+        let unmeasured = Candidate {
+            energy: None,
+            ..cand(1, 125.0, "8A", 0.0)
+        };
+        let s = suggest(&r, &[unmeasured], 1);
+        assert_eq!(s[0].part("energy"), None);
+        assert!(
+            (s[0].total - 1.0).abs() < 1e-9,
+            "a perfect BPM and key: {}",
+            s[0].total
+        );
     }
 
     #[test]

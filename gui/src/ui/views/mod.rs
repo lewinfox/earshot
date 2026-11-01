@@ -8,6 +8,7 @@ use egui::Margin;
 
 use super::panels::Cx;
 use super::panels::deck::DeckUi;
+use super::panels::export::ExportUi;
 use super::panels::flow::FlowUi;
 use super::panels::library::LibraryPane;
 use super::panels::tempo_lock::TempoLockUi;
@@ -23,6 +24,8 @@ pub struct Panels {
     pub tempo_lock: TempoLockUi,
     /// Prepare's Flow editor.
     pub flow: FlowUi,
+    /// Prepare's Export tab.
+    pub export: ExportUi,
 }
 
 impl Panels {
@@ -32,6 +35,7 @@ impl Panels {
             library,
             tempo_lock: TempoLockUi::default(),
             flow: FlowUi::default(),
+            export: ExportUi::default(),
         }
     }
 }

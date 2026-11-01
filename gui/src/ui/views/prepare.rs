@@ -13,12 +13,13 @@ use super::{Panels, row_frame};
 use crate::core::command::ViewCmd;
 use crate::core::view::{Region, Tool};
 use crate::ui::panels::deck::{CUE_PANE_W, CuePane, PreparePlayer, WavePanel};
+use crate::ui::panels::export::ExportPanel;
 use crate::ui::panels::flow::FlowTab;
 use crate::ui::panels::tempo_lock::TempoLockPanel;
 use crate::ui::panels::{Cx, Panel, mixer, resized};
 use crate::ui::widgets::{Tab, tool_tabs};
 
-const TOOLS: [Tab<Tool>; 2] = [
+const TOOLS: [Tab<Tool>; 3] = [
     Tab {
         id: Tool::TempoLock,
         name: "Tempo lock",
@@ -28,6 +29,12 @@ const TOOLS: [Tab<Tool>; 2] = [
         id: Tool::Flow,
         name: "Flow",
         tip: "Plan a set: add tracks, then grow it from suggestions",
+    },
+    Tab {
+        id: Tool::Export,
+        name: "Export",
+        tip: "Write playlists to a Rekordbox or Serato stick, Serato, Mixxx or Rekordbox XML, \
+              or convert a stick to the other format",
     },
 ];
 
@@ -112,6 +119,11 @@ fn tool(ui: &mut Ui, tool: Tool, panels: &mut Panels, cx: &mut Cx) {
         Tool::TempoLock => TempoLockPanel {
             tab: &mut panels.tempo_lock,
             roots: &panels.library.browser.folders,
+        }
+        .ui(ui, cx),
+        Tool::Export => ExportPanel {
+            tab: &mut panels.export,
+            external: &mut panels.library.external,
         }
         .ui(ui, cx),
     }

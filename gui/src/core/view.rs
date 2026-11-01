@@ -6,6 +6,7 @@ use earshot_engine::DeckId;
 use serde::{Deserialize, Serialize};
 
 use super::collections::Section;
+use super::sources::{SourceId, SourceKind};
 
 /// The two halves of the app, like Rekordbox's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -17,7 +18,9 @@ pub enum Mode {
     Prepare,
 }
 
-/// What the library's left icon stack shows: what we're operating on.
+/// What the library's left icon stack shows: where to look for music. The first
+/// four are views of earshot's own library; the rest are other places tracks come
+/// from (`core::sources`), each with an icon of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Source {
     /// Every track, with quick filters by analysis status.
@@ -29,11 +32,17 @@ pub enum Source {
     Crates,
     /// Flows, in folders.
     Flows,
-    /// Where tracks come from (`core::sources`): the music folders, other DJ
-    /// software's libraries and drives, and (to come) streaming services.
-    #[serde(alias = "Explorer", alias = "External", alias = "SoundCloud")]
-    #[serde(alias = "Beatport", alias = "Spotify")]
-    Sources,
+    /// A DJ program's library (Rekordbox, Serato, Mixxx): always listed, set up or not.
+    Program(SourceKind),
+    /// Another library added by hand (a Rekordbox XML, a copy of a stick).
+    Library(SourceId),
+    /// A USB stick, while it's plugged in, by [`Drive::id`](crate::core::drives::Drive::id).
+    Stick(u64),
+    /// Managing where music comes from: the music folders, adding libraries, and
+    /// (to come) streaming services.
+    #[serde(alias = "Sources", alias = "Explorer", alias = "External")]
+    #[serde(alias = "SoundCloud", alias = "Beatport", alias = "Spotify")]
+    Manage,
 }
 
 impl Source {
@@ -65,6 +74,8 @@ pub enum Tool {
     #[default]
     #[serde(alias = "CuesGrid")]
     Flow,
+    /// Write playlists to another DJ program's library or a USB stick, or convert a stick.
+    Export,
 }
 
 /// The windows over the app. They stack: the last one opened is on top.

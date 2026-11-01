@@ -14,7 +14,7 @@
 CREATE TABLE sources (
   id        INTEGER PRIMARY KEY,
   kind      TEXT NOT NULL CHECK (kind IN ('folder', 'rekordbox_db', 'rekordbox_xml',
-                                          'rekordbox_usb', 'serato', 'mixxx')),
+                                          'rekordbox_usb', 'serato', 'serato_usb', 'mixxx')),
   name      TEXT NOT NULL,
   location  BLOB,
   config    TEXT NOT NULL DEFAULT '{}',
@@ -73,6 +73,18 @@ CREATE TABLE files (
 ) STRICT;
 CREATE INDEX files_track ON files(track_id);
 CREATE INDEX files_hash ON files(content_hash);
+
+-- Waveforms and loudness of files earshot has played that aren't in its library (a
+-- Mixxx or Rekordbox track on this computer), keyed by the file as it was: a changed
+-- file is worked out again. Files on USB sticks are never kept here (core/outside.rs).
+CREATE TABLE file_cache (
+  path      BLOB PRIMARY KEY,
+  size      INTEGER NOT NULL,
+  mtime_ns  INTEGER NOT NULL,
+  waveform  BLOB NOT NULL,
+  lufs      REAL NOT NULL,
+  peak      REAL NOT NULL
+) STRICT;
 
 -- ---- metadata ---------------------------------------------------------------------
 

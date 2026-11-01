@@ -111,12 +111,6 @@ impl Track {
         self.grid_source == Some(GridSource::AnalysisDynamic)
     }
 
-    /// Ranked energy, or the middle when it hasn't been measured (what the
-    /// suggestion scorer uses).
-    pub fn energy_or_mid(&self) -> f32 {
-        self.energy.unwrap_or(0.5)
-    }
-
     /// Energy on the 1-10 scale the chips show and queries use.
     pub fn energy_level(&self) -> Option<f64> {
         self.energy.map(|e| e as f64 * 9.0 + 1.0)

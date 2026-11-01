@@ -17,11 +17,13 @@ use earshot_engine::{
 use super::bus::{LOOP_SIZES, step_size};
 use super::collections::{CollectionCmd, FlowCmd};
 use super::edit::EditCmd;
+use super::export::ExportCmd;
 use super::external::ExternalCmd;
 use super::index::LibraryCmd;
 use super::player::{self, AudioSettings, GridOp, Player};
 use super::store::{Memory, Store, StoreCmd};
 use super::tempo_lock::TempoLockCmd;
+use super::track::TrackId;
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -42,6 +44,8 @@ pub enum Command {
     Flow(FlowCmd),
     /// Other DJ programs' libraries: find, read, import. Run by the UI, like `Library`.
     External(ExternalCmd),
+    /// Writing to other DJ programs' libraries and sticks. Run by the UI, like `Library`.
+    Export(ExportCmd),
     /// The tempo lock tool (`TempoLock::run`). Run by the UI, like `Library`.
     TempoLock(TempoLockCmd),
     /// Metadata, ratings, tags and collection edits, which can be undone. Run by the
@@ -410,6 +414,45 @@ impl From<FlowCmd> for Command {
 impl From<EditCmd> for Command {
     fn from(c: EditCmd) -> Command {
         Command::Edit(c)
+    }
+}
+
+impl Command {
+    /// The same command with its tracks swapped through `f` (another library's,
+    /// imported, become earshot's): for the commands that put tracks in a playlist,
+    /// crate or Flow.
+    pub fn map_tracks(self, f: impl Fn(TrackId) -> TrackId) -> Command {
+        let map = |v: Vec<TrackId>| v.into_iter().map(&f).collect();
+        match self {
+            Command::Collection(CollectionCmd::AddTracks { to, tracks }) => {
+                CollectionCmd::AddTracks {
+                    to,
+                    tracks: map(tracks),
+                }
+                .into()
+            }
+            Command::Collection(CollectionCmd::SavePlaylist { name, tracks }) => {
+                CollectionCmd::SavePlaylist {
+                    name,
+                    tracks: map(tracks),
+                }
+                .into()
+            }
+            Command::Flow(FlowCmd::AddTracks(tracks)) => FlowCmd::AddTracks(map(tracks)).into(),
+            Command::Flow(FlowCmd::AddAt { tracks, x, y }) => FlowCmd::AddAt {
+                tracks: map(tracks),
+                x,
+                y,
+            }
+            .into(),
+            other => other,
+        }
+    }
+}
+
+impl From<ExportCmd> for Command {
+    fn from(c: ExportCmd) -> Command {
+        Command::Export(c)
     }
 }
 

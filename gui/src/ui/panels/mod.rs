@@ -5,6 +5,7 @@
 //! `dispatch` carries out after the frame.
 
 pub mod deck;
+pub mod export;
 pub mod flow;
 pub mod library;
 pub mod mixer;
@@ -19,6 +20,7 @@ use super::prefs::UiPrefs;
 use super::theme::Theme;
 use crate::core::collections::{CollectionId, Collections};
 use crate::core::command::{Command, ViewCmd};
+use crate::core::drives::{Drive, Uses};
 use crate::core::history::History;
 use crate::core::index::LibraryIndex;
 use crate::core::session::SLOTS;
@@ -64,6 +66,10 @@ pub struct CoreView<'a> {
     pub open_flow: Option<CollectionId>,
     /// How many decks Perform shows (two or four).
     pub decks: usize,
+    /// The USB sticks plugged in.
+    pub drives: &'a [Drive],
+    /// Which of them earshot is using (not safe to pull out).
+    pub uses: &'a Uses,
 }
 
 /// The engine as it is this frame, read once by the shell before anything is drawn.

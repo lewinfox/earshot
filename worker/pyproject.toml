@@ -33,7 +33,7 @@ packages = ["earshot_worker"]
 torch = [{ index = "pytorch-cpu" }]
 torchaudio = [{ index = "pytorch-cpu" }]
 # Bump `rev` to pick up cratelib changes.
-cratelib = { git = "https://github.com/lewinfox/cratelib", rev = "7997d9f037860f4152c065c12aa06ebd725f5ca4" }
+cratelib = { git = "https://github.com/lewinfox/cratelib", rev = "d2f4c36ca7e96a488b27148d94994ffb308a8566" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

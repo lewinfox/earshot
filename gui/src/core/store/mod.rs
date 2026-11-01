@@ -7,7 +7,11 @@
 //!   background threads. WAL mode lets them read while the writer writes.
 //! - The UI thread never runs SQL.
 //!
-//! The schema is `gui/migrations/001_baseline.sql`.
+//! The schema is made by the migrations in `gui/migrations/` ([`MIGRATIONS`]), run in
+//! order when the database opens: a new one gets them all, an older one the ones it
+//! hasn't had (after a backup copy). For now there's one, `000_init.sql`, edited in
+//! place while nothing is released; a database made before an edit to it is refused
+//! (its fingerprint, [`INIT_FINGERPRINT`], doesn't match).
 
 mod read;
 mod write;
@@ -19,15 +23,19 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use earshot_engine::HOTCUES;
 use earshot_engine::media::Location;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
-pub use read::{JobRow, LibTrack, Memory, PlaySession, Preview, ResultState, Sources, TrackCues};
+pub use read::{
+    CueRow, JobRow, LibTrack, Memory, PlaySession, Preview, ResultState, Sources, TrackCues,
+};
 pub use write::{AnalysisSave, GridSave, ScannedFile, Writer, grid_bpm};
 
 use super::collections::{Collection, CollectionKind, FlowGraph, NodeId, Section};
 use super::edit::{Edit, EditCmd};
 use super::embeddings::Embeddings;
+use super::outside::{self, FileKey, Outside};
 use super::sources::{NewSource, Source, SourceId};
+use earshot_engine::loudness::Loudness;
 
 /// Bump when `engine/src/waveform.rs` changes its output, so cached waveforms are redone.
 pub const WAVEFORM_VERSION: i64 = 1;
@@ -36,15 +44,33 @@ pub const WAVEFORM_VERSION: i64 = 1;
 /// scratch, and an old database is left alone rather than migrated.
 pub const FILE_NAME: &str = "library.db";
 
-/// The whole schema. There are no migrations yet: development databases from before
-/// it are refused (see [`SCHEMA_VERSION`]).
-const BASELINE: &str = include_str!("../../../migrations/001_baseline.sql");
+/// The migrations, in order: a database's `user_version` is how many it has had.
+/// Add one at the end to change the schema (once `000_init.sql` stops being edited
+/// in place).
+pub const MIGRATIONS: &[&str] = &[include_str!("../../../migrations/000_init.sql")];
 
-/// `user_version` of a database made from [`BASELINE`]. Development builds used 1 and
-/// 2 (before beatgrids stored their model), 3 (before collections had sections), 4
-/// (before imports from other libraries) and 5 (before sources); those are refused,
-/// not converted.
-pub const SCHEMA_VERSION: i64 = 6;
+/// `application_id` of a database made by [`MIGRATIONS`] (ASCII "ears"). Development
+/// databases from before there were migrations don't have it, and are refused.
+const APPLICATION_ID: i64 = 0x6561_7273;
+
+/// The setting holding [`INIT_FINGERPRINT`] as it was when the database was made.
+const INIT_SETTING: &str = "schema.init";
+
+/// A fingerprint of `000_init.sql`'s statements (comments and spacing left out), so
+/// a database made before it was edited is refused rather than failing on a missing
+/// table or column.
+pub fn init_fingerprint(sql: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for line in sql.lines() {
+        let code = line.split("--").next().unwrap_or("").trim();
+        if !code.is_empty() {
+            h.update(code.split_whitespace().collect::<Vec<_>>().join(" "));
+            h.update(b"\n");
+        }
+    }
+    crate::core::hash::to_hex(&h.finalize().into())
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -64,6 +90,11 @@ pub enum StoreError {
          delete {FILE_NAME} in the data folder to start a new library"
     )]
     TooOld { found: i64 },
+    #[error(
+        "the database was made before the schema (000_init.sql) last changed; \
+         delete {FILE_NAME} in the data folder (make clean-db) to start a new library"
+    )]
+    InitChanged,
     #[error("no track {0}")]
     NoTrack(i64),
     #[error("{0}: not a file on this computer")]
@@ -258,6 +289,13 @@ pub enum StoreCmd {
     /// its. An earlier session left open (the app didn't get to end it) is closed at
     /// its last play.
     StartSession,
+    /// The waveform and loudness of a file outside the library (on this computer;
+    /// never a stick's), for next time.
+    SaveFileCache {
+        key: FileKey,
+        waveform: Vec<u8>,
+        level: Loudness,
+    },
     /// A track counted as played (`history::PLAYED_AFTER`) on deck `deck` (0-based),
     /// playing since `started_at` (unix seconds). Starts a session if none is open.
     SavePlay {
@@ -406,11 +444,16 @@ pub struct Store {
     pub reader: Reader,
     next_collection: Arc<AtomicI64>,
     embeddings: Arc<RwLock<Embeddings>>,
+    /// The session's outside tracks (negative ids): nothing is saved for them.
+    pub outside: Outside,
+    /// Where answers for outside tracks go, as the writer's do.
+    sink: EventSink,
 }
 
 impl Store {
     /// Open (creating and migrating if needed) and start the writer thread.
     pub fn open(path: &Path, sink: EventSink) -> Result<Store> {
+        let answers = sink.clone();
         let conn = open_writer(path)?;
         let next = conn.query_row(
             "SELECT coalesce(max(id), 0) + 1 FROM collections",
@@ -439,6 +482,8 @@ impl Store {
             reader: Reader::new(path),
             next_collection: Arc::new(AtomicI64::new(next)),
             embeddings,
+            outside: Outside::default(),
+            sink: answers,
         })
     }
 
@@ -452,11 +497,23 @@ impl Store {
 
     /// Queue a command. Never blocks; errors come back as [`StoreEvent::Error`].
     pub fn send(&self, cmd: StoreCmd) {
+        // An outside track's: kept in memory (its cue edits) or dropped, never saved.
+        if outside::touches_outside(&cmd) {
+            if let Some(e) = self.outside.apply(cmd) {
+                (self.sink)(e);
+            }
+            return;
+        }
         let _ = self.tx.send(Box::new(move |w: &mut Writer| {
             if let Err(e) = w.apply(cmd) {
                 w.emit(StoreEvent::Error(e));
             }
         }));
+    }
+
+    /// Send an event as if the Store had (an answer about an outside track).
+    pub fn tell(&self, e: StoreEvent) {
+        (self.sink)(e);
     }
 
     /// Run `f` on the writer thread and wait for its answer. For background threads
@@ -491,6 +548,12 @@ impl Store {
     /// Load a track's hot cue labels and memory cues on a reader thread and send them
     /// as an event.
     pub fn request_cues(&self, track: i64, sink: EventSink) {
+        if outside::is_outside(track) {
+            if let Some(cues) = self.outside.cues(track) {
+                sink(StoreEvent::Cues { track, cues });
+            }
+            return;
+        }
         let reader = self.reader.clone();
         std::thread::spawn(move || match reader.with(|c| read::cues(c, track)) {
             Ok(cues) => sink(StoreEvent::Cues { track, cues }),
@@ -532,30 +595,76 @@ fn open_writer(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
-    migrate(&mut conn)?;
+    migrate(&mut conn, path)?;
     write::fill_keys(&conn)?;
     Ok(conn)
 }
 
-/// Create the schema in a new database (`user_version` 0), and refuse any other
-/// version than [`SCHEMA_VERSION`].
-fn migrate(conn: &mut Connection) -> Result<()> {
+/// Bring the database at `path` up to date: run the [`MIGRATIONS`] it hasn't had
+/// (all of them for a new one), backing up an existing one first. Refuses a
+/// database from before migrations, from a newer earshot, or made before
+/// `000_init.sql` was last edited.
+fn migrate(conn: &mut Connection, path: &Path) -> Result<()> {
+    migrate_with(conn, path, MIGRATIONS)
+}
+
+fn migrate_with(conn: &mut Connection, path: &Path, migrations: &[&str]) -> Result<()> {
     let found: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    match found {
-        0 => {
-            let tx = conn.transaction().map_err(StoreError::Create)?;
-            tx.execute_batch(BASELINE).map_err(StoreError::Create)?;
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)
-                .map_err(StoreError::Create)?;
-            tx.commit().map_err(StoreError::Create)
-        }
-        SCHEMA_VERSION => Ok(()),
-        found if found > SCHEMA_VERSION => Err(StoreError::TooNew {
-            found,
-            known: SCHEMA_VERSION,
-        }),
-        found => Err(StoreError::TooOld { found }),
+    let app: i64 = conn.pragma_query_value(None, "application_id", |r| r.get(0))?;
+    let known = migrations.len() as i64;
+    if found != 0 && app != APPLICATION_ID {
+        return Err(StoreError::TooOld { found });
     }
+    if found > known {
+        return Err(StoreError::TooNew { found, known });
+    }
+    let fingerprint = init_fingerprint(migrations[0]);
+    if found > 0 {
+        let made: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                [INIT_SETTING],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if made.as_deref() != Some(&fingerprint) {
+            return Err(StoreError::InitChanged);
+        }
+    }
+    if found == known {
+        return Ok(());
+    }
+    if found > 0 {
+        backup(conn, path, found)?;
+    }
+    let tx = conn.transaction().map_err(StoreError::Create)?;
+    for sql in &migrations[found as usize..] {
+        tx.execute_batch(sql).map_err(StoreError::Create)?;
+    }
+    if found == 0 {
+        tx.pragma_update(None, "application_id", APPLICATION_ID)
+            .map_err(StoreError::Create)?;
+        tx.execute(
+            "INSERT INTO settings(key, value) VALUES (?1, ?2)",
+            [INIT_SETTING, &fingerprint],
+        )
+        .map_err(StoreError::Create)?;
+    }
+    tx.pragma_update(None, "user_version", known)
+        .map_err(StoreError::Create)?;
+    tx.commit().map_err(StoreError::Create)
+}
+
+/// A copy of the database as it is, before migrating it: `library.db.v<n>.bak` next
+/// to it (`n`: its schema version then).
+fn backup(conn: &Connection, path: &Path, version: i64) -> Result<()> {
+    let to = path.with_file_name(format!(
+        "{}.v{version}.bak",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    let _ = std::fs::remove_file(&to);
+    conn.execute("VACUUM INTO ?1", [to.to_string_lossy()])?;
+    Ok(())
 }
 
 /// Read-only connections, opened as needed and kept for reuse. The mutex is only
@@ -652,6 +761,26 @@ impl Reader {
         self.with(|c| read::hotcues(c, id))
     }
 
+    /// A file of earshot's with this audio, if there's one.
+    pub fn file_with_hash(&self, hash: &crate::core::hash::Hash) -> Result<Option<PathBuf>> {
+        self.with(|c| read::file_with_hash(c, hash))
+    }
+
+    /// The waveform and loudness kept for a file outside the library, as it is now.
+    pub fn file_cache(&self, key: &FileKey) -> Result<Option<(Vec<u8>, Loudness)>> {
+        self.with(|c| read::file_cache(c, key))
+    }
+
+    /// The track a file is, if earshot has it.
+    pub fn track_at(&self, path: &Path) -> Result<Option<i64>> {
+        self.with(|c| read::track_at(c, path))
+    }
+
+    /// Every cue a track has, of every kind.
+    pub fn all_cues(&self, id: i64) -> Result<Vec<CueRow>> {
+        self.with(|c| read::all_cues(c, id))
+    }
+
     /// A track's saved analyser results.
     pub fn analysis_results(&self, id: i64) -> Result<Vec<ResultState>> {
         self.with(|c| read::analysis_results(c, id))
@@ -707,7 +836,6 @@ impl Reader {
     }
 
     /// A collection's tracks (a smart playlist's found by its query).
-    #[allow(dead_code)] // for export and sync; the UI evaluates queries in memory
     pub fn collection_tracks(&self, id: i64) -> Result<Vec<i64>> {
         self.with(|c| read::collection_tracks(c, id))
     }

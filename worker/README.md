@@ -200,6 +200,18 @@ python -m earshot_worker.libraries find [PATH]     # the usual places, or PATH
 python -m earshot_worker.libraries read FORMAT PATH [--volume-root R] [--root DIR]... [--cues] [--paths JSON]
 ```
 
+```sh
+python -m earshot_worker.libraries write < SPEC    # write a library (gui/src/core/export.rs builds SPEC)
+```
+
+- `write`'s spec: `from` (`{"earshot": {"tracks", "playlists"}}`, times in seconds of
+  earshot's decode, or `{"source": {...}, "playlists": [index paths] | null}`), `target`
+  (`{"format", "path", "volume_root"}`), `options`, and `replace`: move another
+  program's library on the target stick aside (`PIONEER` → `PIONEER.earshot-<time>`),
+  and back if the write fails; `merge`: add to the library already on the target (a
+  stick's is otherwise written whole, from what's given). Answers `{"written": {"files", "warnings", "tracks",
+  "playlists", "moved"}}`.
+
 - A library is `{"format", "path", "volume_root", "name"}`; `format` is cratelib's
   (`rekordbox_db`, `rekordbox_xml`, `rekordbox_usb`, `serato`, `mixxx`).
 - `read` gives `tracks` (`id`, `location` as the program stores it, `file` on this

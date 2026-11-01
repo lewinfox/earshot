@@ -245,7 +245,7 @@ impl FlowUi {
 
     /// Add tracks as new cards, one under the other from `at` (canvas points, the
     /// first card's centre).
-    fn add_at(&mut self, tracks: &[TrackId], at: Pos2) {
+    pub fn add_at(&mut self, tracks: &[TrackId], at: Pos2) {
         let first = at - vec2(NODE_W, NODE_H) / 2.0;
         for (i, &track) in tracks.iter().enumerate() {
             self.edit(GraphOp::Add {

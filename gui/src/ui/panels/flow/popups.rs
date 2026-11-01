@@ -62,9 +62,14 @@ impl FlowUi {
         if self.picks_for.as_ref() != Some(&stamp) {
             // Tracks already in the Flow are left out; tracks played this session
             // still count as played.
-            self.picks =
-                v.history
-                    .suggest(v.lib, &RefTrack::of(t), self.direction, &stamp.exclude, 9);
+            self.picks = v.history.suggest(
+                v.lib,
+                &RefTrack::of(t),
+                self.direction,
+                &stamp.exclude,
+                9,
+                false,
+            );
             self.picks_for = Some(stamp);
         }
         let mut picked = None;

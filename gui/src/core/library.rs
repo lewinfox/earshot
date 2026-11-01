@@ -20,7 +20,7 @@ const AUDIO_EXTENSIONS: &[&str] = &[
     "mp3", "flac", "wav", "aif", "aiff", "m4a", "mp4", "aac", "ogg",
 ];
 
-fn is_audio(p: &Path) -> bool {
+pub fn is_audio(p: &Path) -> bool {
     p.extension()
         .and_then(|x| x.to_str())
         .is_some_and(|x| AUDIO_EXTENSIONS.contains(&x.to_lowercase().as_str()))

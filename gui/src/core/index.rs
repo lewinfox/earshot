@@ -15,6 +15,10 @@ pub struct LibraryIndex {
     by_id: HashMap<TrackId, usize>,
     /// Tracks queued, being analysed, or whose analysis failed.
     analysis: HashMap<TrackId, AnalysisState>,
+    /// Outside tracks (`core::outside`, negative ids): found by [`LibraryIndex::get`]
+    /// so lists, decks and menus can show them, but not part of [`LibraryIndex::tracks`]
+    /// (the library).
+    outside: HashMap<TrackId, Track>,
     /// Bumped whenever track data changes, so views built from it know to refresh.
     rev: u64,
 }
@@ -77,7 +81,24 @@ impl LibraryIndex {
     }
 
     pub fn get(&self, id: TrackId) -> Option<&Track> {
-        self.by_id.get(&id).map(|&i| &self.tracks[i])
+        match self.by_id.get(&id) {
+            Some(&i) => Some(&self.tracks[i]),
+            None => self.outside.get(&id),
+        }
+    }
+
+    /// Outside tracks read (again) from another library.
+    pub fn put_outside(&mut self, tracks: Vec<LibTrack>) {
+        for t in tracks {
+            self.outside.insert(t.id, Track::new(t));
+        }
+        self.rev += 1;
+    }
+
+    /// The outside tracks known this session.
+    #[allow(dead_code)] // tests
+    pub fn outside(&self) -> impl Iterator<Item = &Track> {
+        self.outside.values()
     }
 
     pub fn tracks(&self) -> &[Track] {
@@ -96,15 +117,18 @@ impl LibraryIndex {
         self.analysis.get(&id)
     }
 
-    /// Every track, as the suggestion scorer sees it.
-    pub fn candidates(&self) -> Vec<Candidate> {
+    /// Every track, as the suggestion scorer sees it; with `outside`, other
+    /// libraries' too (scored on BPM and key: they have no energy).
+    pub fn candidates(&self, outside: bool) -> Vec<Candidate> {
+        let more = outside.then(|| self.outside.values()).into_iter().flatten();
         self.tracks
             .iter()
+            .chain(more)
             .map(|t| Candidate {
                 id: t.id,
                 bpm: t.bpm,
                 key: t.key,
-                energy: t.energy_or_mid(),
+                energy: t.energy,
             })
             .collect()
     }
@@ -213,7 +237,6 @@ mod tests {
         assert_eq!(ix.get(1).unwrap().energy, Some(1.0));
         assert_eq!(ix.get(2).unwrap().energy, Some(0.0));
         assert_eq!(ix.get(3).unwrap().energy, None);
-        assert_eq!(ix.get(3).unwrap().energy_or_mid(), 0.5);
 
         // Track 3 gets measured above both: the others move down.
         ix.patch(vec![

@@ -22,7 +22,8 @@ use super::analysis::Mode;
 use super::command::Lane;
 use super::library::Library;
 use super::session::{self, Change, DeckSession, PreviewSession, SLOTS};
-use super::store::{GridSource, Reader, Store, StoreCmd};
+use super::store::{GridSource, Reader, Store, StoreCmd, StoreEvent};
+use super::{external, outside};
 
 /// How many decks the engine runs: all it can. Perform shows two or four of them.
 pub const DECKS: usize = MAX_DECKS;
@@ -265,12 +266,19 @@ pub fn preview(player: &Player, store: &Store, id: i64, start: f64) -> Result<()
     let audio = match on_deck {
         Some(a) => a,
         None => {
-            let at = store.reader.track_location(id).map_err(|e| e.to_string())?;
+            let at = match store.outside.get(id) {
+                Some(t) => Location::File(t.file),
+                None => store.reader.track_location(id).map_err(|e| e.to_string())?,
+            };
             Arc::new(decode::decode(&at)?.0)
         }
     };
     // At the same auto-gain as on a deck.
-    let gain = match store.reader.loudness(id).map_err(|e| e.to_string())? {
+    let stored = match outside::is_outside(id) {
+        true => None,
+        false => store.reader.loudness(id).map_err(|e| e.to_string())?,
+    };
+    let gain = match stored {
         Some(l) => l.auto_gain(),
         None => loudness::measure(&audio).auto_gain(),
     };
@@ -402,6 +410,9 @@ pub fn load_track(
     if player.lock().unwrap().load_tickets[deck.index()] != ticket {
         return Err(SUPERSEDED.into());
     }
+    if outside::is_outside(id) {
+        return load_outside(player, lib, deck, id, ticket);
+    }
     let reader = &lib.store.reader;
     let track = reader.track(id).map_err(|e| e.to_string())?;
     let at = reader.track_location(id).map_err(|e| e.to_string())?;
@@ -461,7 +472,53 @@ pub fn load_track(
     }
     let hotcues = reader.hotcues(id).map_err(|e| e.to_string())?;
     let main = initial_cue(grid.as_ref(), first_beat);
+    put_on_deck(
+        player,
+        deck,
+        ticket,
+        Ready {
+            id,
+            audio,
+            grid,
+            cues: CueSet { main, hot: hotcues },
+            level,
+            title,
+            artist,
+            source,
+            wave: Arc::new(wave),
+            detail,
+        },
+    )
+}
 
+/// A decoded track, with all a deck needs.
+struct Ready {
+    id: i64,
+    audio: Arc<decode::TrackAudio>,
+    grid: Option<Beatgrid>,
+    cues: CueSet,
+    level: loudness::Loudness,
+    title: String,
+    artist: String,
+    source: String,
+    wave: Arc<Vec<u8>>,
+    detail: Vec<u8>,
+}
+
+/// Put a decoded track on a deck, unless a newer load was asked for meanwhile.
+fn put_on_deck(player: &Player, deck: DeckId, ticket: u64, r: Ready) -> Result<(), String> {
+    let Ready {
+        id,
+        audio,
+        grid,
+        cues,
+        level,
+        title,
+        artist,
+        source,
+        wave,
+        detail,
+    } = r;
     let mut inner = player.lock().unwrap();
     // Checked under the same lock as the load itself, so an older request finishing
     // late can't replace a newer one.
@@ -474,7 +531,7 @@ pub fn load_track(
         generation: inner.generation,
         audio,
         grid: grid.map(Arc::new),
-        cues: CueSet { main, hot: hotcues },
+        cues,
         auto_gain: level.auto_gain(),
     });
     // The session first: with no audio running, it's still there for a restart.
@@ -483,9 +540,107 @@ pub fn load_track(
     session.title = title;
     session.artist = artist;
     session.grid_source = source;
-    session.waveform = Arc::new(wave);
+    session.waveform = wave;
     session.detail = Arc::new(detail);
     inner.send(Command::Load { deck, track })
+}
+
+/// An outside track (`core::outside`): its file, with the grid and cues its library
+/// gave. Its waveform and loudness are worked out once and kept (a stick's for the
+/// session only); nothing else about it is saved, and it isn't analysed.
+fn load_outside(
+    player: &Player,
+    lib: &Library,
+    deck: DeckId,
+    id: i64,
+    ticket: u64,
+) -> Result<(), String> {
+    let outside = &lib.store.outside;
+    let t = outside
+        .get(id)
+        .ok_or("that track isn't known any more (its library was closed)")?;
+    let at = Location::File(t.file.clone());
+    let (audio, tags) = decode::decode(&at)?;
+    let key = file_key(&t.file);
+    let cached = match &key {
+        Some(k) if t.on_stick => outside.wave(k),
+        Some(k) => lib
+            .store
+            .reader
+            .file_cache(k)
+            .ok()
+            .flatten()
+            .map(|(w, l)| (Arc::new(w), l)),
+        None => None,
+    };
+    let (wave, level) = match cached {
+        Some(c) => c,
+        None => {
+            let (w, l) = (
+                Arc::new(waveform::summarise(&audio)),
+                loudness::measure(&audio),
+            );
+            match key {
+                Some(k) if t.on_stick => outside.keep_wave(k, w.clone(), l),
+                Some(k) => lib.store.send(StoreCmd::SaveFileCache {
+                    key: k,
+                    waveform: (*w).clone(),
+                    level: l,
+                }),
+                None => {}
+            }
+            (w, l)
+        }
+    };
+    // The track list's thumbnail.
+    lib.store
+        .tell(StoreEvent::Previews(vec![(id, waveform::preview(&wave))]));
+    let (grid, source) = match external::grid_of(&t.grid, audio.duration()) {
+        Some(g) => (Some(g), GridSource::Import.label().to_string()),
+        None => grid_for_file(&at, &tags, audio.duration()),
+    };
+    let detail = waveform::detail(&audio);
+    // The library's main cue isn't kept; the deck starts on the grid's first beat.
+    let cues = CueSet {
+        main: None,
+        hot: t.hot,
+    };
+    put_on_deck(
+        player,
+        deck,
+        ticket,
+        Ready {
+            id,
+            audio: Arc::new(audio),
+            grid,
+            cues,
+            level,
+            title: if t.title.is_empty() {
+                t.file
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            } else {
+                t.title.clone()
+            },
+            artist: t.artist.clone(),
+            source,
+            wave,
+            detail,
+        },
+    )
+}
+
+/// A file as it is now (path, size, modified), for caches.
+pub fn file_key(p: &Path) -> Option<outside::FileKey> {
+    let m = std::fs::metadata(p).ok()?;
+    let mtime = m
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos() as i64;
+    Some((p.to_owned(), m.len(), mtime))
 }
 
 /// Where a track's cue starts: the grid line nearest where analysis found the beats

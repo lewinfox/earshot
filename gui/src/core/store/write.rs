@@ -181,6 +181,25 @@ impl Writer {
             StoreCmd::RemoveSource(id) => self.remove_source(id),
             StoreCmd::SaveUserGrid { track, grid } => self.save_user_grid(track, &grid).map(|_| ()),
             StoreCmd::SaveWaveform { track, data } => self.save_waveform(track, &data),
+            StoreCmd::SaveFileCache {
+                key: (path, size, mtime),
+                waveform,
+                level,
+            } => {
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO file_cache(path, size, mtime_ns, waveform, lufs, peak)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        path_bytes(&path),
+                        size as i64,
+                        mtime,
+                        waveform,
+                        level.lufs,
+                        level.peak
+                    ],
+                )?;
+                Ok(())
+            }
             StoreCmd::SaveFeatures { track, features } => {
                 self.save_measured(track, &features)?;
                 self.tracks_changed(&[track])

@@ -47,7 +47,7 @@ pub struct RefTrack {
     pub bpm: Option<f64>,
     /// Effective key: shifted by the tempo fader unless the deck has keylock on.
     pub key: Option<Camelot>,
-    pub energy: f32,
+    pub energy: Option<f32>,
     /// The deck it's on, if it came from one.
     pub deck: Option<usize>,
     pub playing: bool,
@@ -60,7 +60,7 @@ impl RefTrack {
             id: t.id,
             bpm: t.bpm,
             key: t.key,
-            energy: t.energy_or_mid(),
+            energy: t.energy,
             deck: None,
             playing: false,
         }
@@ -221,7 +221,8 @@ impl History {
     }
 
     /// The best `n` tracks to play after `r`, leaving out `exclude` (e.g. the tracks
-    /// already in a Flow). Tracks played this session score lower.
+    /// already in a Flow). Tracks played this session score lower. `outside`: other
+    /// libraries' tracks too (not for a Flow, which holds earshot's).
     pub fn suggest(
         &self,
         lib: &LibraryIndex,
@@ -229,9 +230,10 @@ impl History {
         direction: Direction,
         exclude: &HashSet<TrackId>,
         n: usize,
+        outside: bool,
     ) -> Vec<Scored> {
         let r = r.reference(direction, &self.played, exclude);
-        suggest::suggest(&r, &lib.candidates(), n)
+        suggest::suggest(&r, &lib.candidates(outside), n)
     }
 }
 
@@ -428,16 +430,16 @@ mod tests {
         let r = RefTrack::of(ix.get(1).unwrap());
         let ids = |v: Vec<Scored>| v.into_iter().map(|s| s.id).collect::<Vec<_>>();
         assert_eq!(
-            ids(s.suggest(&ix, &r, Direction::Hold, &HashSet::new(), 9)),
+            ids(s.suggest(&ix, &r, Direction::Hold, &HashSet::new(), 9, false)),
             vec![2, 3]
         );
         s.mark_played(2);
         assert_eq!(
-            ids(s.suggest(&ix, &r, Direction::Hold, &HashSet::new(), 9)),
+            ids(s.suggest(&ix, &r, Direction::Hold, &HashSet::new(), 9, false)),
             vec![3, 2]
         );
         assert_eq!(
-            ids(s.suggest(&ix, &r, Direction::Hold, &HashSet::from([3]), 9)),
+            ids(s.suggest(&ix, &r, Direction::Hold, &HashSet::from([3]), 9, false)),
             vec![2]
         );
     }

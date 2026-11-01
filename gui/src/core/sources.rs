@@ -28,17 +28,20 @@ pub enum SourceKind {
     Serato,
     /// Mixxx's `mixxxdb.sqlite`.
     Mixxx,
+    /// A USB stick's `_Serato_` folder (not a program's library: there can be many).
+    SeratoUsb,
 }
 
 impl SourceKind {
     /// Every kind, in the order the pane lists them.
-    pub const ALL: [SourceKind; 6] = [
+    pub const ALL: [SourceKind; 7] = [
         SourceKind::Folder,
         SourceKind::RekordboxDb,
         SourceKind::Serato,
         SourceKind::Mixxx,
         SourceKind::RekordboxXml,
         SourceKind::RekordboxUsb,
+        SourceKind::SeratoUsb,
     ];
 
     /// The DJ programs the pane always lists, set up or not.
@@ -48,7 +51,7 @@ impl SourceKind {
         SourceKind::Mixxx,
     ];
 
-    /// As stored, and as cratelib names the format.
+    /// As stored. cratelib names the format [`SourceKind::format`].
     pub const fn as_str(self) -> &'static str {
         match self {
             SourceKind::Folder => "folder",
@@ -57,7 +60,21 @@ impl SourceKind {
             SourceKind::RekordboxUsb => "rekordbox_usb",
             SourceKind::Serato => "serato",
             SourceKind::Mixxx => "mixxx",
+            SourceKind::SeratoUsb => "serato_usb",
         }
+    }
+
+    /// cratelib's format: a Serato stick is Serato with the stick as its volume root.
+    pub const fn format(self) -> &'static str {
+        match self {
+            SourceKind::SeratoUsb => "serato",
+            k => k.as_str(),
+        }
+    }
+
+    /// A library on a USB stick, listed under its stick while it's plugged in.
+    pub const fn on_stick(self) -> bool {
+        matches!(self, SourceKind::RekordboxUsb | SourceKind::SeratoUsb)
     }
 
     pub fn parse(s: &str) -> Option<SourceKind> {
@@ -73,6 +90,7 @@ impl SourceKind {
             SourceKind::RekordboxUsb => "Rekordbox USB",
             SourceKind::Serato => "Serato",
             SourceKind::Mixxx => "Mixxx",
+            SourceKind::SeratoUsb => "Serato USB",
         }
     }
 

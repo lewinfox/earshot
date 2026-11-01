@@ -162,7 +162,7 @@ and, to build Rubber Band, `sudo apt install build-essential libsndfile1-dev`.
 ## Known gaps
 
 - No CLAP embeddings, key or energy analysis yet.
-- Other libraries (through cratelib) can be read and imported, not written back to.
+- Exports (Prepare's Export tab) write whole playlists; there's no two-way sync yet.
 - Whole tracks are decoded into memory (about 10 MB per stereo minute).
 - No controller LED feedback or effects.
 - Hot cues are not saved.

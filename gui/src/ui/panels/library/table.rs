@@ -402,6 +402,8 @@ pub enum TableView {
     Duplicates,
     /// What a session played, in order.
     History,
+    /// Another library's tracks (or a playlist's there).
+    External,
 }
 
 impl TableView {

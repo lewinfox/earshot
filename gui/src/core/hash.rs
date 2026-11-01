@@ -63,7 +63,6 @@ pub fn audio_sha256(path: &Path) -> io::Result<Hash> {
 }
 
 /// Lower-case hex, as cratelib writes it.
-#[allow(dead_code)] // library management API, not wired to the UI yet (tests use it)
 pub fn to_hex(h: &Hash) -> String {
     h.iter().map(|b| format!("{b:02x}")).collect()
 }

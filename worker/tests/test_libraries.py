@@ -167,3 +167,163 @@ def test_files_on_another_drive_are_found(tmp_path, monkeypatch):
     monkeypatch.setattr(libraries, "drives", lambda: [other])
     assert libraries.find_files(lib, [music], {}) == {str(other / "DJ"): "D:/Music"}
     assert lib.tracks["1"].file == other / "DJ/house/a.mp3"
+
+
+def write(spec: dict) -> list[dict]:
+    p = subprocess.run(
+        [sys.executable, "-m", "earshot_worker.libraries", "write"],
+        cwd=WORKER_DIR,
+        input=json.dumps(spec),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    lines = [json.loads(line) for line in p.stdout.splitlines()]
+    assert ("error" in lines[-1]) == (p.returncode != 0), p.stderr
+    return lines
+
+
+def tone(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "sine=d=4", str(path)],
+        check=True,
+    )
+    return path
+
+
+needs_ffmpeg = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+
+
+@needs_ffmpeg
+def test_earshots_playlists_go_back_on_rekordboxs_timeline(tmp_path):
+    """The reverse of `read --cues`: an MP3's times move later by what symphonia trims."""
+    from cratelib.offsets import mp3_gapless_offset_ms
+
+    mp3 = tone(tmp_path / "Music/t.mp3")
+    spec = {
+        "from": {
+            "earshot": {
+                "tracks": [
+                    {
+                        "id": 7,
+                        "file": str(mp3),
+                        "title": "T",
+                        "artist": "X",
+                        "bpm": 120.0,
+                        "key": "Am",
+                        "rating": 4,
+                        "cues": [
+                            {"role": "cue", "start_s": 1.0, "end_s": None, "slot": 0, "name": "drop", "colour": None},
+                            {"role": "loop", "start_s": 2.0, "end_s": 3.0, "slot": None, "name": "", "colour": None},
+                        ],
+                        "grid": [{"start_s": 0.5, "bpm": 120.0, "beat": 1}],
+                    }
+                ],
+                "playlists": [
+                    {"name": "Sets", "kind": "folder", "children": [{"name": "Friday", "kind": "playlist", "tracks": [7, 7]}]},
+                    {"name": "Digging", "kind": "crate", "tracks": [7]},
+                ],
+            }
+        },
+        "target": {"format": "rekordbox_xml", "path": str(tmp_path / "out.xml")},
+    }
+    *_, last = write(spec)
+    assert last["written"]["tracks"] == 1
+    assert last["written"]["playlists"] == 2
+    back = cratelib.read(cratelib.RekordboxXml(tmp_path / "out.xml"))
+    [t] = back.tracks.values()
+    assert (t.title, t.artist, t.rating, t.key) == ("T", "X", 4, cratelib.Key(9, True))
+    shift = mp3_gapless_offset_ms(mp3)
+    hot = next(c for c in t.cues if c.slot == 0)
+    assert hot.position_ms == pytest.approx(1000 + shift, abs=1)
+    assert t.grid[0].position_ms == pytest.approx(500 + shift, abs=1)
+    [sets, digging] = back.playlists.children
+    assert sets.children[0].name == "Friday" and len(sets.children[0].track_ids) == 2
+    assert digging.name == "Digging"
+
+
+def test_only_the_chosen_playlists_are_written(tmp_path):
+    xml = wine_xml(tmp_path)
+    lib = cratelib.read(cratelib.RekordboxXml(xml))
+    lib.playlists.children.append(cratelib.Playlist("Other", ["3"]))
+    cratelib.write(lib, cratelib.RekordboxXml(xml))
+    spec = {
+        "from": {
+            "source": {"format": "rekordbox_xml", "path": str(xml)},
+            "playlists": [[0, 0]],
+        },
+        "roots": [str(tmp_path / "Music")],
+        "target": {"format": "rekordbox_xml", "path": str(tmp_path / "out.xml")},
+    }
+    *_, last = write(spec)
+    back = cratelib.read(cratelib.RekordboxXml(tmp_path / "out.xml"))
+    assert [p.name for p in back.playlists.children] == ["Sets"]
+    assert [p.name for p in back.playlists.children[0].children] == ["Friday"]
+    assert sorted(t.title for t in back.tracks.values()) == ["A", "Gone"]
+
+
+@needs_ffmpeg
+def test_converting_a_stick_moves_its_old_library_aside(tmp_path):
+    stick = tmp_path / "STICK"
+    stick.mkdir()
+    lib = cratelib.Library("test")
+    lib.add_track(cratelib.Track("1", str(tone(tmp_path / "Music/a.mp3")), title="A"))
+    lib.playlists.children.append(cratelib.Playlist("Friday", ["1"]))
+    cratelib.write(lib, cratelib.RekordboxUsb(stick), cratelib.RekordboxUsbOptions(waveforms=False, xml=False))
+    assert (stick / "PIONEER").is_dir()
+
+    spec = {
+        "from": {"source": {"format": "rekordbox_usb", "path": str(stick)}},
+        "target": {"format": "serato", "path": str(stick / "_Serato_"), "volume_root": str(stick)},
+        "replace": True,
+    }
+    *_, last = write(spec)
+    [moved] = last["written"]["moved"]
+    assert Path(moved).name.startswith("PIONEER.earshot-")
+    assert not (stick / "PIONEER").exists()
+    back = cratelib.read(cratelib.Serato(stick / "_Serato_", str(stick)))
+    assert [t.title for t in back.tracks.values()] == ["A"]
+    assert [p.name for p in back.playlists.children] == ["Friday"]
+
+
+def test_without_replace_a_second_library_is_refused(tmp_path):
+    stick = tmp_path / "STICK"
+    (stick / "PIONEER/rekordbox").mkdir(parents=True)
+    (stick / "PIONEER/rekordbox/export.pdb").write_bytes(b"")
+    spec = {
+        "from": {"earshot": {"tracks": [], "playlists": []}},
+        "target": {"format": "serato", "path": str(stick / "_Serato_"), "volume_root": str(stick)},
+    }
+    *_, last = write(spec)
+    assert "already has a rekordbox_usb library" in last["error"]
+    assert (stick / "PIONEER").is_dir()
+
+
+@needs_ffmpeg
+def test_merging_adds_a_playlist_to_whats_on_the_stick(tmp_path):
+    stick = tmp_path / "STICK"
+    stick.mkdir()
+    a, b = tone(tmp_path / "Music/a.mp3"), tone(tmp_path / "Music/b.flac")
+    lib = cratelib.Library("test")
+    lib.add_track(cratelib.Track("1", str(a), title="A", file_size=a.stat().st_size))
+    lib.playlists.children.append(cratelib.Playlist("Friday", ["1"]))
+    cratelib.write(lib, cratelib.RekordboxUsb(stick), cratelib.RekordboxUsbOptions(waveforms=False, xml=False))
+
+    track = lambda i, f, title: {"id": i, "file": str(f), "title": title}
+    spec = {
+        "from": {
+            "earshot": {
+                "tracks": [track(1, a, "A"), track(2, b, "B")],
+                "playlists": [{"name": "Saturday", "kind": "playlist", "tracks": [2, 1]}],
+            }
+        },
+        "target": {"format": "rekordbox_usb", "path": str(stick)},
+        "options": {"waveforms": False, "xml": False},
+        "merge": True,
+    }
+    *_, last = write(spec)
+    assert last["written"]["on_target"] == 2
+    back = cratelib.read(cratelib.RekordboxUsb(stick))
+    assert sorted(p.name for p in back.playlists.children) == ["Friday", "Saturday"]
+    assert sorted(t.title for t in back.tracks.values()) == ["A", "B"], "A isn't there twice"

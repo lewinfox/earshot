@@ -10,7 +10,9 @@ use crate::core::bus::deck_letter;
 use crate::core::collections::{CollectionCmd, CollectionId, CollectionKind, FlowCmd, Section};
 use crate::core::command::{Command, DeckCmd, PreviewCmd, ViewCmd};
 use crate::core::edit::EditCmd;
+use crate::core::external::ExternalCmd;
 use crate::core::index::LibraryCmd;
+use crate::core::outside::is_outside;
 use crate::core::tempo_lock::TempoLockCmd;
 use crate::core::track::{AnalysisState, Track, TrackId};
 use crate::core::view::{Mode, Tool};
@@ -177,6 +179,28 @@ pub fn track_menu(ui: &mut Ui, sel: &[TrackId], v: &CoreView, at: MenuAt, out: &
         ui.separator();
     }
     add_to_menus(ui, sel, v, out);
+    // Another library's tracks, not in earshot's: load, add (which imports them),
+    // import, show; nothing else is about them.
+    if sel.iter().any(|&id| is_outside(id)) {
+        if ui
+            .button(format!("{} to earshot…", count("Import", n)))
+            .on_hover_text("Add to earshot's library, with their grids and cues")
+            .clicked()
+        {
+            out.push(ExternalCmd::AskImport(sel.to_vec()).into());
+            ui.close();
+        }
+        if n == 1
+            && ui
+                .button("Show in file manager")
+                .on_hover_text(v.lib.get(first).map_or("", |t| t.path.as_str()))
+                .clicked()
+        {
+            out.push(LibraryCmd::Reveal(first).into());
+            ui.close();
+        }
+        return;
+    }
     if let Some(c) = at.viewing.and_then(|id| v.collections.get(id))
         && c.kind.takes_tracks()
         && v.open_flow != Some(c.id)

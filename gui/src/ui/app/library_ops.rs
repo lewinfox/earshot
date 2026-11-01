@@ -3,6 +3,8 @@
 
 use super::*;
 use crate::core::edit::EditCmd;
+use crate::core::external::ExternalCmd;
+use crate::core::outside::is_outside;
 use crate::core::sources::NewSource;
 use crate::core::store::FlowCamera;
 
@@ -65,6 +67,17 @@ impl EarshotApp {
     /// The collection tree's and track menus' actions become Store commands; the
     /// new list comes back as an event.
     pub(super) fn collection_cmd(&mut self, c: CollectionCmd) {
+        // Another library's tracks join earshot's first.
+        if let CollectionCmd::AddTracks { tracks, .. } | CollectionCmd::SavePlaylist { tracks, .. } =
+            &c
+            && tracks.iter().any(|&t| is_outside(t))
+        {
+            let tracks = tracks.clone();
+            return self.external_cmd(ExternalCmd::ImportThen {
+                tracks,
+                then: Box::new(c.into()),
+            });
+        }
         let store = self.lib.store.clone();
         let lib = &mut self.panels.library;
         let flow = &mut self.panels.flow;
@@ -215,8 +228,18 @@ impl EarshotApp {
     }
 
     pub(super) fn flow_cmd(&mut self, c: FlowCmd) {
+        if let FlowCmd::AddTracks(tracks) | FlowCmd::AddAt { tracks, .. } = &c
+            && tracks.iter().any(|&t| is_outside(t))
+        {
+            let tracks = tracks.clone();
+            return self.external_cmd(ExternalCmd::ImportThen {
+                tracks,
+                then: Box::new(c.into()),
+            });
+        }
         match c {
             FlowCmd::AddTracks(tracks) => self.flow().add_tracks(&tracks),
+            FlowCmd::AddAt { tracks, x, y } => self.flow().add_at(&tracks, egui::pos2(x, y)),
             FlowCmd::BakePath { flow, nodes, name } => {
                 // The Store bakes from what it has: save the canvas first.
                 self.save_flow();

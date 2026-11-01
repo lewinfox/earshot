@@ -29,8 +29,11 @@ use earshot_engine::beatgrid::{Beatgrid, Constant, GridModel};
 use serde::Deserialize;
 
 use super::collections::Section;
+use super::command::Command;
+use super::drives::{Copied, Drive};
 use super::sources::{NewSource, PathRules, Source, SourceConfig, SourceId, SourceKind};
 use super::store::ScannedFile;
+use super::track::TrackId;
 use super::worker_env::WorkerEnv;
 
 /// A library the worker found: what it is and where, before it's a source.
@@ -48,7 +51,13 @@ pub struct Found {
 
 impl Found {
     pub fn kind(&self) -> Option<SourceKind> {
-        SourceKind::parse(&self.format).filter(|k| k.is_library())
+        let kind = SourceKind::parse(&self.format).filter(|k| k.is_library())?;
+        // Serato relative to a drive that isn't the computer's own (`/`, `C:/`): a stick.
+        let computer = |v: &str| v == "/" || (v.len() <= 3 && v.as_bytes().get(1) == Some(&b':'));
+        match self.volume_root.as_deref() {
+            Some(v) if kind == SourceKind::Serato && !computer(v) => Some(SourceKind::SeratoUsb),
+            _ => Some(kind),
+        }
     }
 
     /// The source it makes (`None`: a format earshot doesn't know).
@@ -111,7 +120,7 @@ pub struct ExtCue {
 
 /// A beat from which `bpm` holds until the next marker. `beat` is its place in
 /// the bar (1 = the downbeat); bars are 4/4.
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, serde::Serialize)]
 pub struct Marker {
     pub start_s: f64,
     pub bpm: f64,
@@ -240,6 +249,20 @@ pub struct ExtLibrary {
 }
 
 impl ExtLibrary {
+    /// A library as if read (for tests).
+    #[cfg(test)]
+    pub fn for_test(tracks: Vec<ExtTrack>, playlists: Vec<Node>) -> ExtLibrary {
+        ExtLibrary {
+            source: "test".into(),
+            tracks,
+            playlists,
+            warnings: vec![],
+            paths: PathRules::new(),
+            by_id: HashMap::new(),
+        }
+        .index()
+    }
+
     fn index(mut self) -> ExtLibrary {
         self.by_id = self
             .tracks
@@ -286,18 +309,25 @@ impl ExtLibrary {
     }
 }
 
-/// One line from `earshot_worker.libraries`.
+/// The last line from `earshot_worker.libraries find` or `read`.
 #[derive(Deserialize)]
 struct Line {
-    progress: Option<String>,
     libraries: Option<Vec<Found>>,
     library: Option<ExtLibrary>,
-    error: Option<String>,
 }
 
 /// Run `python -m earshot_worker.libraries <args>` and return its last line.
 /// `progress` gets each progress message on the way.
-fn run(args: Vec<OsString>, mut progress: impl FnMut(String)) -> Result<Line, String> {
+fn run(args: Vec<OsString>, progress: impl FnMut(String)) -> Result<Line, String> {
+    run_with(args, None, progress)
+}
+
+/// [`run`], with `input` on the worker's stdin (`write`'s spec).
+pub(super) fn run_with<T: serde::de::DeserializeOwned>(
+    args: Vec<OsString>,
+    input: Option<String>,
+    mut progress: impl FnMut(String),
+) -> Result<T, String> {
     let env = WorkerEnv::find();
     if let Some(why) = env.problem() {
         return Err(why);
@@ -308,11 +338,22 @@ fn run(args: Vec<OsString>, mut progress: impl FnMut(String)) -> Result<Line, St
         .args(&args)
         .current_dir(&env.dir)
         .envs(env.envs.iter().map(|(k, v)| (k, v)))
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|e| format!("starting {}: {e}", python.display()))?;
+    // On a thread of its own, so a big spec can't fill the pipe while we wait.
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let _ = stdin.write_all(input.as_bytes());
+        });
+    }
     let stdout = child.stdout.take().expect("piped stdout");
     let mut last = None;
     for line in BufReader::new(stdout).lines() {
@@ -320,19 +361,21 @@ fn run(args: Vec<OsString>, mut progress: impl FnMut(String)) -> Result<Line, St
         if line.trim().is_empty() {
             continue;
         }
-        let msg: Line = serde_json::from_str(&line)
+        let msg: serde_json::Value = serde_json::from_str(&line)
             .map_err(|e| format!("the worker sent something unreadable: {e}"))?;
-        match msg.progress {
-            Some(p) => progress(p),
+        match msg.get("progress").and_then(|p| p.as_str()) {
+            Some(p) => progress(p.to_owned()),
             None => last = Some(msg),
         }
     }
     let status = child.wait().map_err(|e| e.to_string())?;
-    match last {
-        Some(Line { error: Some(e), .. }) => Err(e),
-        Some(l) => Ok(l),
-        None => Err(format!("the library reader stopped ({status})")),
+    let Some(last) = last else {
+        return Err(format!("the library reader stopped ({status})"));
+    };
+    if let Some(e) = last.get("error").and_then(|e| e.as_str()) {
+        return Err(e.to_owned());
     }
+    serde_json::from_value(last).map_err(|e| format!("the worker sent something unreadable: {e}"))
 }
 
 /// The libraries in each program's usual place on this computer (`at: None`), or
@@ -364,7 +407,7 @@ pub fn read(
     let paths = &source.config.paths;
     let mut args: Vec<OsString> = vec![
         "read".into(),
-        source.kind.as_str().into(),
+        source.kind.format().into(),
         location.as_os_str().to_owned(),
     ];
     if let Some(v) = &source.config.volume_root {
@@ -425,8 +468,8 @@ pub enum Target {
     Library,
     /// A folder (everything in it), playlist or crate.
     Node(NodePath),
-    /// One track, by [`ExtTrack::id`] (no playlist comes with it).
-    Track(String),
+    /// Some tracks, by [`ExtTrack::id`] (no playlist comes with them).
+    Tracks(Vec<String>),
 }
 
 /// A track to bring in: its file is on this machine.
@@ -499,6 +542,8 @@ pub struct Imported {
     /// Where the import's playlists went: the collection it made for what was
     /// imported (a playlist, crate or folder), and its section. `None`: only tracks.
     pub shown_in: Option<(i64, Section)>,
+    /// Files copied off a stick first (importing from one).
+    pub copied: Option<super::drives::Copied>,
 }
 
 /// A collection's `external`: the source, its section, the names down to it and its
@@ -530,7 +575,7 @@ pub fn plan(
     let tracks_in = match target {
         Target::Library => lib.tracks_in(None),
         Target::Node(path) => lib.tracks_in(Some(path)),
-        Target::Track(id) => lib.track(id).into_iter().collect(),
+        Target::Tracks(ids) => ids.iter().filter_map(|id| lib.track(id)).collect(),
     };
     let missing = tracks_in.iter().filter(|t| t.file.is_none()).count();
     let memory = options.memory_cues && source.kind.has_memory_cues();
@@ -565,7 +610,7 @@ pub fn plan(
     // The nodes to bring: the whole tree, or the chosen one with its folders.
     let chosen: Vec<Node> = match target {
         Target::Library => lib.playlists.clone(),
-        Target::Track(_) => vec![],
+        Target::Tracks(_) => vec![],
         Target::Node(path) => {
             let mut wrapped = lib.node(path).cloned();
             for depth in (1..path.len()).rev() {
@@ -669,14 +714,38 @@ pub enum ExternalCmd {
         at: PathBuf,
     },
     Read(Source),
+    /// Open the import window for these outside tracks (`core::outside`).
+    AskImport(Vec<TrackId>),
+    /// Import these tracks (some are another library's), asking first unless told
+    /// not to, then carry out `then` with them as earshot's.
+    ImportThen {
+        tracks: Vec<TrackId>,
+        then: Box<Command>,
+    },
+    /// Asked and answered: import, then `then`. `remember`: don't ask again.
+    ImportNow {
+        tracks: Vec<TrackId>,
+        then: Box<Command>,
+        remember: bool,
+    },
     /// Bring this in. `read`: the library as already read, if it was (it's read
-    /// again when the options need cues and grids).
+    /// again when the options need cues and grids). `copy_to`: a music folder to
+    /// copy the files into first (a stick's, which won't stay plugged in).
     Import {
         source: Source,
         target: Target,
         options: ImportOptions,
         read: Option<Arc<ExtLibrary>>,
+        copy_to: Option<PathBuf>,
     },
+    /// Copy these files and folders off a stick into a music folder (then scan it).
+    CopyIn {
+        files: Vec<PathBuf>,
+        drive: Drive,
+        to: PathBuf,
+    },
+    /// Unmount a stick, so it can be pulled out.
+    Eject(Drive),
 }
 
 /// What came of an [`ExternalCmd`].
@@ -688,9 +757,14 @@ pub enum ExternalEvent {
         result: Result<Vec<Found>, String>,
     },
     /// Where the user says a program's library is: found there, or not.
-    Located { result: Result<Found, String> },
+    Located {
+        result: Result<Found, String>,
+    },
     /// What a read is doing ("Reading Mixxx tracks 120/900").
-    Progress { source: SourceId, message: String },
+    Progress {
+        source: SourceId,
+        message: String,
+    },
     Read {
         source: SourceId,
         result: Result<Arc<ExtLibrary>, String>,
@@ -698,6 +772,16 @@ pub enum ExternalEvent {
     Imported {
         source: SourceId,
         result: Result<Imported, String>,
+    },
+    /// Tracks of this library were imported: list it again (they're earshot's now).
+    Relist(SourceId),
+    /// What copying files off a stick is doing.
+    CopyProgress(String),
+    Copied(Result<Copied, String>),
+    /// A stick was ejected (it disappears from the drives), or couldn't be.
+    Ejected {
+        drive: PathBuf,
+        result: Result<(), String>,
     },
 }
 
@@ -932,7 +1016,7 @@ mod tests {
         let (save, missing) = plan(
             &source(),
             &library(),
-            &Target::Track("3".into()),
+            &Target::Tracks(vec!["3".into()]),
             ImportOptions::default(),
         );
         assert_eq!(missing, 0);
