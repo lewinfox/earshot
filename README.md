@@ -91,7 +91,9 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   *Load to deck A/B*, drag it onto a deck, or `Shift+←`/`Shift+→`. Right-click →
   *Preview in headphones* plays it on the headphones only.
 - **Analysis**: loading a track with no beatgrid starts analysis in the background; it
-  plays meanwhile on a placeholder grid from its BPM tag, and the deck switches to the
+  plays meanwhile on a *quick grid* (a steady grid from signal processing, worked out in
+  a fraction of a second as it loads; see [`docs/quick-analysis.md`](docs/quick-analysis.md)),
+  or on one from its BPM tag if the quick grid isn't sure, and the deck switches to the
   analysed grid when it's done. Right-click a track → *Analyse*, or a folder →
   *Analyse unanalysed tracks*, to do it ahead of time. Like Rekordbox there are two
   modes:

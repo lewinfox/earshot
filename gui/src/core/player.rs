@@ -8,13 +8,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
 
-use earshot_engine::beatgrid::Beatgrid;
+use earshot_engine::beatgrid::{Beatgrid, GridModel};
 use earshot_engine::decode;
+use earshot_engine::decode::TrackAudio;
 use earshot_engine::media::Location;
 use earshot_engine::{
     Command, CueSet, DeckId, Engine, EngineSnapshot, EngineState, HotcueMode, LoadedTrack,
     MAX_DECKS, MixerState, Monitor, OutputInfo, OutputOptions, PreviewCmd, Routing, Set, energy,
-    loudness, waveform,
+    loudness, quick, waveform,
 };
 use serde::{Deserialize, Serialize};
 
@@ -459,7 +460,7 @@ pub fn load_track(
             Some(Beatgrid::from_model(model, audio.duration()).map_err(|e| e.to_string())?),
             src.label().to_string(),
         ),
-        None => grid_for_file(&at, &tags, audio.duration()),
+        None => grid_for_file(&at, &tags, &audio),
     };
     // The library's title and artist, so the deck agrees with the track list.
     let (title, artist) = (track.title, track.artist);
@@ -611,7 +612,7 @@ fn load_outside(
         .tell(StoreEvent::Previews(vec![(id, waveform::preview(&wave))]));
     let (grid, source) = match external::grid_of(&t.grid, audio.duration()) {
         Some(g) => (Some(g), GridSource::Import.label().to_string()),
-        None => grid_for_file(&at, &tags, audio.duration()),
+        None => grid_for_file(&at, &tags, &audio),
     };
     let detail = waveform::detail(&audio);
     // The library's main cue isn't kept; the deck starts on the grid's first beat.
@@ -779,11 +780,22 @@ fn sidecar_path(path: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
+/// How a deck shows a quick grid's source.
+pub const QUICK_GRID_LABEL: &str = "quick grid";
+
+/// The quick grid is used only when its beat is at least this clear (see
+/// `quick::QuickGrid::confidence`); below it, the BPM tag's placeholder is.
+const QUICK_GRID_CONFIDENCE: f32 = 1.0;
+
+/// A grid for a track with none analysed or set by hand: a tempo-lock sidecar beside
+/// the file, else the quick grid (a steady grid from signal processing, a fraction of
+/// a second: `quick`), else a steady one at its BPM tag from 0 s.
 fn grid_for_file(
     at: &Location,
     tags: &decode::TrackTags,
-    duration: f64,
+    audio: &TrackAudio,
 ) -> (Option<Beatgrid>, String) {
+    let duration = audio.duration();
     // A beats sidecar sits beside a local file.
     if let Some(path) = at.as_file()
         && let Ok(text) = std::fs::read_to_string(sidecar_path(path))
@@ -798,7 +810,13 @@ fn grid_for_file(
             Err(e) => eprintln!("{}: bad beats sidecar: {e}", path.display()),
         }
     }
-    match tags.bpm.filter(|b| *b > 40.0) {
+    let tag_bpm = tags.bpm.filter(|b| *b > 40.0);
+    if let Some(q) = quick::grid(audio, tag_bpm).filter(|q| q.confidence >= QUICK_GRID_CONFIDENCE)
+        && let Ok(g) = Beatgrid::from_model(GridModel::Constant(q.grid), duration)
+    {
+        return (Some(g), QUICK_GRID_LABEL.into());
+    }
+    match tag_bpm {
         Some(bpm) => (
             Beatgrid::constant(bpm, 0.0, duration).ok(),
             "BPM tag (placeholder)".into(),
@@ -1064,6 +1082,44 @@ mod tests {
         // Unknown (no grid, or analysed before first_beat): the engine's default.
         assert_eq!(initial_cue(Some(&constant), None), None);
         assert_eq!(initial_cue(None, Some(12.26)), None);
+    }
+
+    #[test]
+    fn an_unanalysed_track_gets_the_quick_grid_else_its_tag() {
+        use earshot_engine::demo::{DemoSpec, generate};
+        let (audio, truth) = generate(
+            &DemoSpec {
+                start_bpm: 126.0,
+                end_bpm: 126.0,
+                key: "8A".into(),
+                seconds: 30.0,
+                seed: 3,
+            },
+            44_100,
+        );
+        // Not a file, so there's no sidecar to look for.
+        let at = Location::Url("test://demo".into());
+        let tags = decode::TrackTags {
+            bpm: Some(125.0),
+            ..Default::default()
+        };
+        let (grid, source) = grid_for_file(&at, &tags, &audio);
+        assert_eq!(source, QUICK_GRID_LABEL);
+        let grid = grid.unwrap();
+        assert!((grid.mean_bpm() - 126.0).abs() < 0.02);
+        // On the real beats, not the tag's.
+        for &t in &truth.times()[4..40] {
+            assert!((grid.quantize(t) - t).abs() < 0.01, "{t}");
+        }
+
+        // No beat to find: the tag's placeholder.
+        let quiet = TrackAudio {
+            samples: vec![0.0; 44_100 * 2 * 20],
+            sample_rate: 44_100,
+        };
+        let (grid, source) = grid_for_file(&at, &tags, &quiet);
+        assert_eq!(source, "BPM tag (placeholder)");
+        assert!((grid.unwrap().mean_bpm() - 125.0).abs() < 1e-9);
     }
 
     #[test]
