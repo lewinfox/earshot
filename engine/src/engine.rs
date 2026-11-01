@@ -875,7 +875,7 @@ impl Renderer {
             crossfader: 0.0,
             xf_gain: [Smoothed::new(0.0); 2],
             head_gain: Smoothed::new(1.0),
-            head_mix: Smoothed::new(-1.0),
+            head_mix: Smoothed::new(0.5),
             limiters: [Limiter::new(sr), Limiter::new(sr)],
             limiting: 0.0,
             vu_main: [0.0; 2],
@@ -1029,7 +1029,7 @@ impl Renderer {
             ];
             let head = self.head_gain.next(k) as f32;
             // Head mix: how much of the main mix the headphones hear, against the cue bus.
-            let mix = ((self.head_mix.next(k).clamp(-1.0, 1.0) + 1.0) / 2.0) as f32;
+            let mix = self.head_mix.next(k).clamp(0.0, 1.0) as f32;
             let mut m = [0f32; 2];
             let mut p = [0f32; 2];
             for d in slots(live) {
@@ -1395,7 +1395,7 @@ impl Renderer {
                 match mp {
                     MasterParam::Crossfader => self.set_crossfader(v),
                     MasterParam::HeadGain => self.head_gain.target = v.clamp(0.0, 5.0),
-                    MasterParam::HeadMix => self.head_mix.target = v.clamp(-1.0, 1.0),
+                    MasterParam::HeadMix => self.head_mix.target = v.clamp(0.0, 1.0),
                     MasterParam::Gain | MasterParam::Balance => {}
                 }
             }
@@ -1881,6 +1881,7 @@ mod tests {
         rig.send(Command::Deck(p, DeckCmd::Pfl(Set::On)));
         rig.send(Command::Deck(p, DeckCmd::Sync(Set::On)));
         rig.deck(1, DeckCmd::Pfl(Set::On)); // headphones on the (silent) cue bus
+        rig.master(MasterParam::HeadMix, 0.0); // cue bus only
         rig.master(MasterParam::Crossfader, 1.0);
         rig.send(Command::Deck(p, DeckCmd::Play(Set::On)));
         let level = level(&mut rig);
@@ -2216,6 +2217,7 @@ mod tests {
         rig.load(0, 120.0, 120.0);
         rig.deck(0, DeckCmd::Play(Set::On));
         rig.deck(1, DeckCmd::Pfl(Set::On));
+        rig.master(MasterParam::HeadMix, 0.0); // cue bus only
         rig.run(0.5);
         let phones_peak = rig.out.chunks(4).map(|f| f[2].abs()).fold(0.0, f32::max);
         let master_peak = rig.out.chunks(4).map(|f| f[0].abs()).fold(0.0, f32::max);
@@ -2410,6 +2412,7 @@ mod tests {
         rig.deck(0, DeckCmd::Play(Set::On));
         rig.deck(1, DeckCmd::Pfl(Set::On)); // cue bus silent
         rig.master(MasterParam::Balance, 1.0); // right only
+        rig.master(MasterParam::HeadMix, 0.0); // cue bus only
         rig.run(0.5);
         let p = peaks(&rig.out, 4);
         assert!(p[0] == 0.0 && p[1] > 0.01, "balance: {p:?}");
@@ -2432,6 +2435,7 @@ mod tests {
         rig.load(0, 120.0, 120.0);
         rig.deck(0, DeckCmd::Play(Set::On));
         rig.deck(1, DeckCmd::Pfl(Set::On)); // headphones hear nothing
+        rig.master(MasterParam::HeadMix, 0.0); // cue bus only
         // A laptop's one stereo pair, split: master on the right, headphones on the left.
         rig.send(Command::SetRouting(Routing {
             master: Out::Mono(1),

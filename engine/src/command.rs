@@ -196,7 +196,8 @@ pub enum MasterParam {
     Balance,
     /// Headphone level, linear, 0..5.
     HeadGain,
-    /// What the headphones hear: -1 the cue bus only .. 1 the main mix only.
+    /// What the headphones hear: 0 the cue bus only .. 1 the main mix only (0.5 an
+    /// even mix, the default).
     HeadMix,
 }
 
@@ -329,7 +330,7 @@ impl Default for MixerState {
             main_gain: 1.0,
             balance: 0.0,
             head_gain: 1.0,
-            head_mix: -1.0,
+            head_mix: 0.5,
         }
     }
 }
