@@ -461,7 +461,7 @@ mod tests {
             press(Perform, "Right", true),
             Some(Command::View(ViewCmd::LoadSelected(d))) if d == deck(1)
         ));
-        assert!(press(Perform, "C", false).is_none(), "C is Prepare's");
+        assert!(press(Perform, "6", false).is_none(), "6 is Prepare's");
     }
 
     #[test]

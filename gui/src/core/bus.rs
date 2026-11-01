@@ -290,7 +290,7 @@ pub enum Control {
 pub enum FxControl {
     On,
     Level,
-    /// Halve or double the effect's length (through `FX_BEATS`).
+    /// Halve or double the effect's length in beats.
     BeatsDown,
     BeatsUp,
     /// The next effect.
@@ -314,8 +314,8 @@ impl FxControl {
         match self {
             On => spec("fx_on", "effect on / off", Kind::Toggle),
             Level => spec("fx_level", "effect level", Kind::Continuous(FX_LEVEL)),
-            BeatsDown => spec("fx_beats_down", "shorter effect", Kind::Button),
-            BeatsUp => spec("fx_beats_up", "longer effect", Kind::Button),
+            BeatsDown => spec("fx_beats_down", "halve the effect's length", Kind::Button),
+            BeatsUp => spec("fx_beats_up", "double the effect's length", Kind::Button),
             Next => spec("fx_next", "next effect", Kind::Button),
             Target => spec("fx_target", "effect on the next deck / main", Kind::Button),
         }

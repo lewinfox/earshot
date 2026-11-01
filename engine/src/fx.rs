@@ -16,22 +16,9 @@ use crate::dsp::{self, Smoothed};
 /// How many effect units there are.
 pub const FX_UNITS: usize = 2;
 
-/// The beat lengths the ◀ / ▶ buttons step through.
-pub const FX_BEATS: [f64; 10] = [
-    1.0 / 16.0,
-    1.0 / 8.0,
-    1.0 / 4.0,
-    1.0 / 2.0,
-    3.0 / 4.0,
-    1.0,
-    2.0,
-    4.0,
-    8.0,
-    16.0,
-];
-
-/// The shortest and longest beat length a unit takes.
-pub const MIN_BEATS: f64 = 1.0 / 32.0;
+/// The shortest and longest beat length a unit takes. The ◀ / ▶ buttons halve and
+/// double the length within this range, as on Pioneer's gear: 1/16, 1/8 … 8, 16.
+pub const MIN_BEATS: f64 = 1.0 / 16.0;
 pub const MAX_BEATS: f64 = 16.0;
 
 /// The longest echo, seconds: 16 beats down to 80 BPM. Longer ones are cut to this.
@@ -130,7 +117,7 @@ pub enum FxCmd {
     /// Clamped to 0..1.
     Level(f64),
     Target(FxTarget),
-    /// Step the length through [`FX_BEATS`]: -1 shorter, 1 longer.
+    /// Halve (-1) or double (1) the length, within [`MIN_BEATS`]..[`MAX_BEATS`].
     BeatsStep(i32),
     /// The next effect in [`FxKind::ALL`].
     NextKind,
@@ -139,18 +126,10 @@ pub enum FxCmd {
     NextTarget,
 }
 
-/// The length `dir` steps on from `beats` in [`FX_BEATS`] (from the nearest one, for
-/// a length that isn't in it).
+/// `beats` halved (`dir` -1) or doubled (1), `dir` times over, kept within
+/// [`MIN_BEATS`]..[`MAX_BEATS`].
 pub fn step_beats(beats: f64, dir: i32) -> f64 {
-    let nearest = FX_BEATS
-        .iter()
-        .enumerate()
-        .min_by(|a, b| {
-            let d = |x: f64| (x / beats).ln().abs();
-            d(*a.1).total_cmp(&d(*b.1))
-        })
-        .map_or(0, |(i, _)| i) as i32;
-    FX_BEATS[(nearest + dir).clamp(0, FX_BEATS.len() as i32 - 1) as usize]
+    (beats * 2f64.powi(dir)).clamp(MIN_BEATS, MAX_BEATS)
 }
 
 impl FxTarget {
@@ -573,6 +552,35 @@ mod tests {
     }
 
     #[test]
+    fn halving_and_doubling_retime_the_effects() {
+        // Echo at 1 beat (0.5 s at 120 BPM), halved: once the time has glided over,
+        // a click's first repeat comes a quarter second later.
+        let mut u = unit(FxKind::Echo, 1.0, 1.0);
+        u.apply(FxCmd::BeatsStep(-1));
+        assert_eq!(u.state().beats, 0.5);
+        run(&mut u, (SR * 1.0) as usize, |_| 0.0);
+        let out = run(&mut u, (SR * 0.6) as usize, |f| (f == 0) as u8 as f32);
+        let peak_at = |from: f64, to: f64| {
+            out[(from * SR) as usize..(to * SR) as usize]
+                .iter()
+                .fold(0f32, |m, s| m.max(s.abs()))
+        };
+        assert!(peak_at(0.24, 0.26) > 0.5, "a repeat at 1/2 beat");
+        assert!(peak_at(0.05, 0.23) < 1e-3, "nothing before it");
+
+        // Trans at 1 beat, doubled to 2: open for a whole beat, cut for the next.
+        let mut u = unit(FxKind::Trans, 1.0, 1.0);
+        u.apply(FxCmd::BeatsStep(1));
+        let out = run(&mut u, (SR * 1.0) as usize, |_| 1.0);
+        let at = |t: f64| out[(t * SR) as usize];
+        assert!(
+            at(0.3) > 0.99 && at(0.45) > 0.99,
+            "open through the first beat"
+        );
+        assert!(at(0.6) < 0.01 && at(0.9) < 0.01, "cut through the second");
+    }
+
+    #[test]
     fn trans_level_sets_the_depth() {
         let mut u = unit(FxKind::Trans, 1.0, 0.5);
         let out = run(&mut u, (SR * 0.5) as usize, |_| 1.0);
@@ -615,11 +623,20 @@ mod tests {
     #[test]
     fn steps_and_cycles() {
         assert_eq!(step_beats(1.0, 1), 2.0);
-        assert_eq!(step_beats(1.0, -1), 0.75);
+        assert_eq!(step_beats(1.0, -1), 0.5);
+        assert_eq!(step_beats(0.5, -1), 0.25);
         assert_eq!(step_beats(16.0, 1), 16.0);
         assert_eq!(step_beats(1.0 / 16.0, -1), 1.0 / 16.0);
-        // From a length off the list, the nearest one's neighbour.
-        assert_eq!(step_beats(1.1, 1), 2.0);
+        // Halving down from 1 beat and doubling back lands on 1 exactly.
+        let mut b = 1.0;
+        for _ in 0..4 {
+            b = step_beats(b, -1);
+        }
+        assert_eq!(b, 1.0 / 16.0);
+        for _ in 0..4 {
+            b = step_beats(b, 1);
+        }
+        assert_eq!(b, 1.0);
         let mut u = FxUnit::new(SR, FxUnitState::default());
         u.apply(FxCmd::NextKind);
         assert_eq!(u.state().kind, FxKind::Trans);

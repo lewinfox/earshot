@@ -24,16 +24,12 @@ const STEP: f32 = 13.0;
 /// The panel's width, inside its frame.
 pub const WIDTH: f32 = FX_UNITS as f32 * COL;
 
-/// A length in beats as the units show it: `1/4`, `3/4`, `2`.
+/// A length in beats as the units show it: `1/4`, `1/2`, `2`.
 fn fmt_beats(b: f64) -> String {
     if b >= 1.0 {
-        return format!("{b}");
-    }
-    let den = (1.0 / b).round();
-    if (b * den - 1.0).abs() < 1e-9 {
-        format!("1/{den}")
+        format!("{b}")
     } else {
-        format!("{}/4", (b * 4.0).round())
+        format!("1/{}", (1.0 / b).round())
     }
 }
 
@@ -108,14 +104,14 @@ fn column(
             rect(0.0, y, STEP, PFL_H),
             HwButton::new("◀", colour, vec2(STEP, PFL_H)).font(8.0),
         )
-        .on_hover_text("Shorter");
+        .on_hover_text("Halve the length: the echo's repeats, the Trans cuts come twice as often");
     press(ui, &r, FxControl::BeatsDown, out);
     let r = ui
         .put(
             rect(BUTTON - STEP, y, STEP, PFL_H),
             HwButton::new("▶", colour, vec2(STEP, PFL_H)).font(8.0),
         )
-        .on_hover_text("Longer");
+        .on_hover_text("Double the length");
     press(ui, &r, FxControl::BeatsUp, out);
     ui.painter().text(
         pos2(col.center().x, col.top() + y + PFL_H / 2.0),
@@ -187,7 +183,6 @@ mod tests {
         use super::fmt_beats as f;
         assert_eq!(f(1.0 / 16.0), "1/16");
         assert_eq!(f(0.5), "1/2");
-        assert_eq!(f(0.75), "3/4");
         assert_eq!(f(1.0), "1");
         assert_eq!(f(16.0), "16");
     }

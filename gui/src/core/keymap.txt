@@ -61,9 +61,13 @@ perform  Shift+Right  deck2  load_selected
 perform  G        fx1    fx_on
 perform  T        fx1    fx_next
 perform  Shift+G  fx1    fx_target
+perform  C        fx1    fx_beats_down
+perform  V        fx1    fx_beats_up
 perform  H        fx2    fx_on
 perform  Y        fx2    fx_next
 perform  Shift+H  fx2    fx_target
+perform  B        fx2    fx_beats_down
+perform  N        fx2    fx_beats_up
 
 # ---- Prepare: Rekordbox's keys --------------------------------------------------------
 prepare  Space        prepare  play

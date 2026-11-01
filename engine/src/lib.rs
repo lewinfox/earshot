@@ -32,7 +32,7 @@ pub use command::{
     MixerState, ParamId, Press, PreviewCmd, Set, XfSide,
 };
 pub use engine::{Out, Routing};
-pub use fx::{FX_BEATS, FX_UNITS, FxCmd, FxKind, FxTarget, FxUnitState, step_beats};
+pub use fx::{FX_UNITS, FxCmd, FxKind, FxTarget, FxUnitState, step_beats};
 pub use output::{OutputInfo, OutputOptions};
 pub use snapshot::{DeckSnap, EngineEvent, EngineSnapshot, MixerSnap, Monitor, PreviewSnap, Stats};
 pub use tempo::TempoRange;

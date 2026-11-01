@@ -125,10 +125,11 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
 - **Effects** (the FX panel beside the mixer): two units, each running *Echo*
   (repeats on the beat that fade and dull; the repeats ring on after the unit is
   switched off or the fader comes down) or *Trans* (cuts the sound on the beat). Per
-  unit: the effect, its length in beats (◀ ▶, 1/16 to 16), *Level* (how loud the
+  unit: the effect, its length in beats (◀ ▶ halve and double it, from 1/16 to 16), *Level* (how loud the
   repeats are, how deep the cuts go), what it's on (deck A/B…, or *MAIN*, which
   follows the sync leader or the playing deck) and *ON*. Keys: `G`/`H` switch units
-  1/2 on and off, `T`/`Y` pick the next effect, `Shift+G`/`Shift+H` the next target.
+  1/2 on and off, `T`/`Y` pick the next effect, `Shift+G`/`Shift+H` the next target, `C`/`V` halve and double unit 1's length and
+  `B`/`N` unit 2's.
 - **Mixer and FX** switches in the top bar show or hide those panels mid-set.
 - **Layout**: drag the gaps between panes to resize. *Menu → View → Size* or
   Ctrl −/=/0 scales the whole UI.
