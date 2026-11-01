@@ -16,6 +16,9 @@ you can plug in a controller, press everything, and read what's missing.
   choice, the translation layer, and our own (non-XML) format.
 - **[feedback.md](feedback.md)**: LEDs, meters and watching controls. How Mixxx
   does it, how earshot can, how hard it is, and a plan.
+- **[capture.md](capture.md)**: controllers with no mapping. Detecting the
+  model, guided and free capture in a new Configure mode, guesses from Mixxx's
+  mappings, and a GitHub issue for adding support.
 - **`tools/`**: the two scripts that measured all this. Rerun them after a Mixxx
   update (see the top of mixxx-controls.md). They read `~/git/mixxx` and
   `/usr/share/mixxx/controllers` and write only the tables in mixxx-controls.md.
