@@ -7,6 +7,7 @@
 pub mod deck;
 pub mod export;
 pub mod flow;
+pub mod fx;
 pub mod library;
 pub mod mixer;
 pub mod status;

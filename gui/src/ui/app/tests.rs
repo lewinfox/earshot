@@ -684,7 +684,30 @@ fn layout_is_kept_per_mode() {
     steps(&mut h, 3);
 }
 
-/// Perform's mixer hides from View > Panes, and while a controller is connected
+/// Perform's effect units show and hide from the top bar's FX switch, apart from the
+/// mixer's.
+#[test]
+fn the_fx_switch_shows_and_hides_the_effect_units() {
+    let mut h = start("fx");
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Perform).into());
+    steps(&mut h, 3);
+    let fx = |h: &H| h.query_all_by_label("Effect level").count() > 0;
+    let mixer = |h: &H| h.query_all_by_label("Gain").count() > 0;
+    assert!(fx(&h) && mixer(&h));
+    h.get_by_label("FX").click();
+    steps(&mut h, 3);
+    assert!(!fx(&h) && mixer(&h));
+    assert!(!h.state().prefs.show_fx);
+    h.get_by_label("Mixer").click();
+    steps(&mut h, 3);
+    assert!(!fx(&h) && !mixer(&h));
+    h.get_by_label("FX").click();
+    steps(&mut h, 3);
+    assert!(fx(&h) && !mixer(&h));
+}
+
+/// Perform's mixer hides from the top bar's Mixer switch, and while a controller is connected
 /// (unless Settings says not to); it starts hidden each time one connects.
 #[test]
 fn the_mixer_hides_by_hand_and_for_a_controller() {

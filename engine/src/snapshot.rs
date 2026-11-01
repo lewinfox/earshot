@@ -9,6 +9,7 @@ use crate::command::{
     ChannelState, CueSet, DeckId, DeckState, EngineState, HOTCUES, LoopState, MAX_DECKS,
     MixerState, XfSide,
 };
+use crate::fx::{FX_UNITS, FxUnitState};
 use crate::tempo::TempoRange;
 
 /// One deck and its channel, as of the end of a callback.
@@ -79,6 +80,10 @@ pub struct MixerSnap {
     pub limiting: f64,
     /// The leader the app chose ([`crate::Command::SetSyncLeader`]).
     pub sync_leader: Option<DeckId>,
+    /// The effect units' settings.
+    pub fx: [FxUnitState; FX_UNITS],
+    /// Each unit is doing something: on, or an echo still ringing.
+    pub fx_busy: [bool; FX_UNITS],
 }
 
 /// The preview player (headphones only).
@@ -124,6 +129,7 @@ impl EngineSnapshot {
                 balance: self.mixer.balance,
                 head_gain: self.mixer.head_gain,
                 head_mix: self.mixer.head_mix,
+                fx: self.mixer.fx,
             },
             sync_leader: self.mixer.sync_leader,
             ..EngineState::default()

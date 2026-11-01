@@ -148,8 +148,10 @@ pub enum ViewCmd {
     UiScale(f32),
     /// A panel was dragged to this size (points), in the current mode.
     Resize(Region, f32),
-    /// Show Perform's mixer (View > Panes > Mixer controls).
+    /// Show Perform's mixer (the top bar's Mixer switch).
     ShowMixer(bool),
+    /// Show Perform's effect units (the top bar's FX switch).
+    ShowFx(bool),
     /// Hide the mixer while a controller is connected.
     AutoHideMixer(bool),
 }

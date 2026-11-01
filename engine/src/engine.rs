@@ -17,6 +17,7 @@ use crate::command::{
 };
 use crate::decode::TrackAudio;
 use crate::dsp::{self, Limiter, Smoothed};
+use crate::fx::{BeatClock, FALLBACK_BPM, FX_UNITS, FxCmd, FxTarget, FxUnit, FxUnitState};
 use crate::processor::{Channel, KNOB_SECS, MasterChain};
 use crate::snapshot::{
     DeckSnap, EngineEvent, EngineSnapshot, MixerSnap, Monitor, PreviewSnap, Stats,
@@ -797,6 +798,18 @@ pub struct Renderer {
     preview_player: Player,
     preview_gain: f32,
     master_chain: MasterChain,
+    /// Each channel after its fader and crossfader, where the effect units go.
+    post: [Vec<f32>; SLOTS],
+    /// The headphone cue bus (before the head mix).
+    cue: Vec<f32>,
+    /// The crossfader's left and right gains, per frame of the block.
+    xf_frames: Vec<[f32; 2]>,
+    fx: [FxUnit; FX_UNITS],
+    /// Per unit: seconds per beat when its target last moved (an echo's tail keeps
+    /// its timing while the deck is stopped), and a free-running beat for when
+    /// there's nothing to follow.
+    fx_spb: [f64; FX_UNITS],
+    fx_free_beat: [f64; FX_UNITS],
     crossfader: f64,
     /// Left and right crossfader gains, eased.
     xf_gain: [Smoothed; 2],
@@ -872,6 +885,12 @@ impl Renderer {
             preview_player: Player::new(0.0, None),
             preview_gain: 1.0,
             master_chain: MasterChain::new(sr),
+            post: std::array::from_fn(|_| vec![0.0; MAX_BLOCK * 2]),
+            cue: vec![0.0; MAX_BLOCK * 2],
+            xf_frames: vec![[0.0; 2]; MAX_BLOCK],
+            fx: std::array::from_fn(|u| FxUnit::new(sr, FxUnitState::default_for(u))),
+            fx_spb: [60.0 / FALLBACK_BPM; FX_UNITS],
+            fx_free_beat: [0.0; FX_UNITS],
             crossfader: 0.0,
             xf_gain: [Smoothed::new(0.0); 2],
             head_gain: Smoothed::new(1.0),
@@ -1023,23 +1042,23 @@ impl Renderer {
         let k = self.knob_ease;
         let any_pfl = self.channels[..live].iter().any(|c| c.pfl);
         for f in 0..n {
-            let xf = [
+            self.xf_frames[f] = [
                 self.xf_gain[0].next(k) as f32,
                 self.xf_gain[1].next(k) as f32,
             ];
-            let head = self.head_gain.next(k) as f32;
-            // Head mix: how much of the main mix the headphones hear, against the cue bus.
-            let mix = ((self.head_mix.next(k).clamp(-1.0, 1.0) + 1.0) / 2.0) as f32;
-            let mut m = [0f32; 2];
-            let mut p = [0f32; 2];
-            for d in slots(live) {
-                let (ch, buf) = (&mut self.channels[d], &self.deck_buf[d]);
-                if ch.direct {
-                    m[0] += buf[2 * f];
-                    m[1] += buf[2 * f + 1];
-                    continue;
-                }
+        }
+        let cue = &mut self.cue[..n * 2];
+        cue.fill(0.0);
+        for d in slots(live) {
+            let (ch, buf) = (&mut self.channels[d], &self.deck_buf[d][..n * 2]);
+            let post = &mut self.post[d][..n * 2];
+            if ch.direct {
+                post.copy_from_slice(buf);
+                continue;
+            }
+            for f in 0..n {
                 let v = ch.fader.next(k) as f32;
+                let xf = self.xf_frames[f];
                 let g = v
                     * v
                     * match ch.crossfader {
@@ -1049,17 +1068,51 @@ impl Renderer {
                     };
                 for c in 0..2 {
                     let s = buf[2 * f + c];
-                    m[c] += s * g;
+                    post[2 * f + c] = s * g;
                     if ch.pfl {
-                        p[c] += s;
+                        cue[2 * f + c] += s;
                     }
                 }
             }
+        }
+
+        // Effect units on channels, after the fader so an echo rings on after it.
+        let clocks: [Option<BeatClock>; FX_UNITS] = std::array::from_fn(|u| self.fx_clock(u, n));
+        for (u, clock) in clocks.iter().enumerate() {
+            if let (FxTarget::Deck(id), Some(clock)) = (self.fx[u].state().target, clock)
+                && id.index() < live
+            {
+                self.fx[u].process(&mut self.post[id.index()][..n * 2], clock);
+            }
+        }
+
+        // The main mix, then effects on it, then the headphones.
+        for f in 0..n {
+            let mut m = [0f32; 2];
+            for d in slots(live) {
+                m[0] += self.post[d][2 * f];
+                m[1] += self.post[d][2 * f + 1];
+            }
+            self.master[2 * f] = 0.8 * m[0];
+            self.master[2 * f + 1] = 0.8 * m[1];
+        }
+        for (u, clock) in clocks.iter().enumerate() {
+            if let (FxTarget::Master, Some(clock)) = (self.fx[u].state().target, clock) {
+                self.fx[u].process(&mut self.master[..n * 2], clock);
+            }
+        }
+        for f in 0..n {
+            let head = self.head_gain.next(k) as f32;
+            // Head mix: how much of the main mix the headphones hear, against the cue bus.
+            let mix = ((self.head_mix.next(k).clamp(-1.0, 1.0) + 1.0) / 2.0) as f32;
             for c in 0..2 {
-                let m = 0.8 * m[c];
-                self.master[2 * f + c] = m;
+                let m = self.master[2 * f + c];
                 // With nothing cued the cue bus carries the main mix.
-                let cue = if any_pfl { 0.8 * p[c] } else { m };
+                let cue = if any_pfl {
+                    0.8 * self.cue[2 * f + c]
+                } else {
+                    m
+                };
                 self.phones[2 * f + c] = head * ((1.0 - mix) * cue + mix * m);
             }
         }
@@ -1091,6 +1144,48 @@ impl Renderer {
         }
         // The headphones get their own limiter, after the preview is mixed in.
         self.limiters[1].process(&mut self.phones[..n * 2]);
+    }
+
+    /// The deck effects on the main mix follow: the sync leader if it's playing, else
+    /// the first playing deck, else the first loaded one.
+    fn master_deck(&self) -> Option<usize> {
+        let loaded = |d: &usize| self.decks[*d].track.is_some();
+        let playing = |d: &usize| loaded(d) && self.decks[*d].playing();
+        self.sync_leader
+            .map(|l| l.index())
+            .filter(|d| *d < self.live && playing(d))
+            .or_else(|| (0..self.live).find(playing))
+            .or_else(|| (0..self.live).find(loaded))
+    }
+
+    /// Effect unit `u`'s beat clock for this block (just rendered, `n` frames), or
+    /// `None` when its target isn't a live deck.
+    fn fx_clock(&mut self, u: usize, n: usize) -> Option<BeatClock> {
+        let sr = self.sample_rate;
+        let deck = match self.fx[u].state().target {
+            FxTarget::Deck(id) if id.index() < self.live => Some(id.index()),
+            FxTarget::Deck(_) => return None,
+            FxTarget::Master => self.master_deck(),
+        };
+        let Some(d) = deck.filter(|d| self.decks[*d].track.is_some()) else {
+            // Nothing to follow: a steady fallback tempo.
+            let clock = BeatClock::steady(FALLBACK_BPM, self.fx_free_beat[u], sr);
+            self.fx_free_beat[u] = (clock.beat_end + n as f64 * clock.beats_per_frame) % 64.0;
+            self.fx_spb[u] = clock.secs_per_beat;
+            return Some(clock);
+        };
+        let dk = &self.decks[d];
+        let bpm = dk.sync_bpm().unwrap_or(FALLBACK_BPM);
+        let speed = dk.player.speed.abs();
+        let moving = dk.playing() && speed > 0.05;
+        if moving {
+            self.fx_spb[u] = 60.0 / (bpm * speed);
+        }
+        Some(BeatClock {
+            beat_end: dk.beat_at(dk.pos()),
+            beats_per_frame: if moving { bpm * speed / 60.0 / sr } else { 0.0 },
+            secs_per_beat: self.fx_spb[u],
+        })
     }
 
     /// The deck `d` follows when synced: the app's chosen leader, or else the best
@@ -1295,6 +1390,7 @@ impl Renderer {
                 }
             }
             Command::Preview(p) => self.preview_cmd(p),
+            Command::Fx { unit, cmd } => self.fx_cmd(unit, cmd),
             Command::Restore(st) => self.restore(st),
         }
     }
@@ -1400,6 +1496,24 @@ impl Renderer {
         }
     }
 
+    fn fx_cmd(&mut self, unit: usize, cmd: FxCmd) {
+        // Only the live decks (not Prepare's player) take effects.
+        if let FxCmd::Target(FxTarget::Deck(id)) = cmd
+            && id.index() >= self.live
+        {
+            return;
+        }
+        if let Some(fx) = self.fx.get_mut(unit) {
+            match cmd {
+                FxCmd::NextTarget => {
+                    let next = fx.state().target.next(self.live);
+                    fx.apply(FxCmd::Target(next));
+                }
+                cmd => fx.apply(cmd),
+            }
+        }
+    }
+
     fn preview_cmd(&mut self, p: PreviewCmd) {
         let t = &mut self.preview_player.transport;
         match p {
@@ -1457,6 +1571,20 @@ impl Renderer {
         self.master_chain.set(MasterParam::Balance, m.balance);
         self.set_param(ParamId::Master(MasterParam::HeadGain), m.head_gain);
         self.set_param(ParamId::Master(MasterParam::HeadMix), m.head_mix);
+        for (u, s) in m.fx.into_iter().enumerate() {
+            let target_ok = match s.target {
+                FxTarget::Deck(id) => id.index() < self.live,
+                FxTarget::Master => true,
+            };
+            self.fx[u].set(if target_ok {
+                s
+            } else {
+                FxUnitState {
+                    target: FxTarget::Master,
+                    ..s
+                }
+            });
+        }
         self.apply(Command::SetSyncLeader(st.sync_leader));
         self.apply(Command::SetHotcueMode(st.hotcue_mode));
         // Its tracks are out; the box itself is freed elsewhere.
@@ -1494,6 +1622,8 @@ impl Renderer {
                 vu_main: self.vu_main.map(|v| v as f64),
                 limiting: self.limiting,
                 sync_leader: self.sync_leader,
+                fx: self.fx.each_ref().map(|u| u.state()),
+                fx_busy: self.fx.each_ref().map(|u| u.busy()),
             },
             preview: PreviewSnap {
                 playing: self.preview.is_some() && pt.playing,
@@ -1634,6 +1764,86 @@ mod tests {
             deck: id(deck),
             track: track(audio, None, 1),
         });
+    }
+
+    fn peak(v: &[f32]) -> f32 {
+        v.iter().fold(0f32, |m, s| m.max(s.abs()))
+    }
+
+    /// A playing deck A of steady tone at full fader, with effect unit 1 (on deck A)
+    /// set to `kind`.
+    fn fx_rig(kind: crate::fx::FxKind) -> Rig {
+        use crate::fx::FxCmd;
+        let mut rig = Rig::new();
+        load_fn(&mut rig, 0, 30.0, |t| {
+            (t * 440.0 * std::f64::consts::TAU).sin() as f32 * 0.5
+        });
+        rig.channel(0, ChannelParam::Volume, 1.0);
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.send(Command::Fx {
+            unit: 0,
+            cmd: FxCmd::Kind(kind),
+        });
+        rig.send(Command::Fx {
+            unit: 0,
+            cmd: FxCmd::Level(1.0),
+        });
+        rig
+    }
+
+    #[test]
+    fn an_echo_rings_on_after_the_fader_comes_down() {
+        use crate::fx::{FxCmd, FxKind};
+        // Without the echo, the fader down is silence.
+        let mut rig = fx_rig(FxKind::Echo);
+        rig.run(1.0);
+        rig.channel(0, ChannelParam::Volume, 0.0);
+        rig.run(0.05);
+        assert!(peak(&record(&mut rig, 0.3)) < 1e-4);
+
+        // With it on, the repeats go on.
+        let mut rig = fx_rig(FxKind::Echo);
+        rig.send(Command::Fx {
+            unit: 0,
+            cmd: FxCmd::Enabled(Set::On),
+        });
+        rig.run(1.0);
+        rig.channel(0, ChannelParam::Volume, 0.0);
+        rig.run(0.05);
+        assert!(peak(&record(&mut rig, 0.3)) > 0.05);
+        assert!(rig.snap().mixer.fx_busy[0]);
+        assert!(rig.snap().mixer.fx[0].enabled);
+    }
+
+    #[test]
+    fn trans_cuts_in_time_with_the_deck() {
+        use crate::fx::{FxCmd, FxKind, FxTarget};
+        // No grid: the deck counts beats at 120 BPM from the start, so a 1-beat Trans
+        // is open for the first quarter second of each half second, cut for the next.
+        let mut rig = fx_rig(FxKind::Trans);
+        rig.send(Command::Fx {
+            unit: 0,
+            cmd: FxCmd::Enabled(Set::On),
+        });
+        rig.send(Command::Fx {
+            unit: 0,
+            cmd: FxCmd::Target(FxTarget::Master),
+        });
+        rig.run(0.2);
+        let start = rig.pos(0);
+        let out = record(&mut rig, 2.0);
+        let sr = SR as f64;
+        // A window of the output around track time `t`.
+        let at = |t: f64| {
+            let i = ((t - start) * sr) as usize;
+            peak(&out[i - 200..i + 200])
+        };
+        let first = (start / 0.5).ceil() * 0.5;
+        for k in 0..3 {
+            let beat = first + k as f64 * 0.5;
+            assert!(at(beat + 0.12) > 0.1, "open after the beat at {beat}");
+            assert!(at(beat + 0.37) < 1e-3, "cut in the second half at {beat}");
+        }
     }
 
     /// Run for `seconds`, keeping the master's left channel.

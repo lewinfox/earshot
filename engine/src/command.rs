@@ -9,6 +9,7 @@ use std::time::Instant;
 use crate::beatgrid::Beatgrid;
 use crate::decode::TrackAudio;
 use crate::engine::Routing;
+use crate::fx::{FX_UNITS, FxCmd, FxUnitState};
 use crate::tempo::TempoRange;
 
 /// The most decks the engine can run. The app picks how many are live when it starts
@@ -320,6 +321,7 @@ pub struct MixerState {
     pub balance: f64,
     pub head_gain: f64,
     pub head_mix: f64,
+    pub fx: [FxUnitState; FX_UNITS],
 }
 
 impl Default for MixerState {
@@ -330,6 +332,7 @@ impl Default for MixerState {
             balance: 0.0,
             head_gain: 1.0,
             head_mix: -1.0,
+            fx: std::array::from_fn(FxUnitState::default_for),
         }
     }
 }
@@ -402,6 +405,11 @@ pub enum Command {
     SetHotcueMode(HotcueMode),
     SetRouting(Routing),
     Preview(PreviewCmd),
+    /// An effect unit (0..[`FX_UNITS`]; others are ignored).
+    Fx {
+        unit: usize,
+        cmd: FxCmd,
+    },
     /// Put every deck and the mixer back as they were (after an audio restart).
     Restore(Box<EngineState>),
 }

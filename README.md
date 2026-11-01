@@ -122,6 +122,14 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
 - **Energy** is a stand-in for now: loudness of the busy parts plus brightness,
   ranked across your library. It's measured when a track is analysed or loaded;
   tracks without it count as middling.
+- **Effects** (the FX panel beside the mixer): two units, each running *Echo*
+  (repeats on the beat that fade and dull; the repeats ring on after the unit is
+  switched off or the fader comes down) or *Trans* (cuts the sound on the beat). Per
+  unit: the effect, its length in beats (◀ ▶, 1/16 to 16), *Level* (how loud the
+  repeats are, how deep the cuts go), what it's on (deck A/B…, or *MAIN*, which
+  follows the sync leader or the playing deck) and *ON*. Keys: `G`/`H` switch units
+  1/2 on and off, `T`/`Y` pick the next effect, `Shift+G`/`Shift+H` the next target.
+- **Mixer and FX** switches in the top bar show or hide those panels mid-set.
 - **Layout**: drag the gaps between panes to resize. *Menu → View → Size* or
   Ctrl −/=/0 scales the whole UI.
 - **Search** with free text plus `bpm:120-126` and `key:8A` (or `key:Am`). It searches
@@ -164,6 +172,7 @@ and, to build Rubber Band, `sudo apt install build-essential libsndfile1-dev`.
 - No CLAP embeddings, key or energy analysis yet.
 - Exports (Prepare's Export tab) write whole playlists; there's no two-way sync yet.
 - Whole tracks are decoded into memory (about 10 MB per stereo minute).
-- No controller LED feedback or effects.
+- No controller LED feedback. Effects are Echo and Trans only, and the DDJ-400's FX
+  section isn't mapped yet.
 - Hot cues are not saved.
 - The worker has no timeout: if it hangs, the analysis queue stops until restart.

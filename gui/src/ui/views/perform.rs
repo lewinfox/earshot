@@ -8,6 +8,7 @@ use egui::{Margin, Ui, vec2};
 use super::{Panels, library, row_frame};
 use crate::core::view::Region;
 use crate::ui::panels::deck::{DeckPanel, Side, WavePanel};
+use crate::ui::panels::fx::FxPanel;
 use crate::ui::panels::mixer::{self, MixerPanel};
 use crate::ui::panels::{Cx, Panel, resized};
 
@@ -57,12 +58,15 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
                 }
             };
             let show_mixer = cx.prefs.mixer_shown();
+            let show_fx = cx.prefs.show_fx;
             let mixer_w = if show_mixer {
                 mixer::width(&decks) + 16.0
             } else {
                 0.0
             };
-            let width = (ui.available_width() - mixer_w - 12.0) / 2.0;
+            let fx_w = if show_fx { FxPanel::WIDTH } else { 0.0 };
+            let gaps = 6.0 * (2 + show_mixer as u8 + show_fx as u8 - 1) as f32;
+            let width = (ui.available_width() - mixer_w - fx_w - gaps.max(12.0)) / 2.0;
             let column = |ui: &mut Ui, s: Side, panels: &mut Panels, cx: &mut Cx| {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = STACK_GAP;
@@ -89,6 +93,9 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
                         }
                         .ui(ui, cx)
                     });
+                }
+                if show_fx {
+                    ui.allocate_ui(vec2(fx_w, 0.0), |ui| FxPanel.ui(ui, cx));
                 }
                 column(ui, Side::Right, panels, cx);
             });

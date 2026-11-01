@@ -7,6 +7,7 @@
 pub mod command;
 pub mod dsp;
 pub mod engine;
+pub mod fx;
 pub mod keylock;
 pub mod output;
 pub mod phones_out;
@@ -31,6 +32,7 @@ pub use command::{
     MixerState, ParamId, Press, PreviewCmd, Set, XfSide,
 };
 pub use engine::{Out, Routing};
+pub use fx::{FX_BEATS, FX_UNITS, FxCmd, FxKind, FxTarget, FxUnitState, step_beats};
 pub use output::{OutputInfo, OutputOptions};
 pub use snapshot::{DeckSnap, EngineEvent, EngineSnapshot, MixerSnap, Monitor, PreviewSnap, Stats};
 pub use tempo::TempoRange;

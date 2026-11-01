@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use earshot_engine::{
-    Command as EngineCommand, CommandSender, DeckCmd as EngineCmd, DeckId, LEAD_IN, ParamId,
+    Command as EngineCommand, CommandSender, DeckCmd as EngineCmd, DeckId, FxCmd, LEAD_IN, ParamId,
     Routing, Set,
 };
 
@@ -30,6 +30,8 @@ pub enum Command {
     Deck(DeckId, DeckCmd),
     /// A knob or fader: EQ, volume, crossfader, …
     Param(ParamId, f64),
+    /// An effect unit (0-based).
+    Fx(usize, FxCmd),
     Mixer(MixerCmd),
     Audio(AudioCmd),
     /// The headphone preview of a library track.
@@ -159,6 +161,7 @@ pub fn direct(cmd: Command) -> Result<EngineCommand, Command> {
     match cmd {
         Command::Deck(deck, DeckCmd::Engine(c)) => Ok(EngineCommand::Deck(deck, c)),
         Command::Param(p, v) => Ok(EngineCommand::Param(p, v)),
+        Command::Fx(unit, cmd) => Ok(EngineCommand::Fx { unit, cmd }),
         other => Err(other),
     }
 }
