@@ -1369,6 +1369,7 @@ fn usb_stick() {
         free_bytes: 12_300_000_000,
         writable: true,
         libraries: vec![],
+        empty: false,
     };
     let mut h = start("usb_stick");
     let id = drive.id();
@@ -1389,6 +1390,114 @@ fn usb_stick() {
     h.get_by_label("In use");
     render(&mut h, "usb_stick");
     drop(hold);
+    let _ = std::fs::remove_dir_all(&stick);
+}
+
+/// While tracks are analysed the status line along the bottom says so, with a bar,
+/// and the top bar has a jobs pill; once they're done both are gone.
+#[test]
+fn the_status_line_shows_whats_running() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = start("status_line");
+    let ids = ids(&h);
+    h.state_mut().dispatch(
+        LibraryCmd::Analyse {
+            tracks: ids.clone(),
+            dynamic: false,
+        }
+        .into(),
+    );
+    settle_until(&mut h, |a| {
+        a.jobs.list().iter().any(|j| j.progress.is_some())
+    });
+    steps(&mut h, 1);
+    let jobs = h.state().jobs.list();
+    assert!(jobs[0].title.starts_with("Analysing "), "{jobs:?}");
+    h.get_by_label_contains(&jobs[0].title);
+    let n = jobs.len();
+    h.get_by_label(&format!("{n} job{}", if n == 1 { "" } else { "s" }))
+        .click();
+    steps(&mut h, 2);
+    h.get_by_label("Stop analysis");
+    render(&mut h, "status_line");
+    settle_until(&mut h, |a| a.analysis.busy.is_empty());
+    steps(&mut h, 2);
+    assert!(h.state().jobs.list().is_empty());
+    assert!(h.query_by_label_contains("job").is_none());
+}
+
+/// A stick with files on it isn't ready for a library: its pane says so and offers
+/// to format it; a playlist's "Send to" opens the add window, which offers to format
+/// first, and the format window says what's lost. (The stick here has no device, so
+/// formatting it fails, harmlessly.) Its icon's menu has Format and Eject.
+#[test]
+fn a_stick_with_files_is_formatted_first() {
+    use egui_kittest::kittest::Queryable;
+    let stick = scratch_dir("FILES");
+    let _ = std::fs::remove_dir_all(&stick);
+    std::fs::create_dir_all(&stick).unwrap();
+    std::fs::write(stick.join("notes.txt"), b"").unwrap();
+    let drive = crate::core::drives::Drive {
+        path: stick.clone(),
+        label: "Files".into(),
+        device: String::new(),
+        fstype: "vfat".into(),
+        total_bytes: 32_000_000_000,
+        free_bytes: 12_000_000_000,
+        writable: true,
+        libraries: vec![],
+        empty: false,
+    };
+    let mut h = start("format_stick");
+    let ids = ids(&h);
+    let id = drive.id();
+    make(&mut h, CollectionKind::Playlist, "Friday", vec![ids[0]]);
+    h.state_mut().drives_changed(vec![drive.clone()]);
+    h.state_mut()
+        .dispatch(ViewCmd::Source(Some(Source::Stick(id))).into());
+    steps(&mut h, 3);
+    // The pane's and the middle's.
+    assert_eq!(
+        h.query_all_by_label_contains("It has other files on it.")
+            .count(),
+        2
+    );
+    assert_eq!(h.query_all_by_label("Format this stick…").count(), 3);
+
+    h.state_mut()
+        .dispatch(ViewCmd::Source(Some(Source::Playlists)).into());
+    steps(&mut h, 3);
+    h.get_by_label("Friday").click_secondary();
+    steps(&mut h, 2);
+    h.get_by_label("Send to Files ⏵").click();
+    steps(&mut h, 2);
+    h.get_by_label("as Rekordbox (format it first)…").click();
+    steps(&mut h, 3);
+    h.get_by_label_contains("Files isn't ready for a Rekordbox library.");
+    h.get_by_label("Format…").click();
+    steps(&mut h, 3);
+    h.get_by_label_contains("Everything on it is erased (20.0 GB used now)");
+    h.get_by_label("Then \"Friday\" is added to it.");
+    render(&mut h, "format_stick");
+    h.get_by_label("Erase and format").click();
+    settle_until(&mut h, |a| {
+        a.panels.library.external.format_result().is_some()
+    });
+    steps(&mut h, 2);
+    h.get_by_label_contains("Formatting failed: earshot can't tell which device");
+    h.get_by_label("Close").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Erase and format").is_none());
+
+    // The real drives were listed after formatting: this stick isn't one.
+    h.state_mut().drives_changed(vec![drive]);
+    steps(&mut h, 2);
+    h.get_by_label("Files: safe to remove").click_secondary();
+    steps(&mut h, 2);
+    h.get_by_label("Eject");
+    h.get_by_label("Format this stick…").click();
+    steps(&mut h, 2);
+    h.get_by_label("Erase and format");
     let _ = std::fs::remove_dir_all(&stick);
 }
 

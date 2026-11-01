@@ -28,6 +28,8 @@ pub struct StackItem<T> {
     pub light: Option<Color32>,
     /// A gap above it, starting a group.
     pub gap: bool,
+    /// Right-clicking it opens a menu ([`icon_stack_with_menu`]'s).
+    pub menu: bool,
 }
 
 impl<T> StackItem<T> {
@@ -39,6 +41,7 @@ impl<T> StackItem<T> {
             enabled: true,
             light: None,
             gap: false,
+            menu: false,
         }
     }
 }
@@ -57,6 +60,18 @@ pub fn icon_stack<T: Copy + PartialEq>(
     items: &[StackItem<T>],
     open: Option<T>,
     opens: Opens,
+) -> Option<Option<T>> {
+    icon_stack_with_menu(ui, items, open, opens, |_, _| {})
+}
+
+/// [`icon_stack`], where right-clicking an item with [`StackItem::menu`] opens a
+/// menu `menu` fills in.
+pub fn icon_stack_with_menu<T: Copy + PartialEq>(
+    ui: &mut Ui,
+    items: &[StackItem<T>],
+    open: Option<T>,
+    opens: Opens,
+    mut menu: impl FnMut(&mut Ui, T),
 ) -> Option<Option<T>> {
     let mut picked = None;
     ui.vertical(|ui| {
@@ -131,6 +146,9 @@ pub fn icon_stack<T: Copy + PartialEq>(
             let resp = resp.on_hover_text(&*it.tip);
             if resp.clicked() {
                 picked = Some((!on).then_some(it.id));
+            }
+            if it.menu {
+                resp.context_menu(|ui| menu(ui, it.id));
             }
             // Spring-loaded while something is dragged over it.
             let since = resp.id.with("drag-over");

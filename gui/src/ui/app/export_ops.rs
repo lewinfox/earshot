@@ -107,9 +107,19 @@ impl EarshotApp {
                     x.options
                 ));
                 let sink = self.sink.clone();
+                let to = self
+                    .drives
+                    .iter()
+                    .find(|d| d.holds(&x.target.path))
+                    .map_or_else(|| x.target.kind.label().to_string(), |d| d.label.clone());
+                let job = self.jobs.start(format!("Exporting to {to}"));
                 std::thread::spawn(move || {
-                    let progress = |m| send(ExportEvent::Progress(m));
+                    let progress = |m: String| {
+                        job.report(&m);
+                        send(ExportEvent::Progress(m))
+                    };
                     let result = export::run(&reader, &x, &roots, progress);
+                    drop(job);
                     match &result {
                         Ok(w) => crate::core::log::note(&format!("exported: {w:?}")),
                         Err(e) => crate::core::log::note(&format!("export failed: {e}")),

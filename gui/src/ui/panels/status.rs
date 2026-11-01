@@ -1,5 +1,6 @@
 //! The top bar (mode, menu, audio, MIDI and analysis pills, frame timing) and the
-//! MIDI log along the bottom.
+//! status line along the bottom: what earshot is doing in the background (with a
+//! progress bar when it can be counted), then the MIDI log.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -9,9 +10,10 @@ use egui::{RichText, Ui};
 use super::{Cx, Panel};
 use crate::core::command::{AppCmd, Command, ViewCmd};
 use crate::core::index::LibraryCmd;
+use crate::core::jobs::Running;
 use crate::core::view::{Modal, Mode, SettingsTab};
 use crate::ui::theme::fs;
-use crate::ui::widgets::{Seg, segmented};
+use crate::ui::widgets::{Intent, Pill, Seg, muted, segmented};
 
 /// Tracks being analysed, and failures since they were last dismissed.
 #[derive(Default)]
@@ -40,6 +42,8 @@ pub struct TopBar<'a> {
     pub audio_note: Option<&'a str>,
     pub midi_ports: &'a [String],
     pub analysis: &'a AnalysisSummary,
+    /// The jobs running and queued, for the jobs pill.
+    pub jobs: &'a [Running],
     pub hud: Meter<'a>,
     /// What undo and redo would do ("edit title"), if anything.
     pub undo: Option<String>,
@@ -160,7 +164,9 @@ impl Panel for TopBar<'_> {
                 Some(note) => (format!("⚠ {note}"), false),
                 None => (audio, ok),
             };
-            if t.pill(ui, &audio, if ok { t.ok } else { t.warn })
+            let intent = if ok { Intent::Success } else { Intent::Warning };
+            if ui
+                .add(Pill::new(&audio, intent))
                 .on_hover_text("Audio settings")
                 .clicked()
             {
@@ -171,18 +177,20 @@ impl Panel for TopBar<'_> {
             } else {
                 format!("MIDI: {}", self.midi_ports.join(", "))
             };
-            let colour = if self.midi_ports.is_empty() {
-                t.line
+            let intent = if self.midi_ports.is_empty() {
+                Intent::Neutral
             } else {
-                t.ok
+                Intent::Success
             };
-            if t.pill(ui, &midi, colour)
+            if ui
+                .add(Pill::new(&midi, intent))
                 .on_hover_text("Click to reconnect MIDI")
                 .clicked()
             {
                 cx.send(AppCmd::ReconnectMidi);
             }
             self.analysis_pill(ui, cx);
+            self.jobs_pill(ui, cx);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Keys").clicked() {
                     cx.send(ViewCmd::ToggleModal(Modal::Keys));
@@ -225,36 +233,54 @@ impl TopBar<'_> {
         ui.label(RichText::new("CPU").size(fs(11.0)));
     }
 
+    /// "3 jobs", with a spinner, while any run or wait; clicked, a dropdown with a
+    /// row for each (and Stop analysis, while there's analysis).
+    fn jobs_pill(&self, ui: &mut Ui, cx: &mut Cx) {
+        let t = cx.theme;
+        let n = self.jobs.len();
+        if n == 0 {
+            return;
+        }
+        let text = format!("{n} job{}", if n == 1 { "" } else { "s" });
+        let analysing = !self.analysis.busy.is_empty();
+        let r = ui.add(Pill::new(&text, Intent::Info).busy());
+        egui::Popup::menu(&r)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_min_width(fs(320.0));
+                for j in self.jobs {
+                    job_line(ui, j, t);
+                }
+                if analysing {
+                    ui.separator();
+                    if ui.button("Stop analysis").clicked() {
+                        cx.send(AppCmd::StopAnalysis);
+                        ui.close();
+                    }
+                }
+            });
+    }
+
     fn analysis_pill(&self, ui: &mut Ui, cx: &mut Cx) {
-        let (a, t) = (self.analysis, cx.theme);
+        let a = self.analysis;
         if let Some(why) = &a.worker_problem {
-            t.pill(ui, "analysis worker out of date", t.bad)
+            ui.add(Pill::new("analysis worker out of date", Intent::Danger))
                 .on_hover_text(why);
             return;
         }
-        let fail = if a.failed > 0 {
-            format!(" · {} failed", a.failed)
-        } else {
-            String::new()
-        };
+        // What's being analysed is in the jobs pill: this is for failures.
         let n = a.busy.len();
-        let text = if n > 0 {
-            format!("analysing {n} track{}{fail}", if n == 1 { "" } else { "s" })
-        } else if a.failed > 0 {
-            format!("analysis: {} failed", a.failed)
-        } else {
+        if a.failed == 0 {
             return;
+        }
+        let text = format!("analysis: {} failed", a.failed);
+        // Only failures, nothing running: red. Still working: amber.
+        let intent = if n == 0 {
+            Intent::Danger
+        } else {
+            Intent::Warning
         };
-        let r = t.pill(
-            ui,
-            &text,
-            // Only failures, nothing running: red. Still working: amber.
-            if a.failed > 0 && n == 0 {
-                t.bad
-            } else {
-                t.warn
-            },
-        );
+        let r = ui.add(Pill::new(&text, intent));
         let running: Vec<String> = a
             .running
             .keys()
@@ -266,27 +292,9 @@ impl TopBar<'_> {
         } else {
             format!("Last error: {}\nClick to dismiss.", a.last_error)
         };
-        let stop = if n > 0 {
-            "Right-click to stop analysing"
-        } else {
-            ""
-        };
-        let r = r.on_hover_text(
-            [running.join("\n"), failures, stop.into()]
-                .join("\n")
-                .trim()
-                .to_string(),
-        );
+        let r = r.on_hover_text([running.join("\n"), failures].join("\n").trim().to_string());
         if r.clicked() {
             cx.send(AppCmd::DismissFailures);
-        }
-        if n > 0 {
-            r.context_menu(|ui| {
-                if ui.button("Stop analysis jobs").clicked() {
-                    cx.send(AppCmd::StopAnalysis);
-                    ui.close();
-                }
-            });
         }
     }
 }
@@ -313,16 +321,54 @@ fn deck_count(ui: &mut Ui, cx: &mut Cx) {
     }
 }
 
-pub struct MidiLog<'a>(pub &'a VecDeque<String>);
+/// A job's line: spinner (or "queued"), what it's doing, and its bar when counted.
+fn job_line(ui: &mut Ui, j: &Running, t: &crate::ui::theme::Theme) {
+    ui.horizontal(|ui| {
+        if j.queued {
+            muted(ui, "queued");
+        } else {
+            ui.spinner();
+        }
+        let text = RichText::new(j.text()).size(fs(11.0));
+        ui.label(if j.queued { text.color(t.muted) } else { text });
+        if let Some(f) = j.fraction() {
+            ui.add(
+                egui::ProgressBar::new(f)
+                    .desired_width(fs(160.0))
+                    .desired_height(fs(8.0))
+                    .fill(t.accent),
+            );
+            muted(ui, format!("{:.0} %", f * 100.0));
+        }
+    });
+}
 
-impl Panel for MidiLog<'_> {
+/// The bottom line: the first job with its bar (the others in the top bar's jobs
+/// pill), then the MIDI messages last received, newest first.
+pub struct StatusLine<'a> {
+    pub jobs: &'a [Running],
+    pub midi: &'a VecDeque<String>,
+}
+
+impl Panel for StatusLine<'_> {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        let log: Vec<&str> = self.0.iter().map(|s| s.as_str()).collect();
-        ui.label(
-            RichText::new(format!("MIDI  {}", log.join("   |   ")))
-                .monospace()
-                .size(fs(11.0))
-                .color(cx.theme.muted),
-        );
+        let t = cx.theme;
+        ui.horizontal(|ui| {
+            if let Some(first) = self.jobs.first() {
+                job_line(ui, first, t);
+                let more = self.jobs.len() - 1;
+                if more > 0 {
+                    muted(ui, format!("+{more} more"));
+                }
+                ui.separator();
+            }
+            let log: Vec<&str> = self.midi.iter().map(|s| s.as_str()).collect();
+            ui.label(
+                RichText::new(format!("MIDI  {}", log.join("   |   ")))
+                    .monospace()
+                    .size(fs(11.0))
+                    .color(t.muted),
+            );
+        });
     }
 }

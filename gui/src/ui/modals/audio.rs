@@ -11,7 +11,7 @@ use egui::{RichText, Ui};
 use crate::core::command::{AudioCmd, Command};
 use crate::core::player::{AudioSettings, DEFAULT_BUFFER};
 use crate::ui::theme::{THEME, fs};
-use crate::ui::widgets::Button;
+use crate::ui::widgets::{Button, muted};
 
 const BUFFERS: [u32; 6] = [64, 128, 256, 512, 1024, 2048];
 
@@ -174,11 +174,7 @@ impl AudioUi {
                     ..draft.clone()
                 })));
             }
-            ui.label(
-                RichText::new("Smaller buffers respond faster but may crackle.")
-                    .size(fs(11.0))
-                    .color(THEME.muted),
-            );
+            muted(ui, "Smaller buffers respond faster but may crackle.");
         });
         action
     }
@@ -270,10 +266,9 @@ fn routing_section(
             }
         });
     if phones.is_some() {
-        ui.label(
-            RichText::new("The headphones are on their own device: these are its channels.")
-                .size(fs(11.0))
-                .color(THEME.muted),
+        muted(
+            ui,
+            "The headphones are on their own device: these are its channels.",
         );
     }
     if phones.is_none() {

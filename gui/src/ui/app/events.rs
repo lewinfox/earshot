@@ -70,6 +70,31 @@ impl EarshotApp {
                         .get(ev.track_id)
                         .map(|t| t.title.clone())
                         .unwrap_or_default();
+                    // Jobs: one for each track being analysed, one for those waiting.
+                    match &ev.state {
+                        Some(AnalysisState::Running { progress, .. }) => {
+                            let job = self
+                                .analysis_jobs
+                                .entry(ev.track_id)
+                                .or_insert_with(|| self.jobs.start(format!("Analysing {title}")));
+                            job.progress((progress.clamp(0.0, 1.0) * 100.0) as u64, 100);
+                        }
+                        _ => {
+                            self.analysis_jobs.remove(&ev.track_id);
+                        }
+                    }
+                    let waiting = a.busy.len().saturating_sub(a.running.len());
+                    if waiting == 0 {
+                        self.analysis_queue = None;
+                    } else {
+                        let q = self
+                            .analysis_queue
+                            .get_or_insert_with(|| self.jobs.queue("Analysis"));
+                        q.say(format!(
+                            "{waiting} track{} waiting",
+                            if waiting == 1 { "" } else { "s" }
+                        ));
+                    }
                     if let Some(AnalysisState::Failed(e)) = &ev.state {
                         a.failed += 1;
                         a.last_error = format!("{title}: {e}");

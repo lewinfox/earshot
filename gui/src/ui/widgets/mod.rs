@@ -7,7 +7,13 @@
 //!
 //! - [`RoundButton`]: play, pause and stop, as round icon buttons ([`Icon`] draws
 //!   them, as it does for the lit buttons).
-//! - [`Button`]: normal, primary (the accent) and subtle text buttons.
+//! - [`Button`]: text buttons by intent: primary (the accent), secondary, warning,
+//!   danger and subtle.
+//! - [`Intent`]: what a control or message means (info, success, warning, danger),
+//!   which picks its colour, for buttons, [`Note`]s and [`Pill`]s.
+//! - [`Note`], [`muted`], [`heading`], [`busy_line`]: text.
+//! - [`Pill`]: a small rounded status label (the top bar's).
+//! - [`dialog`]: a small window asking one thing, with [`go_cancel`] buttons.
 //! - [`Toggle`]: a switch for on/off; [`segmented`] for one of a few choices.
 //! - [`Slider`]: a named slider with its value.
 //!
@@ -20,24 +26,32 @@
 
 pub mod button;
 pub mod chips;
+pub mod dialog;
 pub mod fader;
 pub mod icon_stack;
+pub mod intent;
 pub mod knob;
 pub mod meter;
+pub mod pill;
 pub mod round_button;
 pub mod slider;
+pub mod text;
 pub mod text_button;
 pub mod toggle;
 pub mod tool_tabs;
 
 pub use button::{HwButton, Icon, held};
 pub use chips::{key_chip, key_chip_sized};
+pub use dialog::{Choice, close_only, dialog, go_cancel};
 pub use fader::Fader;
-pub use icon_stack::{Opens, StackItem, icon_stack};
+pub use icon_stack::{Opens, StackItem, icon_stack, icon_stack_with_menu};
+pub use intent::Intent;
 pub use knob::Knob;
 pub use meter::Meter;
+pub use pill::Pill;
 pub use round_button::{RoundButton, RoundSize};
 pub use slider::Slider;
+pub use text::{Note, busy_line, heading, muted};
 pub use text_button::Button;
 pub use toggle::{Seg, Toggle, segmented};
 pub use tool_tabs::{Tab, tool_tabs};

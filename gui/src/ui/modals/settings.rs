@@ -10,8 +10,8 @@ use super::audio::AudioUi;
 use crate::core::command::{AppCmd, Command};
 use crate::core::keymap::Origin;
 use crate::core::view::{SettingsTab, ViewCmd};
-use crate::ui::theme::{THEME, fs};
-use crate::ui::widgets::{Button, Seg, Slider, segmented};
+use crate::ui::theme::THEME;
+use crate::ui::widgets::{Button, Seg, Slider, muted, segmented};
 use earshot_engine::HotcueMode;
 
 /// The window's title, which is also its id.
@@ -100,10 +100,6 @@ impl SettingsUi {
     }
 }
 
-fn note(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).size(fs(11.0)).color(THEME.muted));
-}
-
 fn decks(ui: &mut Ui, mode: HotcueMode, auto_hide_mixer: bool) -> Vec<Command> {
     let mut out = vec![];
     ui.horizontal(|ui| {
@@ -118,7 +114,7 @@ fn decks(ui: &mut Ui, mode: HotcueMode, auto_hide_mixer: bool) -> Vec<Command> {
             out.push(Command::App(AppCmd::HotcueMode(m)));
         }
     });
-    note(
+    muted(
         ui,
         "On a playing deck a hot cue always jumps there and plays on. Applies to every \
          deck and Prepare's player.",
@@ -131,7 +127,7 @@ fn decks(ui: &mut Ui, mode: HotcueMode, auto_hide_mixer: bool) -> Vec<Command> {
     {
         out.push(Command::View(ViewCmd::AutoHideMixer(hide)));
     }
-    note(
+    muted(
         ui,
         "Perform's mixer starts hidden each time a controller connects; View > Panes > \
          Mixer controls shows it.",
@@ -147,7 +143,7 @@ fn analysis(ui: &mut Ui, env: &AnalysisEnv) -> Vec<Command> {
         &mut n,
         1..=env.cores.max(1),
     ));
-    note(
+    muted(
         ui,
         "How many tracks the library analyses at once. Each worker holds its own copy \
          of the analysis models, so more use more memory. While a deck plays in \
@@ -178,7 +174,7 @@ fn analysis(ui: &mut Ui, env: &AnalysisEnv) -> Vec<Command> {
         }
         ui.label(count);
     });
-    note(
+    muted(
         ui,
         "Stale: analysed by an older version of earshot, the file's audio has changed \
          since, or the analysis failed or never ran.",
@@ -227,7 +223,7 @@ fn keymap(ui: &mut Ui, env: &KeymapEnv) -> Option<Command> {
             cmd = Some(Command::App(AppCmd::CopyKeymap));
         }
     });
-    note(
+    muted(
         ui,
         "One binding per line; the built-in file's comments explain the format. \
          Delete the file to go back to the built-in keymap.",

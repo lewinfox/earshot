@@ -23,7 +23,7 @@ use super::panels::flow::FlowUi;
 use super::panels::library::browser::Scope;
 use super::panels::library::tracks::take_wanted_art;
 use super::panels::library::{LibraryPane, drag};
-use super::panels::status::{AnalysisSummary, Meter, MidiLog, TopBar};
+use super::panels::status::{AnalysisSummary, Meter, StatusLine, TopBar};
 use super::panels::{CoreView, Cx, EngineFrame, Panel, PreviewState};
 use super::prefs::{self, UiPrefs};
 use super::theme::{self, THEME};
@@ -98,6 +98,11 @@ pub struct EarshotApp {
     /// Hot cue labels and memory cues of the tracks on the players, by track id.
     cues: HashMap<i64, Arc<store::TrackCues>>,
     analysis: AnalysisSummary,
+    /// What's running in the background (`core::jobs`), for the status line and
+    /// the jobs pill; analysis's, by track, and the tracks waiting for it.
+    jobs: crate::core::jobs::Jobs,
+    analysis_jobs: HashMap<i64, crate::core::jobs::Job>,
+    analysis_queue: Option<crate::core::jobs::Job>,
     /// The track in the headphones' preview player.
     preview: Option<Preview>,
     /// Deck and audio settings, as saved in the Store.
@@ -274,6 +279,12 @@ impl EarshotApp {
             sticks_added: Default::default(),
             cues: HashMap::new(),
             analysis: AnalysisSummary::default(),
+            jobs: {
+                let ctx = cc.egui_ctx.clone();
+                crate::core::jobs::Jobs::new(move || ctx.request_repaint())
+            },
+            analysis_jobs: HashMap::new(),
+            analysis_queue: None,
             preview: None,
             settings,
             pending_rename: None,
@@ -689,6 +700,7 @@ impl EarshotApp {
 
     /// Draw the window, collecting what it asks for.
     fn draw(&mut self, ctx: &egui::Context) -> Vec<Command> {
+        let jobs = self.jobs.list();
         let mut out: Vec<Command> = vec![];
         let mut cx = Cx {
             core: CoreView {
@@ -720,6 +732,7 @@ impl EarshotApp {
                     audio_note: self.audio_note.as_ref().map(|(n, _)| n.as_str()),
                     midi_ports: &self.midi_ports,
                     analysis: &self.analysis,
+                    jobs: &jobs,
                     hud: Meter {
                         load: self.hud.load,
                         detail: [&self.hud.text, &self.hud.audio],
@@ -731,7 +744,13 @@ impl EarshotApp {
             });
         egui::TopBottomPanel::bottom("midi")
             .frame(THEME.bar_frame())
-            .show(ctx, |ui| MidiLog(&self.midi_log).ui(ui, &mut cx));
+            .show(ctx, |ui| {
+                StatusLine {
+                    jobs: &jobs,
+                    midi: &self.midi_log,
+                }
+                .ui(ui, &mut cx)
+            });
         views::show(ctx, &mut self.panels, &mut cx);
         drag::paint_ghost(ctx, cx.core.lib);
 

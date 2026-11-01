@@ -2,7 +2,9 @@
 //! stick (`core::export`). From: earshot's playlists, crates and Flows, or another
 //! library from the Sources pane (all of it, or some playlists). To: a Rekordbox or
 //! Serato stick, Serato or Mixxx on this computer, or a Rekordbox XML. "Convert this
-//! stick" is the shortcut for a whole stick to the other format, on the same stick.
+//! stick" is the shortcut for a whole stick to the other format, on the same stick:
+//! the old library is moved aside. Anything else goes onto a stick only when it's
+//! ready for that kind of library (`Drive::needs_format`), else it's formatted first.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -19,7 +21,8 @@ use crate::core::export::{
 };
 use crate::core::external::{ExternalCmd, Node, NodeKind, NodePath};
 use crate::core::sources::{Source, SourceId, SourceKind};
-use crate::ui::theme::{THEME, fs};
+use crate::ui::theme::THEME;
+use crate::ui::widgets::{Button, Note, busy_line, heading, muted};
 
 /// What the export takes from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -142,15 +145,6 @@ impl Panel for ExportPanel<'_> {
     }
 }
 
-fn heading(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).strong().size(fs(14.0)));
-    ui.add_space(4.0);
-}
-
-fn note(ui: &mut Ui, text: impl Into<String>) {
-    ui.label(RichText::new(text).size(fs(11.0)).color(THEME.muted));
-}
-
 impl ExportPanel<'_> {
     // ---- from ---------------------------------------------------------------------
 
@@ -190,7 +184,7 @@ impl ExportPanel<'_> {
             FromChoice::Earshot => {
                 let cs = cx.core.collections;
                 if tab.picked.is_empty() {
-                    note(
+                    muted(
                         ui,
                         "Tick the playlists, crates, Flows or folders to export.",
                     );
@@ -226,13 +220,10 @@ impl ExportPanel<'_> {
                 match self.external.status(id) {
                     None => {}
                     Some(Status::Reading(m)) => {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            note(ui, if m.is_empty() { "Reading…" } else { m });
-                        });
+                        busy_line(ui, m, "Reading…");
                     }
                     Some(Status::Failed(e)) => {
-                        ui.label(RichText::new(e).color(THEME.bad));
+                        ui.add(Note::danger(e));
                     }
                     Some(Status::Ready(lib)) => {
                         let mut all = tab.nodes.is_empty();
@@ -268,6 +259,12 @@ impl ExportPanel<'_> {
         ui.add_space(4.0);
         let mut target = None;
         let mut in_way: Vec<SourceKind> = vec![];
+        let mut needs_format: Option<Drive> = None;
+        // Converting a stick's own library, on it: the old one is moved aside.
+        let from_stick = match tab.from {
+            FromChoice::Library(id) => libraries.iter().find(|s| s.id == id).and_then(stick_of),
+            FromChoice::Earshot => None,
+        };
         match tab.kind {
             k if k.on_drive() => {
                 ui.horizontal(|ui| {
@@ -282,7 +279,7 @@ impl ExportPanel<'_> {
                 });
                 let drives: &[Drive] = cx.core.drives;
                 if drives.is_empty() {
-                    note(ui, "No USB sticks plugged in.");
+                    muted(ui, "No USB sticks plugged in.");
                 }
                 let mut chosen = tab.drive.clone();
                 for d in drives {
@@ -297,12 +294,17 @@ impl ExportPanel<'_> {
                     }
                     if chosen.as_ref() == Some(&d.path) {
                         if let Some(n) = d.notes() {
-                            note(ui, n);
+                            muted(ui, n);
                         }
                         if !d.writable {
-                            ui.label(RichText::new("Not writable").color(THEME.bad));
+                            ui.add(Note::danger("Not writable"));
                         }
-                        in_way = in_the_way(k, d);
+                        if from_stick.as_ref() == Some(&d.path) {
+                            in_way = in_the_way(k, d);
+                        } else if let Some(why) = d.needs_format(k.stick_kind().unwrap()) {
+                            ui.add(Note::warning(format!("Not ready for this library. {why}")));
+                            needs_format = Some(d.clone());
+                        }
                     }
                 }
                 if let Some(p) = &chosen
@@ -338,14 +340,14 @@ impl ExportPanel<'_> {
                 let program = k.program().expect("a program's library");
                 match libraries.iter().find(|s| s.kind == program) {
                     Some(s) => {
-                        note(
+                        muted(
                             ui,
                             s.location
                                 .as_deref()
                                 .map(|p| p.display().to_string())
                                 .unwrap_or_default(),
                         );
-                        note(
+                        muted(
                             ui,
                             format!(
                                 "Updates {}'s own library (its files are backed up first). \
@@ -360,13 +362,15 @@ impl ExportPanel<'_> {
                             volume_root: s.config.volume_root.clone(),
                         });
                     }
-                    None => note(
-                        ui,
-                        format!(
-                            "{} isn't set up: find it in the Sources pane first.",
-                            program.label()
-                        ),
-                    ),
+                    None => {
+                        muted(
+                            ui,
+                            format!(
+                                "{} isn't set up: find it in the Sources pane first.",
+                                program.label()
+                            ),
+                        );
+                    }
                 }
             }
         }
@@ -378,16 +382,23 @@ impl ExportPanel<'_> {
                 .on_hover_text("Without it, the stick's library holds only what's exported");
         }
 
+        if let Some(d) = &needs_format {
+            ui.add_space(6.0);
+            if ui
+                .add(Button::secondary("Format this stick…"))
+                .on_hover_text("Erase it and make it FAT32; then export")
+                .clicked()
+            {
+                self.external.open_format(d);
+            }
+        }
         if !in_way.is_empty() {
             ui.add_space(6.0);
             let names: Vec<_> = in_way.iter().map(|k| short_kind(*k)).collect();
-            ui.label(
-                RichText::new(format!(
-                    "This stick has a {} library. A stick holds one DJ library.",
-                    names.join(" and ")
-                ))
-                .color(THEME.warn),
-            );
+            ui.add(Note::warning(format!(
+                "This stick has a {} library. A stick holds one DJ library.",
+                names.join(" and ")
+            )));
             ui.checkbox(
                 &mut tab.replace,
                 "Move it aside (kept on the stick, renamed with .earshot-<time>)",
@@ -416,13 +427,15 @@ impl ExportPanel<'_> {
             Some("Pick what to export")
         } else if target.is_none() {
             Some("Pick where to export to")
+        } else if needs_format.is_some() {
+            Some("Format the stick first")
         } else if !in_way.is_empty() && !tab.replace {
             Some("The stick has another library on it")
         } else {
             None
         };
         let go = ui
-            .add_enabled(blocked.is_none(), egui::Button::new("Export"))
+            .add_enabled(blocked.is_none(), Button::primary("Export"))
             .on_disabled_hover_text(blocked.unwrap_or_default());
         if go.clicked()
             && let (Some(from), Some(target)) = (from, target)
@@ -439,15 +452,12 @@ impl ExportPanel<'_> {
             })));
         }
         if let Some(m) = &tab.running {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                note(ui, if m.is_empty() { "Starting…" } else { m });
-            });
+            busy_line(ui, m, "Starting…");
         }
         match &tab.report {
             None => {}
             Some(Err(e)) => {
-                ui.label(RichText::new(format!("Export failed: {e}")).color(THEME.bad));
+                ui.add(Note::danger(format!("Export failed: {e}")));
             }
             Some(Ok(w)) => report(ui, w),
         }
@@ -491,12 +501,12 @@ fn report(ui: &mut Ui, w: &Written) {
             w.skipped
         );
     }
-    ui.label(RichText::new(text).color(THEME.ok));
+    ui.add(Note::success(text));
     for m in &w.moved {
-        note(ui, format!("The old library is now at {}", m.display()));
+        muted(ui, format!("The old library is now at {}", m.display()));
     }
     for line in &w.warnings {
-        note(ui, line);
+        muted(ui, line);
     }
 }
 

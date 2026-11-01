@@ -23,6 +23,9 @@ use super::hash;
 use super::sources::SourceKind;
 use super::store::Reader;
 
+mod format;
+pub use format::{fat_label, format};
+
 /// How long [`watch`] waits without news before looking anyway: a library written
 /// onto a stick by another program doesn't change the mount table. (earshot looks
 /// again itself after writing to one.)
@@ -64,9 +67,34 @@ pub struct Drive {
     pub writable: bool,
     /// The DJ libraries on it: [`SourceKind::RekordboxUsb`], [`SourceKind::SeratoUsb`].
     pub libraries: Vec<SourceKind>,
+    /// Nothing on it but what operating systems leave ([`clutter`]).
+    pub empty: bool,
 }
 
 impl Drive {
+    /// Why a library of `kind` can't be written to it as it is, so it should be
+    /// formatted first: another program's library is on it (a stick holds one), it
+    /// isn't FAT32, or it has other files on it. A stick with this kind of library
+    /// already is fine.
+    pub fn needs_format(&self, kind: SourceKind) -> Option<String> {
+        if self.libraries.contains(&kind) {
+            return None;
+        }
+        if let Some(other) = self.libraries.first() {
+            return Some(format!(
+                "It has a {} library on it, and a stick holds one kind.",
+                other.label().trim_end_matches(" USB")
+            ));
+        }
+        if !self.fstype.is_empty() && !matches!(self.fstype.as_str(), "vfat" | "msdos") {
+            return Some(format!("It's {}, not FAT32.", fs_name(&self.fstype)));
+        }
+        if !self.empty {
+            return Some("It has other files on it.".into());
+        }
+        None
+    }
+
     /// What's worth knowing about its filesystem, for DJ players.
     pub fn notes(&self) -> Option<&'static str> {
         match self.fstype.as_str() {
@@ -109,6 +137,32 @@ impl Drive {
     }
 }
 
+/// A filesystem type as people know it.
+fn fs_name(fstype: &str) -> &str {
+    match fstype {
+        "exfat" => "exFAT",
+        "ntfs" | "ntfs3" | "fuseblk" => "NTFS",
+        "hfsplus" | "hfs" => "HFS+",
+        "apfs" => "APFS",
+        "ext4" | "ext3" | "ext2" => "a Linux filesystem",
+        other => other,
+    }
+}
+
+/// What operating systems leave on a stick of their own accord (hidden files too,
+/// which [`read_dir`] leaves out).
+fn clutter(name: &str) -> bool {
+    matches!(
+        name,
+        "System Volume Information" | "$RECYCLE.BIN" | "lost+found"
+    )
+}
+
+/// Nothing at `root` but [`clutter`].
+fn is_empty(root: &Path) -> bool {
+    read_dir(root).is_ok_and(|v| v.iter().all(|e| clutter(&e.name)))
+}
+
 /// The DJ libraries in a folder (a drive's root).
 pub fn libraries_at(root: &Path) -> Vec<SourceKind> {
     let mut out = vec![];
@@ -145,19 +199,28 @@ fn unescape(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// The removable drives in a mount table (`/proc/self/mounts`'s text): mounts below
-/// one of [`ROOTS`] (not a root's own mount), as (device, mount point, fstype).
-fn parse_mounts(text: &str) -> Vec<(String, PathBuf, String)> {
+/// Every mount in a mount table (`/proc/self/mounts`'s text), as (device, mount
+/// point, fstype).
+fn parse_all_mounts(text: &str) -> Vec<(String, PathBuf, String)> {
     text.lines()
         .filter_map(|line| {
             let mut f = line.split_whitespace();
             let (device, at, fstype) = (f.next()?, unescape(f.next()?), f.next()?);
-            let at = PathBuf::from(at);
+            Some((device.to_owned(), PathBuf::from(at), fstype.to_owned()))
+        })
+        .collect()
+}
+
+/// The removable drives in a mount table: mounts below one of [`ROOTS`] (not a
+/// root's own mount), as (device, mount point, fstype).
+fn parse_mounts(text: &str) -> Vec<(String, PathBuf, String)> {
+    parse_all_mounts(text)
+        .into_iter()
+        .filter(|(_, at, fstype)| {
             let below_root = ROOTS
                 .iter()
                 .any(|r| at.starts_with(r) && at != Path::new(r));
-            (below_root && !VIRTUAL.contains(&fstype))
-                .then(|| (device.to_owned(), at, fstype.to_owned()))
+            below_root && !VIRTUAL.contains(&fstype.as_str())
         })
         .collect()
 }
@@ -207,6 +270,7 @@ pub fn list() -> Vec<Drive> {
                     |n| n.to_string_lossy().into(),
                 ),
                 libraries: libraries_at(&path),
+                empty: is_empty(&path),
                 device,
                 fstype,
                 total_bytes,
@@ -371,18 +435,19 @@ pub fn copy_path(file: &Path, stick: &Path, label: &str, dest: &Path) -> PathBuf
 /// Copy `files` (on the stick at `stick`) into the music folder `dest`. Each is
 /// checked against earshot's tracks first: one with the same audio is used instead
 /// of a copy. Returns where each file is now (the copy, or earshot's own).
+/// `progress` hears (files done, of) before each.
 pub fn copy_in(
     reader: &Reader,
     files: &[PathBuf],
     stick: &Path,
     label: &str,
     dest: &Path,
-    mut progress: impl FnMut(String),
+    mut progress: impl FnMut(usize, usize),
 ) -> (HashMap<PathBuf, PathBuf>, Copied) {
     let mut out = HashMap::new();
     let mut report = Copied::default();
     for (i, f) in files.iter().enumerate() {
-        progress(format!("Copying {}/{}", i + 1, files.len()));
+        progress(i, files.len());
         let to = copy_path(f, stick, label, dest);
         let size = |p: &Path| fs::metadata(p).map(|m| m.len()).ok();
         if to.is_file() && size(&to) == size(f) {
@@ -523,6 +588,36 @@ tmpfs /run/media tmpfs rw 0 0
             libraries_at(&dir),
             [SourceKind::RekordboxUsb, SourceKind::SeratoUsb]
         );
+    }
+
+    #[test]
+    fn a_stick_needs_formatting_unless_its_clean_fat32_or_has_the_library() {
+        let dir = scratch("clean");
+        let mut d = Drive {
+            path: dir.clone(),
+            label: "S".into(),
+            device: "/dev/sdb1".into(),
+            fstype: "vfat".into(),
+            total_bytes: 0,
+            free_bytes: 0,
+            writable: true,
+            libraries: vec![],
+            empty: true,
+        };
+        let rb = SourceKind::RekordboxUsb;
+        assert_eq!(d.needs_format(rb), None);
+        fs::create_dir_all(dir.join("System Volume Information")).unwrap();
+        fs::write(dir.join(".DS_Store"), b"").unwrap();
+        assert!(is_empty(&dir));
+        fs::write(dir.join("song.mp3"), b"").unwrap();
+        assert!(!is_empty(&dir));
+        d.empty = false;
+        assert!(d.needs_format(rb).unwrap().contains("other files"));
+        d.fstype = "exfat".into();
+        assert!(d.needs_format(rb).unwrap().contains("exFAT"));
+        d.libraries = vec![SourceKind::SeratoUsb];
+        assert!(d.needs_format(rb).unwrap().contains("Serato"));
+        assert_eq!(d.needs_format(SourceKind::SeratoUsb), None);
     }
 
     #[test]

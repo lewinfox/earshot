@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use earshot_engine::{DeckId, MAX_DECKS};
-use egui::{Color32, CornerRadius, Margin, RichText, Stroke, Ui, Vec2, vec2};
+use egui::{Color32, Margin, Stroke, Ui, Vec2, vec2};
 
 use crate::core::store::Memory;
 
@@ -328,18 +328,6 @@ impl Theme {
         egui::Frame::new()
             .fill(self.panel)
             .inner_margin(self.spacing.bar_margin)
-    }
-
-    /// A small rounded status label with a coloured border; clickable.
-    pub fn pill(&self, ui: &mut Ui, text: &str, border: Color32) -> egui::Response {
-        egui::Frame::new()
-            .fill(self.panel_2)
-            .stroke(Stroke::new(1.0_f32, border))
-            .corner_radius(CornerRadius::same(10))
-            .inner_margin(Margin::symmetric(8, 2))
-            .show(ui, |ui| ui.label(RichText::new(text).size(fs(11.0))))
-            .response
-            .interact(egui::Sense::click())
     }
 }
 

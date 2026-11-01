@@ -20,7 +20,9 @@ impl EarshotApp {
         let send = move |e: ExternalEvent| sink(Event::External(e));
         match c {
             ExternalCmd::Find => {
+                let job = self.jobs.start("Looking for DJ libraries");
                 std::thread::spawn(move || {
+                    let _job = job;
                     send(ExternalEvent::Found {
                         at: None,
                         result: external::find(None),
@@ -73,9 +75,11 @@ impl EarshotApp {
             }
             ExternalCmd::Read(source) => {
                 let roots = self.roots();
+                let job = self.jobs.start(format!("Reading {}", source.name));
                 std::thread::spawn(move || {
                     let id = source.id;
                     let result = external::read(&source, &roots, false, |message| {
+                        job.report(&message);
                         send(ExternalEvent::Progress {
                             source: id,
                             message,
@@ -88,7 +92,10 @@ impl EarshotApp {
                     });
                     // Then again with cues and grids, for playing its tracks: slower
                     // (Serato keeps them in the audio files), so the list comes first.
-                    if ok && let Ok(lib) = external::read(&source, &roots, true, |_| {}) {
+                    job.say("cues and beat grids");
+                    job.uncounted();
+                    if ok && let Ok(lib) = external::read(&source, &roots, true, |m| job.report(&m))
+                    {
                         send(ExternalEvent::Read {
                             source: id,
                             result: Ok(Arc::new(lib)),
@@ -122,9 +129,11 @@ impl EarshotApp {
                     "import from {} ({:?}): {target:?}, {options:?}",
                     source.name, source.location
                 ));
+                let job = self.jobs.start(format!("Importing from {}", source.name));
                 std::thread::spawn(move || {
                     let id = source.id;
-                    let progress = |message| {
+                    let progress = |message: String| {
+                        job.report(&message);
                         send(ExternalEvent::Progress {
                             source: id,
                             message,
@@ -158,7 +167,10 @@ impl EarshotApp {
                                 &stick,
                                 &label,
                                 to,
-                                &progress,
+                                |n, of| {
+                                    progress(format!("Copying {}/{of}", n + 1));
+                                    job.progress(n as u64, of as u64);
+                                },
                             );
                             save.tracks.retain_mut(|t| match now_at.get(&t.file) {
                                 Some(p) => {
@@ -169,10 +181,7 @@ impl EarshotApp {
                             });
                             copied = Some(report);
                         }
-                        send(ExternalEvent::Progress {
-                            source: id,
-                            message: format!("reading {} files' tags", save.tracks.len()),
-                        });
+                        progress(format!("reading {} files' tags", save.tracks.len()));
                         let files: Vec<PathBuf> =
                             save.tracks.iter().map(|t| t.file.clone()).collect();
                         save.files =
@@ -228,9 +237,37 @@ impl EarshotApp {
                     self.panels.library.external.ask_import(source, ext);
                 }
             }
+            ExternalCmd::Format { drive, label, then } => {
+                crate::core::log::note(&format!(
+                    "format {} ({}) as {label}",
+                    drive.path.display(),
+                    drive.device
+                ));
+                let hold = self.uses.hold(&drive.path);
+                let sink = self.sink.clone();
+                let job = self.jobs.start(format!("Formatting {}", drive.label));
+                std::thread::spawn(move || {
+                    let result = drives::format(&drive, &label);
+                    drop(job);
+                    match &result {
+                        Ok(at) => crate::core::log::note(&format!("formatted: {}", at.display())),
+                        Err(e) => crate::core::log::note(&format!("format failed: {e}")),
+                    }
+                    drop(hold);
+                    // The stick as it is now, before anything is written to it.
+                    sink(Event::Drives(drives::list()));
+                    send(ExternalEvent::Formatted {
+                        drive: drive.path,
+                        result,
+                        then,
+                    });
+                });
+            }
             ExternalCmd::Eject(drive) => {
+                let job = self.jobs.start(format!("Ejecting {}", drive.label));
                 std::thread::spawn(move || {
                     let result = drives::eject(&drive);
+                    drop(job);
                     send(ExternalEvent::Ejected {
                         drive: drive.path,
                         result,
@@ -245,13 +282,19 @@ impl EarshotApp {
         let reader = self.lib.store.reader.clone();
         let hold = self.uses.hold(&drive.path);
         let sink = self.sink.clone();
+        let job = self.jobs.start(format!("Copying from {}", drive.label));
         std::thread::spawn(move || {
             let send = |e| sink(Event::External(e));
             let files = drives::audio_files(&files);
             let (_, report) =
-                drives::copy_in(&reader, &files, &drive.path, &drive.label, &to, |m| {
-                    send(ExternalEvent::CopyProgress(m))
+                drives::copy_in(&reader, &files, &drive.path, &drive.label, &to, |n, of| {
+                    job.progress(n as u64, of as u64);
+                    send(ExternalEvent::CopyProgress(format!(
+                        "Copying {}/{of}",
+                        n + 1
+                    )))
                 });
+            drop(job);
             drop(hold);
             sink(Event::Command(LibraryCmd::Rescan.into()));
             send(ExternalEvent::Copied(Ok(report)));
@@ -340,6 +383,23 @@ impl EarshotApp {
             }
             _ => {}
         }
+        let e = match e {
+            ExternalEvent::Formatted {
+                drive,
+                result: Ok(at),
+                then: Some(mut x),
+            } => {
+                x.target.path = at.clone();
+                self.panels.library.external.writing_to(&at);
+                self.dispatch(crate::core::export::ExportCmd::Run(x).into());
+                ExternalEvent::Formatted {
+                    drive,
+                    result: Ok(at),
+                    then: None,
+                }
+            }
+            e => e,
+        };
         self.panels.library.external.event(e);
     }
 
@@ -410,6 +470,7 @@ impl EarshotApp {
             self.hasher.clone(),
             self.sink.clone(),
         );
+        let job = self.jobs.start("Importing tracks");
         std::thread::spawn(move || {
             let mut now: HashMap<TrackId, TrackId> = HashMap::new();
             let mut copied_any = false;
@@ -432,7 +493,11 @@ impl EarshotApp {
                         continue;
                     };
                     let files: Vec<PathBuf> = save.tracks.iter().map(|t| t.file.clone()).collect();
-                    let (at, _) = drives::copy_in(&store.reader, &files, stick, label, to, |_| {});
+                    job.say(format!("copying from {label}"));
+                    let (at, _) =
+                        drives::copy_in(&store.reader, &files, stick, label, to, |n, of| {
+                            job.progress(n as u64, of as u64)
+                        });
                     for t in &mut save.tracks {
                         if let Some(p) = at.get(&t.file) {
                             moved.insert(t.file.clone(), p.clone());

@@ -18,6 +18,7 @@ pub mod external;
 pub mod hash;
 pub mod history;
 pub mod index;
+pub mod jobs;
 pub mod keymap;
 pub mod keys;
 pub mod library;

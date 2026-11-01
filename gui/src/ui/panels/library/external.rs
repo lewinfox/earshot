@@ -9,6 +9,7 @@
 mod panes;
 pub use panes::Middle;
 mod sticks;
+pub use sticks::{Sending, send_menu};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -35,6 +36,7 @@ use crate::ui::panels::library::drag::Origin;
 use crate::ui::panels::library::table::{TableState, TableView, TrackTable};
 use crate::ui::panels::library::tracks::{Media, MenuAt};
 use crate::ui::theme::{THEME, fs};
+use crate::ui::widgets::{self, Button, Choice, Note, busy_line, go_cancel, muted};
 
 /// How far reading a library has got.
 pub enum Status {
@@ -240,7 +242,8 @@ impl ExternalUi {
             ExternalEvent::Relist(_) => {}
             ExternalEvent::CopyProgress(_)
             | ExternalEvent::Copied(_)
-            | ExternalEvent::Ejected { .. } => self.stick.event(e),
+            | ExternalEvent::Ejected { .. }
+            | ExternalEvent::Formatted { .. } => self.stick.event(e),
             ExternalEvent::Imported { source, result } => {
                 if self.importing.as_ref().is_some_and(|i| i.0 == source) {
                     self.importing = None;
@@ -264,9 +267,10 @@ impl ExternalUi {
 
     /// The windows the pane opens: importing, and adding to a stick.
     pub fn windows(&mut self, ctx: &egui::Context, v: &CoreView, out: &mut Vec<Command>) {
-        self.dialog(ctx, out);
+        self.import_window(ctx, out);
         self.confirm_window(ctx, out);
         self.to_stick_window(ctx, v, out);
+        self.format_window(ctx, v, out);
     }
 
     /// What an import is doing, or how the last one went, in a box: where its
@@ -278,11 +282,7 @@ impl ExternalUi {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
             if let Some((_, m)) = &self.importing {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    let m = if m.is_empty() { "starting" } else { m };
-                    ui.label(format!("Importing… {m}"));
-                });
+                busy_line(ui, m, "Importing…");
                 return;
             }
             let Some(r) = &self.report else { return };
@@ -371,24 +371,15 @@ impl ExternalUi {
         match self.status.get(&source.id) {
             None => {}
             Some(Status::Reading(m)) => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(
-                        RichText::new(if m.is_empty() { "Reading…" } else { m }).size(fs(11.0)),
-                    );
-                });
+                busy_line(ui, m, "Reading…");
             }
             Some(Status::Failed(e)) => {
-                ui.label(RichText::new(e).size(fs(11.0)).color(THEME.bad));
+                ui.add(Note::danger(e).small());
             }
             Some(Status::Ready(lib)) => {
                 let lib = lib.clone();
                 if lib.playlists.is_empty() {
-                    ui.label(
-                        RichText::new("No playlists")
-                            .size(fs(11.0))
-                            .color(THEME.muted),
-                    );
+                    muted(ui, "No playlists");
                 }
                 for (i, n) in lib.playlists.iter().enumerate() {
                     self.node(ui, source, n, vec![i], out);
@@ -450,7 +441,24 @@ impl ExternalUi {
         if r.clicked() {
             self.show(source, Some(path.clone()), out);
         }
-        r.context_menu(|ui| self.import_item(ui, source, Target::Node(path.clone())));
+        r.context_menu(|ui| {
+            self.import_item(ui, source, Target::Node(path.clone()));
+            // A stick's own playlist isn't sent to that stick.
+            let others: Vec<Drive> = self
+                .drives
+                .iter()
+                .filter(|d| !source.location.as_deref().is_some_and(|at| d.holds(at)))
+                .cloned()
+                .collect();
+            if let Some((drive, kind)) = send_menu(ui, &others) {
+                let what = Sending::Library {
+                    source: source.clone(),
+                    path: path.clone(),
+                    name: n.name.clone(),
+                };
+                self.send_to_stick(&drive, what, kind);
+            }
+        });
     }
 
     fn import_item(&mut self, ui: &mut Ui, source: &Source, target: Target) {
@@ -612,51 +620,40 @@ impl ExternalUi {
             .iter()
             .filter(|&&t| crate::core::outside::is_outside(t))
             .count();
-        let (mut go, mut close, mut open) = (false, false, true);
-        egui::Window::new("Import to earshot?")
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut open)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label(if n == 1 {
-                    "That track isn't in earshot's library yet. Playlists, crates and Flows \
-                     hold earshot's tracks, so it has to be imported first."
-                        .to_string()
-                } else {
-                    format!(
-                        "{n} of those tracks aren't in earshot's library yet. Playlists, \
-                         crates and Flows hold earshot's tracks, so they have to be imported \
-                         first."
-                    )
-                });
-                ui.label(
-                    RichText::new(
-                        "Their grids, cues and details come too. A USB stick's are copied \
-                         into your first music folder.",
-                    )
-                    .size(fs(11.0))
-                    .color(THEME.muted),
-                );
-                ui.checkbox(remember, "Don't ask again");
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    go = ui.button("Import").clicked();
-                    close = ui.button("Cancel").clicked();
-                });
+        let choice = widgets::dialog(ctx, "Import to earshot?", |ui| {
+            ui.label(if n == 1 {
+                "That track isn't in earshot's library yet. Playlists, crates and Flows \
+                 hold earshot's tracks, so it has to be imported first."
+                    .to_string()
+            } else {
+                format!(
+                    "{n} of those tracks aren't in earshot's library yet. Playlists, \
+                     crates and Flows hold earshot's tracks, so they have to be imported \
+                     first."
+                )
             });
-        if go {
-            let (tracks, then, remember) = self.confirm.take().expect("open");
-            out.push(
-                ExternalCmd::ImportNow {
-                    tracks,
-                    then: Box::new(then),
-                    remember,
-                }
-                .into(),
+            muted(
+                ui,
+                "Their grids, cues and details come too. A USB stick's are copied \
+                 into your first music folder.",
             );
-        } else if close || !open {
-            self.confirm = None;
+            ui.checkbox(remember, "Don't ask again");
+            go_cancel(ui, Button::primary("Import"), true, "")
+        });
+        match choice {
+            Choice::Go(()) => {
+                let (tracks, then, remember) = self.confirm.take().expect("open");
+                out.push(
+                    ExternalCmd::ImportNow {
+                        tracks,
+                        then: Box::new(then),
+                        remember,
+                    }
+                    .into(),
+                );
+            }
+            Choice::Close => self.confirm = None,
+            Choice::Stay => {}
         }
     }
 
@@ -697,7 +694,7 @@ impl ExternalUi {
 
     /// Our track with this track's file, if there is one.
     /// The import window, while it's open.
-    fn dialog(&mut self, ctx: &egui::Context, out: &mut Vec<Command>) {
+    fn import_window(&mut self, ctx: &egui::Context, out: &mut Vec<Command>) {
         let Some(d) = &mut self.dialog else { return };
         let what = match (&d.target, self.status.get(&d.source.id)) {
             (Target::Library, _) => format!("Everything in {}", d.source.name),
@@ -712,104 +709,90 @@ impl ExternalUi {
             },
             _ => String::new(),
         };
-        let (mut go, mut close) = (false, false);
-        let mut open = true;
-        egui::Window::new("Import to earshot")
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut open)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label(what);
-                ui.label(
-                    RichText::new(
-                        "Tracks whose files are on this computer, with their title, artist, \
-                         BPM, key and the like, and the playlists and crates they're in.",
-                    )
-                    .size(fs(11.0))
-                    .color(THEME.muted),
-                );
-                ui.add_space(6.0);
-                let o = &mut d.options;
-                ui.checkbox(&mut o.grid, "Beat grid")
-                    .on_hover_text("Becomes the track's grid; the one it had is kept, to go back to");
-                ui.checkbox(&mut o.hot_cues, "Hot cues")
-                    .on_hover_text("Into empty pads (with Overwrite, into every pad)");
-                let memory = d.source.kind.has_memory_cues();
-                if !memory {
-                    o.memory_cues = false;
-                }
-                ui.add_enabled(memory, egui::Checkbox::new(&mut o.memory_cues, "Memory cues"))
-                    .on_disabled_hover_text("Only Rekordbox has memory cues");
-                ui.checkbox(&mut o.overwrite, "Overwrite existing metadata")
-                    .on_hover_text(
-                        "Replace what earshot has (your own edits too), and set hot cues over \
-                         earshot's. Without it, imports only fill gaps.",
-                    );
-                if o.needs_cues() && d.source.kind == SourceKind::Serato {
-                    ui.label(
-                        RichText::new("Serato keeps cues and grids in the audio files: reading them takes a while.")
-                            .size(fs(11.0))
-                            .color(THEME.muted),
-                    );
-                }
-                let mut ready = true;
-                if let Some(to) = &mut d.copy_to {
-                    ui.add_space(6.0);
-                    ui.label("Copy the files into:");
-                    if self.music.is_empty() {
-                        ui.label(
-                            RichText::new("Add a music folder first (Sources › Folders).")
-                                .color(THEME.bad),
-                        );
-                        ready = false;
-                    } else {
-                        if !self.music.contains(to) {
-                            *to = self.music[0].clone();
-                        }
-                        egui::ComboBox::from_id_salt("import-copy-to")
-                            .selected_text(to.as_str())
-                            .show_ui(ui, |ui| {
-                                for m in &self.music {
-                                    ui.selectable_value(to, m.clone(), m);
-                                }
-                            });
-                        ui.label(
-                            RichText::new(
-                                "In a folder named after the stick. Tracks earshot has \
-                                 already (the same audio) aren't copied again.",
-                            )
-                            .size(fs(11.0))
-                            .color(THEME.muted),
-                        );
-                    }
-                }
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    go = ui.add_enabled(ready, egui::Button::new("Import")).clicked();
-                    close = ui.button("Cancel").clicked();
-                });
-            });
-        if go {
-            let d = self.dialog.take().expect("open");
-            let lib = match self.status.get(&d.source.id) {
-                Some(Status::Ready(lib)) => Some(lib.clone()),
-                _ => None,
-            };
-            self.importing = Some((d.source.id, String::new()));
-            self.report = None;
-            out.push(
-                ExternalCmd::Import {
-                    source: d.source,
-                    target: d.target,
-                    options: d.options,
-                    read: lib,
-                    copy_to: d.copy_to.map(PathBuf::from),
-                }
-                .into(),
+        let choice = widgets::dialog(ctx, "Import to earshot", |ui| {
+            ui.label(what);
+            muted(
+                ui,
+                "Tracks whose files are on this computer, with their title, artist, \
+                 BPM, key and the like, and the playlists and crates they're in.",
             );
-        } else if close || !open {
-            self.dialog = None;
+            ui.add_space(6.0);
+            let o = &mut d.options;
+            ui.checkbox(&mut o.grid, "Beat grid")
+                .on_hover_text("Becomes the track's grid; the one it had is kept, to go back to");
+            ui.checkbox(&mut o.hot_cues, "Hot cues")
+                .on_hover_text("Into empty pads (with Overwrite, into every pad)");
+            let memory = d.source.kind.has_memory_cues();
+            if !memory {
+                o.memory_cues = false;
+            }
+            ui.add_enabled(
+                memory,
+                egui::Checkbox::new(&mut o.memory_cues, "Memory cues"),
+            )
+            .on_disabled_hover_text("Only Rekordbox has memory cues");
+            ui.checkbox(&mut o.overwrite, "Overwrite existing metadata")
+                .on_hover_text(
+                    "Replace what earshot has (your own edits too), and set hot cues over \
+                     earshot's. Without it, imports only fill gaps.",
+                );
+            if o.needs_cues() && d.source.kind == SourceKind::Serato {
+                muted(
+                    ui,
+                    "Serato keeps cues and grids in the audio files: reading them takes a while.",
+                );
+            }
+            let mut ready = true;
+            if let Some(to) = &mut d.copy_to {
+                ui.add_space(6.0);
+                ui.label("Copy the files into:");
+                if self.music.is_empty() {
+                    ui.add(Note::danger(
+                        "Add a music folder first (Sources › Folders).",
+                    ));
+                    ready = false;
+                } else {
+                    if !self.music.contains(to) {
+                        *to = self.music[0].clone();
+                    }
+                    egui::ComboBox::from_id_salt("import-copy-to")
+                        .selected_text(to.as_str())
+                        .show_ui(ui, |ui| {
+                            for m in &self.music {
+                                ui.selectable_value(to, m.clone(), m);
+                            }
+                        });
+                    muted(
+                        ui,
+                        "In a folder named after the stick. Tracks earshot has \
+                         already (the same audio) aren't copied again.",
+                    );
+                }
+            }
+            go_cancel(ui, Button::primary("Import"), ready, "")
+        });
+        match choice {
+            Choice::Go(()) => {
+                let d = self.dialog.take().expect("open");
+                let lib = match self.status.get(&d.source.id) {
+                    Some(Status::Ready(lib)) => Some(lib.clone()),
+                    _ => None,
+                };
+                self.importing = Some((d.source.id, String::new()));
+                self.report = None;
+                out.push(
+                    ExternalCmd::Import {
+                        source: d.source,
+                        target: d.target,
+                        options: d.options,
+                        read: lib,
+                        copy_to: d.copy_to.map(PathBuf::from),
+                    }
+                    .into(),
+                );
+            }
+            Choice::Close => self.dialog = None,
+            Choice::Stay => {}
         }
     }
 }

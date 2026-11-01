@@ -42,7 +42,7 @@ use crate::core::sources::STREAMING;
 use crate::core::track::TrackId;
 use crate::core::view::{Aside, Mode, Pane, Region, Source};
 use crate::ui::theme::{fs, sized_panel, text_scale};
-use crate::ui::widgets::{Opens, StackItem, icon_stack, icon_stack::WIDTH};
+use crate::ui::widgets::{Opens, StackItem, icon_stack, icon_stack::WIDTH, icon_stack_with_menu};
 
 /// The left icon stack's views of earshot's own library (the other sources follow).
 const VIEWS: [StackItem<Source>; 4] = [
@@ -118,13 +118,20 @@ impl LibraryPane {
                 }
             };
             let search = self.browser.search.clone();
+            let sends = std::cell::RefCell::new(vec![]);
             let tree = TreeCtx {
                 collections: cx.core.collections,
                 open,
                 search: &search,
+                sticks: cx.core.drives,
+                sends: &sends,
             };
             let mut cmds: Vec<CollectionCmd> = vec![];
             self.collections.show(ui, section, &tree, &mut cmds);
+            for (id, drive, kind) in sends.into_inner() {
+                let what = crate::ui::panels::library::external::Sending::Earshot(id);
+                self.external.send_to_stick(&drive, what, kind);
+            }
             cx.out.extend(cmds.into_iter().map(Command::Collection));
             // Another library's playlist dropped here: import it.
             if section != Section::Flows {
@@ -257,7 +264,14 @@ impl LibraryPane {
             .show_inside(ui, |ui| {
                 let mut items: Vec<StackItem<Source>> = VIEWS.into_iter().collect();
                 items.extend(self.external.stack_items(&cx.core));
-                if let Some(s) = icon_stack(ui, &items, layout.source, Opens::Right) {
+                let (external, core, out) = (&mut self.external, &cx.core, &mut *cx.out);
+                let picked =
+                    icon_stack_with_menu(ui, &items, layout.source, Opens::Right, |ui, s| {
+                        if let Source::Stick(id) = s {
+                            external.stick_menu(ui, id, core, out);
+                        }
+                    });
+                if let Some(s) = picked {
                     cx.send(ViewCmd::Source(s));
                 }
             });

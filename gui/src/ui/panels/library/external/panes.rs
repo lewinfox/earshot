@@ -20,7 +20,7 @@ use crate::core::view::Source as Pane;
 use crate::ui::panels::CoreView;
 use crate::ui::panels::export::short_kind;
 use crate::ui::theme::{THEME, fs};
-use crate::ui::widgets::StackItem;
+use crate::ui::widgets::{Note, StackItem, heading, muted};
 
 /// What the middle shows for a source's pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +63,7 @@ impl ExternalUi {
                 enabled: true,
                 light: None,
                 gap: i == 0,
+                menu: false,
             });
         }
         for (i, d) in self.drives.iter().enumerate() {
@@ -82,6 +83,7 @@ impl ExternalUi {
                 enabled: true,
                 light: Some(if busy { THEME.bad } else { THEME.ok }),
                 gap: i == 0,
+                menu: true,
             });
         }
         let mut manage = StackItem::new(
@@ -135,7 +137,7 @@ impl ExternalUi {
                 Pane::Program(kind) => self.program_pane(ui, kind, out),
                 Pane::Library(id) => {
                     if let Some(s) = self.source(id).cloned() {
-                        title(ui, &s.name);
+                        heading(ui, &s.name);
                         self.library(ui, &s, out);
                     }
                 }
@@ -150,7 +152,7 @@ impl ExternalUi {
     }
 
     fn program_pane(&mut self, ui: &mut Ui, kind: SourceKind, out: &mut Vec<Command>) {
-        title(ui, kind.label());
+        heading(ui, kind.label());
         let found = self.entries().into_iter().find(|(k, _)| *k == kind);
         match found {
             Some((_, Some(source))) => self.library(ui, &source, out),
@@ -175,7 +177,7 @@ impl ExternalUi {
                     out.push(ExternalCmd::Find.into());
                 }
                 if let Some(e) = &self.find_error {
-                    ui.label(RichText::new(e).size(fs(11.0)).color(THEME.bad));
+                    ui.add(Note::danger(e).small());
                 }
             }
         }
@@ -208,19 +210,15 @@ impl ExternalUi {
             self.eject_button(ui, v, d, out);
         });
         if let Some(e) = &self.stick.eject_error {
-            ui.label(
-                RichText::new(format!("Couldn't eject: {e}"))
-                    .size(fs(11.0))
-                    .color(THEME.bad),
-            );
+            ui.add(Note::danger(format!("Couldn't eject: {e}")).small());
         }
         ui.add_space(4.0);
         let libraries = self.stick_libraries(d);
         if libraries.is_empty() {
-            muted(ui, "No DJ library on it. Drop a playlist here to make one.");
+            self.no_library(ui, v, d);
         }
         for s in libraries {
-            ui.label(RichText::new(short_kind(s.kind)).color(THEME.muted));
+            muted(ui, short_kind(s.kind));
             self.library(ui, &s, out);
             ui.add_space(6.0);
         }
@@ -231,7 +229,7 @@ impl ExternalUi {
     /// adding another library or a copy of a stick.
     pub fn manage(&mut self, ui: &mut Ui, out: &mut Vec<Command>) {
         if let Some(e) = &self.find_error {
-            ui.label(RichText::new(e).size(fs(11.0)).color(THEME.bad));
+            ui.add(Note::danger(e).small());
         }
         ui.horizontal(|ui| {
             if ui
@@ -260,13 +258,4 @@ impl ExternalUi {
     pub(super) fn stick_busy(&self, v: &CoreView, d: &Drive) -> bool {
         v.uses.busy(&d.path) || self.stick.ejecting.as_ref() == Some(&d.path)
     }
-}
-
-fn title(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).strong().size(fs(14.0)));
-    ui.add_space(2.0);
-}
-
-fn muted(ui: &mut Ui, text: impl Into<String>) {
-    ui.label(RichText::new(text.into()).size(fs(11.0)).color(THEME.muted));
 }

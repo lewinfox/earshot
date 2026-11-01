@@ -746,6 +746,13 @@ pub enum ExternalCmd {
     },
     /// Unmount a stick, so it can be pulled out.
     Eject(Drive),
+    /// Erase a stick and make it one FAT32 partition called `label`
+    /// (`drives::format`); `then`, an export to write to it once it's mounted again.
+    Format {
+        drive: Drive,
+        label: String,
+        then: Option<Box<super::export::Export>>,
+    },
 }
 
 /// What came of an [`ExternalCmd`].
@@ -782,6 +789,13 @@ pub enum ExternalEvent {
     Ejected {
         drive: PathBuf,
         result: Result<(), String>,
+    },
+    /// A stick was formatted (`result`: where it's mounted now), or wasn't. The app
+    /// starts the export that was to follow (`then`) before the stick view hears.
+    Formatted {
+        drive: PathBuf,
+        result: Result<PathBuf, String>,
+        then: Option<Box<super::export::Export>>,
     },
 }
 

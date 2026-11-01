@@ -4,12 +4,18 @@
 //! Flow that is one chain of cards gets a list, one that branches a fork. Click one
 //! to list its tracks; drop tracks on a crate, playlist or Flow to add them.
 
+use std::cell::RefCell;
+use std::path::PathBuf;
+
 use egui::{RichText, Sense, Stroke, Ui, pos2, vec2};
 
 use super::drag::{self, DragPayload};
 use crate::core::collections::{
     Collection, CollectionCmd, CollectionId, CollectionKind, Collections, Section,
 };
+use crate::core::drives::Drive;
+use crate::core::export::TargetKind;
+use crate::ui::panels::library::external::send_menu;
 use crate::ui::theme::{THEME, fs};
 
 #[derive(Default)]
@@ -27,6 +33,9 @@ pub struct TreeCtx<'a> {
     pub open: Option<CollectionId>,
     /// The library's search, which a new smart playlist starts from.
     pub search: &'a str,
+    /// The USB sticks plugged in, for "Send to", and what was sent where.
+    pub sticks: &'a [Drive],
+    pub sends: &'a RefCell<Vec<(CollectionId, PathBuf, TargetKind)>>,
 }
 
 impl CollectionsUi {
@@ -146,6 +155,7 @@ impl CollectionsUi {
                 ui.close();
             }
             move_menu(ui, f, cx.collections, out);
+            send_to(ui, f.id, cx);
             let inside = cx.collections.count_inside(f.id);
             ui.menu_button("Delete", |ui| {
                 let label = match inside {
@@ -225,6 +235,7 @@ impl CollectionsUi {
                 ui.close();
             }
             move_menu(ui, c, cx.collections, out);
+            send_to(ui, c.id, cx);
             ui.menu_button("Delete", |ui| {
                 if ui.button(format!("Delete \"{}\"", c.name)).clicked() {
                     out.push(CollectionCmd::Delete(c.id));
@@ -286,6 +297,13 @@ fn new_menu(
     if ui.button("New folder").clicked() {
         out.push(CollectionCmd::CreateFolder { section, parent });
         ui.close();
+    }
+}
+
+/// "Send to <stick>": the add-to-stick window opens for it (`TreeCtx::sends`).
+fn send_to(ui: &mut Ui, id: CollectionId, cx: &TreeCtx) {
+    if let Some((drive, kind)) = send_menu(ui, cx.sticks) {
+        cx.sends.borrow_mut().push((id, drive, kind));
     }
 }
 

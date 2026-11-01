@@ -26,7 +26,7 @@ use crate::core::track::{Status, Track, TrackId};
 use crate::ui::panels::CoreView;
 use crate::ui::theme::{CUE_PALETTE, THEME, fs, rgb};
 use crate::ui::util;
-use crate::ui::widgets::key_chip;
+use crate::ui::widgets::{Intent, Pill, key_chip};
 
 // ---- columns --------------------------------------------------------------------------
 
@@ -164,7 +164,7 @@ pub const COLUMNS: [ColumnDef; 21] = [
         Some(Field::Artist),
         200.0,
         false,
-        |ui, c| muted(ui, &c.t.artist),
+        |ui, c| muted_cell(ui, &c.t.artist),
     ),
     col(
         ColumnId::Album,
@@ -173,7 +173,7 @@ pub const COLUMNS: [ColumnDef; 21] = [
         Some(Field::Album),
         160.0,
         false,
-        |ui, c| muted(ui, &c.t.album),
+        |ui, c| muted_cell(ui, &c.t.album),
     ),
     col(
         ColumnId::Genre,
@@ -182,7 +182,7 @@ pub const COLUMNS: [ColumnDef; 21] = [
         Some(Field::Genre),
         110.0,
         false,
-        |ui, c| muted(ui, &c.t.genre),
+        |ui, c| muted_cell(ui, &c.t.genre),
     ),
     col(
         ColumnId::Bpm,
@@ -213,7 +213,7 @@ pub const COLUMNS: [ColumnDef; 21] = [
         Some(Field::Duration),
         44.0,
         false,
-        |ui, c| muted(ui, &c.t.duration.map(util::mmss).unwrap_or_default()),
+        |ui, c| muted_cell(ui, &c.t.duration.map(util::mmss).unwrap_or_default()),
     ),
     col(
         ColumnId::Energy,
@@ -223,7 +223,7 @@ pub const COLUMNS: [ColumnDef; 21] = [
         50.0,
         false,
         |ui, c| {
-            muted(
+            muted_cell(
                 ui,
                 &c.t.energy_level()
                     .map_or(String::new(), |e| format!("{e:.0}")),
@@ -255,7 +255,7 @@ pub const COLUMNS: [ColumnDef; 21] = [
         Some(Field::Tag),
         140.0,
         false,
-        |ui, c| muted(ui, &c.t.tags.join(", ")),
+        |ui, c| muted_cell(ui, &c.t.tags.join(", ")),
     ),
     col(
         ColumnId::Comment,
@@ -264,7 +264,7 @@ pub const COLUMNS: [ColumnDef; 21] = [
         Some(Field::Comment),
         160.0,
         false,
-        |ui, c| muted(ui, &c.t.comment),
+        |ui, c| muted_cell(ui, &c.t.comment),
     ),
     col(
         ColumnId::File,
@@ -275,7 +275,7 @@ pub const COLUMNS: [ColumnDef; 21] = [
         false,
         |ui, c| {
             let name = c.t.path.rsplit('/').next().unwrap_or(&c.t.path);
-            muted(ui, name)
+            muted_cell(ui, name)
         },
     ),
     col(
@@ -297,7 +297,7 @@ pub const COLUMNS: [ColumnDef; 21] = [
         Some(Field::LastPlayed),
         90.0,
         false,
-        |ui, c| muted(ui, &c.t.last_played.map(ago).unwrap_or_default()),
+        |ui, c| muted_cell(ui, &c.t.last_played.map(ago).unwrap_or_default()),
     ),
     col(
         ColumnId::Change,
@@ -1113,15 +1113,14 @@ fn filter_chips(ui: &mut Ui, s: &mut TableState) -> bool {
     let error = s.filter().err();
     let mut clear: Option<ColumnId> = None;
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("Only:").size(fs(11.0)).color(THEME.muted));
+        crate::ui::widgets::muted(ui, "Only:");
         for (c, f) in &s.filters {
             if f.is_empty() {
                 continue;
             }
             let text = format!("{} {}  x", def(*c).name, f.summary());
-            if THEME
-                .pill(ui, &text, THEME.accent)
-                .interact(Sense::click())
+            if ui
+                .add(Pill::new(&text, Intent::Info))
                 .on_hover_text("Click to clear (right-click the column's header to change it)")
                 .clicked()
             {
@@ -1229,7 +1228,8 @@ pub fn auto_widths(
     out
 }
 
-fn muted(ui: &mut Ui, s: &str) {
+/// A grey cell, cut short to fit.
+fn muted_cell(ui: &mut Ui, s: &str) {
     ui.add(
         egui::Label::new(RichText::new(s).color(THEME.muted))
             .truncate()
@@ -1240,7 +1240,7 @@ fn muted(ui: &mut Ui, s: &str) {
 /// Muted, against the cell's right edge (numbers).
 fn right(ui: &mut Ui, s: &str) {
     ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-        muted(ui, s)
+        muted_cell(ui, s)
     });
 }
 
@@ -1263,7 +1263,7 @@ pub fn ago(unix: i64) -> String {
 }
 
 fn index_cell(ui: &mut Ui, c: &mut Cell) {
-    muted(ui, &(c.row + 1).to_string());
+    muted_cell(ui, &(c.row + 1).to_string());
 }
 
 fn wave_cell(ui: &mut Ui, c: &mut Cell) {

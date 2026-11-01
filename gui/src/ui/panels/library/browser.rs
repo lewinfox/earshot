@@ -22,6 +22,7 @@ use crate::core::store::PlaySession;
 use crate::core::track::{Status, TrackId};
 use crate::ui::panels::CoreView;
 use crate::ui::theme::{THEME, fs};
+use crate::ui::widgets::muted;
 
 /// What the track list shows.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -255,11 +256,7 @@ impl LibraryUi {
     /// The music folders, as a tree (the Sources pane's Folders section).
     pub fn folder_tree(&mut self, ui: &mut Ui, v: &CoreView, out: &mut Vec<Command>) {
         if self.folders.is_empty() {
-            ui.label(
-                RichText::new("No music folders yet.")
-                    .size(fs(11.0))
-                    .color(THEME.muted),
-            );
+            muted(ui, "No music folders yet.");
         }
         for root in self.folders.clone() {
             let name = root.rsplit('/').next().unwrap_or(&root).to_string();

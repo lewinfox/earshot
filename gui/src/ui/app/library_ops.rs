@@ -352,8 +352,11 @@ impl EarshotApp {
             self.sink.clone(),
             self.hasher.clone(),
         );
+        let job = self.jobs.start("Scanning the music folders");
         std::thread::spawn(move || {
-            sink(Event::Scanned(library::scan_library(&store)));
+            let result = library::scan_library(&store);
+            drop(job);
+            sink(Event::Scanned(result));
             let _ = hasher.send(());
         });
     }
