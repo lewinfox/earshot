@@ -177,6 +177,10 @@ struct Hud {
     /// it had. `None` without audio.
     load: Option<f32>,
     xruns: u64,
+    /// The headphones' own device: times they ran dry and were realigned, as last
+    /// logged.
+    phones_short: u64,
+    phones_realigns: u64,
     last: Option<Instant>,
 }
 

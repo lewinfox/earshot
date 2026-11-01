@@ -121,6 +121,27 @@ impl EarshotApp {
                 "cb {worst:.2}/{budget:.1} ms · slow {} · xrun {xruns}",
                 s.slow_callbacks.load(Relaxed),
             );
+            if self.audio.as_ref().is_ok_and(|i| i.phones.is_some()) {
+                let (short, realigns) = (
+                    s.phones_short.load(Relaxed),
+                    s.phones_realigns.load(Relaxed),
+                );
+                let queued = s.phones_level.load(Relaxed) as f64 / rate.max(1.0) * 1000.0;
+                // The audio thread can't write logs: it counts, and this notices.
+                if short > self.hud.phones_short {
+                    eprintln!(
+                        "audio: headphones ran dry: {} frames of silence (queue {queued:.1} ms)",
+                        short - self.hud.phones_short
+                    );
+                }
+                if realigns > self.hud.phones_realigns {
+                    eprintln!("audio: headphones out of line with the master: realigning");
+                }
+                (self.hud.phones_short, self.hud.phones_realigns) = (short, realigns);
+                self.hud.audio += &format!(
+                    "\nheadphones queue {queued:.1} ms · realigned {realigns} · ran dry {short} frames"
+                );
+            }
             // A dropout since the last look shows as full, whatever the timing said.
             let dropped = xruns > self.hud.xruns;
             self.hud.xruns = xruns;

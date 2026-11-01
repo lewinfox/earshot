@@ -66,7 +66,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libasound2-dev libdbus-1-dev libclang-dev \
+            pkg-config libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev \
             libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
             libxrandr-dev libxi-dev libgl1-mesa-dev
           # Building Rubber Band for the bundle.

@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig, SupportedBufferSize};
 
-use crate::engine::Renderer;
+use crate::engine::{PhonesRoute, Renderer};
+use crate::phones_out::Aligner;
 use crate::snapshot::Stats;
 
 #[derive(Debug, Clone, Default)]
@@ -22,6 +23,9 @@ pub struct OutputOptions {
     pub buffer_frames: Option<u32>,
     /// Use the null output even if a device exists.
     pub null: bool,
+    /// The headphones on a device of their own (like [`OutputOptions::device`]).
+    /// Only under PipeWire ([`can_split`]); `None`: on the master's device.
+    pub phones_device: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -32,6 +36,10 @@ pub struct OutputInfo {
     pub buffer_frames: Option<u32>,
     pub sample_format: String,
     pub null: bool,
+    /// The headphones' own device and its channels, if they have one.
+    pub phones: Option<(String, u16)>,
+    /// Why the headphones aren't on the device asked for (they're on the master's).
+    pub phones_error: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -51,8 +59,14 @@ pub fn list_devices() -> Vec<DeviceSummary> {
     let Ok(devices) = host.output_devices() else {
         return vec![];
     };
+    let pipewire = host.id().name().eq_ignore_ascii_case("pipewire");
     devices
         .filter_map(|d| {
+            // PipeWire lists its "default" stand-ins and other programs' streams
+            // too: only real devices have a driver.
+            if pipewire && d.description().ok()?.driver().is_none() {
+                return None;
+            }
             let id = d.id().ok()?.to_string();
             let name = d
                 .description()
@@ -95,6 +109,12 @@ impl Drop for OutputHandle {
 pub const PIPEWIRE_CHUNK: u32 = 256;
 /// The rate PipeWire runs at unless set otherwise.
 pub const PIPEWIRE_RATE: u32 = 48_000;
+
+/// The headphones can go to a device of their own: PipeWire keeps the two devices'
+/// clocks together (on Linux with PipeWire running, cpal talks to it directly).
+pub fn can_split() -> bool {
+    cfg!(target_os = "linux") && pipewire_running()
+}
 
 /// Whether PipeWire is the sound server: its socket is there.
 pub fn pipewire_running() -> bool {
@@ -145,14 +165,16 @@ pub fn start(
         .spawn(move || {
             let built = build_stream(&opts2, stats, make_renderer);
             match built {
-                Ok((stream, info)) => {
-                    if let Err(e) = stream.play() {
-                        let _ = info_tx.send(Err(e.to_string()));
-                        return;
+                Ok((streams, info)) => {
+                    for s in &streams {
+                        if let Err(e) = s.play() {
+                            let _ = info_tx.send(Err(e.to_string()));
+                            return;
+                        }
                     }
                     let _ = info_tx.send(Ok(info));
                     let _ = stop_rx.recv(); // park until the handle is dropped
-                    drop(stream);
+                    drop(streams);
                 }
                 Err(e) => {
                     let _ = info_tx.send(Err(e));
@@ -170,13 +192,9 @@ pub fn start(
     ))
 }
 
-fn build_stream(
-    opts: &OutputOptions,
-    stats: Arc<Stats>,
-    make_renderer: impl FnOnce(u32) -> Renderer + Send + 'static,
-) -> Result<(cpal::Stream, OutputInfo), String> {
-    let host = cpal::default_host();
-    let device = match &opts.device {
+/// The device asked for (by id, or part of its name), or the default.
+fn find_device(host: &cpal::Host, want: Option<&str>) -> Result<cpal::Device, String> {
+    match want {
         Some(want) => {
             let want = want.to_lowercase();
             host.output_devices()
@@ -187,18 +205,30 @@ fn build_stream(
                         .description()
                         .map(|x| x.name().to_string())
                         .unwrap_or_default();
-                    id.to_lowercase().contains(&want) || name.to_lowercase().contains(&want)
+                    id.to_lowercase() == want || name.to_lowercase().contains(&want)
                 })
-                .ok_or_else(|| format!("no output device matching '{want}'"))?
+                .ok_or_else(|| format!("no output device matching '{want}'"))
         }
         None => host
             .default_output_device()
-            .ok_or("no default output device")?,
-    };
-    let name = device
-        .description()
+            .ok_or_else(|| "no default output device".into()),
+    }
+}
+
+fn device_name(d: &cpal::Device) -> String {
+    d.description()
         .map(|x| x.name().to_string())
-        .unwrap_or_else(|_| "unknown".into());
+        .unwrap_or_else(|_| "unknown".into())
+}
+
+fn build_stream(
+    opts: &OutputOptions,
+    stats: Arc<Stats>,
+    make_renderer: impl FnOnce(u32) -> Renderer + Send + 'static,
+) -> Result<(Vec<cpal::Stream>, OutputInfo), String> {
+    let host = cpal::default_host();
+    let device = find_device(&host, opts.device.as_deref())?;
+    let name = device_name(&device);
 
     // Prefer 4+ channels (master + headphones), 44.1/48 kHz, float samples. Of the
     // rates, the one the system runs at (PipeWire's 48 kHz, CoreAudio's or Windows'
@@ -254,22 +284,96 @@ fn build_stream(
             buffer_frames = Some(want);
         }
     }
-    let info = OutputInfo {
+    let mut info = OutputInfo {
         device: name,
         sample_rate: config.sample_rate,
         channels: config.channels,
         buffer_frames,
         sample_format: format!("{:?}", supported.sample_format()),
         null: false,
+        phones: None,
+        phones_error: None,
     };
-    let renderer = make_renderer(config.sample_rate);
+    let mut renderer = make_renderer(config.sample_rate);
+    // The headphones' device first: if it can't be had, they stay on the master's.
+    let mut streams = vec![];
+    if let Some(want) = &opts.phones_device {
+        match phones_stream(&host, want, config.clone(), stats.clone()) {
+            Ok((stream, (tx, route), (name, channels))) => {
+                renderer.tap_phones(tx, route);
+                streams.push(stream);
+                info.phones = Some((name, channels));
+            }
+            Err(e) => {
+                eprintln!("audio: headphones: {e}");
+                info.phones_error = Some(e);
+            }
+        }
+    }
     let stream = match supported.sample_format() {
         SampleFormat::F32 => build::<f32>(&device, config, renderer, stats),
         SampleFormat::I32 => build::<i32>(&device, config, renderer, stats),
         SampleFormat::I16 => build::<i16>(&device, config, renderer, stats),
         f => return Err(format!("unsupported sample format {f:?}")),
     }?;
-    Ok((stream, info))
+    // The master's stream first, so it's the one that starts the engine.
+    streams.insert(0, stream);
+    Ok((streams, info))
+}
+
+/// What the headphones' stream hands back: the queue's end and their routing, for the
+/// renderer.
+type Tap = (rtrb::Producer<f32>, Arc<PhonesRoute>);
+
+/// A stream on the headphones' own device, playing what the renderer queues for it
+/// (at the master's rate and buffer size), kept in line by [`Aligner`].
+fn phones_stream(
+    host: &cpal::Host,
+    want: &str,
+    master: StreamConfig,
+    stats: Arc<Stats>,
+) -> Result<(cpal::Stream, Tap, (String, u16)), String> {
+    if !can_split() {
+        return Err("a separate headphones device needs PipeWire".into());
+    }
+    let device = find_device(host, Some(want))?;
+    let name = device_name(&device);
+    // Float at the master's rate; as many channels as it has (up to 4).
+    let range = device
+        .supported_output_configs()
+        .map_err(|e| e.to_string())?
+        .filter(|r| r.sample_format() == SampleFormat::F32)
+        .filter_map(|r| r.try_with_sample_rate(master.sample_rate))
+        .max_by_key(|c| c.channels().min(4))
+        .ok_or_else(|| format!("{name} can't play at {} Hz", master.sample_rate))?;
+    let mut config = range.config();
+    config.buffer_size = master.buffer_size;
+    let channels = config.channels;
+    let chunk = match master.buffer_size {
+        cpal::BufferSize::Fixed(n) => n as usize,
+        cpal::BufferSize::Default => PIPEWIRE_CHUNK as usize,
+    };
+    // A chunk queued when the headphones go first in a cycle (the streams run in
+    // either order): the least that never runs dry while the master keeps up.
+    let (tx, rx) = rtrb::RingBuffer::new(master.sample_rate as usize * 2);
+    let route = Arc::new(PhonesRoute::default());
+    let mut aligner = Aligner::new(rx, chunk, route.clone(), stats.clone());
+    let err_stats = stats;
+    let stream = device
+        .build_output_stream(
+            config,
+            move |data: &mut [f32], _| aligner.process(data, channels as usize),
+            move |err| {
+                if err.kind() == cpal::ErrorKind::Xrun {
+                    err_stats.xruns.fetch_add(1, Relaxed);
+                } else {
+                    eprintln!("audio stream error (headphones): {err}");
+                }
+            },
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok((stream, (tx, route), (name, channels)))
 }
 
 fn build<T>(
@@ -344,6 +448,8 @@ fn start_null(
         buffer_frames: Some(frames),
         sample_format: "F32".into(),
         null: true,
+        phones: None,
+        phones_error: None,
     };
     (
         OutputHandle {

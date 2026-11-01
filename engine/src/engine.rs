@@ -54,6 +54,31 @@ pub struct Routing {
     pub phones: Out,
 }
 
+/// The headphones' routing, shared with their own device's stream (lock-free).
+#[derive(Default)]
+pub struct PhonesRoute(std::sync::atomic::AtomicU32);
+
+impl PhonesRoute {
+    pub fn set(&self, out: Out) {
+        let v = match out {
+            Out::Off => 0,
+            Out::Stereo(c) => 1 << 16 | c as u32,
+            Out::Mono(c) => 2 << 16 | c as u32,
+        };
+        self.0.store(v, Relaxed);
+    }
+
+    pub fn get(&self) -> Out {
+        let v = self.0.load(Relaxed);
+        let c = (v & 0xffff) as u16;
+        match v >> 16 {
+            1 => Out::Stereo(c),
+            2 => Out::Mono(c),
+            _ => Out::Off,
+        }
+    }
+}
+
 impl Routing {
     /// Master on 1/2, headphones on 3/4 when the device has them (DDJ-400 layout).
     pub fn default_for(channels: u16) -> Routing {
@@ -76,7 +101,7 @@ impl Default for Routing {
 
 /// Add a stereo frame to `frame` as `out` says. Channels the device lacks are skipped.
 #[inline]
-fn route(frame: &mut [f32], out: Out, l: f32, r: f32) {
+pub(crate) fn route(frame: &mut [f32], out: Out, l: f32, r: f32) {
     let ch = frame.len();
     match out {
         Out::Off => {}
@@ -678,8 +703,10 @@ impl Deck {
             DeckCmd::TempoRangeNext => self.set_range(self.range.next()),
             DeckCmd::Nudge(amount) => self.nudge = amount,
             // With the clock: the renderer does these.
-            DeckCmd::Vinyl(_) | DeckCmd::Hand(_) | DeckCmd::HandMove { .. } | DeckCmd::Bend { .. } => {
-            }
+            DeckCmd::Vinyl(_)
+            | DeckCmd::Hand(_)
+            | DeckCmd::HandMove { .. }
+            | DeckCmd::Bend { .. } => {}
             DeckCmd::Quantize(set) => self.quantize = set.apply(self.quantize),
             DeckCmd::Keylock(set) => self.player.keylock = set.apply(self.player.keylock),
             // Handled by the renderer.
@@ -763,6 +790,9 @@ pub struct Renderer {
     phones: Vec<f32>,
     preview_buf: Vec<f32>,
     routing: Routing,
+    /// The headphones on their own device: their bus goes here instead
+    /// ([`crate::phones_out`]), and their routing to [`PhonesRoute`].
+    phones_tap: Option<(rtrb::Producer<f32>, Arc<PhonesRoute>)>,
     preview: Option<Arc<TrackAudio>>,
     preview_player: Player,
     preview_gain: f32,
@@ -837,6 +867,7 @@ impl Renderer {
             phones: vec![0.0; MAX_BLOCK * 2],
             preview_buf: vec![0.0; MAX_BLOCK * 2],
             routing: Routing::default(),
+            phones_tap: None,
             preview: None,
             preview_player: Player::new(0.0, None),
             preview_gain: 1.0,
@@ -862,6 +893,12 @@ impl Renderer {
         r
     }
 
+    /// Send the headphone bus to its own device from now on (`crate::phones_out`).
+    pub(crate) fn tap_phones(&mut self, queue: rtrb::Producer<f32>, route: Arc<PhonesRoute>) {
+        route.set(self.routing.phones);
+        self.phones_tap = Some((queue, route));
+    }
+
     /// Render into an interleaved device buffer with `channels` channels, routing the
     /// master and headphone buses as set by [`Command::SetRouting`].
     pub fn process(&mut self, out: &mut [f32], channels: usize) {
@@ -874,7 +911,16 @@ impl Renderer {
             let n = (total - done).min(MAX_BLOCK);
             self.render_block(n);
             let chunk = &mut out[done * channels..(done + n) * channels];
-            let Routing { master, phones } = self.routing;
+            let Routing { master, mut phones } = self.routing;
+            if let Some((tap, _)) = &mut self.phones_tap {
+                // On their own device: the bus goes over whole.
+                phones = Out::Off;
+                for s in &self.phones[..2 * n] {
+                    if tap.push(*s).is_err() {
+                        break;
+                    }
+                }
+            }
             for (f, frame) in chunk.chunks_exact_mut(channels).enumerate() {
                 frame.fill(0.0);
                 route(frame, master, self.master[2 * f], self.master[2 * f + 1]);
@@ -1242,7 +1288,12 @@ impl Renderer {
                     d.hotcue_mode = m;
                 }
             }
-            Command::SetRouting(r) => self.routing = r,
+            Command::SetRouting(r) => {
+                self.routing = r;
+                if let Some((_, route)) = &self.phones_tap {
+                    route.set(r.phones);
+                }
+            }
             Command::Preview(p) => self.preview_cmd(p),
             Command::Restore(st) => self.restore(st),
         }
@@ -1970,7 +2021,11 @@ mod tests {
             out.extend(record(&mut rig, 0.01));
         }
         rig.run(0.3);
-        assert!((rig.pos(0) - start - 0.036).abs() < 0.001, "{}", rig.pos(0) - start);
+        assert!(
+            (rig.pos(0) - start - 0.036).abs() < 0.001,
+            "{}",
+            rig.pos(0) - start
+        );
         assert!(out.iter().any(|s| s.abs() > 0.01), "you hear it");
         assert!(!rig.snap().decks[0].playing);
     }

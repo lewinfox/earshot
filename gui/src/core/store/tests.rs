@@ -1338,6 +1338,7 @@ fn a_grid_edit_doesnt_wait_for_the_database() {
             device: None,
             buffer_frames: Some(256),
             null: true,
+            phones_device: None,
         },
     )
     .unwrap();

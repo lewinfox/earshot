@@ -9,6 +9,7 @@ pub mod dsp;
 pub mod engine;
 pub mod keylock;
 pub mod output;
+pub mod phones_out;
 pub mod processor;
 pub mod scratch;
 pub mod snapshot;

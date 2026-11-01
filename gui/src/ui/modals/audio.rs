@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use earshot_engine::output::{DeviceSummary, list_devices};
+use earshot_engine::output::{DeviceSummary, can_split, list_devices};
 use earshot_engine::{Out, OutputInfo, Routing};
 use egui::{RichText, Ui};
 
@@ -53,11 +53,11 @@ impl AudioUi {
         }
         let mut action = self.device_section(ui, saved, info);
         ui.separator();
-        let channels = match info {
-            Ok(i) => i.channels,
-            Err(_) => 2,
+        let (channels, phones) = match info {
+            Ok(i) => (i.channels, i.phones.as_ref().map(|p| p.1)),
+            Err(_) => (2, None),
         };
-        if let Some(r) = routing_section(ui, routing, channels) {
+        if let Some(r) = routing_section(ui, routing, channels, phones) {
             action = Some(Command::Audio(AudioCmd::Route(r)));
         }
         action
@@ -83,6 +83,19 @@ impl AudioUi {
             ),
             Err(e) => ui.label(RichText::new(format!("No audio: {e}")).color(THEME.bad)),
         };
+        if let Ok(i) = info {
+            if let Some((name, ch)) = &i.phones {
+                ui.label(
+                    RichText::new(format!("Headphones: {name} · {ch} channels")).color(THEME.muted),
+                );
+            }
+            if let Some(e) = &i.phones_error {
+                ui.label(
+                    RichText::new(format!("Headphones are on the master's device: {e}"))
+                        .color(THEME.warn),
+                );
+            }
+        }
         if std::env::var_os("EARSHOT_AUDIO_DEVICE").is_some()
             || std::env::var_os("EARSHOT_BUFFER").is_some()
         {
@@ -100,40 +113,33 @@ impl AudioUi {
             .show(ui, |ui| {
                 ui.label("Device");
                 ui.horizontal(|ui| {
-                    let current = match (&draft.device, &devices) {
-                        (None, _) => "System default".to_string(),
-                        (Some(id), Some(list)) => {
-                            list.iter().find(|d| &d.id == id).map_or(id.clone(), label)
-                        }
-                        (Some(id), None) => id.clone(),
-                    };
-                    egui::ComboBox::from_id_salt("audio-device-pick")
-                        .width(330.0)
-                        .selected_text(current)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut draft.device, None, "System default");
-                            match &devices {
-                                None => {
-                                    ui.label(
-                                        RichText::new("Looking for devices…").color(THEME.muted),
-                                    );
-                                }
-                                Some(list) => {
-                                    for d in list {
-                                        ui.selectable_value(
-                                            &mut draft.device,
-                                            Some(d.id.clone()),
-                                            label(d),
-                                        );
-                                    }
-                                }
-                            }
-                        });
+                    device_pick(
+                        ui,
+                        "audio-device-pick",
+                        &mut draft.device,
+                        &devices,
+                        "System default",
+                    );
                     if ui.add(Button::subtle("Refresh").small()).clicked() {
                         self.listed = false;
                     }
                 });
                 ui.end_row();
+                if can_split() {
+                    ui.label("Headphones");
+                    device_pick(
+                        ui,
+                        "audio-phones-pick",
+                        &mut draft.phones_device,
+                        &devices,
+                        "Same device as master",
+                    )
+                    .on_hover_text(
+                        "Put the headphones on a device of their own, e.g. the laptop's \
+                         speakers for the master and a USB dongle for the headphones",
+                    );
+                    ui.end_row();
+                }
                 ui.label("Buffer");
                 egui::ComboBox::from_id_salt("audio-buffer")
                     .selected_text(
@@ -154,7 +160,9 @@ impl AudioUi {
                     });
                 ui.end_row();
             });
-        let changed = draft.device != saved.device || draft.buffer_frames != saved.buffer_frames;
+        let changed = draft.device != saved.device
+            || draft.buffer_frames != saved.buffer_frames
+            || draft.phones_device != saved.phones_device;
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(changed, Button::primary("Apply"))
@@ -174,6 +182,38 @@ impl AudioUi {
         });
         action
     }
+}
+
+/// A device, or `none` (the default, or the master's).
+fn device_pick(
+    ui: &mut Ui,
+    id: &str,
+    pick: &mut Option<String>,
+    devices: &Option<Vec<DeviceSummary>>,
+    none: &str,
+) -> egui::Response {
+    let current = match (&*pick, devices) {
+        (None, _) => none.to_string(),
+        (Some(id), Some(list)) => list.iter().find(|d| &d.id == id).map_or(id.clone(), label),
+        (Some(id), None) => id.clone(),
+    };
+    egui::ComboBox::from_id_salt(id)
+        .width(330.0)
+        .selected_text(current)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(pick, None, none);
+            match devices {
+                None => {
+                    ui.label(RichText::new("Looking for devices…").color(THEME.muted));
+                }
+                Some(list) => {
+                    for d in list {
+                        ui.selectable_value(pick, Some(d.id.clone()), label(d));
+                    }
+                }
+            }
+        })
+        .response
 }
 
 fn label(d: &DeviceSummary) -> String {
@@ -200,60 +240,79 @@ fn out_choices(channels: u16) -> Vec<Out> {
     v
 }
 
-fn routing_section(ui: &mut Ui, current: Routing, channels: u16) -> Option<Routing> {
+/// Which channels the master and headphones go to: of the one device, or with the
+/// headphones on their own (`phones`: its channels), of each one's.
+fn routing_section(
+    ui: &mut Ui,
+    current: Routing,
+    channels: u16,
+    phones: Option<u16>,
+) -> Option<Routing> {
     let mut r = current;
     ui.label(RichText::new("Outputs").strong());
     egui::Grid::new("audio-routing")
         .num_columns(2)
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
-            for (name, bus) in [("Master", &mut r.master), ("Headphones", &mut r.phones)] {
+            for (name, bus, ch) in [
+                ("Master", &mut r.master, channels),
+                ("Headphones", &mut r.phones, phones.unwrap_or(channels)),
+            ] {
                 ui.label(name);
                 egui::ComboBox::from_id_salt(("audio-out", name))
                     .selected_text(out_name(*bus))
                     .show_ui(ui, |ui| {
-                        for o in out_choices(channels) {
+                        for o in out_choices(ch) {
                             ui.selectable_value(bus, o, out_name(o));
                         }
                     });
                 ui.end_row();
             }
         });
-    ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("Presets:").color(THEME.muted));
-        if channels >= 4
-            && ui
-                .add(Button::new("Controller"))
-                .on_hover_text("Master on 1/2, headphones on 3/4")
+    if phones.is_some() {
+        ui.label(
+            RichText::new("The headphones are on their own device: these are its channels.")
+                .size(fs(11.0))
+                .color(THEME.muted),
+        );
+    }
+    if phones.is_none() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Presets:").color(THEME.muted));
+            if channels >= 4
+                && ui
+                    .add(Button::new("Controller"))
+                    .on_hover_text("Master on 1/2, headphones on 3/4")
+                    .clicked()
+            {
+                r = Routing::default_for(4);
+            }
+            if ui
+                .add(Button::new("Speakers only"))
+                .on_hover_text("Master on 1/2, no headphones")
                 .clicked()
-        {
-            r = Routing::default_for(4);
-        }
-        if ui
-            .add(Button::new("Speakers only"))
-            .on_hover_text("Master on 1/2, no headphones")
-            .clicked()
-        {
-            r = Routing {
-                master: Out::Stereo(0),
-                phones: Out::Off,
-            };
-        }
-        if channels >= 2
-            && ui
-                .add(Button::new("Split cue"))
-                .on_hover_text(
-                    "One stereo output, e.g. laptop headphones: master in the right ear, \
+            {
+                r = Routing {
+                    master: Out::Stereo(0),
+                    phones: Out::Off,
+                };
+            }
+            if channels >= 2
+                && ui
+                    .add(Button::new("Split cue"))
+                    .on_hover_text(
+                        "One stereo output, e.g. laptop headphones: master in the right ear, \
                      cue and preview in the left",
-                )
-                .clicked()
-        {
-            r = Routing {
-                master: Out::Mono(1),
-                phones: Out::Mono(0),
-            };
-        }
-    });
+                    )
+                    .clicked()
+            {
+                r = Routing {
+                    master: Out::Mono(1),
+                    phones: Out::Mono(0),
+                };
+            }
+        });
+    }
     if r.phones == Out::Off {
         ui.label(
             RichText::new("Headphones are off, so previews and headphone cue are silent.")

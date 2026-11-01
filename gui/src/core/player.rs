@@ -201,6 +201,11 @@ pub struct AudioSettings {
     pub device: Option<String>,
     pub buffer_frames: Option<u32>,
     pub routing: Option<Routing>,
+    /// The headphones on a device of their own (laptop-only: master on the speakers,
+    /// headphones on a USB dongle). `None`: on the master's device. Only under
+    /// PipeWire ([`earshot_engine::output::can_split`]).
+    #[serde(default)]
+    pub phones_device: Option<String>,
 }
 
 /// The buffer size when none is chosen, in frames: about 5 ms, two of them queued.
@@ -223,6 +228,7 @@ pub fn output_options(saved: &AudioSettings) -> OutputOptions {
                 .unwrap_or(DEFAULT_BUFFER),
         ),
         null: std::env::var("EARSHOT_NULL_AUDIO").is_ok_and(|v| v == "1"),
+        phones_device: saved.phones_device.clone(),
     }
 }
 
@@ -375,9 +381,17 @@ pub fn start_engine(player: &Player, opts: &OutputOptions) -> Result<OutputInfo,
         }
     }
     let info = engine.info().clone();
-    engine.send(Command::SetRouting(
-        inner.routing.unwrap_or(Routing::default_for(info.channels)),
-    ))?;
+    // Not chosen yet: the controller's layout, or with the headphones on their own
+    // device, each on its device's first pair.
+    let routing = inner.routing.unwrap_or(if info.phones.is_some() {
+        Routing {
+            master: earshot_engine::Out::Stereo(0),
+            phones: earshot_engine::Out::Stereo(0),
+        }
+    } else {
+        Routing::default_for(info.channels)
+    });
+    engine.send(Command::SetRouting(routing))?;
     inner.midi.set(engine.sender());
     inner.engine = Some(engine);
     Ok(info)
@@ -807,6 +821,7 @@ pub(crate) mod testing {
             device: None,
             buffer_frames: Some(256),
             null: true,
+            phones_device: None,
         }
     }
 

@@ -138,14 +138,21 @@ impl Panel for TopBar<'_> {
             let (audio, ok) = match self.audio {
                 Ok(i) => (
                     format!(
-                        "{}{} · {} kHz · {} frames · {} ch",
-                        if i.null { "⚠ " } else { "" },
+                        "{}{}{} · {} kHz · {} frames · {} ch",
+                        if i.null || i.phones_error.is_some() {
+                            "⚠ "
+                        } else {
+                            ""
+                        },
                         i.device,
+                        i.phones
+                            .as_ref()
+                            .map_or(String::new(), |(p, _)| format!(" · headphones: {p}")),
                         i.sample_rate / 1000,
                         i.buffer_frames.map_or("default".into(), |b| b.to_string()),
                         i.channels
                     ),
-                    !i.null,
+                    !i.null && i.phones_error.is_none(),
                 ),
                 Err(e) => (format!("no audio: {e}"), false),
             };

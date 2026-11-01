@@ -34,7 +34,7 @@ folder, below).
 System packages (Ubuntu/Debian names):
 
 ```bash
-sudo apt install build-essential pkg-config libasound2-dev libdbus-1-dev libclang-dev
+sudo apt install build-essential pkg-config libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev
 ```
 
 You also need Rust (stable) and [uv](https://docs.astral.sh/uv/). Your user should be

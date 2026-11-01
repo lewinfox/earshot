@@ -244,6 +244,12 @@ pub struct Stats {
     pub max_callback_ns: AtomicU64,
     /// Events the app didn't collect in time (the ring was full).
     pub dropped_events: AtomicU64,
+    /// Headphones on their own device: frames it wanted that weren't there yet.
+    pub phones_short: AtomicU64,
+    /// Times the headphones were brought back in line with the master.
+    pub phones_realigns: AtomicU64,
+    /// Frames queued for the headphones (smoothed): how far behind the master they are.
+    pub phones_level: AtomicU64,
 }
 
 impl Stats {
