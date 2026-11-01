@@ -343,6 +343,7 @@ impl EarshotApp {
             eprintln!("MIDI: {e}");
             (Midi::default(), vec![])
         });
+        self.prefs.set_controller(!self.midi_ports.is_empty());
     }
 
     /// Each deck's tempo range, as the engine has it.
@@ -584,6 +585,8 @@ impl EarshotApp {
             }
             ViewCmd::CloseModal(m) => self.modals.close(m),
             ViewCmd::WaveZoom(z) => self.prefs.wave_zoom = z,
+            ViewCmd::ShowMixer(show) => self.prefs.set_mixer(show),
+            ViewCmd::AutoHideMixer(on) => self.prefs.auto_hide_mixer = on,
             ViewCmd::UiScale(z) => {
                 self.prefs.ui_scale = z;
                 theme::set_text_scale(&self.ctx, z);
@@ -734,6 +737,7 @@ impl EarshotApp {
             audio: &self.audio,
             routing,
             hotcue_mode: self.settings.hotcue_mode,
+            auto_hide_mixer: self.prefs.auto_hide_mixer,
             keymap: &self.keymap,
             mode: self.prefs.mode,
             analysis: AnalysisEnv {

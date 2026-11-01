@@ -50,26 +50,6 @@ impl Panel for TopBar<'_> {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let t = cx.theme;
         ui.horizontal(|ui| {
-            ui.label(RichText::new("earshot").strong().color(t.accent));
-            let mut mode = cx.prefs.mode;
-            egui::ComboBox::from_id_salt("mode")
-                .selected_text(match mode {
-                    Mode::Prepare => "Prepare",
-                    Mode::Perform => "Perform",
-                })
-                .width(90.0)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut mode, Mode::Prepare, "Prepare")
-                        .on_hover_text("One player: set cues, fix beat grids, build playlists");
-                    ui.selectable_value(&mut mode, Mode::Perform, "Perform")
-                        .on_hover_text("Two or four decks and the mixer");
-                });
-            if mode != cx.prefs.mode {
-                cx.send(ViewCmd::SetMode(mode));
-            }
-            if mode == Mode::Perform {
-                deck_count(ui, cx);
-            }
             ui.menu_button("Menu", |ui| {
                 ui.menu_button("Import", |ui| {
                     if ui.button("Folder…").clicked() {
@@ -105,24 +85,56 @@ impl Panel for TopBar<'_> {
                             }
                         }
                     });
+                    ui.menu_button("Panes", |ui| {
+                        let mut mixer = cx.prefs.mixer_shown();
+                        if ui
+                            .checkbox(&mut mixer, "Mixer controls")
+                            .on_hover_text("Perform's mixer, between the decks")
+                            .changed()
+                        {
+                            cx.send(ViewCmd::ShowMixer(mixer));
+                        }
+                    });
                 });
             });
-            ui.menu_button("Edit", |ui| {
-                for (label, what, keys, cmd) in [
-                    ("Undo", &self.undo, "Ctrl+Z", Command::Undo),
-                    ("Redo", &self.redo, "Ctrl+Shift+Z", Command::Redo),
-                ] {
-                    let text = match what {
-                        Some(w) => format!("{label} {w}"),
-                        None => label.to_string(),
-                    };
-                    let b = egui::Button::new(text).shortcut_text(keys);
-                    if ui.add_enabled(what.is_some(), b).clicked() {
-                        cx.send(cmd);
-                        ui.close();
+            if cx.prefs.mode == Mode::Prepare {
+                ui.menu_button("Edit", |ui| {
+                    for (label, what, keys, cmd) in [
+                        ("Undo", &self.undo, "Ctrl+Z", Command::Undo),
+                        ("Redo", &self.redo, "Ctrl+Shift+Z", Command::Redo),
+                    ] {
+                        let text = match what {
+                            Some(w) => format!("{label} {w}"),
+                            None => label.to_string(),
+                        };
+                        let b = egui::Button::new(text).shortcut_text(keys);
+                        if ui.add_enabled(what.is_some(), b).clicked() {
+                            cx.send(cmd);
+                            ui.close();
+                        }
                     }
-                }
-            });
+                });
+            }
+            ui.label(RichText::new("earshot").strong().color(t.accent));
+            let mut mode = cx.prefs.mode;
+            egui::ComboBox::from_id_salt("mode")
+                .selected_text(match mode {
+                    Mode::Prepare => "Prepare",
+                    Mode::Perform => "Perform",
+                })
+                .width(90.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut mode, Mode::Prepare, "Prepare")
+                        .on_hover_text("One player: set cues, fix beat grids, build playlists");
+                    ui.selectable_value(&mut mode, Mode::Perform, "Perform")
+                        .on_hover_text("Two or four decks and the mixer");
+                });
+            if mode != cx.prefs.mode {
+                cx.send(ViewCmd::SetMode(mode));
+            }
+            if mode == Mode::Perform {
+                deck_count(ui, cx);
+            }
             let (audio, ok) = match self.audio {
                 Ok(i) => (
                     format!(

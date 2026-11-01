@@ -9,7 +9,7 @@ use super::ModalEnv;
 use super::audio::AudioUi;
 use crate::core::command::{AppCmd, Command};
 use crate::core::keymap::Origin;
-use crate::core::view::SettingsTab;
+use crate::core::view::{SettingsTab, ViewCmd};
 use crate::ui::theme::{THEME, fs};
 use crate::ui::widgets::{Button, Seg, Slider, segmented};
 use earshot_engine::HotcueMode;
@@ -89,7 +89,9 @@ impl SettingsUi {
                                 .ui(ui, env.audio_settings, env.audio, env.routing),
                         )
                     }
-                    SettingsTab::Decks => out.extend(decks(ui, env.hotcue_mode)),
+                    SettingsTab::Decks => {
+                        out.extend(decks(ui, env.hotcue_mode, env.auto_hide_mixer))
+                    }
                     SettingsTab::Analysis => out.extend(analysis(ui, &env.analysis)),
                     SettingsTab::Keymap => out.extend(keymap(ui, &env.keymap_file)),
                 }
@@ -102,7 +104,7 @@ fn note(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).size(fs(11.0)).color(THEME.muted));
 }
 
-fn decks(ui: &mut Ui, mode: HotcueMode) -> Vec<Command> {
+fn decks(ui: &mut Ui, mode: HotcueMode, auto_hide_mixer: bool) -> Vec<Command> {
     let mut out = vec![];
     ui.horizontal(|ui| {
         ui.label("Hot cues on a stopped deck");
@@ -120,6 +122,19 @@ fn decks(ui: &mut Ui, mode: HotcueMode) -> Vec<Command> {
         ui,
         "On a playing deck a hot cue always jumps there and plays on. Applies to every \
          deck and Prepare's player.",
+    );
+    ui.add_space(8.0);
+    let mut hide = auto_hide_mixer;
+    if ui
+        .checkbox(&mut hide, "Auto-hide mixer when controller connected")
+        .changed()
+    {
+        out.push(Command::View(ViewCmd::AutoHideMixer(hide)));
+    }
+    note(
+        ui,
+        "Perform's mixer starts hidden each time a controller connects; View > Panes > \
+         Mixer controls shows it.",
     );
     out
 }

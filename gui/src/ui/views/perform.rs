@@ -56,7 +56,12 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
                     Side::Right
                 }
             };
-            let mixer_w = mixer::width(&decks) + 16.0;
+            let show_mixer = cx.prefs.mixer_shown();
+            let mixer_w = if show_mixer {
+                mixer::width(&decks) + 16.0
+            } else {
+                0.0
+            };
             let width = (ui.available_width() - mixer_w - 12.0) / 2.0;
             let column = |ui: &mut Ui, s: Side, panels: &mut Panels, cx: &mut Cx| {
                 ui.vertical(|ui| {
@@ -76,13 +81,15 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
             };
             ui.horizontal_top(|ui| {
                 column(ui, Side::Left, panels, cx);
-                ui.allocate_ui(vec2(mixer_w, 0.0), |ui| {
-                    MixerPanel {
-                        decks: &decks,
-                        width: mixer_w,
-                    }
-                    .ui(ui, cx)
-                });
+                if show_mixer {
+                    ui.allocate_ui(vec2(mixer_w, 0.0), |ui| {
+                        MixerPanel {
+                            decks: &decks,
+                            width: mixer_w,
+                        }
+                        .ui(ui, cx)
+                    });
+                }
                 column(ui, Side::Right, panels, cx);
             });
         });

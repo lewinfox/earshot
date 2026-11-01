@@ -25,6 +25,18 @@ pub struct UiPrefs {
     pub four_decks: bool,
     /// Each kind of track list's columns, widths and sort.
     pub tables: Tables,
+    /// Perform's mixer, between the decks (View > Panes > Mixer controls), while no
+    /// controller hides it.
+    pub show_mixer: bool,
+    /// Hide the mixer while a controller is connected (it has its own).
+    pub auto_hide_mixer: bool,
+    /// A MIDI controller is connected (not kept).
+    #[serde(skip)]
+    pub controller: bool,
+    /// The mixer, while a controller hides it: shown again by hand. Not kept: each
+    /// time a controller connects it starts hidden.
+    #[serde(skip)]
+    pub mixer_with_controller: bool,
 }
 
 /// View > Text size's sizes, which Ctrl +/- step through, with their names.
@@ -49,6 +61,10 @@ impl Default for UiPrefs {
             ui_scale: 1.0,
             four_decks: false,
             tables: Tables::default(),
+            show_mixer: true,
+            auto_hide_mixer: true,
+            controller: false,
+            mixer_with_controller: false,
         }
     }
 }
@@ -57,6 +73,37 @@ impl UiPrefs {
     /// The decks Perform shows: two or four.
     pub fn decks(&self) -> Vec<DeckId> {
         DeckId::first(if self.four_decks { 4 } else { 2 }).collect()
+    }
+
+    /// Perform shows the mixer.
+    pub fn mixer_shown(&self) -> bool {
+        if self.mixer_hidden_by_controller() {
+            self.mixer_with_controller
+        } else {
+            self.show_mixer
+        }
+    }
+
+    /// The connected controller decides whether the mixer shows (Settings > Decks).
+    fn mixer_hidden_by_controller(&self) -> bool {
+        self.auto_hide_mixer && self.controller
+    }
+
+    /// Show or hide the mixer: for now, while a controller hides it; else from now on.
+    pub fn set_mixer(&mut self, show: bool) {
+        if self.mixer_hidden_by_controller() {
+            self.mixer_with_controller = show;
+        } else {
+            self.show_mixer = show;
+        }
+    }
+
+    /// A controller was connected or disconnected (`true`: one is there now).
+    pub fn set_controller(&mut self, connected: bool) {
+        if connected && !self.controller {
+            self.mixer_with_controller = false;
+        }
+        self.controller = connected;
     }
 
     pub fn layout(&self) -> &Layout {

@@ -684,6 +684,40 @@ fn layout_is_kept_per_mode() {
     steps(&mut h, 3);
 }
 
+/// Perform's mixer hides from View > Panes, and while a controller is connected
+/// (unless Settings says not to); it starts hidden each time one connects.
+#[test]
+fn the_mixer_hides_by_hand_and_for_a_controller() {
+    let mut h = start("mixer");
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Perform).into());
+    steps(&mut h, 3);
+    let mixer = |h: &H| h.query_all_by_label("Gain").count() > 0;
+    assert!(mixer(&h));
+    h.state_mut().dispatch(ViewCmd::ShowMixer(false).into());
+    steps(&mut h, 3);
+    assert!(!mixer(&h));
+    h.state_mut().dispatch(ViewCmd::ShowMixer(true).into());
+
+    // A controller connects: hidden, until shown by hand.
+    h.state_mut().prefs.set_controller(true);
+    steps(&mut h, 3);
+    assert!(!mixer(&h));
+    h.state_mut().dispatch(ViewCmd::ShowMixer(true).into());
+    steps(&mut h, 3);
+    assert!(mixer(&h));
+    // Disconnected and connected again: hidden again; gone: the choice without one.
+    h.state_mut().prefs.set_controller(false);
+    h.state_mut().prefs.set_controller(true);
+    assert!(!h.state().prefs.mixer_shown());
+    h.state_mut().prefs.set_controller(false);
+    assert!(h.state().prefs.mixer_shown());
+    // Auto-hide off: a controller changes nothing.
+    h.state_mut().dispatch(ViewCmd::AutoHideMixer(false).into());
+    h.state_mut().prefs.set_controller(true);
+    assert!(h.state().prefs.mixer_shown());
+}
+
 /// The settings window: the analysis tab changes the background worker cap at once
 /// (and saves it), the keymap tab loads the user's keymap file or says why it didn't.
 #[test]
