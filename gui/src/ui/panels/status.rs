@@ -25,14 +25,22 @@ pub struct AnalysisSummary {
     pub worker_problem: Option<String>,
 }
 
+/// The CPU meter: how much of its time the audio engine needs.
+pub struct Meter<'a> {
+    /// The slowest recent audio callback, as a share of its time (1 or more: too
+    /// slow, the sound drops out). `None` without audio.
+    pub load: Option<f32>,
+    /// Frame timing, and the audio callback's: the tooltip.
+    pub detail: [&'a str; 2],
+}
+
 pub struct TopBar<'a> {
     pub audio: &'a Result<OutputInfo, String>,
     /// The audio stalled and was restarted, or keeps stalling (`core::audio_watch`).
     pub audio_note: Option<&'a str>,
     pub midi_ports: &'a [String],
     pub analysis: &'a AnalysisSummary,
-    /// Frame timing, and the audio callback's.
-    pub hud: [&'a str; 2],
+    pub hud: Meter<'a>,
     /// What undo and redo would do ("edit title"), if anything.
     pub undo: Option<String>,
     pub redo: Option<String>,
@@ -160,14 +168,44 @@ impl Panel for TopBar<'_> {
                 if ui.button("Keys").clicked() {
                     cx.send(ViewCmd::ToggleModal(Modal::Keys));
                 }
-                ui.label(RichText::new(self.hud[1]).monospace().size(fs(11.0)));
-                ui.label(RichText::new(self.hud[0]).monospace().size(fs(11.0)));
+                self.cpu_meter(ui, cx);
             });
         });
     }
 }
 
 impl TopBar<'_> {
+    /// "CPU" and a bar: green, amber from half, red from 80 % (where a callback
+    /// counts as slow).
+    fn cpu_meter(&self, ui: &mut Ui, cx: &mut Cx) {
+        let t = cx.theme;
+        let load = self.hud.load;
+        let (rect, r) = ui.allocate_exact_size(egui::vec2(60.0, 10.0), egui::Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(rect, 2.0, t.line);
+        if let Some(l) = load {
+            let colour = match l {
+                l if l >= 0.8 => t.bad,
+                l if l >= 0.5 => t.warn,
+                _ => t.ok,
+            };
+            let mut fill = rect;
+            fill.set_width(rect.width() * l.clamp(0.02, 1.0));
+            p.rect_filled(fill, 2.0, colour);
+        }
+        let tip = match load {
+            Some(l) => format!(
+                "Audio engine load: {:.0} % of the time it has, at worst lately\n{}\n{}",
+                l * 100.0,
+                self.hud.detail[1],
+                self.hud.detail[0]
+            ),
+            None => format!("No audio\n{}", self.hud.detail[0]),
+        };
+        r.on_hover_text(tip);
+        ui.label(RichText::new("CPU").size(fs(11.0)));
+    }
+
     fn analysis_pill(&self, ui: &mut Ui, cx: &mut Cx) {
         let (a, t) = (self.analysis, cx.theme);
         if let Some(why) = &a.worker_problem {

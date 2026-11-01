@@ -116,11 +116,18 @@ impl EarshotApp {
                 0.0
             };
             let worst = s.take_max_callback_ns() as f64 / 1e6;
+            let xruns = s.xruns.load(Relaxed);
             self.hud.audio = format!(
-                "cb {worst:.2}/{budget:.1} ms · slow {} · xrun {}",
+                "cb {worst:.2}/{budget:.1} ms · slow {} · xrun {xruns}",
                 s.slow_callbacks.load(Relaxed),
-                s.xruns.load(Relaxed)
             );
+            // A dropout since the last look shows as full, whatever the timing said.
+            let dropped = xruns > self.hud.xruns;
+            self.hud.xruns = xruns;
+            self.hud.load = (budget > 0.0).then(|| {
+                let load = (worst / budget) as f32;
+                if dropped { load.max(1.0) } else { load }
+            });
         }
     }
 }

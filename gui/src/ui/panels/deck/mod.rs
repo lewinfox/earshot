@@ -40,7 +40,7 @@ use crate::ui::panels::library::drag;
 use crate::ui::panels::{Cx, Panel};
 use crate::ui::theme::THEME;
 use crate::ui::util::{self, Camelot};
-use crate::ui::widgets::{HwButton, held, key_chip};
+use crate::ui::widgets::{HwButton, held, key_chip_sized};
 
 /// Which side of the mixer a deck sits on. Its tempo fader goes on the outside edge
 /// and its controls run outwards from the mixer.
@@ -555,13 +555,20 @@ impl DeckUi {
                 } else {
                     &info.title
                 };
-                ui.add(egui::Label::new(RichText::new(title).strong().size(15.0)).truncate());
+                let title = if info.artist.is_empty() || info.title.is_empty() {
+                    title.to_string()
+                } else {
+                    format!("{title} - {}", info.artist)
+                };
                 ui.horizontal(|ui| {
                     if let Some(k) = info.key {
-                        key_chip(ui, k);
+                        key_chip_sized(ui, k, 15.0);
                     }
+                    ui.add(egui::Label::new(RichText::new(title).strong().size(15.0)).truncate());
+                });
+                ui.horizontal(|ui| {
                     if let Some(b) = info.tag_bpm {
-                        ui.label(RichText::new(format!("{b:.2}")).color(THEME.muted));
+                        ui.label(RichText::new(format!("{b:.2} BPM")).color(THEME.muted));
                     }
                     match &info.analysing {
                         Some((p, stage)) => {
@@ -571,18 +578,8 @@ impl DeckUi {
                                     .color(THEME.warn),
                             );
                         }
-                        None if !info.grid_source.is_empty() => {
-                            ui.label(
-                                RichText::new(format!("grid: {}", info.grid_source))
-                                    .size(11.0)
-                                    .color(THEME.muted),
-                            );
-                        }
                         None => {}
                     }
-                    ui.add(
-                        egui::Label::new(RichText::new(&info.artist).color(THEME.muted)).truncate(),
-                    );
                 });
             });
             ui.with_layout(Layout::top_down(Align::Max), |ui| {
@@ -976,7 +973,7 @@ mod tests {
                 deck,
             );
         h.run_steps(2);
-        assert!(h.query_by_label("Glide").is_some());
+        assert!(h.query_by_label("Glide - Someone").is_some());
         assert!(h.query_by_label("Old track").is_none());
         h.state_mut().finish_load(7);
         h.run_steps(2);

@@ -31,7 +31,7 @@ pub mod toggle;
 pub mod tool_tabs;
 
 pub use button::{HwButton, Icon, held};
-pub use chips::key_chip;
+pub use chips::{key_chip, key_chip_sized};
 pub use fader::Fader;
 pub use icon_stack::{Opens, StackItem, icon_stack};
 pub use knob::Knob;

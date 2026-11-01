@@ -127,6 +127,21 @@ impl DeckUi {
                 ui.add_space(4.0);
                 ui.label(RichText::new(at).monospace().size(10.0).color(THEME.muted))
                     .on_hover_text("The bar's 1 nearest the playhead");
+                // Padded to the longest ("from tempo-lock sidecar"), so the page's
+                // width doesn't change with it either.
+                let from = if info.grid_source.is_empty() {
+                    String::new()
+                } else {
+                    format!("from {}", info.grid_source)
+                };
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(format!("{from:<23}"))
+                        .monospace()
+                        .size(10.0)
+                        .color(THEME.muted),
+                )
+                .on_hover_text("Where this grid came from");
             });
         });
     }

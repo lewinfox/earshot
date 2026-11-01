@@ -23,7 +23,7 @@ use super::panels::flow::FlowUi;
 use super::panels::library::browser::Scope;
 use super::panels::library::tracks::take_wanted_art;
 use super::panels::library::{LibraryPane, drag};
-use super::panels::status::{AnalysisSummary, MidiLog, TopBar};
+use super::panels::status::{AnalysisSummary, Meter, MidiLog, TopBar};
 use super::panels::{CoreView, Cx, EngineFrame, Panel, PreviewState};
 use super::prefs::{self, UiPrefs};
 use super::theme::{self, THEME};
@@ -170,8 +170,13 @@ struct Preview {
 #[derive(Default)]
 struct Hud {
     frames: VecDeque<(Instant, f32)>,
+    /// Frame timing and the audio callback's, for the CPU meter's tooltip.
     text: String,
     audio: String,
+    /// The audio engine's load: its slowest callback lately, as a share of the time
+    /// it had. `None` without audio.
+    load: Option<f32>,
+    xruns: u64,
     last: Option<Instant>,
 }
 
@@ -708,7 +713,10 @@ impl EarshotApp {
                     audio_note: self.audio_note.as_ref().map(|(n, _)| n.as_str()),
                     midi_ports: &self.midi_ports,
                     analysis: &self.analysis,
-                    hud: [&self.hud.text, &self.hud.audio],
+                    hud: Meter {
+                        load: self.hud.load,
+                        detail: [&self.hud.text, &self.hud.audio],
+                    },
                     undo: self.edits.next_undo().map(|e| e.label()),
                     redo: self.edits.next_redo().map(|e| e.label()),
                 }
