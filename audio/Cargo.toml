@@ -4,5 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# The quick analysis (src/quick): STFTs and autocorrelation.
+realfft = "3.5"
 serde = { version = "1.0.229", features = ["derive"] }
 symphonia = { version = "0.6.1", features = ["mp3", "aac", "isomp4", "alac"] }
