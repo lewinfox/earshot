@@ -404,6 +404,9 @@ pub enum Command {
     SetSyncLeader(Option<DeckId>),
     /// What hot cues do on a stopped deck, on every player.
     SetHotcueMode(HotcueMode),
+    /// Effects go only on the first this many decks (the ones the app shows); a unit
+    /// on another goes back to its default, or the main mix.
+    SetFxDecks(usize),
     SetRouting(Routing),
     Preview(PreviewCmd),
     /// An effect unit (0..[`FX_UNITS`]; others are ignored).

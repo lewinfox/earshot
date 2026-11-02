@@ -309,6 +309,7 @@ impl EarshotApp {
             app.dispatch((deck, EngineCmd::TempoRange(range)).into());
         }
         let _ = player::set_hotcue_mode(&app.player, app.settings.hotcue_mode);
+        let _ = player::set_fx_decks(&app.player, app.prefs.decks().len());
         player::set_cue_first_beat(&app.player, app.settings.cue_first_beat);
         let options = app.settings.deck_options.clone();
         for (i, o) in options.into_iter().enumerate().take(session::SLOTS) {
@@ -588,7 +589,12 @@ impl EarshotApp {
                     self.load(Some(deck), id);
                 }
             }
-            ViewCmd::FourDecks(on) => self.prefs.four_decks = on,
+            ViewCmd::FourDecks(on) => {
+                self.prefs.four_decks = on;
+                if let Err(e) = player::set_fx_decks(&self.player, self.prefs.decks().len()) {
+                    eprintln!("effect decks: {e}");
+                }
+            }
             ViewCmd::SetMode(m) => self.prefs.mode = m,
             ViewCmd::Source(s) => self.prefs.layout_mut().source = s,
             ViewCmd::Aside(a) => self.prefs.layout_mut().aside = a,
@@ -808,6 +814,7 @@ impl eframe::App for EarshotApp {
                 .is_some_and(|sh| sh.live().iter().any(|d| d.playing));
         self.lib.analyser.set_playing(playing);
         self.keyboard(ctx);
+        input::full_screen_key(ctx);
         // Ctrl +/- and Ctrl 0 change the text size too (egui's shortcuts, our steps).
         if let Some(z) = self.text_size_keys(ctx) {
             self.dispatch(ViewCmd::UiScale(z).into());

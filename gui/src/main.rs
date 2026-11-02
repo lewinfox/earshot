@@ -4,6 +4,11 @@
 mod core;
 mod ui;
 
+/// The narrowest the window can be: the widest view, Perform with four decks and the
+/// mixer, fits with nothing off the edge (`ui::app::tests::everything_fits_at_the_
+/// narrowest_window`).
+pub const MIN_WIDTH: f32 = 1840.0;
+
 fn main() -> eframe::Result {
     // SAFETY: first thing, before any other thread starts.
     unsafe { earshot_engine::output::ask_pipewire_for_small_chunks() };
@@ -18,8 +23,8 @@ fn main() -> eframe::Result {
             // (gui/install-desktop.sh). Also names eframe's storage folder.
             .with_app_id("earshot")
             .with_icon(icon())
-            .with_inner_size([1600.0, 1000.0])
-            .with_min_inner_size([1000.0, 640.0]),
+            .with_inner_size([MIN_WIDTH, 1000.0])
+            .with_min_inner_size([MIN_WIDTH, 640.0]),
         vsync: true,
         ..Default::default()
     };

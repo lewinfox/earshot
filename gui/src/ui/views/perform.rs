@@ -1,14 +1,16 @@
 //! Perform: the decks' waveforms stacked across the top, the decks either side of
-//! the mixer, and the library below. Two decks, or four (the 2/4 toggle in the top
+//! the mixer, the effect units in a strip under them (when shown), and the library
+//! below. Two decks, or four (the 2/4 toggle in the top
 //! bar): then each side of the mixer holds two smaller decks, one above the other.
 
 use earshot_engine::DeckId;
-use egui::{Margin, Ui, vec2};
+use egui::{Margin, Ui};
+use egui_extras::{Size, StripBuilder};
 
 use super::{Panels, library, row_frame};
 use crate::core::view::Region;
-use crate::ui::panels::deck::{DeckPanel, Side, WavePanel};
-use crate::ui::panels::fx::FxPanel;
+use crate::ui::panels::deck::{DeckLayout, DeckPanel, Side, WavePanel};
+use crate::ui::panels::fx::{self, FxPanel};
 use crate::ui::panels::mixer::{self, MixerPanel};
 use crate::ui::panels::{Cx, Panel, resized};
 
@@ -58,47 +60,52 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
                 }
             };
             let show_mixer = cx.prefs.mixer_shown();
-            let show_fx = cx.prefs.show_fx;
-            let mixer_w = if show_mixer {
-                mixer::width(&decks) + 16.0
-            } else {
-                0.0
-            };
-            let fx_w = if show_fx { FxPanel::WIDTH } else { 0.0 };
-            let gaps = 6.0 * (2 + show_mixer as u8 + show_fx as u8 - 1) as f32;
-            let width = (ui.available_width() - mixer_w - fx_w - gaps.max(12.0)) / 2.0;
             let column = |ui: &mut Ui, s: Side, panels: &mut Panels, cx: &mut Cx| {
+                let width = ui.available_width();
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = STACK_GAP;
                     for d in decks.iter().filter(|d| side(d) == s) {
                         let deck = &mut panels.decks[d.index()];
                         DeckPanel {
                             deck,
-                            width,
-                            height: deck_h,
-                            side: s,
-                            compact,
+                            layout: DeckLayout {
+                                width,
+                                height: deck_h,
+                                side: s,
+                                compact,
+                                tempo_fader: show_mixer,
+                            },
                         }
                         .ui(ui, cx);
                     }
                 });
             };
-            ui.horizontal_top(|ui| {
-                column(ui, Side::Left, panels, cx);
+            // The mixer at its own width; the decks share the rest, so nothing can be
+            // pushed off the edge.
+            let mut strip = StripBuilder::new(ui).size(Size::remainder());
+            if show_mixer {
+                strip = strip.size(Size::exact(mixer::width(&decks) + 16.0));
+            }
+            strip.size(Size::remainder()).horizontal(|mut strip| {
+                strip.cell(|ui| column(ui, Side::Left, panels, cx));
                 if show_mixer {
-                    ui.allocate_ui(vec2(mixer_w, 0.0), |ui| {
+                    strip.cell(|ui| {
+                        let width = ui.available_width();
                         MixerPanel {
                             decks: &decks,
-                            width: mixer_w,
+                            width,
                         }
                         .ui(ui, cx)
                     });
                 }
-                if show_fx {
-                    ui.allocate_ui(vec2(fx_w, 0.0), |ui| FxPanel.ui(ui, cx));
-                }
-                column(ui, Side::Right, panels, cx);
+                strip.cell(|ui| column(ui, Side::Right, panels, cx));
             });
         });
+    if cx.prefs.show_fx {
+        egui::TopBottomPanel::top("fx-perform")
+            .exact_height(fx::HEIGHT + 16.0 + 8.0)
+            .frame(row_frame(cx, Margin::symmetric(6, 4)))
+            .show(ctx, |ui| FxPanel.ui(ui, cx));
+    }
     library(ctx, panels, cx);
 }

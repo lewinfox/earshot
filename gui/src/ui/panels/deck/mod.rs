@@ -126,6 +126,8 @@ impl PendingLoad {
 
 // Layout.
 const TEMPO_W: f32 = 76.0;
+/// SYNC and ★ over Q and KEY, in the header (without a tempo fader).
+const BUTTONS_W: f32 = TEMPO_W + 6.0;
 
 /// The size of a deck's buttons: full size, or smaller while Perform shows four decks.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -268,6 +270,9 @@ pub struct DeckUi {
     side: Side,
     /// Its buttons' size, as last drawn.
     dims: Dims,
+    /// Width of the page and CUE / play with full-size buttons, as last drawn: when
+    /// the deck is too narrow for them, it uses the compact ones.
+    full_controls_w: Option<f32>,
     bpm_text: String,
     /// The engine's state for this frame.
     state: DeckSnap,
@@ -291,6 +296,7 @@ impl DeckUi {
             controls_w: 0.0,
             side: Side::Left,
             dims: Dims::FULL,
+            full_controls_w: None,
             bpm_text: String::new(),
             state: DeckSnap::default(),
             pending: None,
@@ -410,21 +416,32 @@ impl DeckUi {
 
     // ---- the deck panel -----------------------------------------------------------------
 
-    /// Draw the deck `width` points wide and at least `height` tall; `compact` with
-    /// smaller buttons (while Perform shows four decks).
-    #[allow(clippy::too_many_arguments)]
+    /// Draw the deck as `layout` says.
     pub fn show(
         &mut self,
         ui: &mut Ui,
-        width: f32,
-        height: f32,
-        side: Side,
-        compact: bool,
+        layout: DeckLayout,
         info: &DeckInfo,
         out: &mut Vec<Command>,
     ) {
+        let DeckLayout {
+            width,
+            height,
+            side,
+            compact,
+            tempo_fader,
+        } = layout;
         self.side = side;
-        self.dims = if compact { Dims::COMPACT } else { Dims::FULL };
+        // Compact when asked, or when full-size buttons don't fit in this width: the
+        // frame, the tempo fader, the controls, the tabs and the least gap between.
+        let fader_w = if tempo_fader { TEMPO_W + 8.0 } else { 0.0 };
+        let fits = |controls: f32| 18.0 + fader_w + controls + TABS_W + 3.0 + 6.0 <= width;
+        let squeezed = self.full_controls_w.is_some_and(|c| !fits(c));
+        self.dims = if compact || squeezed {
+            Dims::COMPACT
+        } else {
+            Dims::FULL
+        };
         let loading = self.pending.as_ref().map(PendingLoad::info);
         let info = loading.as_ref().unwrap_or(info);
         let resp = THEME
@@ -434,18 +451,24 @@ impl DeckUi {
                 ui.set_width(inner);
                 ui.set_min_height(height - 12.0);
                 ui.spacing_mut().item_spacing = vec2(4.0, 5.0);
-                let left = inner - TEMPO_W - 8.0;
+                let left = if tempo_fader {
+                    inner - TEMPO_W - 8.0
+                } else {
+                    inner
+                };
                 let inner_h = height - 12.0;
-                // The tempo fader on the outside edge.
+                // The tempo fader on the outside edge (its buttons in the header without
+                // it).
                 ui.horizontal_top(|ui| {
-                    if side == Side::Left {
+                    if tempo_fader && side == Side::Left {
                         self.tempo(ui, info, out, inner_h);
                         ui.add_space(4.0);
                     }
                     ui.vertical(|ui| {
                         ui.set_width(left);
                         let top = ui.cursor().min.y;
-                        self.header(ui, info);
+                        let buttons = (!tempo_fader).then_some(&mut *out);
+                        self.header(ui, info, buttons);
                         // The overview takes what the header and controls leave, so the
                         // controls sit on the bottom edge.
                         let used = ui.cursor().min.y - top;
@@ -455,13 +478,21 @@ impl DeckUi {
                         self.overview(ui, info, out, overview_h);
                         self.controls(ui, info, out);
                     });
-                    if side == Side::Right {
+                    if tempo_fader && side == Side::Right {
                         ui.add_space(4.0);
                         self.tempo(ui, info, out, inner_h);
                     }
                 });
             })
             .response;
+        // Full-size controls that turn out not to fit: draw this frame again with
+        // compact ones, so nothing is pushed off the edge.
+        if self.dims == Dims::FULL {
+            self.full_controls_w = Some(self.controls_w);
+            if !fits(self.controls_w) {
+                ui.ctx().request_discard("a deck's controls didn't fit");
+            }
+        }
         if drag::hovering_tracks(&resp) {
             ui.painter().rect_stroke(
                 resp.rect,
@@ -497,7 +528,7 @@ impl DeckUi {
             ui.set_min_height(inner_h);
             ui.spacing_mut().item_spacing = vec2(4.0, 5.0);
             let top = ui.cursor().min.y;
-            self.header(ui, info);
+            self.header(ui, info, None);
             let used = ui.cursor().min.y - top;
             let overview_h =
                 (inner_h - used - self.dims.controls_h() - ui.spacing().item_spacing.y).max(24.0);
@@ -528,7 +559,9 @@ impl DeckUi {
         });
     }
 
-    fn header(&mut self, ui: &mut Ui, info: &DeckInfo) {
+    /// The deck number, title and times; with `buttons`, also SYNC, ★, Q and KEY (when
+    /// there's no tempo fader to sit over), sending to it.
+    fn header(&mut self, ui: &mut Ui, info: &DeckInfo, buttons: Option<&mut Vec<Command>>) {
         let s = self.state;
         // While loading: the new track's length, from the top.
         let (position, duration) = match &self.pending {
@@ -545,8 +578,8 @@ impl DeckUi {
                         .color(self.colour()),
                 );
             }
-            // Title and details on the left, as wide as the times allow.
-            let right = 90.0;
+            // Title and details on the left, as wide as the times (and buttons) allow.
+            let right = 90.0 + if buttons.is_some() { BUTTONS_W } else { 0.0 };
             let left = (ui.available_width() - right).max(60.0);
             ui.allocate_ui_with_layout(vec2(left, 36.0), Layout::top_down(Align::Min), |ui| {
                 ui.set_width(left);
@@ -582,6 +615,13 @@ impl DeckUi {
                     }
                 });
             });
+            if let Some(out) = buttons {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+                    self.sync_buttons(ui, info, out);
+                    self.mode_buttons(ui, out);
+                });
+            }
             ui.with_layout(Layout::top_down(Align::Max), |ui| {
                 let ending = s.playing && self.pending.is_none() && duration - position < 30.0;
                 let remain = if duration > 0.0 {
@@ -793,29 +833,32 @@ fn page_icon(p: &egui::Painter, c: egui::Pos2, page: Page, ink: Color32) {
 
 // ---- panels --------------------------------------------------------------------------
 
-/// A Perform deck, `width` × `height`, on the mixer's `side`; `compact` with smaller
-/// buttons.
-pub struct DeckPanel<'a> {
-    pub deck: &'a mut DeckUi,
+/// How a Perform deck is drawn.
+#[derive(Clone, Copy, Debug)]
+pub struct DeckLayout {
+    /// Its width, and at least its height.
     pub width: f32,
     pub height: f32,
+    /// Which side of the mixer it's on.
     pub side: Side,
+    /// Smaller buttons (while Perform shows four decks).
     pub compact: bool,
+    /// The tempo fader on its outer edge (off while the mixer's controls are hidden:
+    /// a controller has its own); without it SYNC, Q and KEY go in the header.
+    pub tempo_fader: bool,
+}
+
+/// A Perform deck.
+pub struct DeckPanel<'a> {
+    pub deck: &'a mut DeckUi,
+    pub layout: DeckLayout,
 }
 
 impl Panel for DeckPanel<'_> {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         crate::ui::theme::normal_text(ui);
         let info = cx.engine.deck(self.deck.id);
-        self.deck.show(
-            ui,
-            self.width,
-            self.height,
-            self.side,
-            self.compact,
-            info,
-            cx.out,
-        );
+        self.deck.show(ui, self.layout, info, cx.out);
     }
 }
 
@@ -968,7 +1011,14 @@ mod tests {
             .build_ui_state(
                 move |ui, deck: &mut DeckUi| {
                     let mut out = vec![];
-                    deck.show(ui, 680.0, 200.0, Side::Left, false, &info, &mut out);
+                    let layout = DeckLayout {
+                        width: 680.0,
+                        height: 200.0,
+                        side: Side::Left,
+                        compact: false,
+                        tempo_fader: true,
+                    };
+                    deck.show(ui, layout, &info, &mut out);
                 },
                 deck,
             );

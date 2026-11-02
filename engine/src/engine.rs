@@ -782,6 +782,8 @@ pub struct Renderer {
     decks: [Deck; SLOTS],
     channels: [Channel; SLOTS],
     live: usize,
+    /// The decks effects can go on: the first `fx_decks` ([`Command::SetFxDecks`]).
+    fx_decks: usize,
     /// The deck synced decks follow, if the app picked one.
     sync_leader: Option<DeckId>,
     sample_rate: f64,
@@ -873,6 +875,7 @@ impl Renderer {
                 ch
             }),
             live,
+            fx_decks: live,
             sync_leader: None,
             sample_rate: sr,
             deck_buf: std::array::from_fn(|_| vec![0.0; MAX_BLOCK * 2]),
@@ -1163,7 +1166,7 @@ impl Renderer {
     fn fx_clock(&mut self, u: usize, n: usize) -> Option<BeatClock> {
         let sr = self.sample_rate;
         let deck = match self.fx[u].state().target {
-            FxTarget::Deck(id) if id.index() < self.live => Some(id.index()),
+            FxTarget::Deck(id) if self.fx_target_ok(FxTarget::Deck(id)) => Some(id.index()),
             FxTarget::Deck(_) => return None,
             FxTarget::Master => self.master_deck(),
         };
@@ -1385,6 +1388,21 @@ impl Renderer {
                     d.hotcue_mode = m;
                 }
             }
+            Command::SetFxDecks(n) => {
+                self.fx_decks = n.clamp(1, self.live);
+                for u in 0..self.fx.len() {
+                    if self.fx_target_ok(self.fx[u].state().target) {
+                        continue;
+                    }
+                    let default = FxUnitState::default_for(u).target;
+                    let to = if self.fx_target_ok(default) {
+                        default
+                    } else {
+                        FxTarget::Master
+                    };
+                    self.fx[u].apply(FxCmd::Target(to));
+                }
+            }
             Command::SetRouting(r) => {
                 self.routing = r;
                 if let Some((_, route)) = &self.phones_tap {
@@ -1498,17 +1516,26 @@ impl Renderer {
         }
     }
 
+    /// Whether an effect can go on `t`: the main mix, or one of the first
+    /// [`Self::fx_decks`] decks (not Prepare's player).
+    fn fx_target_ok(&self, t: FxTarget) -> bool {
+        match t {
+            FxTarget::Deck(id) => id.index() < self.fx_decks,
+            FxTarget::Master => true,
+        }
+    }
+
     fn fx_cmd(&mut self, unit: usize, cmd: FxCmd) {
-        // Only the live decks (not Prepare's player) take effects.
-        if let FxCmd::Target(FxTarget::Deck(id)) = cmd
-            && id.index() >= self.live
+        if let FxCmd::Target(t) = cmd
+            && !self.fx_target_ok(t)
         {
             return;
         }
+        let fx_decks = self.fx_decks;
         if let Some(fx) = self.fx.get_mut(unit) {
             match cmd {
                 FxCmd::NextTarget => {
-                    let next = fx.state().target.next(self.live);
+                    let next = fx.state().target.next(fx_decks);
                     fx.apply(FxCmd::Target(next));
                 }
                 cmd => fx.apply(cmd),
@@ -1574,10 +1601,7 @@ impl Renderer {
         self.set_param(ParamId::Master(MasterParam::HeadGain), m.head_gain);
         self.set_param(ParamId::Master(MasterParam::HeadMix), m.head_mix);
         for (u, s) in m.fx.into_iter().enumerate() {
-            let target_ok = match s.target {
-                FxTarget::Deck(id) => id.index() < self.live,
-                FxTarget::Master => true,
-            };
+            let target_ok = self.fx_target_ok(s.target);
             self.fx[u].set(if target_ok {
                 s
             } else {
@@ -1815,6 +1839,48 @@ mod tests {
         assert!(peak(&record(&mut rig, 0.3)) > 0.05);
         assert!(rig.snap().mixer.fx_busy[0]);
         assert!(rig.snap().mixer.fx[0].enabled);
+    }
+
+    /// With two decks shown, an effect goes on A, B or the main mix only, and a unit on
+    /// a hidden deck goes back to its own.
+    #[test]
+    fn effects_go_only_on_the_decks_shown() {
+        use crate::fx::{FxCmd, FxTarget};
+        let deck = |i| FxTarget::Deck(DeckId::new(i).unwrap());
+        let mut rig = Rig::with_decks(4);
+        let target = |rig: &Rig, u: usize| rig.snap().mixer.fx[u].target;
+        let next = |rig: &mut Rig, u: usize| {
+            rig.send(Command::Fx {
+                unit: u,
+                cmd: FxCmd::NextTarget,
+            });
+            rig.run(0.01);
+        };
+        // Four shown: unit 2 goes B, C, D, main.
+        for t in [deck(2), deck(3), FxTarget::Master, deck(0)] {
+            next(&mut rig, 1);
+            assert_eq!(target(&rig, 1), t);
+        }
+        // Unit 2 on D, then two shown: back to B.
+        for _ in 0..3 {
+            next(&mut rig, 1);
+        }
+        assert_eq!(target(&rig, 1), deck(3));
+        rig.send(Command::SetFxDecks(2));
+        rig.run(0.01);
+        assert_eq!(target(&rig, 1), deck(1));
+        // And on round B, main, A.
+        for t in [FxTarget::Master, deck(0), deck(1)] {
+            next(&mut rig, 1);
+            assert_eq!(target(&rig, 1), t);
+        }
+        // Not put on C by hand either.
+        rig.send(Command::Fx {
+            unit: 0,
+            cmd: FxCmd::Target(deck(2)),
+        });
+        rig.run(0.01);
+        assert_eq!(target(&rig, 0), deck(0));
     }
 
     #[test]

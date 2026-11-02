@@ -23,6 +23,7 @@ pub fn keys_help(ui: &mut Ui, keymap: &Keymap, mode: keymap::Mode) {
         lib.rows.extend([
             ("Ctrl A".into(), "select all".into()),
             ("Ctrl - / = / 0".into(), "UI size".into()),
+            ("F11".into(), "full screen".into()),
         ]);
     }
     ui.columns(sections.len().max(1), |c| {

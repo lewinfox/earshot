@@ -306,7 +306,7 @@ fn panes(ui: &mut Ui, cx: &mut Cx) {
     let mut fx = cx.prefs.show_fx;
     if ui
         .add(Toggle::new(&mut fx, "FX"))
-        .on_hover_text("The effect units, beside the mixer")
+        .on_hover_text("The effect units, in a strip under the decks")
         .changed()
     {
         cx.send(ViewCmd::ShowFx(fx));
