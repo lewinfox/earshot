@@ -1333,6 +1333,34 @@ fn hotcue_mode_setting() {
     });
 }
 
+/// Settings > Decks can cue new loads at the track's start instead of its first
+/// beat; the choice is saved and reaches the player, and a load then cues at 0 s.
+#[test]
+fn cue_first_beat_setting() {
+    use crate::core::settings;
+    use crate::core::view::SettingsTab;
+    let mut h = start("cue-first-beat");
+    assert!(h.state().player.lock().unwrap().cue_first_beat);
+    h.state_mut()
+        .dispatch(ViewCmd::Settings(SettingsTab::Decks).into());
+    steps(&mut h, 3);
+    h.get_by_label("Automatically set initial cue to first detected beat")
+        .click();
+    steps(&mut h, 3);
+    assert!(!h.state().player.lock().unwrap().cue_first_beat);
+    settle_until(&mut h, |a| {
+        settings::read::<bool>(&a.lib.store.reader, settings::CUE_FIRST_BEAT) == Some(false)
+    });
+
+    let id = ids(&h)[1];
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
+    h.state_mut().dispatch(LibraryCmd::Load(id).into());
+    settle_until(&mut h, |a| a.frame.deck(DeckId::PREPARE).grid.is_some());
+    let snap = h.state().frame.snap.as_ref().unwrap().prepare;
+    assert_eq!(snap.cue_point, 0.0);
+}
+
 /// Prepare's Export tab draws: what to export on the left, where to on the right.
 #[test]
 fn export_tab() {

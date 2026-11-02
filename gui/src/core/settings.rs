@@ -21,6 +21,8 @@ pub const HOTCUE_MODE: &str = "decks.hotcue_mode";
 /// The Flow that was on the canvas last. (Where its canvas was looking is kept with
 /// the Flow: `StoreCmd::SaveFlowCamera`.)
 pub const FLOW_OPEN: &str = "flow.open";
+/// Cue a newly loaded track on its first beat (else at its start).
+pub const CUE_FIRST_BEAT: &str = "decks.cue_first_beat";
 /// Add another library's tracks to earshot without asking, when they're put in a
 /// playlist, crate or Flow.
 pub const IMPORT_WITHOUT_ASKING: &str = "import.without_asking";
@@ -32,6 +34,7 @@ pub struct Settings {
     pub tempo_ranges: Vec<TempoRange>,
     pub deck_options: Vec<DeckOptions>,
     pub hotcue_mode: HotcueMode,
+    pub cue_first_beat: bool,
     pub flow_open: Option<CollectionId>,
     pub import_without_asking: bool,
 }
@@ -63,6 +66,7 @@ impl Settings {
             tempo_ranges: read(reader, TEMPO_RANGES).unwrap_or_default(),
             deck_options: read(reader, DECK_OPTIONS).unwrap_or_default(),
             hotcue_mode: read(reader, HOTCUE_MODE).unwrap_or_default(),
+            cue_first_beat: read(reader, CUE_FIRST_BEAT).unwrap_or(true),
             flow_open: read(reader, FLOW_OPEN).unwrap_or_default(),
             import_without_asking: read(reader, IMPORT_WITHOUT_ASKING).unwrap_or_default(),
         }

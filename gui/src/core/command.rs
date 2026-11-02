@@ -136,6 +136,8 @@ pub enum AppCmd {
     BackgroundWorkers(usize),
     /// What hot cues do on a stopped deck (and save it).
     HotcueMode(earshot_engine::HotcueMode),
+    /// Cue newly loaded tracks on their first beat, else at their start (and save it).
+    CueFirstBeat(bool),
     /// Read the user's keymap file again (the built-in one if there's none).
     ReloadKeymap,
     /// Count the tracks with stale analysis (answered with `Event::Stale`).
