@@ -29,7 +29,7 @@ pub struct Range {
     /// Double-click goes back here.
     pub default: f64,
     /// The value at the middle of the travel, for controls whose middle means "as is"
-    /// (EQ, filter, balance). The travel either side maps linearly to min..centre and
+    /// (EQ, filter, balance, headphone mix). The travel either side maps linearly to min..centre and
     /// centre..max, and value arcs start from it.
     pub centre: Option<f64>,
     pub format: fn(f64) -> String,
@@ -179,17 +179,11 @@ pub const HEAD_GAIN: Range = Range {
 };
 pub const HEAD_MIX: Range = Range {
     name: "Headphone mix",
-    min: -1.0,
+    min: 0.0,
     max: 1.0,
-    default: -1.0,
-    centre: None,
-    format: |v| {
-        format!(
-            "{:.0} % cue, {:.0} % main",
-            (1.0 - v) * 50.0,
-            (v + 1.0) * 50.0
-        )
-    },
+    default: 0.5,
+    centre: Some(0.5),
+    format: |v| format!("{:.0} % cue, {:.0} % main", (1.0 - v) * 100.0, v * 100.0),
 };
 /// The tempo fader, -1..1 across the deck's tempo range (minus at the top).
 pub const TEMPO: Range = Range {

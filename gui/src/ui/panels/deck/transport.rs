@@ -2,7 +2,7 @@
 
 use std::f32::consts::TAU;
 
-use egui::{Align2, FontId, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Align2, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui, pos2, vec2};
 
 use super::{DeckUi, Dims};
 use crate::core::bus::DeckControl;
@@ -60,12 +60,17 @@ impl DeckUi {
     /// the tempo change and fader range under it, VINYL over it (lit in vinyl mode;
     /// a click turns it on or off), and a dot on the rim that turns like a record at
     /// 33⅓ rpm (1.8 s a turn).
+    ///
+    /// Under the mouse, as in Rekordbox: − and + under the tempo (nudge slower or
+    /// faster while held) and two arrows outside the rim at the lower left (turn the
+    /// jog wheel back or forward while held: a bend while playing, a slow move while
+    /// stopped). The ring leaves room round itself for the arrows, and a little more
+    /// on the left so they keep clear of CUE and play.
     pub(super) fn jog(&self, ui: &mut Ui, out: &mut Vec<Command>) {
         let s = self.state;
         let jog = self.dims.jog();
-        // The text scales with the ring (it is smaller on a compact deck).
         let k = jog / Dims::FULL.jog();
-        let (rect, resp) = ui.allocate_exact_size(vec2(jog, jog), Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(vec2(jog + JOG_LEFT * k, jog), Sense::click());
         let resp = resp.on_hover_text(
             "BPM at the current tempo; the tempo change and the fader's range. \
              VINYL: the jog wheel's top and the waveform scratch (click to turn off: \
@@ -74,13 +79,24 @@ impl DeckUi {
         if resp.clicked() {
             self.control(out, DeckControl::Vinyl, 1.0);
         }
+        let c = pos2(rect.right() - jog / 2.0, rect.center().y);
+        let r = jog / 2.0 - JOG_ROOM * k;
+        // The text scales with the ring (it is smaller on a compact deck).
+        let t = k * r / (Dims::FULL.jog() / 2.0 - 2.0);
         let p = ui.painter();
-        let c = rect.center();
-        let r = jog / 2.0 - 2.0 * k;
-        p.circle(c, r, THEME.jog_face, Stroke::new(3.0_f32, self.colour()));
+        p.circle(
+            c,
+            r,
+            THEME.jog_face,
+            Stroke::new(3.0 * k.max(0.8), self.colour()),
+        );
         if self.pending.is_none() {
             let a = ((self.shown / 1.8).fract() as f32) * TAU - TAU / 4.0;
-            p.circle_filled(c + vec2(a.cos(), a.sin()) * r, 3.5, THEME.jog_dot);
+            p.circle_filled(
+                c + vec2(a.cos(), a.sin()) * r,
+                3.5 * k.max(0.8),
+                THEME.jog_dot,
+            );
         }
         let bpm = match &self.pending {
             Some(pl) => pl.bpm.map(|b| b * (1.0 + s.rate)),
@@ -95,35 +111,196 @@ impl DeckUi {
             }
             None => ("-".into(), String::new()),
         };
-        let big = p.layout_no_wrap(whole, FontId::monospace(20.0 * k), THEME.text);
-        let small = p.layout_no_wrap(frac, FontId::monospace(12.0 * k), THEME.text);
+        let big = p.layout_no_wrap(whole, FontId::monospace(20.0 * t), THEME.text);
+        let small = p.layout_no_wrap(frac, FontId::monospace(12.0 * t), THEME.text);
         let w = big.size().x + small.size().x;
-        let top = c.y - big.size().y + 4.0 * k;
+        let top = c.y - big.size().y + 2.0 * t;
         let left = c.x - w / 2.0;
-        let small_top = top + big.size().y - small.size().y - 2.0 * k;
+        let small_top = top + big.size().y - small.size().y - 2.0 * t;
         p.galley(pos2(left, top), big.clone(), THEME.text);
         p.galley(pos2(left + big.size().x, small_top), small, THEME.text);
         let pct = p.layout_no_wrap(
             format!("{:+.1}%", s.rate * 100.0),
-            FontId::monospace(9.5 * k),
+            FontId::monospace(9.5 * t),
             THEME.muted,
         );
         let range = p.layout_no_wrap(
             format!(" {}", s.range.label()),
-            FontId::monospace(9.5 * k),
+            FontId::monospace(9.5 * t),
             self.colour(),
         );
         let w = pct.size().x + range.size().x;
-        let y = c.y + 7.0 * k;
+        let y = c.y + 4.0 * t;
         p.galley(pos2(c.x - w / 2.0, y), pct.clone(), THEME.muted);
         p.galley(pos2(c.x - w / 2.0 + pct.size().x, y), range, self.colour());
         let vinyl = if s.vinyl { self.colour() } else { THEME.line };
         p.text(
-            pos2(c.x, top - 2.0 * k),
+            pos2(c.x, top - 2.0 * t),
             Align2::CENTER_BOTTOM,
             "VINYL",
-            FontId::proportional(8.0 * k),
+            FontId::proportional(8.0 * t),
             vinyl,
+        );
+        self.jog_nudges(ui, out, resp.id, rect, c, r, k);
+    }
+
+    /// The jog ring's hover controls: see [`DeckUi::jog`]. They are always live (so a
+    /// press carried off the ring still lets go), but only drawn under the mouse.
+    #[allow(clippy::too_many_arguments)]
+    fn jog_nudges(
+        &self,
+        ui: &mut Ui,
+        out: &mut Vec<Command>,
+        base: egui::Id,
+        rect: Rect,
+        c: Pos2,
+        r: f32,
+        k: f32,
+    ) {
+        let mut shown = ui.rect_contains_pointer(rect);
+        // − and + side by side under the tempo change: filled squares, apart.
+        let (size, gap) = (10.0 * k, 6.0 * k);
+        let top = c.y + 0.5 * r;
+        let buttons = [
+            (-1.0, DeckControl::NudgeDown, "Nudge slower (hold)"),
+            (1.0, DeckControl::NudgeUp, "Nudge faster (hold)"),
+        ];
+        let mut drawn = Vec::new();
+        for (side, control, tip) in buttons {
+            let left = if side < 0.0 {
+                c.x - gap / 2.0 - size
+            } else {
+                c.x + gap / 2.0
+            };
+            let b = Rect::from_min_size(pos2(left, top), vec2(size, size));
+            let id = base.with(("jog_nudge", side as i32));
+            let resp = ui.interact(b, id, Sense::click()).on_hover_text(tip);
+            if let Some(d) = held(ui, &resp) {
+                self.control(out, control, d as u8 as f64);
+            }
+            shown |= resp.is_pointer_button_down_on();
+            drawn.push((b, side, resp.hovered() || resp.is_pointer_button_down_on()));
+        }
+        // Two half-arrows hugging the rim at the lower left, pointing apart with a dot
+        // between: forward turns clockwise (up the left side), back anticlockwise
+        // (along the bottom). Each answers to the box round it, kept in the ring's own
+        // space so it can't reach CUE or play.
+        let r0 = r + ARROW_GAP * k;
+        let mut arrows = Vec::new();
+        for (dir, tip) in [
+            (1.0_f32, "Turn the jog wheel forward (hold)"),
+            (-1.0, "Turn the jog wheel back (hold)"),
+        ] {
+            let outline = half_arrow(c, r0, k, dir);
+            let hit = Rect::from_points(&outline).expand(3.0 * k).intersect(rect);
+            let id = base.with(("jog_turn", dir as i32));
+            let resp = ui.interact(hit, id, Sense::click()).on_hover_text(tip);
+            let down = resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down());
+            if down {
+                let dt = ui.input(|i| i.stable_dt).min(0.1) as f64;
+                self.control(out, DeckControl::JogBend, dir as f64 * JOG_ARROW * dt);
+                ui.ctx().request_repaint();
+            }
+            shown |= down;
+            arrows.push((outline, resp.hovered() || down));
+        }
+        if !shown {
+            return;
+        }
+        let p = ui.painter();
+        for (b, side, hot) in drawn {
+            let fill = if hot { THEME.muted } else { THEME.line };
+            p.rect_filled(b, 1.5 * k, fill);
+            let ink = Stroke::new(1.5 * k.max(0.8), THEME.text);
+            let (m, h) = (b.center(), b.width() * 0.32);
+            p.line_segment([m - vec2(h, 0.0), m + vec2(h, 0.0)], ink);
+            if side > 0.0 {
+                p.line_segment([m - vec2(0.0, h), m + vec2(0.0, h)], ink);
+            }
+        }
+        for (outline, hot) in arrows {
+            let ink = if hot {
+                THEME.text
+            } else {
+                THEME.text.gamma_multiply(0.85)
+            };
+            fill_strip(p, &outline, ink);
+        }
+        let a = ARROW_AT.to_radians();
+        p.circle_filled(
+            c + vec2(a.cos(), a.sin()) * (r0 + ARROW_SHAFT * k / 2.0),
+            1.2 * k.max(0.8),
+            THEME.text.gamma_multiply(0.6),
         );
     }
 }
+
+/// Room round the jog ring for its arrows, and extra on the left (towards CUE and
+/// play), at full size.
+const JOG_ROOM: f32 = 5.0;
+const JOG_LEFT: f32 = 6.0;
+
+/// The jog arrows, at full size: the dot between them (degrees clockwise from 3
+/// o'clock), the gap from the dot to each tail and how far each reaches (degrees),
+/// the gap between the rim and their flat side, the shaft's thickness, the barb's
+/// height and the head's share of the length.
+const ARROW_AT: f32 = 135.0;
+const ARROW_FROM: f32 = 4.0;
+const ARROW_SPAN: f32 = 20.0;
+const ARROW_GAP: f32 = 5.0;
+const ARROW_SHAFT: f32 = 2.2;
+const ARROW_BARB: f32 = 6.5;
+const ARROW_HEAD: f32 = 0.45;
+
+/// One jog arrow: the outer half of `=>`, bent round the rim. Its flat side runs along
+/// radius `r0`; the shaft and then the barb stand out from it, and the barb tapers to
+/// the tip on the flat side. `dir` 1 runs clockwise from the dot, -1 anticlockwise.
+///
+/// Returned as pairs along its length, (flat side, outer edge), for [`fill_strip`].
+fn half_arrow(c: Pos2, r0: f32, k: f32, dir: f32) -> Vec<Pos2> {
+    let at = |deg: f32, rad: f32| {
+        let a = deg.to_radians();
+        c + vec2(a.cos(), a.sin()) * rad
+    };
+    let (shaft, barb) = (ARROW_SHAFT * k, ARROW_BARB * k);
+    let tail = ARROW_AT + dir * ARROW_FROM;
+    let mut pairs = Vec::new();
+    let mut push = |u: f32, width: f32| {
+        let deg = tail + dir * ARROW_SPAN * u;
+        pairs.push(at(deg, r0));
+        pairs.push(at(deg, r0 + width));
+    };
+    let neck = 1.0 - ARROW_HEAD;
+    const N: usize = 8;
+    for i in 0..=N {
+        push(neck * i as f32 / N as f32, shaft);
+    }
+    for i in 0..=N {
+        let s = i as f32 / N as f32;
+        push(neck + ARROW_HEAD * s, barb * (1.0 - s));
+    }
+    pairs
+}
+
+/// Fill a strip given as (inner, outer) pairs, with an outline for smooth edges (a
+/// mesh isn't antialiased). Unlike a convex polygon it can bend and step.
+fn fill_strip(p: &egui::Painter, pairs: &[Pos2], ink: egui::Color32) {
+    let mut mesh = egui::Mesh::default();
+    for &v in pairs {
+        mesh.colored_vertex(v, ink);
+    }
+    for i in 0..(pairs.len() / 2 - 1) as u32 {
+        let (a, b, c, d) = (2 * i, 2 * i + 1, 2 * i + 2, 2 * i + 3);
+        mesh.add_triangle(a, b, c);
+        mesh.add_triangle(b, d, c);
+    }
+    p.add(Shape::mesh(mesh));
+    // Round the edge: out along the flat side, back along the outer one.
+    let mut edge: Vec<Pos2> = pairs.iter().step_by(2).copied().collect();
+    edge.extend(pairs.iter().skip(1).step_by(2).rev());
+    p.add(Shape::closed_line(edge, Stroke::new(0.6_f32, ink)));
+}
+
+/// How fast a held jog arrow turns the wheel, in seconds of track a second: a bend
+/// of about 8 % while playing, or 80 ms a second through a stopped track.
+const JOG_ARROW: f64 = 0.4;

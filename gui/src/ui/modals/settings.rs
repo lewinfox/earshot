@@ -89,9 +89,7 @@ impl SettingsUi {
                                 .ui(ui, env.audio_settings, env.audio, env.routing),
                         )
                     }
-                    SettingsTab::Decks => {
-                        out.extend(decks(ui, env.hotcue_mode, env.auto_hide_mixer))
-                    }
+                    SettingsTab::Decks => out.extend(decks(ui, env)),
                     SettingsTab::Analysis => out.extend(analysis(ui, &env.analysis)),
                     SettingsTab::Keymap => out.extend(keymap(ui, &env.keymap_file)),
                 }
@@ -100,7 +98,7 @@ impl SettingsUi {
     }
 }
 
-fn decks(ui: &mut Ui, mode: HotcueMode, auto_hide_mixer: bool) -> Vec<Command> {
+fn decks(ui: &mut Ui, env: &ModalEnv) -> Vec<Command> {
     let mut out = vec![];
     ui.horizontal(|ui| {
         ui.label("Hot cues on a stopped deck");
@@ -110,7 +108,7 @@ fn decks(ui: &mut Ui, mode: HotcueMode, auto_hide_mixer: bool) -> Vec<Command> {
             Seg::new(HotcueMode::PlayWhileHeld, "Play while held")
                 .tip("Play from the hot cue while it's held; let go to stop and go back"),
         ];
-        if let Some(m) = segmented(ui, mode, &choices) {
+        if let Some(m) = segmented(ui, env.hotcue_mode, &choices) {
             out.push(Command::App(AppCmd::HotcueMode(m)));
         }
     });
@@ -120,7 +118,22 @@ fn decks(ui: &mut Ui, mode: HotcueMode, auto_hide_mixer: bool) -> Vec<Command> {
          deck and Prepare's player.",
     );
     ui.add_space(8.0);
-    let mut hide = auto_hide_mixer;
+    let mut cue = env.cue_first_beat;
+    if ui
+        .checkbox(
+            &mut cue,
+            "Automatically set initial cue to first detected beat",
+        )
+        .changed()
+    {
+        out.push(Command::App(AppCmd::CueFirstBeat(cue)));
+    }
+    muted(
+        ui,
+        "When a track loads. Off, the cue is at the start of the track.",
+    );
+    ui.add_space(8.0);
+    let mut hide = env.auto_hide_mixer;
     if ui
         .checkbox(&mut hide, "Auto-hide mixer when controller connected")
         .changed()

@@ -894,7 +894,7 @@ impl Renderer {
             crossfader: 0.0,
             xf_gain: [Smoothed::new(0.0); 2],
             head_gain: Smoothed::new(1.0),
-            head_mix: Smoothed::new(-1.0),
+            head_mix: Smoothed::new(0.5),
             limiters: [Limiter::new(sr), Limiter::new(sr)],
             limiting: 0.0,
             vu_main: [0.0; 2],
@@ -1104,7 +1104,7 @@ impl Renderer {
         for f in 0..n {
             let head = self.head_gain.next(k) as f32;
             // Head mix: how much of the main mix the headphones hear, against the cue bus.
-            let mix = ((self.head_mix.next(k).clamp(-1.0, 1.0) + 1.0) / 2.0) as f32;
+            let mix = self.head_mix.next(k).clamp(0.0, 1.0) as f32;
             for c in 0..2 {
                 let m = self.master[2 * f + c];
                 // With nothing cued the cue bus carries the main mix.
@@ -1253,8 +1253,10 @@ impl Renderer {
                 continue;
             };
             // The leader's own sync correction is left out, so two synced decks don't
-            // chase each other's corrections.
-            let leader_speed = other.player.speed / (1.0 + other.sync_correction);
+            // chase each other's corrections; so is its nudge and jog-wheel bend, so
+            // nudging one deck leaves the others' speed (and waveform zoom) alone.
+            let leader_speed =
+                other.player.speed / ((1.0 + other.sync_correction) * other.bent().max(1e-9));
             let target = leader_bpm * leader_speed / my_bpm;
             // The readout shows the leader's readout: both tracks' one tempo, not the
             // local tempo the speed follows (they are the same for straight grids).
@@ -1489,7 +1491,7 @@ impl Renderer {
                 match mp {
                     MasterParam::Crossfader => self.set_crossfader(v),
                     MasterParam::HeadGain => self.head_gain.target = v.clamp(0.0, 5.0),
-                    MasterParam::HeadMix => self.head_mix.target = v.clamp(-1.0, 1.0),
+                    MasterParam::HeadMix => self.head_mix.target = v.clamp(0.0, 1.0),
                     MasterParam::Gain | MasterParam::Balance => {}
                 }
             }
@@ -2089,6 +2091,7 @@ mod tests {
         rig.send(Command::Deck(p, DeckCmd::Pfl(Set::On)));
         rig.send(Command::Deck(p, DeckCmd::Sync(Set::On)));
         rig.deck(1, DeckCmd::Pfl(Set::On)); // headphones on the (silent) cue bus
+        rig.master(MasterParam::HeadMix, 0.0); // cue bus only
         rig.master(MasterParam::Crossfader, 1.0);
         rig.send(Command::Deck(p, DeckCmd::Play(Set::On)));
         let level = level(&mut rig);
@@ -2424,6 +2427,7 @@ mod tests {
         rig.load(0, 120.0, 120.0);
         rig.deck(0, DeckCmd::Play(Set::On));
         rig.deck(1, DeckCmd::Pfl(Set::On));
+        rig.master(MasterParam::HeadMix, 0.0); // cue bus only
         rig.run(0.5);
         let phones_peak = rig.out.chunks(4).map(|f| f[2].abs()).fold(0.0, f32::max);
         let master_peak = rig.out.chunks(4).map(|f| f[0].abs()).fold(0.0, f32::max);
@@ -2504,6 +2508,52 @@ mod tests {
         assert!(range(&mut rig, |d| d.tempo) < 1e-5, "playing tempo moves");
     }
 
+    /// Nudging the leader (button or jog wheel) moves only the leader: a follower's
+    /// speed and tempo (its waveform zoom) stay put.
+    #[test]
+    fn nudging_the_leader_leaves_followers_alone() {
+        let mut rig = Rig::new();
+        rig.load(0, 124.0, 124.0);
+        rig.load(1, 126.0, 126.0);
+        rig.deck(1, DeckCmd::Sync(Set::On));
+        rig.run(0.5);
+        let before = rig.snap().decks[1];
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.deck(0, DeckCmd::Nudge(0.04));
+        rig.run(0.5);
+        let d = rig.snap().decks[1];
+        assert!(
+            (d.speed - before.speed).abs() < 1e-6,
+            "follower speed {}",
+            d.speed
+        );
+        assert!(
+            (d.tempo - before.tempo).abs() < 1e-6,
+            "follower tempo {}",
+            d.tempo
+        );
+        rig.deck(0, DeckCmd::Nudge(0.0));
+        rig.deck(
+            0,
+            DeckCmd::Bend {
+                by: 0.05,
+                at: Instant::now(),
+            },
+        );
+        rig.run(0.05);
+        let d = rig.snap().decks[1];
+        assert!(
+            (d.speed - before.speed).abs() < 1e-6,
+            "follower speed {}",
+            d.speed
+        );
+        assert!(
+            (d.tempo - before.tempo).abs() < 1e-6,
+            "follower tempo {}",
+            d.tempo
+        );
+    }
+
     fn peaks(out: &[f32], channels: usize) -> Vec<f32> {
         (0..channels)
             .map(|c| out.chunks(channels).map(|f| f[c].abs()).fold(0.0, f32::max))
@@ -2572,6 +2622,7 @@ mod tests {
         rig.deck(0, DeckCmd::Play(Set::On));
         rig.deck(1, DeckCmd::Pfl(Set::On)); // cue bus silent
         rig.master(MasterParam::Balance, 1.0); // right only
+        rig.master(MasterParam::HeadMix, 0.0); // cue bus only
         rig.run(0.5);
         let p = peaks(&rig.out, 4);
         assert!(p[0] == 0.0 && p[1] > 0.01, "balance: {p:?}");
@@ -2594,6 +2645,7 @@ mod tests {
         rig.load(0, 120.0, 120.0);
         rig.deck(0, DeckCmd::Play(Set::On));
         rig.deck(1, DeckCmd::Pfl(Set::On)); // headphones hear nothing
+        rig.master(MasterParam::HeadMix, 0.0); // cue bus only
         // A laptop's one stereo pair, split: master on the right, headphones on the left.
         rig.send(Command::SetRouting(Routing {
             master: Out::Mono(1),

@@ -48,6 +48,8 @@ pub struct Inner {
     pub sync_leader: Option<DeckId>,
     /// What hot cues do on a stopped deck (a setting; kept for audio restarts).
     pub hotcue_mode: HotcueMode,
+    /// Cue a newly loaded track on its first beat, else at its start (a setting).
+    pub cue_first_beat: bool,
     pub generation: u64,
     /// The newest load asked for on each player (see [`request_load`]). Only that
     /// one may put its track on.
@@ -169,6 +171,7 @@ pub fn new_player() -> Player {
         mixer: MixerState::default(),
         sync_leader: None,
         hotcue_mode: HotcueMode::default(),
+        cue_first_beat: true,
         generation: 0,
         load_tickets: [0; SLOTS],
         routing: None,
@@ -237,6 +240,21 @@ pub fn set_hotcue_mode(player: &Player, mode: HotcueMode) -> Result<(), String> 
     let mut inner = player.lock().unwrap();
     inner.hotcue_mode = mode;
     inner.send(Command::SetHotcueMode(mode))
+}
+
+/// Cue newly loaded tracks on their first beat, else at their start, from now on.
+pub fn set_cue_first_beat(player: &Player, on: bool) {
+    player.lock().unwrap().cue_first_beat = on;
+}
+
+/// The cue a load starts on: the grid line nearest the first beat if the setting
+/// says so (`None`, the grid's first line, if that isn't known), else the start.
+fn load_cue(player: &Player, grid: Option<&Beatgrid>, first_beat: Option<f64>) -> Option<f64> {
+    if player.lock().unwrap().cue_first_beat {
+        initial_cue(grid, first_beat)
+    } else {
+        Some(0.0)
+    }
 }
 
 /// Change where master and headphones go, without restarting audio.
@@ -485,7 +503,7 @@ pub fn load_track(
             .queue(id, Some(audio.clone()), false, Mode::Static);
     }
     let hotcues = reader.hotcues(id).map_err(|e| e.to_string())?;
-    let main = initial_cue(grid.as_ref(), first_beat);
+    let main = load_cue(player, grid.as_ref(), first_beat);
     put_on_deck(
         player,
         deck,
@@ -614,9 +632,10 @@ fn load_outside(
         None => grid_for_file(&at, &tags, audio.duration()),
     };
     let detail = waveform::detail(&audio);
-    // The library's main cue isn't kept; the deck starts on the grid's first beat.
+    // The library's main cue isn't kept; the deck starts on the grid's first line, or
+    // at the start if the setting says so.
     let cues = CueSet {
-        main: None,
+        main: load_cue(player, grid.as_ref(), None),
         hot: t.hot,
     };
     put_on_deck(
