@@ -16,6 +16,8 @@ impl EarshotApp {
             generation: s.generation,
             waveform: s.waveform.clone(),
             detail: s.detail.clone(),
+            stem_waves: s.stem_waves.clone(),
+            stems_job: s.track_id.and_then(|t| self.stems.status(t)),
             tag_bpm: t.and_then(|t| t.tag_bpm),
             key: t.and_then(|t| t.key),
             analysing: s.track_id.and_then(|id| match self.index.analysis(id)? {

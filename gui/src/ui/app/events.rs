@@ -122,6 +122,7 @@ impl EarshotApp {
                 }
                 Event::Command(cmd) => self.dispatch(cmd),
                 Event::TempoLock(e) => self.tempo_lock_event(e),
+                Event::Stems(e) => self.panels.stems.on_event(e),
             }
         }
     }

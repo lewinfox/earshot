@@ -15,15 +15,21 @@ use crate::core::view::{Region, Tool};
 use crate::ui::panels::deck::{CUE_PANE_W, CuePane, PreparePlayer, WavePanel};
 use crate::ui::panels::export::ExportPanel;
 use crate::ui::panels::flow::FlowTab;
+use crate::ui::panels::stems::StemsPanel;
 use crate::ui::panels::tempo_lock::TempoLockPanel;
 use crate::ui::panels::{Cx, Panel, mixer, resized};
 use crate::ui::widgets::{Tab, tool_tabs};
 
-const TOOLS: [Tab<Tool>; 3] = [
+const TOOLS: [Tab<Tool>; 4] = [
     Tab {
         id: Tool::TempoLock,
         name: "Tempo lock",
         tip: "Chart a track's tempo, straighten it to one BPM and save the result",
+    },
+    Tab {
+        id: Tool::Stems,
+        name: "Stems",
+        tip: "Drums, bass, vocals and other",
     },
     Tab {
         id: Tool::Flow,
@@ -119,6 +125,10 @@ fn tool(ui: &mut Ui, tool: Tool, panels: &mut Panels, cx: &mut Cx) {
         Tool::TempoLock => TempoLockPanel {
             tab: &mut panels.tempo_lock,
             roots: &panels.library.browser.folders,
+        }
+        .ui(ui, cx),
+        Tool::Stems => StemsPanel {
+            tab: &mut panels.stems,
         }
         .ui(ui, cx),
         Tool::Export => ExportPanel {

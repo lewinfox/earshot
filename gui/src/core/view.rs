@@ -76,6 +76,8 @@ pub enum Tool {
     Flow,
     /// Write playlists to another DJ program's library or a USB stick, or convert a stick.
     Export,
+    /// Split the player's track into stems, and play them with a level and mute each.
+    Stems,
 }
 
 /// The windows over the app. They stack: the last one opened is on top.

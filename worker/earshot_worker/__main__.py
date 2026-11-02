@@ -71,7 +71,7 @@ from dataclasses import dataclass, field  # noqa: E402
 import numpy as np  # noqa: E402
 import soundfile as sf  # noqa: E402
 
-from . import audio, tempo_lock  # noqa: E402
+from . import audio, stems, tempo_lock  # noqa: E402
 from .analysis import analyse  # noqa: E402
 from .detectors import detector_name, loaded_models  # noqa: E402
 from .static_tempo import analyse_static  # noqa: E402
@@ -85,8 +85,8 @@ PROTOCOL = 2
 ANALYSERS = {"grid": 3}
 # Results of the other job types, by the name in their `result` messages, with
 # their versions (bumped the same way). Sent in the hello with the analysers.
-STEPS = tempo_lock.VERSIONS
-JOB_TYPES = ("analyse", "tempo_lock", "straighten")
+STEPS = {**tempo_lock.VERSIONS, **stems.VERSIONS}
+JOB_TYPES = ("analyse", "tempo_lock", "straighten", "stems")
 # Lower runs first; equal priorities run in the order they arrived.
 PRIORITIES = {"deck": 0, "preview": 1, "background": 2}
 HEARTBEAT_S = float(os.environ.get("EARSHOT_WORKER_HEARTBEAT_S", "2"))
@@ -124,7 +124,7 @@ class Job:
     analysers: dict  # name -> its parameters ("analyse" jobs)
     deadline_s: float
     kind: str = "analyse"  # the request's type
-    params: dict = field(default_factory=dict)  # the request ("straighten" jobs)
+    params: dict = field(default_factory=dict)  # the request ("straighten" and "stems" jobs)
     cancel: threading.Event = field(default_factory=threading.Event)
     order: int = 0  # place in the queue among jobs of its priority
 
@@ -265,6 +265,9 @@ def parse_job(req: dict) -> Job:
     if kind == "straighten":
         tempo_lock.check_straighten(req)
         return Job(job_id, PRIORITIES[priority], wav, {}, float(deadline), kind, req)
+    if kind == "stems":
+        stems.check(req)
+        return Job(job_id, PRIORITIES[priority], wav, {}, float(deadline), kind, req)
     analysers = req.get("analysers")
     if not isinstance(analysers, dict) or not analysers:
         raise ValueError("analyse needs 'analysers': an object of name -> parameters")
@@ -308,6 +311,8 @@ def run_job(job: Job) -> None:
                 raise ValueError(f"{job.wav}: no audio")
             if job.kind == "tempo_lock":
                 emit("tempo_lock", tempo_lock.chart(y, sr, progress_for("tempo_lock")))
+            elif job.kind == "stems":
+                stems.separate(y, sr, job.params, progress_for, emit)
             else:
                 tempo_lock.straighten(y, sr, job.params, progress_for, emit, failed)
             send({"id": job.id, "type": "done", "seconds": float(time.perf_counter() - t0)})

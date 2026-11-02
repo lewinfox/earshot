@@ -50,6 +50,8 @@ pub enum Command {
     Export(ExportCmd),
     /// The tempo lock tool (`TempoLock::run`). Run by the UI, like `Library`.
     TempoLock(TempoLockCmd),
+    /// The stems tool (`Stems::run`). Run by the UI, like `Library`.
+    Stems(crate::core::stems::StemsCmd),
     /// Metadata, ratings, tags and collection edits, which can be undone. Run by the
     /// UI (it keeps the undo history), like `Library`.
     Edit(EditCmd),
@@ -134,8 +136,12 @@ pub enum AppCmd {
     DismissFailures,
     /// Stop all background analysis (a deck's track carries on).
     StopAnalysis,
+    /// Stop a background job (`core::jobs`), if it can be stopped.
+    CancelJob(u64),
     /// Let this many background analysis workers run at once (and save it).
     BackgroundWorkers(usize),
+    /// The stems cache's limit, GB (and save it). Applies at the next start.
+    StemsCacheGb(f64),
     /// What hot cues do on a stopped deck (and save it).
     HotcueMode(earshot_engine::HotcueMode),
     /// Cue newly loaded tracks on their first beat, else at their start (and save it).
@@ -464,6 +470,12 @@ impl From<ExportCmd> for Command {
 impl From<ExternalCmd> for Command {
     fn from(c: ExternalCmd) -> Command {
         Command::External(c)
+    }
+}
+
+impl From<crate::core::stems::StemsCmd> for Command {
+    fn from(c: crate::core::stems::StemsCmd) -> Command {
+        Command::Stems(c)
     }
 }
 

@@ -11,6 +11,7 @@ pub mod fx;
 pub mod library;
 pub mod mixer;
 pub mod status;
+pub mod stems;
 pub mod tempo_lock;
 
 use earshot_engine::{DeckId, EngineSnapshot};

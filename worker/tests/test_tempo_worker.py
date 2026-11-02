@@ -50,7 +50,7 @@ def worker(fake_bin):
     w = Worker({"PATH": path, "FAKE_RUBBERBAND_SECONDS": "6"})
     w.send({"type": "hello", "protocol": 2})
     hello = w.next("hello")
-    assert hello["steps"] == {"tempo_lock": 1, "straighten": 1, "measure": 1}
+    assert hello["steps"] == {"tempo_lock": 1, "straighten": 1, "measure": 1, "stems": 1}
     yield w
     assert w.close() == 0
 

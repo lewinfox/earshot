@@ -23,6 +23,10 @@ pub const HOTCUE_MODE: &str = "decks.hotcue_mode";
 pub const FLOW_OPEN: &str = "flow.open";
 /// Cue a newly loaded track on its first beat (else at its start).
 pub const CUE_FIRST_BEAT: &str = "decks.cue_first_beat";
+/// The most the stems cache may take, GB: the least recently used go at start-up.
+pub const STEMS_CACHE_GB: &str = "stems.cache_gb";
+/// [`STEMS_CACHE_GB`] until it's set.
+pub const STEMS_CACHE_GB_DEFAULT: f64 = 20.0;
 /// Add another library's tracks to earshot without asking, when they're put in a
 /// playlist, crate or Flow.
 pub const IMPORT_WITHOUT_ASKING: &str = "import.without_asking";
@@ -37,6 +41,7 @@ pub struct Settings {
     pub cue_first_beat: bool,
     pub flow_open: Option<CollectionId>,
     pub import_without_asking: bool,
+    pub stems_cache_gb: f64,
 }
 
 /// A player's options that stay as they were set, from one run to the next.
@@ -69,6 +74,7 @@ impl Settings {
             cue_first_beat: read(reader, CUE_FIRST_BEAT).unwrap_or(true),
             flow_open: read(reader, FLOW_OPEN).unwrap_or_default(),
             import_without_asking: read(reader, IMPORT_WITHOUT_ASKING).unwrap_or_default(),
+            stems_cache_gb: read(reader, STEMS_CACHE_GB).unwrap_or(STEMS_CACHE_GB_DEFAULT),
         }
     }
 }

@@ -23,6 +23,7 @@ mod cue_pane;
 mod grid_editor;
 mod loops;
 mod pads;
+mod stems;
 mod tempo;
 mod transport;
 pub mod wave;
@@ -59,6 +60,10 @@ pub struct DeckInfo {
     pub generation: u64,
     pub waveform: Arc<Vec<u8>>,
     pub detail: Arc<Vec<u8>>,
+    /// Each stem's waveform, once the track's stems are on the player.
+    pub stem_waves: Option<Arc<crate::core::stems::StemWaves>>,
+    /// The job working out this track's stems, while it has one.
+    pub stems_job: Option<crate::core::stems::Status>,
     pub tag_bpm: Option<f64>,
     pub key: Option<Camelot>,
     /// (progress, stage) while this track is being analysed.
@@ -113,6 +118,8 @@ impl PendingLoad {
             generation: 0,
             waveform: Arc::default(),
             detail: Arc::default(),
+            stem_waves: None,
+            stems_job: None,
             tag_bpm: self.bpm,
             key: self.key,
             analysing: None,
@@ -741,6 +748,8 @@ impl DeckUi {
         match page {
             Page::Player => {
                 if mirrored {
+                    self.stems(ui, info, out);
+                    ui.add_space(6.0);
                     self.jumps(ui, info, out);
                     ui.add_space(6.0);
                     self.loops(ui, info, out);
@@ -752,6 +761,8 @@ impl DeckUi {
                     self.loops(ui, info, out);
                     ui.add_space(6.0);
                     self.jumps(ui, info, out);
+                    ui.add_space(6.0);
+                    self.stems(ui, info, out);
                 }
             }
             Page::Grid => self.grid_editor(ui, info, out),
@@ -905,6 +916,8 @@ mod tests {
             generation: 0,
             waveform: Arc::default(),
             detail: Arc::default(),
+            stem_waves: None,
+            stems_job: None,
             tag_bpm: None,
             key: None,
             analysing: None,

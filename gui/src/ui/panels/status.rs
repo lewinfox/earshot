@@ -227,7 +227,6 @@ impl TopBar<'_> {
     /// "3 jobs", with a spinner, while any run or wait; clicked, a dropdown with a
     /// row for each (and Stop analysis, while there's analysis).
     fn jobs_pill(&self, ui: &mut Ui, cx: &mut Cx) {
-        let t = cx.theme;
         let n = self.jobs.len();
         if n == 0 {
             return;
@@ -240,7 +239,7 @@ impl TopBar<'_> {
             .show(|ui| {
                 ui.set_min_width(fs(320.0));
                 for j in self.jobs {
-                    job_line(ui, j, t);
+                    job_line(ui, j, cx);
                 }
                 if analysing {
                     ui.separator();
@@ -333,7 +332,8 @@ fn deck_count(ui: &mut Ui, cx: &mut Cx) {
 }
 
 /// A job's line: spinner (or "queued"), what it's doing, and its bar when counted.
-fn job_line(ui: &mut Ui, j: &Running, t: &crate::ui::theme::Theme) {
+fn job_line(ui: &mut Ui, j: &Running, cx: &mut Cx) {
+    let t = cx.theme;
     ui.horizontal(|ui| {
         if j.queued {
             muted(ui, "queued");
@@ -351,6 +351,15 @@ fn job_line(ui: &mut Ui, j: &Running, t: &crate::ui::theme::Theme) {
             );
             muted(ui, format!("{:.0} %", f * 100.0));
         }
+        if j.cancellable
+            && !j.cancelling
+            && ui
+                .small_button("Cancel")
+                .on_hover_text(format!("Stop {}", j.title))
+                .clicked()
+        {
+            cx.send(AppCmd::CancelJob(j.id));
+        }
     });
 }
 
@@ -366,7 +375,7 @@ impl Panel for StatusLine<'_> {
         let t = cx.theme;
         ui.horizontal(|ui| {
             if let Some(first) = self.jobs.first() {
-                job_line(ui, first, t);
+                job_line(ui, first, cx);
                 let more = self.jobs.len() - 1;
                 if more > 0 {
                     muted(ui, format!("+{more} more"));

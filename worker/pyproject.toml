@@ -16,6 +16,7 @@ dependencies = [
     # Other DJ programs' libraries (earshot_worker/libraries.py); pinned to a commit
     # in [tool.uv.sources].
     "cratelib",
+    "demucs>=4.0.1",
 ]
 
 [dependency-groups]

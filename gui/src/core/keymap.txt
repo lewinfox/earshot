@@ -75,6 +75,8 @@ prepare  Left         prepare  jump_back
 prepare  Right        prepare  jump_forward
 prepare  Shift+Left   prepare  grid_nudge -10
 prepare  Shift+Right  prepare  grid_nudge 10
+prepare  Ctrl+Left    prepare  grid_nudge -10
+prepare  Ctrl+Right   prepare  grid_nudge 10
 prepare  C            prepare  set_cue
 prepare  M            prepare  save_memory
 prepare  6            prepare  beatloop 4

@@ -11,6 +11,7 @@ use super::panels::deck::DeckUi;
 use super::panels::export::ExportUi;
 use super::panels::flow::FlowUi;
 use super::panels::library::LibraryPane;
+use super::panels::stems::StemsUi;
 use super::panels::tempo_lock::TempoLockUi;
 use crate::core::session::{self, SLOTS};
 use crate::core::view::Mode;
@@ -26,6 +27,8 @@ pub struct Panels {
     pub flow: FlowUi,
     /// Prepare's Export tab.
     pub export: ExportUi,
+    /// Prepare's Stems tab.
+    pub stems: StemsUi,
 }
 
 impl Panels {
@@ -36,6 +39,7 @@ impl Panels {
             tempo_lock: TempoLockUi::default(),
             flow: FlowUi::default(),
             export: ExportUi::default(),
+            stems: StemsUi::default(),
         }
     }
 }
