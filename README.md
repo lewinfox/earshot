@@ -90,9 +90,12 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
 - **Load** a track: double-click it (goes to a deck that isn't playing), right-click →
   *Load to deck A/B*, drag it onto a deck, or `Shift+←`/`Shift+→`. Right-click →
   *Preview in headphones* plays it on the headphones only.
-- **Analysis**: loading a track with no beatgrid starts analysis in the background; it
-  plays meanwhile on a placeholder grid from its BPM tag, and the deck switches to the
-  analysed grid when it's done. Right-click a track → *Analyse*, or a folder →
+- **Analysis**: loading a track with no beatgrid starts analysis in the background. It
+  plays at once, and a moment later gets a *quick grid*: one steady tempo worked out
+  in a fraction of a second by signal processing (ported from
+  [ClubCraft](https://github.com/beneaze/ClubCraft), MIT), or a placeholder from its
+  BPM tag if the quick grid isn't sure. The deck switches to the analysed grid when
+  it's done. Right-click a track → *Analyse*, or a folder →
   *Analyse unanalysed tracks*, to do it ahead of time. Like Rekordbox there are two
   modes:
   - **Static** (the default): one steady tempo for the whole track, preferring whole

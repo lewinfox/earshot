@@ -8,13 +8,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
 
-use earshot_engine::beatgrid::Beatgrid;
+use earshot_engine::beatgrid::{Beatgrid, GridModel};
 use earshot_engine::decode;
+use earshot_engine::decode::TrackAudio;
 use earshot_engine::media::Location;
 use earshot_engine::{
     Command, CueSet, DeckId, Engine, EngineSnapshot, EngineState, HotcueMode, LoadedTrack,
     MAX_DECKS, MixerState, Monitor, OutputInfo, OutputOptions, PreviewCmd, Routing, Set, energy,
-    loudness, waveform,
+    loudness, quick, waveform,
 };
 use serde::{Deserialize, Serialize};
 
@@ -481,19 +482,30 @@ pub fn load_track(
             l
         }
     };
-    let analysed = stored.is_some();
     let first_beat = reader.first_beat(id).map_err(|e| e.to_string())?;
+    let audio = Arc::new(audio);
+    let mut estimate = false;
     let (grid, source) = match stored {
         Some((model, src)) => (
             Some(Beatgrid::from_model(model, audio.duration()).map_err(|e| e.to_string())?),
             src.label().to_string(),
         ),
-        None => grid_for_file(&at, &tags, audio.duration()),
+        None => match sidecar_grid(&at) {
+            Some(g) => (Some(g), GridSource::Sidecar.label().into()),
+            None => {
+                // No analysed, hand-fixed or sidecar grid: analyse in the background,
+                // starting now. The deck goes on with no grid, gets an estimated one a
+                // moment later, and the analysed one when it arrives.
+                lib.analyser
+                    .queue(id, Some(audio.clone()), false, Mode::Static);
+                estimate = true;
+                (None, NO_GRID_YET_LABEL.into())
+            }
+        },
     };
     // The library's title and artist, so the deck agrees with the track list.
     let (title, artist) = (track.title, track.artist);
 
-    let audio = Arc::new(audio);
     let wave = match cached_wave {
         Some(w) => w,
         None => {
@@ -507,21 +519,15 @@ pub fn load_track(
         }
     };
     let detail = waveform::detail(&audio);
-    // No analysed or hand-fixed grid yet: analyse in the background. The deck plays
-    // with the placeholder grid meanwhile and is updated when the result arrives.
-    if !analysed && source != GridSource::Sidecar.label() {
-        lib.analyser
-            .queue(id, Some(audio.clone()), false, Mode::Static);
-    }
     let hotcues = reader.hotcues(id).map_err(|e| e.to_string())?;
     let main = load_cue(player, grid.as_ref(), first_beat);
-    put_on_deck(
+    let generation = put_on_deck(
         player,
         deck,
         ticket,
         Ready {
             id,
-            audio,
+            audio: audio.clone(),
             grid,
             cues: CueSet { main, hot: hotcues },
             level,
@@ -531,7 +537,11 @@ pub fn load_track(
             wave: Arc::new(wave),
             detail,
         },
-    )
+    )?;
+    if estimate {
+        estimate_grid_later(player, deck, generation, tags, audio);
+    }
+    Ok(())
 }
 
 /// A decoded track, with all a deck needs.
@@ -549,7 +559,8 @@ struct Ready {
 }
 
 /// Put a decoded track on a deck, unless a newer load was asked for meanwhile.
-fn put_on_deck(player: &Player, deck: DeckId, ticket: u64, r: Ready) -> Result<(), String> {
+/// Returns the load's generation.
+fn put_on_deck(player: &Player, deck: DeckId, ticket: u64, r: Ready) -> Result<u64, String> {
     let Ready {
         id,
         audio,
@@ -585,7 +596,9 @@ fn put_on_deck(player: &Player, deck: DeckId, ticket: u64, r: Ready) -> Result<(
     session.grid_source = source;
     session.waveform = wave;
     session.detail = Arc::new(detail);
-    inner.send(Command::Load { deck, track })
+    let generation = track.generation;
+    inner.send(Command::Load { deck, track })?;
+    Ok(generation)
 }
 
 /// An outside track (`core::outside`): its file, with the grid and cues its library
@@ -638,9 +651,13 @@ fn load_outside(
     // The track list's thumbnail.
     lib.store
         .tell(StoreEvent::Previews(vec![(id, waveform::preview(&wave))]));
-    let (grid, source) = match external::grid_of(&t.grid, audio.duration()) {
-        Some(g) => (Some(g), GridSource::Import.label().to_string()),
-        None => grid_for_file(&at, &tags, audio.duration()),
+    let audio = Arc::new(audio);
+    let (grid, source, estimate) = match external::grid_of(&t.grid, audio.duration()) {
+        Some(g) => (Some(g), GridSource::Import.label().to_string(), false),
+        None => match sidecar_grid(&at) {
+            Some(g) => (Some(g), GridSource::Sidecar.label().into(), false),
+            None => (None, NO_GRID_YET_LABEL.into(), true),
+        },
     };
     let detail = waveform::detail(&audio);
     // The library's main cue isn't kept; the deck starts on the grid's first line, or
@@ -649,13 +666,13 @@ fn load_outside(
         main: load_cue(player, grid.as_ref(), None),
         hot: t.hot,
     };
-    put_on_deck(
+    let generation = put_on_deck(
         player,
         deck,
         ticket,
         Ready {
             id,
-            audio: Arc::new(audio),
+            audio: audio.clone(),
             grid,
             cues,
             level,
@@ -672,7 +689,11 @@ fn load_outside(
             wave,
             detail,
         },
-    )
+    )?;
+    if estimate {
+        estimate_grid_later(player, deck, generation, tags, audio);
+    }
+    Ok(())
 }
 
 /// A file as it is now (path, size, modified), for caches.
@@ -809,32 +830,118 @@ fn sidecar_path(path: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
-fn grid_for_file(
-    at: &Location,
-    tags: &decode::TrackTags,
-    duration: f64,
-) -> (Option<Beatgrid>, String) {
-    // A beats sidecar sits beside a local file.
-    if let Some(path) = at.as_file()
-        && let Ok(text) = std::fs::read_to_string(sidecar_path(path))
-    {
-        match serde_json::from_str::<TempoLockAnalysis>(&text)
-            .map_err(|e| e.to_string())
-            .and_then(|a| {
-                Beatgrid::from_indexed(&a.beats, &a.beat_index, &a.is_downbeat)
-                    .map_err(|e| e.to_string())
-            }) {
-            Ok(g) => return (Some(g), GridSource::Sidecar.label().into()),
-            Err(e) => eprintln!("{}: bad beats sidecar: {e}", path.display()),
+/// How a deck shows its grid's source while the estimate is being worked out.
+pub const NO_GRID_YET_LABEL: &str = "none yet";
+
+/// Work out the estimated grid (`estimated_grid`) on a thread of its own, so the
+/// track plays at once, and give it to the deck, cued on its first line if the
+/// setting says so (the engine does that only if nothing has played, moved or cued
+/// the deck since the load). Not if the deck has had a newer load (`generation`) or
+/// has a grid by then (analysis was faster): that one is better.
+fn estimate_grid_later(
+    player: &Player,
+    deck: DeckId,
+    generation: u64,
+    tags: decode::TrackTags,
+    audio: Arc<TrackAudio>,
+) -> std::thread::JoinHandle<()> {
+    let player = player.clone();
+    std::thread::spawn(move || {
+        let Estimate {
+            grid,
+            source,
+            first_beat,
+        } = estimated_grid(&tags, &audio);
+        let mut inner = player.lock().unwrap();
+        let slot = &inner.decks[deck.index()];
+        if slot.generation != generation || slot.grid.is_some() {
+            return;
+        }
+        let grid = grid.map(Arc::new);
+        if grid.is_some()
+            && inner
+                .send(Command::SetGrid {
+                    deck,
+                    generation,
+                    grid: grid.clone(),
+                })
+                .is_err()
+        {
+            return;
+        }
+        let cue = initial_cue(grid.as_deref(), first_beat).filter(|_| inner.cue_first_beat);
+        let slot = &mut inner.decks[deck.index()];
+        slot.grid = grid;
+        slot.grid_source = source;
+        if let Some(at) = cue {
+            let _ = inner.send(Command::InitialCue {
+                deck,
+                generation,
+                at,
+            });
+        }
+    })
+}
+
+/// How a deck shows a quick grid's source.
+pub const QUICK_GRID_LABEL: &str = "quick grid";
+
+/// The quick grid is used only when its beat is at least this clear (see
+/// `quick::QuickGrid::confidence`); below it, the BPM tag's placeholder is.
+const QUICK_GRID_CONFIDENCE: f32 = 1.0;
+
+/// The tempo-lock sidecar's grid, if a local file has a good one beside it.
+fn sidecar_grid(at: &Location) -> Option<Beatgrid> {
+    let path = at.as_file()?;
+    let text = std::fs::read_to_string(sidecar_path(path)).ok()?;
+    match serde_json::from_str::<TempoLockAnalysis>(&text)
+        .map_err(|e| e.to_string())
+        .and_then(|a| {
+            Beatgrid::from_indexed(&a.beats, &a.beat_index, &a.is_downbeat)
+                .map_err(|e| e.to_string())
+        }) {
+        Ok(g) => Some(g),
+        Err(e) => {
+            eprintln!("{}: bad beats sidecar: {e}", path.display());
+            None
         }
     }
-    match tags.bpm.filter(|b| *b > 40.0) {
-        Some(bpm) => (
-            Beatgrid::constant(bpm, 0.0, duration).ok(),
-            "BPM tag (placeholder)".into(),
-        ),
-        None => (None, "none".into()),
+}
+
+/// A grid worked out on the spot: the quick grid, else a steady one at the BPM tag.
+fn estimated_grid(tags: &decode::TrackTags, audio: &TrackAudio) -> Estimate {
+    let duration = audio.duration();
+    let tag_bpm = tags.bpm.filter(|b| *b > 40.0);
+    if let Some(q) = quick::grid(audio, tag_bpm).filter(|q| q.confidence >= QUICK_GRID_CONFIDENCE)
+        && let Ok(g) = Beatgrid::from_model(GridModel::Constant(q.grid), duration)
+    {
+        return Estimate {
+            grid: Some(g),
+            source: QUICK_GRID_LABEL.into(),
+            first_beat: Some(q.grid.anchor),
+        };
     }
+    match tag_bpm {
+        Some(bpm) => Estimate {
+            grid: Beatgrid::constant(bpm, 0.0, duration).ok(),
+            source: "BPM tag (placeholder)".into(),
+            first_beat: None,
+        },
+        None => Estimate {
+            grid: None,
+            source: "none".into(),
+            first_beat: None,
+        },
+    }
+}
+
+/// What [`estimated_grid`] found.
+struct Estimate {
+    grid: Option<Beatgrid>,
+    /// How the deck shows where it's from.
+    source: String,
+    /// The first beat with music in it, if it knows (the quick grid's 1).
+    first_beat: Option<f64>,
 }
 
 /// A null-output engine and helpers for tests that need one running.
@@ -1094,6 +1201,110 @@ mod tests {
         // Unknown (no grid, or analysed before first_beat): the engine's default.
         assert_eq!(initial_cue(Some(&constant), None), None);
         assert_eq!(initial_cue(None, Some(12.26)), None);
+    }
+
+    #[test]
+    fn an_unanalysed_track_gets_the_quick_grid_else_its_tag() {
+        use earshot_engine::demo::{DemoSpec, generate};
+        let (audio, truth) = generate(
+            &DemoSpec {
+                start_bpm: 126.0,
+                end_bpm: 126.0,
+                key: "8A".into(),
+                seconds: 30.0,
+                seed: 3,
+            },
+            44_100,
+        );
+        let tags = decode::TrackTags {
+            bpm: Some(125.0),
+            ..Default::default()
+        };
+        let Estimate {
+            grid,
+            source,
+            first_beat,
+        } = estimated_grid(&tags, &audio);
+        assert_eq!(source, QUICK_GRID_LABEL);
+        assert!((first_beat.unwrap() - truth.times()[0]).abs() < 0.015);
+        let grid = grid.unwrap();
+        assert!((grid.mean_bpm() - 126.0).abs() < 0.02);
+        // On the real beats, not the tag's.
+        for &t in &truth.times()[4..40] {
+            assert!((grid.quantize(t) - t).abs() < 0.01, "{t}");
+        }
+
+        // No beat to find: the tag's placeholder.
+        let quiet = TrackAudio {
+            samples: vec![0.0; 44_100 * 2 * 20],
+            sample_rate: 44_100,
+        };
+        let Estimate { grid, source, .. } = estimated_grid(&tags, &quiet);
+        assert_eq!(source, "BPM tag (placeholder)");
+        assert!((grid.unwrap().mean_bpm() - 125.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_estimated_grid_lands_after_the_load_unless_overtaken() {
+        use earshot_engine::demo::{DemoSpec, generate};
+        let (audio, truth) = generate(
+            &DemoSpec {
+                start_bpm: 126.0,
+                end_bpm: 126.0,
+                key: "8A".into(),
+                seconds: 30.0,
+                seed: 3,
+            },
+            44_100,
+        );
+        // A second of silence first, so the first beat isn't where the deck is
+        // cued already.
+        let mut audio = audio;
+        audio
+            .samples
+            .splice(0..0, std::iter::repeat_n(0.0, 2 * 44_100));
+        let audio = Arc::new(audio);
+        let deck = DeckId::new(0).unwrap();
+        let p = running();
+        let state = |p: &Player| {
+            let inner = p.lock().unwrap();
+            let s = inner.session(deck);
+            (s.grid.as_ref().map(|g| g.mean_bpm()), s.grid_source.clone())
+        };
+        let tags = decode::TrackTags::default();
+
+        // Lands on the load it was worked out for.
+        put_on(&p, deck, 1);
+        let generation = p.lock().unwrap().generation;
+        estimate_grid_later(&p, deck, generation, tags.clone(), audio.clone())
+            .join()
+            .unwrap();
+        let (bpm, source) = state(&p);
+        assert!((bpm.unwrap() - 126.0).abs() < 0.02);
+        assert_eq!(source, QUICK_GRID_LABEL);
+        // Cued on its first beat (the deck hasn't been touched).
+        let first = truth.times()[0] + 1.0;
+        wait(&p, |s| (s.deck(deck).cue_point - first).abs() < 0.015);
+
+        // Not on a newer load.
+        put_on(&p, deck, 2);
+        estimate_grid_later(&p, deck, generation, tags.clone(), audio.clone())
+            .join()
+            .unwrap();
+        assert_eq!(state(&p).0, None);
+
+        // Not over a grid that came first (the analysis's).
+        let generation = p.lock().unwrap().generation;
+        {
+            let mut inner = p.lock().unwrap();
+            let s = inner.session_mut(deck);
+            s.grid = Some(Arc::new(Beatgrid::constant(100.0, 0.0, 30.0).unwrap()));
+            s.grid_source = "analysis".into();
+        }
+        estimate_grid_later(&p, deck, generation, tags, audio)
+            .join()
+            .unwrap();
+        assert_eq!(state(&p), (Some(100.0), "analysis".into()));
     }
 
     #[test]
