@@ -776,7 +776,7 @@ impl Priority {
 
 /// Give a finished grid analysis to every player that has this track loaded (Prepare's
 /// too): the new grid, if it's now the active one, then the initial cue on the grid
-/// line nearest `first_beat`. The engine moves the cue and the playhead there only if
+/// line nearest `first_beat` (unless the setting says to cue at the start). The engine moves the cue and the playhead there only if
 /// nothing has played, moved or cued that player since the load (`InitialCue`), so a
 /// cue set by hand is never overridden.
 fn update_decks(
@@ -808,6 +808,9 @@ fn update_decks(
             }
             inner.decks[deck].grid = grid.clone();
             inner.decks[deck].grid_source = source.label().into();
+        }
+        if !inner.cue_first_beat {
+            continue;
         }
         let at = super::player::initial_cue(inner.decks[deck].grid.as_deref(), Some(first_beat));
         if let Some(at) = at {
