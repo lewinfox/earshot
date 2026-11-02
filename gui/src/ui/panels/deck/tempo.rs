@@ -39,7 +39,6 @@ fn tempo_fader(range: TempoRange) -> (&'static Range, &'static [(f64, &'static s
 }
 
 impl DeckUi {
-    /// BPM and tempo readouts, SYNC, and the tempo fader with nudge buttons.
     /// SYNC, Q and KEY over the tempo fader, `height` tall in all.
     pub(super) fn tempo(
         &mut self,
@@ -52,71 +51,8 @@ impl DeckUi {
         ui.vertical(|ui| {
             ui.set_width(TEMPO_W);
             ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
-            let following = match s.following.and_then(deck_letter) {
-                Some(l) if s.sync => format!("\nFollowing deck {l}"),
-                _ => String::new(),
-            };
-            let leading = if info.leader {
-                "\nThe sync leader: synced decks follow this one"
-            } else {
-                ""
-            };
-            // SYNC, and beside it the sync leader's star.
-            let lead = if info.leader { None } else { Some(self.id) };
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                let r = ui
-                    .add(
-                        HwButton::new("SYNC", self.colour(), vec2(TEMPO_W - 28.0, 20.0))
-                            .font(10.0)
-                            .lit(s.sync),
-                    )
-                    .on_hover_text(format!(
-                        "Match the leader's tempo and beat{following}{leading}"
-                    ));
-                if held(ui, &r) == Some(true) {
-                    self.control(out, DeckControl::Sync, 1.0);
-                }
-                let r = ui
-                    .add(
-                        HwButton::new("★", self.colour(), vec2(24.0, 20.0))
-                            .font(11.0)
-                            .lit(info.leader),
-                    )
-                    .on_hover_text(if info.leader {
-                        "The sync leader: synced decks follow this one. Click to stop leading"
-                    } else {
-                        "Make this deck the sync leader: synced decks follow it"
-                    });
-                if r.clicked() {
-                    out.push(Command::Mixer(MixerCmd::SyncLeader(lead)));
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                let r = ui
-                    .add(
-                        HwButton::new("Q", THEME.accent, vec2(24.0, 18.0))
-                            .font(10.0)
-                            .lit(s.quantize),
-                    )
-                    .on_hover_text(
-                        "Quantise: snap this deck's cues, loops and hot cues to the beat",
-                    );
-                if held(ui, &r) == Some(true) {
-                    self.control(out, DeckControl::Quantize, 1.0);
-                }
-                let r = ui
-                    .add(
-                        HwButton::new("KEY", THEME.accent, vec2(TEMPO_W - 28.0, 18.0))
-                            .font(9.0)
-                            .lit(s.keylock),
-                    )
-                    .on_hover_text("Keylock: the tempo fader changes the speed but not the key");
-                if held(ui, &r) == Some(true) {
-                    self.control(out, DeckControl::Keylock, 1.0);
-                }
-            });
+            self.sync_buttons(ui, info, out);
+            self.mode_buttons(ui, out);
             // The fader gets exactly what's left, so it never stretches the deck.
             let h = height - ui.min_rect().height() - ui.spacing().item_spacing.y;
             ui.horizontal_top(|ui| {
@@ -167,6 +103,79 @@ impl DeckUi {
                     });
                 });
             });
+        });
+    }
+
+    /// SYNC, and beside it the sync leader's star.
+    pub(super) fn sync_buttons(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
+        let s = self.state;
+        let following = match s.following.and_then(deck_letter) {
+            Some(l) if s.sync => format!("\nFollowing deck {l}"),
+            _ => String::new(),
+        };
+        let leading = if info.leader {
+            "\nThe sync leader: synced decks follow this one"
+        } else {
+            ""
+        };
+        // SYNC, and beside it the sync leader's star.
+        let lead = if info.leader { None } else { Some(self.id) };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let r = ui
+                .add(
+                    HwButton::new("SYNC", self.colour(), vec2(TEMPO_W - 28.0, 20.0))
+                        .font(10.0)
+                        .lit(s.sync),
+                )
+                .on_hover_text(format!(
+                    "Match the leader's tempo and beat{following}{leading}"
+                ));
+            if held(ui, &r) == Some(true) {
+                self.control(out, DeckControl::Sync, 1.0);
+            }
+            let r = ui
+                .add(
+                    HwButton::new("★", self.colour(), vec2(24.0, 20.0))
+                        .font(11.0)
+                        .lit(info.leader),
+                )
+                .on_hover_text(if info.leader {
+                    "The sync leader: synced decks follow this one. Click to stop leading"
+                } else {
+                    "Make this deck the sync leader: synced decks follow it"
+                });
+            if r.clicked() {
+                out.push(Command::Mixer(MixerCmd::SyncLeader(lead)));
+            }
+        });
+    }
+
+    /// Q (quantise) and KEY (keylock).
+    pub(super) fn mode_buttons(&mut self, ui: &mut Ui, out: &mut Vec<Command>) {
+        let s = self.state;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let r = ui
+                .add(
+                    HwButton::new("Q", THEME.accent, vec2(24.0, 18.0))
+                        .font(10.0)
+                        .lit(s.quantize),
+                )
+                .on_hover_text("Quantise: snap this deck's cues, loops and hot cues to the beat");
+            if held(ui, &r) == Some(true) {
+                self.control(out, DeckControl::Quantize, 1.0);
+            }
+            let r = ui
+                .add(
+                    HwButton::new("KEY", THEME.accent, vec2(TEMPO_W - 28.0, 18.0))
+                        .font(9.0)
+                        .lit(s.keylock),
+                )
+                .on_hover_text("Keylock: the tempo fader changes the speed but not the key");
+            if held(ui, &r) == Some(true) {
+                self.control(out, DeckControl::Keylock, 1.0);
+            }
         });
     }
 }

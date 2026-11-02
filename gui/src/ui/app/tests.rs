@@ -191,6 +191,10 @@ fn perform() {
         worst * 1000.0
     );
     render(&mut h, "perform");
+    // With the mixer hidden (as with a controller): no tempo faders.
+    h.state_mut().dispatch(ViewCmd::ShowMixer(false).into());
+    steps(&mut h, 5);
+    render(&mut h, "perform-no-mixer");
 }
 
 /// Large text grows the lists and bars but leaves the decks' text (and egui's zoom)
@@ -593,17 +597,21 @@ fn c_puts_the_playhead_on_the_cue() {
     });
 }
 
-/// The 2 / 4 toggle shows four decks (and their mixer channels), saved in the
-/// preferences.
+/// The 2 / 4 toggle shows four decks (and their mixer channels, and lets effects go
+/// on them), saved in the preferences.
 #[test]
 fn four_decks() {
     use egui_kittest::kittest::Queryable;
     let mut h = start("four-decks");
+    let fx_decks = |h: &H| h.state().player.lock().unwrap().fx_decks;
     assert!(!h.state().prefs.four_decks);
+    assert_eq!(fx_decks(&h), 2);
     h.get_by_label("4 decks").click();
     steps(&mut h, 3);
     assert!(h.state().prefs.four_decks);
     assert_eq!(h.state().prefs.decks().len(), 4);
+    // Effects can go on all four.
+    assert_eq!(fx_decks(&h), 4);
     // The engine runs four: deck 3 takes a track and plays.
     let ids = ids(&h);
     let d3 = DeckId::new(2).unwrap();
@@ -684,7 +692,53 @@ fn layout_is_kept_per_mode() {
     steps(&mut h, 3);
 }
 
-/// Perform's mixer hides from View > Panes, and while a controller is connected
+/// Perform's effect units show and hide from the top bar's FX switch, apart from the
+/// mixer's.
+#[test]
+fn the_fx_switch_shows_and_hides_the_effect_units() {
+    let mut h = start("fx");
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Perform).into());
+    steps(&mut h, 3);
+    let fx = |h: &H| h.query_all_by_label("Effect level").count() > 0;
+    let mixer = |h: &H| h.query_all_by_label("Gain").count() > 0;
+    assert!(fx(&h) && mixer(&h));
+    h.get_by_label("FX").click();
+    steps(&mut h, 3);
+    assert!(!fx(&h) && mixer(&h));
+    assert!(!h.state().prefs.show_fx);
+    h.get_by_label("Mixer").click();
+    steps(&mut h, 3);
+    assert!(!fx(&h) && !mixer(&h));
+    h.get_by_label("FX").click();
+    steps(&mut h, 3);
+    assert!(fx(&h) && !mixer(&h));
+}
+
+/// However the mixer and effects are switched, both decks stay inside the window:
+/// when full-size controls don't fit, a deck uses compact ones.
+#[test]
+fn decks_stay_inside_the_window() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = start("deck-fit");
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Perform).into());
+    steps(&mut h, 3);
+    let inside = |h: &H| {
+        let right = h.ctx.content_rect().right();
+        let syncs: Vec<_> = h.query_all_by_label("SYNC").map(|n| n.rect()).collect();
+        assert_eq!(syncs.len(), 2);
+        syncs.iter().all(|r| r.right() <= right + 0.5)
+    };
+    assert!(inside(&h));
+    for switch in ["FX", "Mixer", "FX", "Mixer"] {
+        h.get_by_label(switch).click();
+        steps(&mut h, 5);
+        assert!(inside(&h), "after {switch}");
+    }
+}
+
+/// Perform's mixer hides from the top bar's Mixer switch, and while a controller is connected
 /// (unless Settings says not to); it starts hidden each time one connects.
 #[test]
 fn the_mixer_hides_by_hand_and_for_a_controller() {
@@ -1766,4 +1820,43 @@ fn library_tracks_in_the_table() {
         })
     });
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// At the narrowest the window can be, nothing in any view goes off its right edge:
+/// Perform with two decks or four, and Prepare.
+#[test]
+fn everything_fits_at_the_narrowest_window() {
+    use egui::accesskit;
+    use egui_kittest::kittest::{NodeT, Queryable, by};
+    let mut h = start("narrowest");
+    let ids = ids(&h);
+    for (i, d) in DeckId::first(4).enumerate() {
+        h.state_mut().load(Some(d), ids[i]);
+    }
+    settle_until(&mut h, |a| {
+        DeckId::first(4).all(|d| a.panels.decks[d.index()].wave.is_some())
+    });
+    h.set_size(vec2(crate::MIN_WIDTH, 900.0));
+    for (mode, four) in [
+        (Mode::Perform, false),
+        (Mode::Perform, true),
+        (Mode::Prepare, false),
+    ] {
+        h.state_mut().dispatch(ViewCmd::SetMode(mode).into());
+        h.state_mut().dispatch(ViewCmd::FourDecks(four).into());
+        steps(&mut h, 30);
+        // Every widget with a place on screen (text runs are left out: a
+        // right-aligned label's is reported further right than it's drawn).
+        let past: Vec<String> = h
+            .query_all(by())
+            .filter(|n| n.accesskit_node().role() != accesskit::Role::TextRun)
+            .filter(|n| {
+                n.accesskit_node()
+                    .bounding_box()
+                    .is_some_and(|b| b.x1 as f32 > crate::MIN_WIDTH + 0.5)
+            })
+            .map(|n| format!("{n:?}"))
+            .collect();
+        assert!(past.is_empty(), "{mode:?}, four decks {four}: {past:#?}");
+    }
 }

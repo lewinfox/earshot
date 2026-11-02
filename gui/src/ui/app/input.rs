@@ -83,3 +83,41 @@ impl EarshotApp {
         }
     }
 }
+
+/// F11 puts the window in or out of full screen.
+pub(super) fn full_screen_key(ctx: &egui::Context) {
+    let pressed = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F11));
+    if pressed {
+        let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn f11_toggles_full_screen() {
+        let ctx = egui::Context::default();
+        let press = |full: bool| {
+            let mut input = egui::RawInput::default();
+            input
+                .viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .fullscreen = Some(full);
+            input.events.push(egui::Event::Key {
+                key: egui::Key::F11,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            let out = ctx.run(input, |ctx| super::full_screen_key(ctx));
+            out.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .clone()
+        };
+        assert_eq!(press(false), [egui::ViewportCommand::Fullscreen(true)]);
+        assert_eq!(press(true), [egui::ViewportCommand::Fullscreen(false)]);
+    }
+}

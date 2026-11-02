@@ -8,7 +8,7 @@
 
 use earshot_engine::{DeckId, MasterParam};
 
-use super::bus::{Control, DeckControl, Kind, LibraryControl, deck_letter};
+use super::bus::{Control, DeckControl, FxControl, Kind, LibraryControl, deck_letter};
 use super::command::Command;
 
 /// The built-in keymap.
@@ -233,6 +233,7 @@ impl Keymap {
                     None => ("Player".to_string(), Some(d)),
                 },
                 Control::Master(_) => ("Mixer".to_string(), None),
+                Control::Fx(..) => ("Effects".to_string(), None),
                 Control::Library(LibraryControl::Undo | LibraryControl::Redo) => {
                     ("Edit".to_string(), None)
                 }
@@ -302,6 +303,21 @@ fn parse_line(line: &str) -> Result<Binding, String> {
             .find(|p| Control::Master(*p).spec().name == *control)
             .ok_or_else(unknown)?,
         ),
+        t if t.starts_with("fx") => {
+            let unit = t[2..]
+                .parse::<usize>()
+                .ok()
+                .and_then(|n| n.checked_sub(1))
+                .filter(|u| *u < earshot_engine::FX_UNITS)
+                .ok_or_else(|| format!("unknown target {t}"))?;
+            Control::Fx(
+                unit,
+                FxControl::ALL
+                    .into_iter()
+                    .find(|c| c.spec().name == *control)
+                    .ok_or_else(unknown)?,
+            )
+        }
         t => {
             let deck = match t {
                 "prepare" => DeckId::PREPARE,
@@ -445,7 +461,7 @@ mod tests {
             press(Perform, "Right", true),
             Some(Command::View(ViewCmd::LoadSelected(d))) if d == deck(1)
         ));
-        assert!(press(Perform, "C", false).is_none(), "C is Prepare's");
+        assert!(press(Perform, "6", false).is_none(), "6 is Prepare's");
     }
 
     #[test]
@@ -556,7 +572,7 @@ mod tests {
         let km = Keymap::built_in();
         let help = km.help(Mode::Perform);
         let titles: Vec<&str> = help.iter().map(|s| s.title.as_str()).collect();
-        assert_eq!(titles, ["Deck A", "Deck B", "Library", "Edit"]);
+        assert_eq!(titles, ["Deck A", "Deck B", "Effects", "Library", "Edit"]);
         let a = &help[0].rows;
         assert!(a.contains(&("S".into(), "play / pause".into())));
         assert!(a.contains(&("4".into(), "hot cue 4".into())));

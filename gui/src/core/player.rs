@@ -48,6 +48,8 @@ pub struct Inner {
     pub sync_leader: Option<DeckId>,
     /// What hot cues do on a stopped deck (a setting; kept for audio restarts).
     pub hotcue_mode: HotcueMode,
+    /// The decks effects can go on: the ones shown (kept for audio restarts).
+    pub fx_decks: usize,
     /// Cue a newly loaded track on its first beat, else at its start (a setting).
     pub cue_first_beat: bool,
     pub generation: u64,
@@ -171,6 +173,7 @@ pub fn new_player() -> Player {
         mixer: MixerState::default(),
         sync_leader: None,
         hotcue_mode: HotcueMode::default(),
+        fx_decks: DECKS,
         cue_first_beat: true,
         generation: 0,
         load_tickets: [0; SLOTS],
@@ -240,6 +243,13 @@ pub fn set_hotcue_mode(player: &Player, mode: HotcueMode) -> Result<(), String> 
     let mut inner = player.lock().unwrap();
     inner.hotcue_mode = mode;
     inner.send(Command::SetHotcueMode(mode))
+}
+
+/// Effects go only on the first `n` decks (the ones shown), from now on.
+pub fn set_fx_decks(player: &Player, n: usize) -> Result<(), String> {
+    let mut inner = player.lock().unwrap();
+    inner.fx_decks = n;
+    inner.send(Command::SetFxDecks(n))
 }
 
 /// Cue newly loaded tracks on their first beat, else at their start, from now on.
@@ -390,6 +400,7 @@ pub fn start_engine(player: &Player, opts: &OutputOptions) -> Result<OutputInfo,
     // A new engine counts its own dropped events.
     inner.dropped_seen = 0;
     engine.send(Command::Restore(Box::new(inner.engine_state())))?;
+    engine.send(Command::SetFxDecks(inner.fx_decks))?;
     let p = &inner.preview;
     if let Some(audio) = p.audio.clone() {
         let (start, gain) = (p.position, p.gain);

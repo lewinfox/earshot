@@ -29,14 +29,14 @@ const FADER_COL: f32 = 30.0;
 const VU_W: f32 = 7.0;
 const CENTRE_W: f32 = 30.0;
 const MASTER_GAP: f32 = 10.0;
-const ROW: f32 = 40.0;
-const KNOB: f32 = 24.0;
+pub(super) const ROW: f32 = 40.0;
+pub(super) const KNOB: f32 = 24.0;
 /// Headphone cue buttons, under the gain knobs.
 const PFL_TOP: f32 = ROW + 2.0;
-const PFL_H: f32 = 18.0;
+pub(super) const PFL_H: f32 = 18.0;
 /// Channel faders and meters.
 const FADER_TOP: f32 = PFL_TOP + PFL_H + 6.0;
-const FADER_BOTTOM: f32 = 4.0 * ROW;
+pub(super) const FADER_BOTTOM: f32 = 4.0 * ROW;
 /// The crossfader side button, under each channel fader.
 const XF_SIDE_TOP: f32 = FADER_BOTTOM - PFL_H;
 const XF_TOP: f32 = FADER_BOTTOM + 6.0;
@@ -61,7 +61,7 @@ pub fn on_left(deck: DeckId) -> bool {
 
 /// A knob or fader bound to `control`: shows the engine's value (the default without
 /// an engine) and sends what the user changes.
-fn bound(
+pub(super) fn bound(
     ui: &mut Ui,
     shared: Option<&EngineSnapshot>,
     control: Control,

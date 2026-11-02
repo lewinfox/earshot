@@ -142,8 +142,8 @@ fn decks(ui: &mut Ui, env: &ModalEnv) -> Vec<Command> {
     }
     muted(
         ui,
-        "Perform's mixer starts hidden each time a controller connects; View > Panes > \
-         Mixer controls shows it.",
+        "Perform's mixer starts hidden each time a controller connects; the Mixer switch in \
+         the top bar shows it.",
     );
     out
 }

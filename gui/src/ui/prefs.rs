@@ -25,9 +25,11 @@ pub struct UiPrefs {
     pub four_decks: bool,
     /// Each kind of track list's columns, widths and sort.
     pub tables: Tables,
-    /// Perform's mixer, between the decks (View > Panes > Mixer controls), while no
+    /// Perform's mixer, between the decks (the top bar's Mixer switch), while no
     /// controller hides it.
     pub show_mixer: bool,
+    /// Perform's effect units, beside the mixer (the top bar's FX switch).
+    pub show_fx: bool,
     /// Hide the mixer while a controller is connected (it has its own).
     pub auto_hide_mixer: bool,
     /// A MIDI controller is connected (not kept).
@@ -62,6 +64,7 @@ impl Default for UiPrefs {
             four_decks: false,
             tables: Tables::default(),
             show_mixer: true,
+            show_fx: true,
             auto_hide_mixer: true,
             controller: false,
             mixer_with_controller: false,

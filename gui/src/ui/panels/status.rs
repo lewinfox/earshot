@@ -13,7 +13,7 @@ use crate::core::index::LibraryCmd;
 use crate::core::jobs::Running;
 use crate::core::view::{Modal, Mode, SettingsTab};
 use crate::ui::theme::fs;
-use crate::ui::widgets::{Intent, Pill, Seg, muted, segmented};
+use crate::ui::widgets::{Intent, Pill, Seg, Toggle, muted, segmented};
 
 /// Tracks being analysed, and failures since they were last dismissed.
 #[derive(Default)]
@@ -89,16 +89,6 @@ impl Panel for TopBar<'_> {
                             }
                         }
                     });
-                    ui.menu_button("Panes", |ui| {
-                        let mut mixer = cx.prefs.mixer_shown();
-                        if ui
-                            .checkbox(&mut mixer, "Mixer controls")
-                            .on_hover_text("Perform's mixer, between the decks")
-                            .changed()
-                        {
-                            cx.send(ViewCmd::ShowMixer(mixer));
-                        }
-                    });
                 });
             });
             if cx.prefs.mode == Mode::Prepare {
@@ -138,6 +128,7 @@ impl Panel for TopBar<'_> {
             }
             if mode == Mode::Perform {
                 deck_count(ui, cx);
+                panes(ui, cx);
             }
             let (audio, ok) = match self.audio {
                 Ok(i) => (
@@ -302,6 +293,26 @@ impl TopBar<'_> {
 /// The MIDI messages last received, newest first.
 /// Perform's 2 / 4 deck toggle. Back to two only once decks 3 and 4 have stopped, so
 /// nothing plays out of sight.
+/// Switches for Perform's mixer and effect units, to show or hide them mid-set.
+fn panes(ui: &mut Ui, cx: &mut Cx) {
+    let mut mixer = cx.prefs.mixer_shown();
+    if ui
+        .add(Toggle::new(&mut mixer, "Mixer"))
+        .on_hover_text("The mixer, between the decks")
+        .changed()
+    {
+        cx.send(ViewCmd::ShowMixer(mixer));
+    }
+    let mut fx = cx.prefs.show_fx;
+    if ui
+        .add(Toggle::new(&mut fx, "FX"))
+        .on_hover_text("The effect units, in a strip under the decks")
+        .changed()
+    {
+        cx.send(ViewCmd::ShowFx(fx));
+    }
+}
+
 fn deck_count(ui: &mut Ui, cx: &mut Cx) {
     let four = cx.prefs.four_decks;
     let hidden_playing = cx

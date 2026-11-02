@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use earshot_engine::{
     ChannelParam, DeckCmd as EngineCmd, DeckId, DeckSnap, EQ_HIGH, EQ_LOW, EQ_MID, EngineSnapshot,
-    MasterParam, ParamId, Press, Set,
+    FX_UNITS, FxCmd, MasterParam, ParamId, Press, Set,
 };
 
 use super::command::{Command, DeckCmd, ViewCmd};
@@ -203,6 +203,15 @@ pub const POSITION: Range = Range {
     centre: None,
     format: fmt_percent,
 };
+/// An effect unit's level: how loud the echo's repeats are, how deep Trans cuts.
+pub const FX_LEVEL: Range = Range {
+    name: "Effect level",
+    min: 0.0,
+    max: 1.0,
+    default: 0.5,
+    centre: None,
+    format: fmt_percent,
+};
 /// Beat jump and loop sizes, in beats.
 pub const BEATS: Range = Range {
     name: "Beats",
@@ -265,7 +274,73 @@ const fn spec(name: &'static str, help: &'static str, kind: Kind) -> ControlSpec
 pub enum Control {
     Deck(DeckId, DeckControl),
     Master(MasterParam),
+    /// An effect unit (0-based, below `FX_UNITS`).
+    Fx(usize, FxControl),
     Library(LibraryControl),
+}
+
+/// A control on an effect unit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FxControl {
+    On,
+    Level,
+    /// Halve or double the effect's length in beats.
+    BeatsDown,
+    BeatsUp,
+    /// The next effect.
+    Next,
+    /// Put the unit on the next deck, or the main mix.
+    Target,
+}
+
+impl FxControl {
+    pub const ALL: [FxControl; 6] = [
+        FxControl::On,
+        FxControl::Level,
+        FxControl::BeatsDown,
+        FxControl::BeatsUp,
+        FxControl::Next,
+        FxControl::Target,
+    ];
+
+    pub fn spec(self) -> ControlSpec {
+        use FxControl::*;
+        match self {
+            On => spec("fx_on", "effect on / off", Kind::Toggle),
+            Level => spec("fx_level", "effect level", Kind::Continuous(FX_LEVEL)),
+            BeatsDown => spec("fx_beats_down", "halve the effect's length", Kind::Button),
+            BeatsUp => spec("fx_beats_up", "double the effect's length", Kind::Button),
+            Next => spec("fx_next", "next effect", Kind::Button),
+            Target => spec("fx_target", "effect on the next deck / main", Kind::Button),
+        }
+    }
+
+    pub fn command(self, unit: usize, value: f64) -> Option<Command> {
+        let fx = |c| Some(Command::Fx(unit, c));
+        let pressed = value > 0.0;
+        match self {
+            FxControl::Level => fx(FxCmd::Level(value)),
+            _ if !pressed => None,
+            FxControl::On => fx(FxCmd::Enabled(Set::Toggle)),
+            FxControl::BeatsDown => fx(FxCmd::BeatsStep(-1)),
+            FxControl::BeatsUp => fx(FxCmd::BeatsStep(1)),
+            FxControl::Next => fx(FxCmd::NextKind),
+            FxControl::Target => fx(FxCmd::NextTarget),
+        }
+    }
+
+    /// Mixxx's key, in `[EffectRack1_EffectUnitN]`. Mixxx has no beat lengths or
+    /// targets to cycle; those names are earshot's own.
+    fn mixxx(self) -> &'static str {
+        match self {
+            FxControl::On => "enabled",
+            FxControl::Level => "mix",
+            FxControl::Next => "next_chain",
+            FxControl::BeatsDown => "beats_down",
+            FxControl::BeatsUp => "beats_up",
+            FxControl::Target => "next_target",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -727,6 +802,7 @@ impl Control {
         match self {
             Control::Deck(_, c) => c.spec(),
             Control::Master(p) => master_spec(p),
+            Control::Fx(_, c) => c.spec(),
             Control::Library(c) => c.spec(),
         }
     }
@@ -750,6 +826,14 @@ impl Control {
                 MasterParam::HeadGain => m.head_gain,
                 MasterParam::HeadMix => m.head_mix,
             }),
+            Control::Fx(u, c) => {
+                let s = m.fx.get(u)?;
+                match c {
+                    FxControl::On => Some(s.enabled as u8 as f64),
+                    FxControl::Level => Some(s.level),
+                    _ => None,
+                }
+            }
             Control::Library(_) => None,
         }
     }
@@ -759,6 +843,8 @@ impl Control {
         match self {
             Control::Deck(deck, c) => c.command(deck, value),
             Control::Master(p) => Some(Command::Param(ParamId::Master(p), value)),
+            Control::Fx(u, c) if u < FX_UNITS => c.command(u, value),
+            Control::Fx(..) => None,
             Control::Library(c) => c.command(value),
         }
     }
@@ -779,6 +865,7 @@ impl Control {
                 ms.abs(),
                 if ms < 0.0 { "earlier" } else { "later" }
             ),
+            Control::Fx(u, c) => format!("FX{} {}", u + 1, c.spec().help),
             Control::Library(LibraryControl::Browse) => match arg {
                 Some(v) if v < 0.0 => "previous track".into(),
                 Some(_) => "next track".into(),
@@ -806,6 +893,10 @@ impl Control {
                 let key = MASTER.iter().find(|(m, _)| *m == p)?.1;
                 Some(("[Master]".into(), key.into()))
             }
+            Control::Fx(u, c) => Some((
+                format!("[EffectRack1_EffectUnit{}]", u + 1),
+                c.mixxx().into(),
+            )),
             Control::Library(LibraryControl::Browse) => {
                 Some(("[Library]".into(), "MoveVertical".into()))
             }
@@ -824,6 +915,18 @@ impl Control {
         if group == "[Master]" {
             let p = MASTER.iter().find(|(_, k)| *k == key)?.0;
             return Some(Control::Master(p));
+        }
+        if let Some(n) = group
+            .strip_prefix("[EffectRack1_EffectUnit")
+            .and_then(|g| g.strip_suffix(']'))
+        {
+            let u = n
+                .parse::<usize>()
+                .ok()?
+                .checked_sub(1)
+                .filter(|u| *u < FX_UNITS)?;
+            let c = FxControl::ALL.into_iter().find(|c| c.mixxx() == key)?;
+            return Some(Control::Fx(u, c));
         }
         if group == "[Library]" {
             return LibraryControl::ALL
@@ -1029,6 +1132,21 @@ mod tests {
         assert!(undo.command(0.0).is_none());
         let redo = Control::from_mixxx("[Library]", "Redo").unwrap();
         assert!(matches!(redo.command(1.0), Some(Command::Redo)));
+        for u in 0..FX_UNITS {
+            for c in FxControl::ALL {
+                let c = Control::Fx(u, c);
+                let (g, k) = c.mixxx().unwrap();
+                assert_eq!(Control::from_mixxx(&g, &k), Some(c), "{g} {k}");
+            }
+        }
+        assert_eq!(
+            Control::from_mixxx("[EffectRack1_EffectUnit1]", "mix"),
+            Some(Control::Fx(0, FxControl::Level))
+        );
+        assert_eq!(
+            Control::from_mixxx("[EffectRack1_EffectUnit9]", "mix"),
+            None
+        );
         assert_eq!(Control::from_mixxx("[Channel9]", "play"), None);
         assert_eq!(Control::from_mixxx("[Channel1]", "nonsense"), None);
     }
@@ -1047,6 +1165,31 @@ mod tests {
         assert_eq!(DeckControl::parse("hotcue", Some(0.0)), None);
         assert_eq!(DeckControl::parse("hotcue", None), None);
         assert_eq!(DeckControl::parse("bogus", None), None);
+    }
+
+    #[test]
+    fn effect_controls() {
+        let fx = |c: FxControl, v| Control::Fx(1, c).command(v);
+        assert!(matches!(
+            fx(FxControl::On, 1.0),
+            Some(Command::Fx(1, FxCmd::Enabled(Set::Toggle)))
+        ));
+        assert!(fx(FxControl::On, 0.0).is_none());
+        assert!(matches!(
+            fx(FxControl::BeatsUp, 1.0),
+            Some(Command::Fx(1, FxCmd::BeatsStep(1)))
+        ));
+        assert!(matches!(
+            fx(FxControl::Level, 0.25),
+            Some(Command::Fx(1, FxCmd::Level(0.25)))
+        ));
+        assert!(Control::Fx(FX_UNITS, FxControl::On).command(1.0).is_none());
+        let mut snap = EngineSnapshot::default();
+        snap.mixer.fx[1].enabled = true;
+        snap.mixer.fx[1].level = 0.8;
+        assert_eq!(Control::Fx(1, FxControl::On).get(&snap), Some(1.0));
+        assert_eq!(Control::Fx(1, FxControl::Level).get(&snap), Some(0.8));
+        assert_eq!(Control::Fx(0, FxControl::On).get(&snap), Some(0.0));
     }
 
     #[test]

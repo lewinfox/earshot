@@ -210,6 +210,7 @@ pub fn observe_mixer(m: &MixerSnap) -> MixerState {
         balance: m.balance,
         head_gain: m.head_gain,
         head_mix: m.head_mix,
+        fx: m.fx,
     }
 }
 
