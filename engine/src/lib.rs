@@ -19,7 +19,7 @@ pub mod transport;
 
 // The offline code moved to `earshot-audio`. Re-exported so existing imports keep
 // working; new code should use `earshot_audio` directly.
-pub use earshot_audio::{beatgrid, decode, demo, energy, loudness, media, quick, waveform};
+pub use earshot_audio::{beatgrid, decode, demo, energy, loudness, media, quick, stems, waveform};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};

@@ -538,6 +538,7 @@ pub fn load_track(
             detail,
         },
     )?;
+    super::stems::attach(player, deck, generation, audio.clone(), at);
     if estimate {
         estimate_grid_later(player, deck, generation, tags, audio);
     }

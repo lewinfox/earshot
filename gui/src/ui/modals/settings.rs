@@ -31,6 +31,9 @@ pub struct AnalysisEnv<'a> {
     /// The most there can be (the CPU cores).
     pub cores: usize,
     pub stale: &'a Stale,
+    /// The stems cache's limit, GB, and what it takes now, bytes.
+    pub stems_cache_gb: f64,
+    pub stems_used: u64,
 }
 
 /// What's known of the tracks with stale analysis (an older analyser, other audio,
@@ -192,6 +195,22 @@ fn analysis(ui: &mut Ui, env: &AnalysisEnv) -> Vec<Command> {
         "Stale: analysed by an older version of earshot, the file's audio has changed \
          since, or the analysis failed or never ran.",
     );
+    ui.separator();
+    let mut gb = env.stems_cache_gb;
+    ui.horizontal(|ui| {
+        ui.label("Stems storage limit");
+        ui.add(
+            egui::DragValue::new(&mut gb)
+                .range(1.0..=2000.0)
+                .speed(1.0)
+                .suffix(" GB"),
+        );
+        muted(ui, format!("{:.1} GB used", env.stems_used as f64 / 1e9));
+    });
+    muted(ui, "Least recently used stems are removed at startup.");
+    if gb != env.stems_cache_gb {
+        out.push(Command::App(AppCmd::StemsCacheGb(gb)));
+    }
     out
 }
 

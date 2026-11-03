@@ -10,6 +10,7 @@ use crate::beatgrid::Beatgrid;
 use crate::decode::TrackAudio;
 use crate::engine::Routing;
 use crate::fx::{FX_UNITS, FxCmd, FxUnitState};
+use crate::stems::StemAudio;
 use crate::tempo::TempoRange;
 
 /// The most decks the engine can run. The app picks how many are live when it starts
@@ -171,6 +172,17 @@ pub enum DeckCmd {
     SetLoop {
         start: f64,
         end: f64,
+    },
+    /// A stem's level (`stem` indexes [`crate::stems::NAMES`]), 0..1. Levels go back to
+    /// 1 when a track loads.
+    StemLevel {
+        stem: u8,
+        level: f64,
+    },
+    /// Mute a stem, or unmute it (its level stays).
+    StemMute {
+        stem: u8,
+        set: Set,
     },
 }
 
@@ -398,6 +410,13 @@ pub enum Command {
         deck: DeckId,
         generation: u64,
         at: f64,
+    },
+    /// Give the track loaded as `generation` its stems (`None`: take them away).
+    /// Ignored if the deck has moved on to another track.
+    SetStems {
+        deck: DeckId,
+        generation: u64,
+        stems: Option<Arc<StemAudio>>,
     },
     /// The deck synced decks follow. `None`: each synced deck picks one (a playing
     /// deck that isn't synced itself, if there is one).

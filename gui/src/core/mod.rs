@@ -32,6 +32,7 @@ pub mod services;
 pub mod session;
 pub mod settings;
 pub mod sources;
+pub mod stems;
 pub mod store;
 pub mod suggest;
 pub mod tempo_lock;
@@ -83,6 +84,8 @@ pub enum Event {
     /// News from the tempo lock tool.
     #[allow(dead_code)] // read by the tempo lock tab (step 7, B4)
     TempoLock(tempo_lock::TempoLockEvent),
+    /// News from the stems tool.
+    Stems(stems::StemsEvent),
 }
 
 /// Where background threads send [`Event`]s (the UI's channel, plus a repaint).

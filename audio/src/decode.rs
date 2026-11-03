@@ -106,6 +106,32 @@ fn tags_of(format: &mut Box<dyn FormatReader>) -> TrackTags {
     tags
 }
 
+/// Whether the track's audio is stored losslessly (PCM, FLAC, ALAC, WavPack…), by its
+/// codec, not its file name: an `.m4a` can be either.
+pub fn is_lossless(at: &Location) -> Result<bool, String> {
+    let format = open(at)?;
+    let track = format
+        .default_track(TrackType::Audio)
+        .ok_or("no audio track")?;
+    let codec = track
+        .codec_params
+        .as_ref()
+        .and_then(|c| c.audio())
+        .ok_or("no audio codec parameters")?
+        .codec;
+    use symphonia::core::codecs::audio::well_known::*;
+    // symphonia numbers uncompressed PCM below the lossy codecs (Vorbis first).
+    let pcm = (CODEC_ID_PCM_S32LE..CODEC_ID_VORBIS).contains(&codec);
+    let compressed = [
+        CODEC_ID_FLAC,
+        CODEC_ID_ALAC,
+        CODEC_ID_WAVPACK,
+        CODEC_ID_MONKEYS_AUDIO,
+        CODEC_ID_TTA,
+    ];
+    Ok(pcm || compressed.contains(&codec))
+}
+
 /// Read tags without decoding audio.
 pub fn read_tags(at: &Location) -> Result<TrackTags, String> {
     let mut format = open(at)?;
@@ -182,4 +208,35 @@ pub fn decode(at: &Location) -> Result<(TrackAudio, TrackTags), String> {
     };
     tags.duration = Some(audio.duration());
     Ok((audio, tags))
+}
+
+#[cfg(test)]
+mod lossless_tests {
+    use super::*;
+
+    #[test]
+    fn lossless_by_codec() {
+        let dir = std::env::temp_dir().join(format!("earshot-lossless-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A tiny 16-bit PCM WAV.
+        let wav = dir.join("a.wav");
+        let mut b = Vec::new();
+        let data: Vec<u8> = vec![0; 400];
+        b.extend(b"RIFF");
+        b.extend((36 + data.len() as u32).to_le_bytes());
+        b.extend(b"WAVEfmt ");
+        b.extend(16u32.to_le_bytes());
+        b.extend(1u16.to_le_bytes());
+        b.extend(2u16.to_le_bytes());
+        b.extend(44_100u32.to_le_bytes());
+        b.extend((44_100u32 * 4).to_le_bytes());
+        b.extend(4u16.to_le_bytes());
+        b.extend(16u16.to_le_bytes());
+        b.extend(b"data");
+        b.extend((data.len() as u32).to_le_bytes());
+        b.extend(&data);
+        std::fs::write(&wav, b).unwrap();
+        assert_eq!(is_lossless(&Location::File(wav)), Ok(true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

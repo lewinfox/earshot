@@ -6,6 +6,9 @@
 //! The list is shared between the UI and the jobs' threads; each change asks for
 //! a repaint, so the status line keeps up.
 //!
+//! A job that can be stopped says how ([`Job::on_cancel`]); the status line then
+//! offers a Cancel button ([`Jobs::cancel`]).
+//!
 //! A job's own panel still gets its messages and result through its events: the
 //! list is only what the status line shows.
 
@@ -31,11 +34,20 @@ struct Inner {
 struct Entry {
     id: u64,
     now: Running,
+    cancel: Option<Cancel>,
 }
+
+type Cancel = Arc<dyn Fn() + Send + Sync>;
 
 /// A job, as the status line shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Running {
+    /// Which job, for [`Jobs::cancel`].
+    pub id: u64,
+    /// It can be stopped.
+    pub cancellable: bool,
+    /// Asked to stop, and finishing what it was in the middle of.
+    pub cancelling: bool,
     /// What it is: "Exporting to STICK".
     pub title: String,
     /// What it's doing now: "Writing Serato tags" (may be empty).
@@ -56,7 +68,9 @@ impl Running {
 
     /// "Exporting to STICK: Writing Serato tags".
     pub fn text(&self) -> String {
-        if self.message.is_empty() {
+        if self.cancelling {
+            format!("{}: cancelling…", self.title)
+        } else if self.message.is_empty() {
             format!("{}…", self.title)
         } else {
             format!("{}: {}", self.title, self.message)
@@ -98,7 +112,11 @@ impl Jobs {
             let id = i.next;
             i.list.push(Entry {
                 id,
+                cancel: None,
                 now: Running {
+                    id,
+                    cancellable: false,
+                    cancelling: false,
                     title,
                     message: String::new(),
                     progress: None,
@@ -120,6 +138,22 @@ impl Jobs {
         let mut out: Vec<Running> = i.list.iter().map(|e| e.now.clone()).collect();
         out.sort_by_key(|r| r.queued);
         out
+    }
+
+    /// Stop job `id`, if it can be stopped: it's shown as cancelling until it ends
+    /// itself, as it would anyway.
+    pub fn cancel(&self, id: u64) {
+        let cancel = {
+            let i = self.inner.lock().unwrap();
+            i.list
+                .iter()
+                .find(|e| e.id == id)
+                .and_then(|e| e.cancel.clone())
+        };
+        if let Some(c) = cancel {
+            self.update(id, |r| r.cancelling = true);
+            c();
+        }
     }
 
     fn update(&self, id: u64, f: impl FnOnce(&mut Running)) {
@@ -150,6 +184,29 @@ impl Job {
     pub fn say(&self, message: impl Into<String>) {
         let message = message.into();
         self.jobs.update(self.id, |r| r.message = message);
+    }
+
+    /// It can be stopped, by calling `f`.
+    pub fn on_cancel(&self, f: impl Fn() + Send + Sync + 'static) {
+        {
+            let mut i = self.jobs.inner.lock().unwrap();
+            if let Some(e) = i.list.iter_mut().find(|e| e.id == self.id) {
+                e.cancel = Some(Arc::new(f));
+                e.now.cancellable = true;
+            }
+        }
+        (self.jobs.wake)();
+    }
+
+    /// Asked to stop (by its own panel, not the status line's button): shown as
+    /// cancelling until it's dropped.
+    pub fn cancelling(&self) {
+        self.jobs.update(self.id, |r| r.cancelling = true);
+    }
+
+    /// Its turn has come: no longer queued.
+    pub fn running(&self) {
+        self.jobs.update(self.id, |r| r.queued = false);
     }
 
     /// How far it's got: `done` of `of`.
@@ -231,6 +288,28 @@ mod tests {
         drop(b);
         assert!(jobs.list().is_empty());
         assert_eq!(woken.load(Ordering::Relaxed), 10);
+    }
+
+    #[test]
+    fn a_job_that_says_how_can_be_cancelled() {
+        let jobs = Jobs::default();
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let plain = jobs.start("Scanning");
+        let stoppable = jobs.start("Stems");
+        let s = stopped.clone();
+        stoppable.on_cancel(move || {
+            s.fetch_add(1, Ordering::Relaxed);
+        });
+        let list = jobs.list();
+        assert!(!list[0].cancellable && list[1].cancellable);
+        jobs.cancel(list[0].id);
+        assert_eq!(stopped.load(Ordering::Relaxed), 0);
+        jobs.cancel(list[1].id);
+        assert_eq!(stopped.load(Ordering::Relaxed), 1);
+        assert!(jobs.list()[1].cancelling);
+        assert_eq!(jobs.list()[1].text(), "Stems: cancelling…");
+        assert!(!jobs.list()[0].cancelling);
+        drop((plain, stoppable));
     }
 
     #[test]

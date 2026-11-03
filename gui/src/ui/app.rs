@@ -80,6 +80,8 @@ pub struct EarshotApp {
     /// The tempo lock tool, and its tab's A/B player.
     tempo_lock: TempoLock,
     listener: tempo_lock::Listener,
+    /// The stems tool (its own background worker).
+    stems: crate::core::stems::Stems,
 
     // ---- core state the UI holds ---------------------------------------------------------
     /// The library, collections and play history: the domain state the panes read.
@@ -238,6 +240,21 @@ impl EarshotApp {
                 Some(hasher.clone()),
             )
         };
+        crate::core::stems::init(data_dir, (settings.stems_cache_gb.max(0.0) * 1e9) as u64);
+        let jobs = {
+            let ctx = cc.egui_ctx.clone();
+            crate::core::jobs::Jobs::new(move || ctx.request_repaint())
+        };
+        let stems = {
+            let sink = sink.clone();
+            crate::core::stems::Stems::with_worker(
+                (services.worker)(Role::Background, analysis::cores()),
+                store.clone(),
+                player.clone(),
+                jobs.clone(),
+                Arc::new(move |e| sink(Event::Stems(e))),
+            )
+        };
         let art_loader = library::start_art_loader(store.reader.clone(), sink.clone());
         let lib = Arc::new(Library { store, analyser });
         let mut prefs: UiPrefs = cc
@@ -269,6 +286,7 @@ impl EarshotApp {
             hasher,
             tempo_lock,
             listener: Default::default(),
+            stems,
             index: LibraryIndex::default(),
             collections: Collections::default(),
             history: History::default(),
@@ -279,10 +297,7 @@ impl EarshotApp {
             sticks_added: Default::default(),
             cues: HashMap::new(),
             analysis: AnalysisSummary::default(),
-            jobs: {
-                let ctx = cc.egui_ctx.clone();
-                crate::core::jobs::Jobs::new(move || ctx.request_repaint())
-            },
+            jobs,
             analysis_jobs: HashMap::new(),
             analysis_queue: None,
             preview: None,
@@ -438,12 +453,19 @@ impl EarshotApp {
         match cmd {
             Command::View(v) => self.view_cmd(v),
             Command::App(AppCmd::ReconnectMidi) => self.connect_midi(),
+            Command::App(AppCmd::CancelJob(id)) => self.jobs.cancel(id),
             Command::App(AppCmd::StopAnalysis) => {
                 self.lib.analyser.stop_background();
             }
             Command::App(AppCmd::DismissFailures) => {
                 self.analysis.failed = 0;
                 self.analysis.last_error.clear();
+            }
+            Command::App(AppCmd::StemsCacheGb(gb)) => {
+                self.settings.stems_cache_gb = gb;
+                self.lib
+                    .store
+                    .send(settings::save(settings::STEMS_CACHE_GB, &gb));
             }
             Command::App(AppCmd::BackgroundWorkers(n)) => {
                 self.background_workers = self.lib.analyser.set_background_workers(n);
@@ -505,6 +527,7 @@ impl EarshotApp {
             Command::Export(c) => self.export_cmd(c),
             Command::TempoLock(TempoLockCmd::Listen(c)) => self.listen(c),
             Command::TempoLock(c) => self.tempo_lock.run(c),
+            Command::Stems(c) => self.stems.run(c),
             Command::Collection(c) => self.collection_cmd(c),
             Command::Flow(c) => self.flow_cmd(c),
             Command::Edit(c) => self.edit_cmd(c),
@@ -783,6 +806,8 @@ impl EarshotApp {
                 workers: self.background_workers,
                 cores: analysis::cores(),
                 stale: &self.stale,
+                stems_cache_gb: self.settings.stems_cache_gb,
+                stems_used: crate::core::stems::usage(),
             },
             keymap_file: KeymapEnv {
                 path: &self.keymap_path,

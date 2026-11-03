@@ -399,6 +399,20 @@ fn prepared(a: &EarshotApp) -> Option<i64> {
     a.player.lock().unwrap().session(DeckId::PREPARE).track_id
 }
 
+/// Ctrl+← / → nudge Prepare's grid too (not a beat jump).
+#[test]
+fn ctrl_arrows_nudge_the_grid() {
+    let mut h = start_prepare("nudge-ctrl", 1);
+    let pos = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().prepare.position;
+    steps(&mut h, 20);
+    let (before, at) = (first_beat(h.state()), pos(h.state()));
+    press(&mut h, egui::Modifiers::COMMAND, Key::ArrowRight);
+    settle_until(&mut h, |a| (first_beat(a) - (before + 0.010)).abs() < 1e-6);
+    press(&mut h, egui::Modifiers::COMMAND, Key::ArrowLeft);
+    settle_until(&mut h, |a| (first_beat(a) - before).abs() < 1e-6);
+    assert!((pos(h.state()) - at).abs() < 0.1);
+}
+
 /// Shift+← / → nudge Prepare's grid 10 ms, through the real key events.
 #[test]
 fn shift_arrows_nudge_the_grid() {

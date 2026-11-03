@@ -65,6 +65,11 @@ pub struct DeckSnap {
     pub crossfader: XfSide,
     /// Channel level meter (peak, after gain, EQ and filter, before the fader).
     pub vu: f64,
+    /// The track's stems are loaded, so the stem controls do something.
+    pub stems: bool,
+    /// Each stem's level (0..1) and mute, indexed as [`crate::stems::NAMES`].
+    pub stem_level: [f64; crate::stems::COUNT],
+    pub stem_mute: [bool; crate::stems::COUNT],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]

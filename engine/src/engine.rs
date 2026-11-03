@@ -22,8 +22,9 @@ use crate::processor::{Channel, KNOB_SECS, MasterChain};
 use crate::snapshot::{
     DeckSnap, EngineEvent, EngineSnapshot, MixerSnap, Monitor, PreviewSnap, Stats,
 };
+use crate::stems::{self, StemAudio};
 use crate::tempo::TempoRange;
-use crate::transport::{JumpReason, LEAD_IN, Player};
+use crate::transport::{JumpReason, LEAD_IN, Mix, Player, StemMix};
 
 /// Largest block rendered in one go; bigger device buffers are rendered in chunks.
 pub const MAX_BLOCK: usize = 4096;
@@ -132,6 +133,7 @@ pub(crate) fn route(frame: &mut [f32], out: Out, l: f32, r: f32) {
 pub enum Garbage {
     Track(Arc<LoadedTrack>),
     Grid(Arc<Beatgrid>),
+    Stems(Arc<StemAudio>),
     Audio(Arc<TrackAudio>),
     State(Box<EngineState>),
 }
@@ -254,7 +256,18 @@ struct Deck {
     /// Nothing has played it, moved the playhead or set the cue since the track was
     /// loaded, so [`Command::InitialCue`] may still move both.
     untouched: bool,
+    /// The loaded track's stems, once worked out ([`Command::SetStems`]).
+    stems: Option<Arc<StemAudio>>,
+    /// Each stem's level and mute, as set; and the gain it plays at now, which eases
+    /// toward that over [`STEM_RAMP_SECS`].
+    stem_level: [f64; stems::COUNT],
+    stem_mute: [bool; stems::COUNT],
+    stem_gain: [f32; stems::COUNT],
 }
+
+/// How long a stem takes to go from silent to full (or back): short enough not to
+/// hear as a fade, long enough not to click.
+const STEM_RAMP_SECS: f64 = 0.008;
 
 /// Sync follows the leader's tempo averaged over this many beats either side, so
 /// beat-to-beat wobble in an analysed grid doesn't shake the follower.
@@ -305,7 +318,32 @@ impl Deck {
             tempo: 1.0,
             was_playing: false,
             untouched: false,
+            stems: None,
+            stem_level: [1.0; stems::COUNT],
+            stem_mute: [false; stems::COUNT],
+            stem_gain: [1.0; stems::COUNT],
         }
+    }
+
+    /// The stem gains for an `n`-frame block: where they are, and where they'll be at
+    /// its end (eased toward the levels set).
+    fn stem_ramp(&mut self, n: usize, sr: f64) -> ([f32; stems::COUNT], [f32; stems::COUNT]) {
+        let from = self.stem_gain;
+        let max = (n as f64 / (STEM_RAMP_SECS * sr)) as f32;
+        for s in 0..stems::COUNT {
+            let target = if self.stem_mute[s] {
+                0.0
+            } else {
+                self.stem_level[s] as f32
+            };
+            let d = (target - from[s]).clamp(-max, max);
+            self.stem_gain[s] = if self.stems.is_some() {
+                from[s] + d
+            } else {
+                target
+            };
+        }
+        (from, self.stem_gain)
     }
 
     fn generation(&self) -> u64 {
@@ -424,6 +462,9 @@ impl Deck {
         self.sync_ratio = 0.0;
         self.sync_correction = 0.0;
         self.tempo = 1.0;
+        self.stem_level = [1.0; stems::COUNT];
+        self.stem_mute = [false; stems::COUNT];
+        self.stem_gain = [1.0; stems::COUNT];
         (self.track.replace(track), old_grid)
     }
 
@@ -519,6 +560,16 @@ impl Deck {
                     generation,
                     position: self.cue_point,
                 });
+            }
+            DeckCmd::StemLevel { stem, level } => {
+                if let Some(l) = self.stem_level.get_mut(stem as usize) {
+                    *l = level.clamp(0.0, 1.0);
+                }
+            }
+            DeckCmd::StemMute { stem, set } => {
+                if let Some(m) = self.stem_mute.get_mut(stem as usize) {
+                    *m = set.apply(*m);
+                }
             }
             DeckCmd::SetLoop { start, end } => {
                 if end > start {
@@ -762,6 +813,9 @@ impl Deck {
             filter: ch.get(ChannelParam::Filter),
             crossfader: ch.crossfader,
             vu: ch.vu as f64,
+            stems: self.stems.is_some(),
+            stem_level: self.stem_level,
+            stem_mute: self.stem_mute,
         }
     }
 }
@@ -1020,11 +1074,24 @@ impl Renderer {
             let deck = &mut self.decks[d];
             let buf = &mut self.deck_buf[d][..n * 2];
             buf.fill(0.0);
+            let (from, to) = deck.stem_ramp(n, sr);
             let Some(track) = &deck.track else {
                 deck.player.idle();
                 continue;
             };
-            if deck.player.render(&track.audio, buf, sr, now) {
+            let unity = from.iter().chain(&to).all(|&g| g == 1.0);
+            let mix = Mix {
+                audio: &track.audio,
+                stems: match &deck.stems {
+                    Some(st) if !unity => Some(StemMix {
+                        audio: st,
+                        from,
+                        to,
+                    }),
+                    _ => None,
+                },
+            };
+            if deck.player.render(&mix, buf, sr, now) {
                 deck.preview = Preview::None;
                 self.outbox.send(EngineEvent::TrackEnded {
                     deck: deck.id,
@@ -1139,7 +1206,7 @@ impl Renderer {
         if let Some(audio) = self.preview.as_deref() {
             let buf = &mut self.preview_buf[..n * 2];
             buf.fill(0.0);
-            self.preview_player.render(audio, buf, sr, now);
+            self.preview_player.render(&Mix::plain(audio), buf, sr, now);
             let g = 0.8 * self.head_gain.current as f32 * self.preview_gain;
             for (o, s) in self.phones.iter_mut().zip(buf.iter()) {
                 *o += g * s;
@@ -1339,6 +1406,9 @@ impl Renderer {
         self.channels[d].set_auto_gain(track.auto_gain);
         let old = self.decks[d].load(track);
         self.trash_load(old);
+        if let Some(st) = self.decks[d].stems.take() {
+            self.trash(Garbage::Stems(st));
+        }
         self.outbox.send(EngineEvent::Loaded {
             deck: self.decks[d].id,
             generation,
@@ -1367,6 +1437,21 @@ impl Renderer {
                 };
                 if let Some(g) = old {
                     self.trash(Garbage::Grid(g));
+                }
+            }
+            Command::SetStems {
+                deck,
+                generation,
+                stems,
+            } => {
+                let old = match self.live(deck) {
+                    Some(d) if self.decks[d].generation() == generation => {
+                        std::mem::replace(&mut self.decks[d].stems, stems)
+                    }
+                    _ => stems,
+                };
+                if let Some(st) = old {
+                    self.trash(Garbage::Stems(st));
                 }
             }
             Command::InitialCue {

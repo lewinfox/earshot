@@ -9,4 +9,5 @@ pub mod energy;
 pub mod loudness;
 pub mod media;
 pub mod quick;
+pub mod stems;
 pub mod waveform;
