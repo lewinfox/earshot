@@ -562,6 +562,17 @@ fn user_value(c: &Connection, track: i64, field: Field) -> Result<Option<Value>>
         return Ok(v.map(Value::Text));
     }
     Ok(match field {
+        Field::Attention => {
+            let v: Option<bool> = c
+                .query_row(
+                    "SELECT needs_attention FROM tracks WHERE id = ?1",
+                    [track],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .ok_or(StoreError::NoTrack(track))?;
+            v.map(Value::Flag)
+        }
         Field::Rating | Field::Colour => {
             let col = if field == Field::Rating {
                 "rating"
@@ -606,6 +617,20 @@ fn write_value(c: &Connection, track: i64, field: Field, v: Option<&Value>, t: i
         return put_meta(c, track, name, "user", text, t);
     }
     match field {
+        Field::Attention => {
+            let flag = match v {
+                Some(Value::Flag(b)) => Some(*b),
+                None => None,
+                Some(_) => return Err(wrong()),
+            };
+            let changed = c.execute(
+                "UPDATE tracks SET needs_attention = ?2 WHERE id = ?1",
+                params![track, flag],
+            )?;
+            if changed == 0 {
+                return Err(StoreError::NoTrack(track));
+            }
+        }
         Field::Rating | Field::Colour => {
             let n: Option<i64> = match (field, v) {
                 (_, None) => None,

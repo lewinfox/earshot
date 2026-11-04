@@ -11,6 +11,7 @@ use super::{Cx, Panel};
 use crate::core::command::{AppCmd, Command, ViewCmd};
 use crate::core::index::LibraryCmd;
 use crate::core::jobs::Running;
+use crate::core::notice::{Level, Notice};
 use crate::core::view::{Modal, Mode, SettingsTab};
 use crate::ui::theme::fs;
 use crate::ui::widgets::{Intent, Pill, Seg, Toggle, muted, segmented};
@@ -368,12 +369,48 @@ fn job_line(ui: &mut Ui, j: &Running, cx: &mut Cx) {
 pub struct StatusLine<'a> {
     pub jobs: &'a [Running],
     pub midi: &'a VecDeque<String>,
+    /// Messages for the user, oldest first (each drawn with a close button).
+    pub notices: &'a [Notice],
 }
 
 impl Panel for StatusLine<'_> {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let t = cx.theme;
         ui.horizontal(|ui| {
+            // Newest first.
+            for n in self.notices.iter().rev() {
+                let (colour, icon) = match n.level {
+                    Level::Info => (t.warn, ""),
+                    Level::Warning => (t.bad, "⚠ "),
+                };
+                egui::Frame::new()
+                    .fill(colour.gamma_multiply(0.18))
+                    .stroke(egui::Stroke::new(1.0_f32, colour))
+                    .corner_radius(3)
+                    .inner_margin(egui::Margin::symmetric(6, 0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("{icon}{}", n.text))
+                                    .size(fs(11.0))
+                                    .color(colour),
+                            );
+                            if ui
+                                .add(
+                                    egui::Button::new(RichText::new("×").size(fs(13.0)))
+                                        .frame(false),
+                                )
+                                .on_hover_text("Dismiss")
+                                .clicked()
+                            {
+                                cx.send(AppCmd::DismissNotice(n.id));
+                            }
+                        });
+                    });
+            }
+            if !self.notices.is_empty() {
+                ui.separator();
+            }
             if let Some(first) = self.jobs.first() {
                 job_line(ui, first, cx);
                 let more = self.jobs.len() - 1;

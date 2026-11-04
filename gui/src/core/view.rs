@@ -128,6 +128,8 @@ pub enum ViewCmd {
     FocusSearch,
     /// Load the selected track onto this deck.
     LoadSelected(DeckId),
+    /// Show the deck's track in the library, in the list it was loaded from.
+    ShowInLibrary(DeckId),
     /// Move the selection in the focused list (negative is up) and load the track it
     /// lands on onto this deck: the previous or next track.
     LoadAdjacent(DeckId, i32),

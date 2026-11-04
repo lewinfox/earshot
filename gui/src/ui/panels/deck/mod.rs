@@ -34,7 +34,7 @@ pub use self::waveform::WavePanel;
 
 use self::wave::{DeckWave, Grid, Marks};
 use crate::core::bus::{Control, DeckControl};
-use crate::core::command::{Command, DeckCmd};
+use crate::core::command::{Command, DeckCmd, ViewCmd};
 use crate::core::store::TrackCues;
 use crate::core::track::Track;
 use crate::ui::panels::library::drag;
@@ -333,6 +333,23 @@ impl DeckUi {
         }
     }
 
+    /// Right-click `r` for "Show in library", once a track is on the player.
+    pub(super) fn library_menu(&self, r: &egui::Response, out: &mut Vec<Command>) {
+        if self.pending.is_some() || self.state.duration <= 0.0 {
+            return;
+        }
+        r.context_menu(|ui| {
+            if ui
+                .button("Show in library")
+                .on_hover_text("Select it in the list it was loaded from")
+                .clicked()
+            {
+                out.push(ViewCmd::ShowInLibrary(self.id).into());
+                ui.close();
+            }
+        });
+    }
+
     /// Moving by itself: a track loading, or the waveform being scrubbed.
     pub fn busy(&self) -> bool {
         self.pending.is_some() || self.scrub.is_some()
@@ -474,8 +491,7 @@ impl DeckUi {
                     ui.vertical(|ui| {
                         ui.set_width(left);
                         let top = ui.cursor().min.y;
-                        let buttons = (!tempo_fader).then_some(&mut *out);
-                        self.header(ui, info, buttons);
+                        self.header(ui, info, out, !tempo_fader);
                         // The overview takes what the header and controls leave, so the
                         // controls sit on the bottom edge.
                         let used = ui.cursor().min.y - top;
@@ -535,7 +551,7 @@ impl DeckUi {
             ui.set_min_height(inner_h);
             ui.spacing_mut().item_spacing = vec2(4.0, 5.0);
             let top = ui.cursor().min.y;
-            self.header(ui, info, None);
+            self.header(ui, info, out, false);
             let used = ui.cursor().min.y - top;
             let overview_h =
                 (inner_h - used - self.dims.controls_h() - ui.spacing().item_spacing.y).max(24.0);
@@ -567,8 +583,8 @@ impl DeckUi {
     }
 
     /// The deck number, title and times; with `buttons`, also SYNC, ★, Q and KEY (when
-    /// there's no tempo fader to sit over), sending to it.
-    fn header(&mut self, ui: &mut Ui, info: &DeckInfo, buttons: Option<&mut Vec<Command>>) {
+    /// there's no tempo fader to sit over). Right-click the title: "Show in library".
+    fn header(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>, buttons: bool) {
         let s = self.state;
         // While loading: the new track's length, from the top.
         let (position, duration) = match &self.pending {
@@ -586,7 +602,7 @@ impl DeckUi {
                 );
             }
             // Title and details on the left, as wide as the times (and buttons) allow.
-            let right = 90.0 + if buttons.is_some() { BUTTONS_W } else { 0.0 };
+            let right = 90.0 + if buttons { BUTTONS_W } else { 0.0 };
             let left = (ui.available_width() - right).max(60.0);
             ui.allocate_ui_with_layout(vec2(left, 36.0), Layout::top_down(Align::Min), |ui| {
                 ui.set_width(left);
@@ -604,7 +620,12 @@ impl DeckUi {
                     if let Some(k) = info.key {
                         key_chip_sized(ui, k, 15.0);
                     }
-                    ui.add(egui::Label::new(RichText::new(title).strong().size(15.0)).truncate());
+                    let r = ui.add(
+                        egui::Label::new(RichText::new(title).strong().size(15.0))
+                            .truncate()
+                            .sense(Sense::click()),
+                    );
+                    self.library_menu(&r, out);
                 });
                 ui.horizontal(|ui| {
                     if let Some(b) = info.tag_bpm {
@@ -622,7 +643,7 @@ impl DeckUi {
                     }
                 });
             });
-            if let Some(out) = buttons {
+            if buttons {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
                     self.sync_buttons(ui, info, out);

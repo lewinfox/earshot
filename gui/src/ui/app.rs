@@ -22,7 +22,7 @@ use super::panels::deck::{DeckInfo, PendingLoad};
 use super::panels::flow::FlowUi;
 use super::panels::library::browser::Scope;
 use super::panels::library::tracks::take_wanted_art;
-use super::panels::library::{LibraryPane, drag};
+use super::panels::library::{LibraryPane, LoadedFrom, drag};
 use super::panels::status::{AnalysisSummary, Meter, StatusLine, TopBar};
 use super::panels::{CoreView, Cx, EngineFrame, Panel, PreviewState};
 use super::prefs::{self, UiPrefs};
@@ -40,6 +40,7 @@ use crate::core::index::{LibraryCmd, LibraryIndex};
 use crate::core::keymap::{self, Keymap};
 use crate::core::library::{self, Library};
 use crate::core::midi::{self, Midi};
+use crate::core::notice::{self, Notices};
 use crate::core::player::{self, AudioSettings, DECKS, Player};
 use crate::core::services::Services;
 use crate::core::session;
@@ -68,6 +69,10 @@ pub struct EarshotApp {
     /// stopped helping).
     audio_stalls: VecDeque<Instant>,
     audio_note: Option<(String, Option<Instant>)>,
+    /// Messages for the user, in the bottom bar.
+    notices: Notices,
+    /// Each player's track and the list it was loaded from, by `DeckId::index()`.
+    loaded_from: [Option<(i64, LoadedFrom)>; session::SLOTS],
     /// Always the null output (tests).
     null_audio: bool,
     midi: Midi,
@@ -278,6 +283,8 @@ impl EarshotApp {
             audio,
             audio_stalls: VecDeque::new(),
             audio_note: None,
+            loaded_from: Default::default(),
+            notices: Notices::default(),
             null_audio: services.null_audio,
             midi: Midi::default(),
             midi_ports: vec![],
@@ -434,6 +441,12 @@ impl EarshotApp {
             .send(settings::save(settings::AUDIO, &self.settings.audio));
     }
 
+    /// Show the user a message in the bottom bar.
+    pub(super) fn notify(&mut self, level: notice::Level, text: impl Into<String>) {
+        self.notices.push(level, text, Instant::now());
+        self.ctx.request_repaint();
+    }
+
     /// Carry out a command, from whichever input: the only place app state changes.
     /// The decks', mixer's and engine's are done in core; what's left is the UI's.
     fn dispatch(&mut self, cmd: Command) {
@@ -491,6 +504,7 @@ impl EarshotApp {
                     .send(settings::save(settings::CUE_FIRST_BEAT, &on));
             }
             Command::App(AppCmd::ReloadKeymap) => self.reload_keymap(),
+            Command::App(AppCmd::DismissNotice(id)) => self.notices.dismiss(id),
             Command::App(c @ (AppCmd::CountStale | AppCmd::QueueStale)) => {
                 if self.stale == Stale::Counting {
                     return;
@@ -601,6 +615,40 @@ impl EarshotApp {
             ViewCmd::LoadSelected(deck) => {
                 if let Some(id) = lib.focused_track(flow) {
                     self.load(Some(deck), id);
+                }
+            }
+            ViewCmd::ShowInLibrary(deck) => {
+                let Some(track) = self.player.lock().unwrap().session(deck).track_id else {
+                    return;
+                };
+                // Not if the deck's track changed since, or the crate, playlist or
+                // Flow doesn't have it any more: then All tracks.
+                let gone = |f: &LoadedFrom| match f {
+                    LoadedFrom::List {
+                        scope: Scope::Collection(id),
+                        ..
+                    } => self
+                        .collections
+                        .get(*id)
+                        .is_none_or(|c| c.kind.takes_tracks() && !c.tracks.contains(&track)),
+                    _ => false,
+                };
+                let from = self.loaded_from[deck.index()]
+                    .clone()
+                    .filter(|(t, f)| *t == track && !gone(f))
+                    .map(|(_, f)| f);
+                let mut source = self.prefs.layout().source;
+                let mut out = vec![];
+                let note = self
+                    .panels
+                    .library
+                    .show_track(track, from, &mut source, &mut out);
+                self.prefs.layout_mut().source = source;
+                if let Some(text) = note {
+                    self.notify(notice::Level::Info, text);
+                }
+                for c in out {
+                    self.dispatch(c);
                 }
             }
             ViewCmd::LoadAdjacent(deck, n) => {
@@ -731,6 +779,7 @@ impl EarshotApp {
             decks: self.prefs.decks().len(),
             drives: &self.drives,
             uses: &self.uses,
+            playing: &[],
         };
         lib.suggest
             .refresh(&view, &decks, prepare.as_ref(), selected);
@@ -739,7 +788,18 @@ impl EarshotApp {
     /// Draw the window, collecting what it asks for.
     fn draw(&mut self, ctx: &egui::Context) -> Vec<Command> {
         let jobs = self.jobs.list();
+        if let Some(next) = self.notices.expire(Instant::now()) {
+            ctx.request_repaint_after(next.saturating_duration_since(Instant::now()));
+        }
         let mut out: Vec<Command> = vec![];
+        // The decks and Prepare's player.
+        let mut players = self.decks_now();
+        players.push(self.deck_now(DeckId::PREPARE));
+        let playing: Vec<i64> = players
+            .into_iter()
+            .filter(|d| d.playing)
+            .filter_map(|d| d.track)
+            .collect();
         let mut cx = Cx {
             core: CoreView {
                 lib: &self.index,
@@ -749,6 +809,7 @@ impl EarshotApp {
                 decks: self.prefs.decks().len(),
                 drives: &self.drives,
                 uses: &self.uses,
+                playing: &playing,
             },
             engine: &self.frame,
             theme: &THEME,
@@ -786,6 +847,7 @@ impl EarshotApp {
                 StatusLine {
                     jobs: &jobs,
                     midi: &self.midi_log,
+                    notices: self.notices.shown(),
                 }
                 .ui(ui, &mut cx)
             });

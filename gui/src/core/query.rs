@@ -803,13 +803,13 @@ fn sql_field(f: Field) -> String {
             .into(),
         // As `Status`'s order: none 0, done 1, busy 2, attention 3. A failed analysis
         // is the stored error (in memory it lasts until the app restarts), and busy
-        // is a queued job.
+        // is a queued job. Then the user's mark, else analysis's (`Track::needs_attention`).
         Field::Status => format!(
             "CASE WHEN EXISTS (SELECT 1 FROM analysis_results r WHERE r.track_id = t.id
                                AND r.error IS NOT NULL) THEN {attention}
                   WHEN EXISTS (SELECT 1 FROM jobs j WHERE j.track_id = t.id
                                AND j.kind LIKE 'analyse:%') THEN {busy}
-                  WHEN {drifts} AND NOT {dynamic} THEN {attention}
+                  WHEN coalesce(t.needs_attention, {drifts} AND NOT {dynamic}) THEN {attention}
                   WHEN {analysed} THEN {done} ELSE {none} END",
             drifts = sql_field(Field::Drifts),
             dynamic = sql_field(Field::Dynamic),

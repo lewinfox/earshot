@@ -38,7 +38,10 @@ use super::flow::FlowUi;
 use super::{Cx, Panel, resized};
 use crate::core::collections::{CollectionCmd, Section};
 use crate::core::command::{Command, ViewCmd};
+use crate::core::external::NodePath;
+use crate::core::outside::is_outside;
 use crate::core::sources::STREAMING;
+use crate::core::sources::SourceId;
 use crate::core::track::TrackId;
 use crate::core::view::{Aside, Mode, Pane, Region, Source};
 use crate::ui::theme::{fs, sized_panel, text_scale};
@@ -58,6 +61,24 @@ const ASIDES: [StackItem<Aside>; 1] = [StackItem::new(
     "💡",
     "Suggestions: what could play next",
 )];
+
+/// The list a track was loaded from, so "Show in library" can go back to it: the
+/// same file can be in many lists.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LoadedFrom {
+    /// The track list: the left pane that was open, and what the list showed.
+    List {
+        source: Option<Source>,
+        scope: Scope,
+    },
+    /// Another library's list (a DJ program's, or one on a USB stick): the left
+    /// pane, the library and the playlist or folder in it (`None`: all its tracks).
+    Elsewhere {
+        pane: Source,
+        library: SourceId,
+        node: Option<NodePath>,
+    },
+}
 
 pub struct LibraryPane {
     /// The track list and the Explorer tree.
@@ -95,6 +116,79 @@ impl LibraryPane {
             Pane::Suggest => self.suggest.focused(),
             Pane::Flow => flow.selected_track().or(self.browser.focused()),
         }
+    }
+
+    /// The list with focus, as where a track being loaded now comes from. `source`:
+    /// the left pane open; `flow`: the Flow canvas. `None`: the suggestions, or a
+    /// Flow not saved yet.
+    pub fn here(&self, source: Option<Source>, flow: &FlowUi) -> Option<LoadedFrom> {
+        match self.focused_pane {
+            Pane::Library => match source.and_then(|s| Some((s, self.external.middle(s)?))) {
+                Some((pane, Middle::Tracks)) => {
+                    let (library, node) = self.external.open_list()?;
+                    Some(LoadedFrom::Elsewhere {
+                        pane,
+                        library,
+                        node,
+                    })
+                }
+                // A stick's own page lists no tracks.
+                Some((_, Middle::Stick)) => None,
+                None => Some(LoadedFrom::List {
+                    source,
+                    scope: self.browser.scope().clone(),
+                }),
+            },
+            Pane::Flow => flow.flow.map(|id| LoadedFrom::List {
+                source: Some(Source::Flows),
+                scope: Scope::Collection(id),
+            }),
+            Pane::Suggest => None,
+        }
+    }
+
+    /// Go back to where `track` was loaded from (All tracks if not known) and
+    /// select it there. `source`: the left pane, changed to the one to show. Returns
+    /// what to tell the user, if it couldn't go back there.
+    pub fn show_track(
+        &mut self,
+        track: TrackId,
+        from: Option<LoadedFrom>,
+        source: &mut Option<Source>,
+        out: &mut Vec<Command>,
+    ) -> Option<String> {
+        let mut note = None;
+        let (pane, scope) = match from {
+            Some(LoadedFrom::Elsewhere {
+                pane,
+                library,
+                node,
+            }) => {
+                if !self.external.pane_gone(pane) && self.external.reveal(library, node, track, out)
+                {
+                    *source = Some(pane);
+                    self.focused_pane = Pane::Library;
+                    return None;
+                }
+                let what = match pane {
+                    Source::Stick(_) => "The USB stick it was loaded from isn't plugged in",
+                    _ => "The library it was loaded from isn't there any more",
+                };
+                // Only that library had it: nowhere else to show it.
+                if is_outside(track) {
+                    return Some(format!("{what}, so it can't be shown."));
+                }
+                note = Some(format!("{what}: showing it in All tracks."));
+                (Some(Source::AllTracks), Scope::All)
+            }
+            Some(LoadedFrom::List { source, scope }) => (source, scope),
+            None => (Some(Source::AllTracks), Scope::All),
+        };
+        self.browser.set_scope(scope);
+        self.browser.reveal(track);
+        self.focused_pane = Pane::Library;
+        *source = pane;
+        note
     }
 
     /// Move the focused list's selection (the keyboard, the browse knob).
@@ -209,9 +303,13 @@ impl LibraryPane {
             Some(Middle::Stick) => return self.external.stick_view(ui, &cx.core, cx.out),
             Some(Middle::Tracks) => {
                 let table = self.tables.get_mut(TableView::External);
-                return self
+                if self
                     .external
-                    .list(ui, &cx.core, &mut self.media, table, cx.out);
+                    .list(ui, &cx.core, &mut self.media, table, cx.out)
+                {
+                    cx.send(ViewCmd::FocusPane(Pane::Library));
+                }
+                return;
             }
             None => {}
         }

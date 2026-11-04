@@ -83,6 +83,7 @@ impl OutsideTrack {
             grid_source: (!self.grid.is_empty()).then_some(GridSource::Import),
             energy: None,
             drifts: false,
+            needs_attention: None,
             rating: (self.rating > 0).then_some(self.rating),
             colour: self.colour,
             tags: vec![],

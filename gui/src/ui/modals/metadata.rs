@@ -73,7 +73,8 @@ impl Row {
             Start::Same(Some(Value::Tags(t))) => text = t.join(", "),
             Start::Same(Some(Value::Rating(r))) => rating = Some(*r),
             Start::Same(Some(Value::Colour(c))) => colour = Some(*c),
-            Start::Same(None) | Start::Mixed => {}
+            // Not an editor field.
+            Start::Same(Some(Value::Flag(_))) | Start::Same(None) | Start::Mixed => {}
         }
         Row {
             field,

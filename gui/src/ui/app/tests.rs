@@ -1835,6 +1835,17 @@ fn library_tracks_in_the_table() {
             && a.panels.decks[deck.index()].wave.is_some()
     });
 
+    // "Show in library" from elsewhere comes back to Mixxx's list, with it selected.
+    let mixxx = crate::core::view::Source::Program(SourceKind::Mixxx);
+    h.state_mut()
+        .dispatch(ViewCmd::Source(Some(crate::core::view::Source::AllTracks)).into());
+    steps(&mut h, 2);
+    h.state_mut().dispatch(ViewCmd::ShowInLibrary(deck).into());
+    settle_until(&mut h, |a| {
+        a.prefs.layout().source == Some(mixxx)
+            && a.panels.library.external.focused() == Some(outside)
+    });
+
     // Into a playlist: it asks, then imports it and the playlist has earshot's track.
     let save = Command::from(crate::core::collections::CollectionCmd::SavePlaylist {
         name: "From Mixxx".into(),
@@ -1861,6 +1872,17 @@ fn library_tracks_in_the_table() {
                     .is_some_and(|t| t.path == theirs.to_string_lossy())
         })
     });
+
+    // Mixxx switched off: its track can't be shown, and the bottom bar says why.
+    h.state_mut()
+        .dispatch(LibraryCmd::RemoveSource(source.id).into());
+    settle_until(&mut h, |a| {
+        a.sources.iter().all(|s| s.id != source.id || !s.enabled)
+    });
+    h.state_mut().dispatch(ViewCmd::ShowInLibrary(deck).into());
+    steps(&mut h, 2);
+    h.get_by_label_contains("isn't there any more, so it can't be shown.");
+    render(&mut h, "notice");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1901,4 +1923,54 @@ fn everything_fits_at_the_narrowest_window() {
             .collect();
         assert!(past.is_empty(), "{mode:?}, four decks {four}: {past:#?}");
     }
+}
+
+/// "Show in library" goes back to the list a deck's track was loaded from (the same
+/// file can be in many) and selects it there; once that list no longer has it, it's
+/// shown in All tracks.
+#[test]
+fn show_in_library_goes_back_to_where_it_came_from() {
+    use crate::ui::panels::library::browser::Scope;
+    let mut h = start_with("show-in-library", stand_in);
+    let track = ids(&h)[1];
+    let boxed = make(&mut h, CollectionKind::Crate, "Box", vec![track]);
+    let deck = DeckId::new(0).unwrap();
+    h.state_mut()
+        .dispatch(ViewCmd::Source(Some(Source::Crates)).into());
+    let lib = &mut h.state_mut().panels.library;
+    lib.browser.set_scope(Scope::Collection(boxed));
+    lib.focused_pane = crate::core::view::Pane::Library;
+    h.state_mut()
+        .dispatch(Command::Deck(deck, DeckCmd::Load(track)));
+    let on = |a: &EarshotApp| a.player.lock().unwrap().session(deck).track_id;
+    settle_until(&mut h, |a| on(a) == Some(track));
+
+    // Looking somewhere else meanwhile.
+    h.state_mut()
+        .dispatch(ViewCmd::Source(Some(Source::AllTracks)).into());
+    h.state_mut().panels.library.browser.set_scope(Scope::All);
+    steps(&mut h, 2);
+    h.state_mut().dispatch(ViewCmd::ShowInLibrary(deck).into());
+    let shown_in = |a: &EarshotApp, scope: &Scope, source| {
+        let lib = &a.panels.library;
+        lib.browser.scope() == scope
+            && lib.browser.focused() == Some(track)
+            && a.prefs.layout().source == Some(source)
+    };
+    settle_until(&mut h, |a| {
+        shown_in(a, &Scope::Collection(boxed), Source::Crates)
+    });
+
+    // Taken out of the crate: All tracks has it.
+    h.state().lib.store.send(StoreCmd::RemoveTracks {
+        id: boxed,
+        tracks: vec![track],
+    });
+    settle_until(&mut h, |a| {
+        a.collections
+            .get(boxed)
+            .is_some_and(|c| c.tracks.is_empty())
+    });
+    h.state_mut().dispatch(ViewCmd::ShowInLibrary(deck).into());
+    settle_until(&mut h, |a| shown_in(a, &Scope::All, Source::AllTracks));
 }

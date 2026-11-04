@@ -128,7 +128,7 @@ pub enum PreviewCmd {
 pub use super::view::ViewCmd;
 
 /// The app's own housekeeping. Run by the UI.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum AppCmd {
     /// Close and reopen every MIDI input, e.g. after plugging the controller in.
     ReconnectMidi,
@@ -155,6 +155,8 @@ pub enum AppCmd {
     /// Write the built-in keymap to the user's keymap file, to edit (not over one
     /// that's there).
     CopyKeymap,
+    /// Close a message in the bottom bar.
+    DismissNotice(u64),
 }
 
 impl From<(DeckId, EngineCmd)> for Command {

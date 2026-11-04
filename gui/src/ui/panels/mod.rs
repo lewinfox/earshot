@@ -72,6 +72,8 @@ pub struct CoreView<'a> {
     pub drives: &'a [Drive],
     /// Which of them earshot is using (not safe to pull out).
     pub uses: &'a Uses,
+    /// The tracks playing on a player now (the library shows them in green).
+    pub playing: &'a [TrackId],
 }
 
 /// The engine as it is this frame, read once by the shell before anything is drawn.

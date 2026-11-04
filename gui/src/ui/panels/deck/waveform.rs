@@ -126,6 +126,7 @@ impl DeckUi {
         if let Some(id) = drag::take_track(&resp) {
             self.send(out, DeckCmd::Load(id));
         }
+        self.library_menu(&resp, out);
     }
 
     pub(super) fn bar_beat(&self, info: &DeckInfo) -> Option<String> {
@@ -164,6 +165,7 @@ impl DeckUi {
             let at = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64;
             self.control(out, DeckControl::Position, at);
         }
+        self.library_menu(&resp, out);
     }
 }
 

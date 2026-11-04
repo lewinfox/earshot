@@ -35,6 +35,9 @@ pub enum Field {
     /// 0xRRGGBB.
     Colour,
     Tags,
+    /// The user's mark: needs attention or OK (`Value::Flag`; `None`: up to analysis).
+    /// Not in the editor: the track menu sets it.
+    Attention,
 }
 
 impl Field {
@@ -62,6 +65,7 @@ impl Field {
             Field::Rating => "Rating",
             Field::Colour => "Colour",
             Field::Tags => "Tags",
+            Field::Attention => "Needs attention",
         }
     }
 
@@ -74,7 +78,7 @@ impl Field {
             Field::Genre => Some("genre"),
             Field::Comment => Some("comment"),
             Field::Key => Some("key"),
-            Field::Rating | Field::Colour | Field::Tags => None,
+            Field::Rating | Field::Colour | Field::Tags | Field::Attention => None,
         }
     }
 
@@ -91,6 +95,7 @@ impl Field {
             Field::Rating => t.rating.map(Value::Rating),
             Field::Colour => t.colour.map(Value::Colour),
             Field::Tags => (!t.tags.is_empty()).then(|| Value::Tags(t.tags.clone())),
+            Field::Attention => t.needs_attention.map(Value::Flag),
         }
     }
 }
@@ -104,6 +109,7 @@ pub enum Value {
     Colour(u32),
     /// Tag names, sorted, each once.
     Tags(Vec<String>),
+    Flag(bool),
 }
 
 impl Value {

@@ -24,6 +24,7 @@ pub mod keys;
 pub mod library;
 pub mod log;
 pub mod midi;
+pub mod notice;
 pub mod outside;
 pub mod player;
 pub mod query;
