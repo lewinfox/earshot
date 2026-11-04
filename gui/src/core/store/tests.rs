@@ -783,6 +783,33 @@ fn a_grid_edit_updates_the_bpm() {
 }
 
 #[test]
+fn the_main_cue_is_one_per_track_and_kept() {
+    let (dir, mut w, id) = one_track("main-cue");
+    assert_eq!(read::main_cue(w.conn(), id).unwrap(), None);
+    w.save_main_cue(id, 12.5).unwrap();
+    // Saving again replaces it.
+    w.save_main_cue(id, 20.25).unwrap();
+    assert_eq!(read::main_cue(w.conn(), id).unwrap(), Some(20.25));
+    let n: i64 = w
+        .conn()
+        .query_row("SELECT count(*) FROM cues WHERE track_id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(n, 1);
+    // Not a hot cue, and not among the cues that go out to other programs.
+    assert_eq!(
+        read::hotcues(w.conn(), id).unwrap(),
+        [None; earshot_engine::HOTCUES]
+    );
+    assert!(read::all_cues(w.conn(), id).unwrap().is_empty());
+    drop(w);
+    // Read back after a restart.
+    let c = open_writer(&dir.join(FILE_NAME)).unwrap();
+    assert_eq!(read::main_cue(&c, id).unwrap(), Some(20.25));
+}
+
+#[test]
 fn hot_cues_and_memories_save_and_load() {
     let (_dir, mut w, id) = one_track("cues");
     let mut hot = [None; earshot_engine::HOTCUES];

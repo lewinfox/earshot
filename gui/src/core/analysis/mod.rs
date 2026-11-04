@@ -809,7 +809,8 @@ fn update_decks(
             inner.decks[deck].grid = grid.clone();
             inner.decks[deck].grid_source = source.label().into();
         }
-        if !inner.cue_first_beat {
+        // A main cue saved by hand stays where it is.
+        if !inner.cue_first_beat || inner.decks[deck].cue_saved {
             continue;
         }
         let at = super::player::initial_cue(inner.decks[deck].grid.as_deref(), Some(first_beat));

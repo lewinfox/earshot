@@ -427,6 +427,16 @@ pub struct TrackCues {
     pub memories: Vec<Memory>,
 }
 
+/// A track's main cue (seconds), if one was saved.
+pub fn main_cue(c: &Connection, track: i64) -> Result<Option<f64>> {
+    Ok(c.query_row(
+        "SELECT start_s FROM cues WHERE track_id = ?1 AND kind = ?2",
+        params![track, CueKind::Main.as_i64()],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
 pub fn hotcues(c: &Connection, track: i64) -> Result<[Option<f64>; HOTCUES]> {
     let mut out = [None; HOTCUES];
     let mut st =
@@ -496,7 +506,8 @@ pub struct CueRow {
     pub color: Option<u32>,
 }
 
-/// Every cue a track has: hot cues, memory cues and loops, in order through it.
+/// Every cue a track has: hot cues, memory cues and loops, in order through it. Not
+/// the main cue: it's earshot's own, and isn't exported.
 pub fn all_cues(c: &Connection, track: i64) -> Result<Vec<CueRow>> {
     let mut st = c.prepare_cached(
         "SELECT kind, slot, start_s, end_s, label, color FROM cues

@@ -517,6 +517,34 @@ fn hot_cues_are_kept_per_track() {
     settle_until(&mut h, |a| snap(a).hotcues[2] == Some(at));
 }
 
+/// The main cue moved with the Cue button comes back when the track is loaded again,
+/// with the playhead on it.
+#[test]
+fn the_main_cue_is_kept_per_track() {
+    let mut h = start_prepare("main-cue", 1);
+    let (id, other) = (prepared(h.state()).unwrap(), ids(&h)[0]);
+    let deck = DeckId::PREPARE;
+    let snap = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().prepare;
+    h.state_mut().dispatch((deck, EngineCmd::Seek(7.0)).into());
+    settle_until(&mut h, |a| (snap(a).position - 7.0).abs() < 0.01);
+    for press in [earshot_engine::Press::Down, earshot_engine::Press::Up] {
+        h.state_mut().dispatch((deck, EngineCmd::Cue(press)).into());
+    }
+    settle_until(&mut h, |a| snap(a).cue_by_hand);
+    let at = snap(h.state()).cue_point;
+    assert!((at - 7.0).abs() < 1.0, "cued near the playhead: {at}");
+    steps(&mut h, 10);
+    for track in [other, id] {
+        h.state_mut()
+            .dispatch(Command::Deck(deck, DeckCmd::Load(track)));
+        settle_until(&mut h, |a| prepared(a) == Some(track));
+    }
+    settle_until(&mut h, |a| {
+        let s = snap(a);
+        s.cue_point == at && (s.position - at).abs() < 1e-6
+    });
+}
+
 /// Ctrl+↓ / ↑ load the next and previous track in the library into Prepare's player.
 #[test]
 fn ctrl_arrows_load_the_next_track() {

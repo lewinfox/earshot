@@ -100,8 +100,8 @@ impl Inner {
     }
 
     /// Catch up with the engine: take its latest snapshot and fold in its events.
-    /// Returns the snapshot and the decks whose hot cues changed.
-    fn catch_up(&mut self) -> (Option<EngineSnapshot>, Vec<DeckId>) {
+    /// Returns the snapshot and what changed on which deck, to save.
+    fn catch_up(&mut self) -> (Option<EngineSnapshot>, Vec<(DeckId, Change)>) {
         let mut changed = vec![];
         let Some(engine) = self.engine.as_mut() else {
             return (None, changed);
@@ -115,10 +115,10 @@ impl Inner {
         self.preview.observe(&snap.preview);
         while let Some(e) = engine.next_event() {
             let deck = e.deck();
-            if self.decks[deck.index()].apply(&e) == Some(Change::Hotcues)
-                && !changed.contains(&deck)
+            if let Some(c) = self.decks[deck.index()].apply(&e)
+                && !changed.contains(&(deck, c))
             {
-                changed.push(deck);
+                changed.push((deck, c));
             }
         }
         // Events were dropped (the ring was full): a cue or loop change may be among
@@ -137,8 +137,10 @@ impl Inner {
             let d = slot_snap(&snap, i);
             s.observe(d);
             let deck = session::slot(i);
-            if s.resync(d) == Some(Change::Hotcues) && !changed.contains(&deck) {
-                changed.push(deck);
+            for c in s.resync(d) {
+                if !changed.contains(&(deck, c)) {
+                    changed.push((deck, c));
+                }
             }
         }
         (Some(snap), changed)
@@ -185,17 +187,23 @@ pub fn new_player() -> Player {
 }
 
 /// Once a frame: bring the sessions up to date with the engine, and save any hot cues
-/// that changed. Returns the engine's latest state.
+/// and main cues that changed. Returns the engine's latest state.
 pub fn poll(player: &Player, store: &Store) -> Option<EngineSnapshot> {
     let mut inner = player.lock().unwrap();
     let (snap, changed) = inner.catch_up();
-    for deck in changed {
+    for (deck, change) in changed {
         let s = inner.session(deck);
-        if let Some(track) = s.track_id {
-            store.send(StoreCmd::SaveHotcues {
+        let Some(track) = s.track_id else { continue };
+        match change {
+            Change::Hotcues => store.send(StoreCmd::SaveHotcues {
                 track,
                 cues: s.state.cues.hot,
-            });
+            }),
+            Change::MainCue => {
+                if let Some(at) = s.state.cues.main {
+                    store.send(StoreCmd::SaveMainCue { track, at });
+                }
+            }
         }
     }
     snap
@@ -520,7 +528,9 @@ pub fn load_track(
     };
     let detail = waveform::detail(&audio);
     let hotcues = reader.hotcues(id).map_err(|e| e.to_string())?;
-    let main = load_cue(player, grid.as_ref(), first_beat);
+    // A main cue set by hand wins over the first-beat setting.
+    let saved_cue = reader.main_cue(id).map_err(|e| e.to_string())?;
+    let main = saved_cue.or_else(|| load_cue(player, grid.as_ref(), first_beat));
     let generation = put_on_deck(
         player,
         deck,
@@ -536,6 +546,7 @@ pub fn load_track(
             source,
             wave: Arc::new(wave),
             detail,
+            cue_saved: saved_cue.is_some(),
         },
     )?;
     super::stems::attach(player, deck, generation, audio.clone(), at);
@@ -557,6 +568,8 @@ struct Ready {
     source: String,
     wave: Arc<Vec<u8>>,
     detail: Vec<u8>,
+    /// `cues.main` was saved by hand: analysis won't move it.
+    cue_saved: bool,
 }
 
 /// Put a decoded track on a deck, unless a newer load was asked for meanwhile.
@@ -573,6 +586,7 @@ fn put_on_deck(player: &Player, deck: DeckId, ticket: u64, r: Ready) -> Result<u
         source,
         wave,
         detail,
+        cue_saved,
     } = r;
     let mut inner = player.lock().unwrap();
     // Checked under the same lock as the load itself, so an older request finishing
@@ -597,6 +611,7 @@ fn put_on_deck(player: &Player, deck: DeckId, ticket: u64, r: Ready) -> Result<u
     session.grid_source = source;
     session.waveform = wave;
     session.detail = Arc::new(detail);
+    session.cue_saved = cue_saved;
     let generation = track.generation;
     inner.send(Command::Load { deck, track })?;
     Ok(generation)
@@ -661,10 +676,11 @@ fn load_outside(
         },
     };
     let detail = waveform::detail(&audio);
-    // The library's main cue isn't kept; the deck starts on the grid's first line, or
-    // at the start if the setting says so.
+    // The library's main cue isn't read; one set by hand this session is kept.
+    // Otherwise the deck starts on the grid's first line, or at the start if the
+    // setting says so.
     let cues = CueSet {
-        main: load_cue(player, grid.as_ref(), None),
+        main: t.main.or_else(|| load_cue(player, grid.as_ref(), None)),
         hot: t.hot,
     };
     let generation = put_on_deck(
@@ -689,6 +705,7 @@ fn load_outside(
             source,
             wave,
             detail,
+            cue_saved: t.main.is_some(),
         },
     )?;
     if estimate {
@@ -858,6 +875,7 @@ fn estimate_grid_later(
         if slot.generation != generation || slot.grid.is_some() {
             return;
         }
+        let cue_saved = slot.cue_saved;
         let grid = grid.map(Arc::new);
         if grid.is_some()
             && inner
@@ -870,7 +888,8 @@ fn estimate_grid_later(
         {
             return;
         }
-        let cue = initial_cue(grid.as_deref(), first_beat).filter(|_| inner.cue_first_beat);
+        let cue =
+            initial_cue(grid.as_deref(), first_beat).filter(|_| inner.cue_first_beat && !cue_saved);
         let slot = &mut inner.decks[deck.index()];
         slot.grid = grid;
         slot.grid_source = source;
@@ -1071,7 +1090,11 @@ mod tests {
                 .load(Relaxed)
                 > 0
         );
-        assert_eq!(changed, vec![a], "the hot cue is saved");
+        assert_eq!(
+            changed,
+            vec![(a, Change::MainCue), (a, Change::Hotcues)],
+            "the main cue and the hot cue are saved"
+        );
         let inner = p.lock().unwrap();
         let st = &inner.session(a).state;
         assert_eq!(st.cues.hot[3], d.hotcues[3]);
@@ -1302,10 +1325,23 @@ mod tests {
             s.grid = Some(Arc::new(Beatgrid::constant(100.0, 0.0, 30.0).unwrap()));
             s.grid_source = "analysis".into();
         }
-        estimate_grid_later(&p, deck, generation, tags, audio)
+        estimate_grid_later(&p, deck, generation, tags.clone(), audio.clone())
             .join()
             .unwrap();
         assert_eq!(state(&p), (Some(100.0), "analysis".into()));
+
+        // The grid lands, but a main cue saved by hand stays where it was.
+        put_on(&p, deck, 3);
+        let generation = p.lock().unwrap().generation;
+        p.lock().unwrap().session_mut(deck).cue_saved = true;
+        estimate_grid_later(&p, deck, generation, tags, audio)
+            .join()
+            .unwrap();
+        assert_eq!(state(&p).1, QUICK_GRID_LABEL);
+        // The grid went to the engine before any cue would have: once it's there, so
+        // would the cue be.
+        let s = wait(&p, |s| s.deck(deck).bpm.is_some());
+        assert_eq!(s.deck(deck).cue_point, 0.0);
     }
 
     #[test]

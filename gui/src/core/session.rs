@@ -54,6 +54,9 @@ pub struct DeckSession {
     pub auto_gain: f64,
     /// The engine has started playing this load (its `Loaded` event came back).
     pub in_engine: bool,
+    /// The main cue came saved with the track: analysis mustn't move it
+    /// (`Command::InitialCue`).
+    pub cue_saved: bool,
 
     // ---- performance state --------------------------------------------------------------
     /// Cues, loop, position, tempo and channel as the engine last had them. Cues and the
@@ -70,6 +73,8 @@ pub struct DeckSession {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Change {
     Hotcues,
+    /// The main cue, set by hand.
+    MainCue,
 }
 
 impl DeckSession {
@@ -90,6 +95,7 @@ impl DeckSession {
             generation: 0,
             auto_gain: 1.0,
             in_engine: false,
+            cue_saved: false,
             state,
             jump_size: 4.0,
             loop_size: 4.0,
@@ -106,6 +112,7 @@ impl DeckSession {
         self.stem_waves = None;
         self.auto_gain = track.auto_gain;
         self.in_engine = false;
+        self.cue_saved = false;
         self.state.cues = track.cues;
         self.state.loop_ = LoopState::default();
         self.state.position = 0.0;
@@ -144,7 +151,14 @@ impl DeckSession {
             EngineEvent::Loaded { .. } => self.in_engine = true,
             EngineEvent::Started { .. } => st.playing = true,
             EngineEvent::Stopped { .. } | EngineEvent::TrackEnded { .. } => st.playing = false,
-            EngineEvent::CueSet { position, .. } => st.cues.main = Some(position),
+            EngineEvent::CueSet {
+                position, by_hand, ..
+            } => {
+                st.cues.main = Some(position);
+                if by_hand {
+                    return Some(Change::MainCue);
+                }
+            }
             EngineEvent::HotcueSet { slot, position, .. } => {
                 let pad = st.cues.hot.get_mut(slot as usize)?;
                 if *pad == position {
@@ -160,24 +174,28 @@ impl DeckSession {
 
     /// Events were lost: take what they'd have said (playing, cues, hot cues, the
     /// loop) from a snapshot of this load. Returns what changed that should be saved.
-    pub fn resync(&mut self, d: &DeckSnap) -> Option<Change> {
+    pub fn resync(&mut self, d: &DeckSnap) -> Vec<Change> {
+        let mut changed = vec![];
         if self.track_id.is_none() || d.generation != self.generation {
-            return None;
+            return changed;
         }
         self.in_engine = true;
         let st = &mut self.state;
         st.playing = d.playing;
+        if d.cue_by_hand && st.cues.main != Some(d.cue_point) {
+            changed.push(Change::MainCue);
+        }
         st.cues.main = Some(d.cue_point);
         st.loop_ = LoopState {
             start: d.loop_in,
             end: d.loop_out,
             active: d.loop_active,
         };
-        if st.cues.hot == d.hotcues {
-            return None;
+        if st.cues.hot != d.hotcues {
+            st.cues.hot = d.hotcues;
+            changed.push(Change::Hotcues);
         }
-        st.cues.hot = d.hotcues;
-        Some(Change::Hotcues)
+        changed
     }
 
     /// Take the continuous state from a snapshot: the channel and tempo always, the
@@ -284,16 +302,23 @@ mod tests {
             ..DeckSnap::default()
         };
         d.hotcues[1] = Some(8.0);
-        assert_eq!(s.resync(&d), Some(Change::Hotcues));
+        // Not set by hand: only the hot cue is worth saving.
+        assert_eq!(s.resync(&d), vec![Change::Hotcues]);
         assert!(s.in_engine && s.state.playing);
         assert_eq!(s.state.cues.main, Some(2.0));
         assert_eq!(s.state.cues.hot[1], Some(8.0));
         assert_eq!(s.state.loop_.bounds(), Some((4.0, 6.0)));
-        // Nothing new to save the second time; another load's snapshot is ignored.
-        assert_eq!(s.resync(&d), None);
+        // Nothing new to save the second time.
+        assert!(s.resync(&d).is_empty());
+        // A cue moved by hand is.
+        d.cue_point = 3.0;
+        d.cue_by_hand = true;
+        assert_eq!(s.resync(&d), vec![Change::MainCue]);
+        assert_eq!(s.state.cues.main, Some(3.0));
+        // Another load's snapshot is ignored.
         d.generation = 2;
         d.hotcues[1] = None;
-        assert_eq!(s.resync(&d), None);
+        assert!(s.resync(&d).is_empty());
         assert_eq!(s.state.cues.hot[1], Some(8.0));
     }
 
@@ -319,11 +344,17 @@ mod tests {
         // A slot the engine doesn't have is ignored, not a panic.
         assert_eq!(s.apply(&set(200, Some(1.0))), None);
 
-        s.apply(&EngineEvent::CueSet {
+        // Where analysis put it (InitialCue): nothing to save.
+        let cue = |position, by_hand| EngineEvent::CueSet {
             deck: d,
             generation: 3,
-            position: 4.0,
-        });
+            position,
+            by_hand,
+        };
+        assert_eq!(s.apply(&cue(2.0, false)), None);
+        assert_eq!(s.state.cues.main, Some(2.0));
+        // Set by hand: saved.
+        assert_eq!(s.apply(&cue(4.0, true)), Some(Change::MainCue));
         let l = LoopState {
             start: Some(2.0),
             end: Some(4.0),
@@ -368,6 +399,7 @@ mod tests {
                 deck: d,
                 generation: 3,
                 position: 8.0,
+                by_hand: true,
             },
             EngineEvent::Started {
                 deck: d,

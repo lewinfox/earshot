@@ -235,6 +235,7 @@ impl Writer {
                 self.save_hotcues(track, &cues)?;
                 self.emit_cues(track)
             }
+            StoreCmd::SaveMainCue { track, at } => self.save_main_cue(track, at),
             StoreCmd::SetHotcueLabel { track, slot, label } => {
                 self.set_hotcue_label(track, slot, label.as_deref())
             }
@@ -605,6 +606,16 @@ impl Writer {
             };
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Save a track's main cue, replacing the one it had.
+    pub fn save_main_cue(&mut self, track: i64, at: f64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO cues(track_id, kind, slot, start_s) VALUES (?1, ?2, 0, ?3)
+             ON CONFLICT (track_id, kind, slot) DO UPDATE SET start_s = excluded.start_s",
+            params![track, CueKind::Main.as_i64(), at],
+        )?;
         Ok(())
     }
 

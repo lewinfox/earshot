@@ -51,6 +51,9 @@ pub struct DeckSnap {
     pub loop_out: Option<f64>,
     pub loop_active: bool,
     pub cue_point: f64,
+    /// The cue point was set by hand (the Cue button, or `SetCue`) since the track was
+    /// loaded, rather than where the load or [`crate::Command::InitialCue`] put it.
+    pub cue_by_hand: bool,
     pub hotcues: [Option<f64>; HOTCUES],
     pub volume: f64,
     pub pfl: bool,
@@ -197,10 +200,13 @@ pub enum EngineEvent {
         deck: DeckId,
         generation: u64,
     },
+    /// The main cue moved. `by_hand`: by the Cue button or `SetCue` (worth saving with
+    /// the track), not by [`crate::Command::InitialCue`].
     CueSet {
         deck: DeckId,
         generation: u64,
         position: f64,
+        by_hand: bool,
     },
     /// A hot cue was set (`Some`) or cleared (`None`).
     HotcueSet {
