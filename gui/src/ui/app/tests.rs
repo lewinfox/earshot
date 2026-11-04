@@ -1383,6 +1383,7 @@ fn deck_pages_switch_in_place() {
             first("CUE"),
             first("Player controls"),
             first("Grid controls"),
+            first("Stem controls"),
         )
     };
     let before = place(&h);
@@ -1393,12 +1394,23 @@ fn deck_pages_switch_in_place() {
         "the grid editor"
     );
     assert_eq!(place(&h), before);
+    // Stems have a tab of their own.
+    h.get_all_by_label("Stem controls").next().unwrap().click();
+    steps(&mut h, 5);
+    assert!(h.query_all_by_label("STEMS").count() > 0, "the stems page");
+    assert_eq!(place(&h), before);
+    render(&mut h, "deck-pages-stems");
     h.get_all_by_label("Player controls")
         .next()
         .unwrap()
         .click();
     steps(&mut h, 5);
     assert_eq!(place(&h), before);
+    assert_eq!(
+        h.query_all_by_label("STEMS").count(),
+        0,
+        "not on the player page"
+    );
 }
 
 /// Hot cues play on when pressed unless Settings > Decks says "Play while held"; the

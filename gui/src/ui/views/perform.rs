@@ -9,7 +9,7 @@ use egui_extras::{Size, StripBuilder};
 
 use super::{Panels, library, row_frame};
 use crate::core::view::Region;
-use crate::ui::panels::deck::{DeckLayout, DeckPanel, Side, WavePanel};
+use crate::ui::panels::deck::{DeckLayout, DeckPanel, PANEL_H, Side, WavePanel, jog_room};
 use crate::ui::panels::fx::{self, FxPanel};
 use crate::ui::panels::mixer::{self, MixerPanel};
 use crate::ui::panels::{Cx, Panel, resized};
@@ -40,11 +40,7 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
     resized(ctx, r.response.rect.height(), Region::Waves, waves_h, cx);
     // Fixed heights, so the decks can't be stretched by a height egui remembered from
     // an older layout: the mixer's, or two smaller decks'.
-    let deck_h = if compact {
-        COMPACT_H
-    } else {
-        mixer::HEIGHT + 12.0
-    };
+    let deck_h = jog_room(compact) + if compact { COMPACT_H } else { PANEL_H };
     let per_side = decks.len().div_ceil(2) as f32;
     let height = (deck_h * per_side + STACK_GAP * (per_side - 1.0)).max(mixer::HEIGHT + 12.0);
     egui::TopBottomPanel::top("decks-perform")
@@ -94,6 +90,7 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
                         MixerPanel {
                             decks: &decks,
                             width,
+                            height,
                         }
                         .ui(ui, cx)
                     });

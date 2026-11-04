@@ -12,12 +12,12 @@ use egui::{Margin, Ui, vec2};
 use super::{Panels, row_frame};
 use crate::core::command::ViewCmd;
 use crate::core::view::{Region, Tool};
-use crate::ui::panels::deck::{CUE_PANE_W, CuePane, PreparePlayer, WavePanel};
+use crate::ui::panels::deck::{CUE_PANE_W, CuePane, PANEL_H, PreparePlayer, WavePanel, jog_room};
 use crate::ui::panels::export::ExportPanel;
 use crate::ui::panels::flow::FlowTab;
 use crate::ui::panels::stems::StemsPanel;
 use crate::ui::panels::tempo_lock::TempoLockPanel;
-use crate::ui::panels::{Cx, Panel, mixer, resized};
+use crate::ui::panels::{Cx, Panel, resized};
 use crate::ui::widgets::{Tab, tool_tabs};
 
 const TOOLS: [Tab<Tool>; 4] = [
@@ -76,7 +76,7 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
     }
     // The player's controls (hot cues or the grid editor, loops, beat jumps, tempo),
     // as tall as Perform's decks.
-    let height = mixer::HEIGHT + 12.0;
+    let height = PANEL_H + jog_room(false);
     egui::TopBottomPanel::top("player-prepare")
         .exact_height(height + 8.0)
         .frame(row_frame(cx, Margin::symmetric(6, 4)))

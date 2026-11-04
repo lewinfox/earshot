@@ -1,7 +1,8 @@
 //! The mixer between the decks, laid out like Mixxx's: each channel has gain, high /
 //! mid / low EQ and filter knobs, a headphone cue button, a fader with a level
 //! meter and its crossfader side (L, THRU or R) under the fader; the main meters and
-//! the crossfader sit in the middle, main and headphone knobs on the right. Channels
+//! the crossfader sit in the middle, main and headphone knobs in a row across the
+//! top. The faders and meters stretch to fill the height it's given. Channels
 //! on the crossfader's left side (decks 1 and 3) sit left of the middle, the others
 //! mirrored on the right. Two channels or four, as many as decks are shown.
 //!
@@ -21,32 +22,33 @@ use crate::ui::panels::{Cx, Panel};
 use crate::ui::theme::THEME;
 use crate::ui::widgets::{Fader, HwButton, Knob, Meter, Range, held};
 
-// Layout, in points from the mixer's top left. Columns from the left: deck A's knobs,
-// its gain / cue / fader, its meter, the main meters, then deck B mirrored, then the
-// main and headphone knobs.
+// Layout, in points from the channels' top left (under the main and headphone
+// knobs' row). Columns from the left: deck A's knobs, its gain / cue / fader, its
+// meter, the main meters, then deck B mirrored.
 const KNOB_COL: f32 = 34.0;
 const FADER_COL: f32 = 30.0;
 const VU_W: f32 = 7.0;
 const CENTRE_W: f32 = 30.0;
-const MASTER_GAP: f32 = 10.0;
 pub(super) const ROW: f32 = 40.0;
 pub(super) const KNOB: f32 = 24.0;
+/// The main and headphone knobs' row, over the channels, and the gap under it.
+const MASTER_H: f32 = ROW + 2.0;
 /// Headphone cue buttons, under the gain knobs.
 const PFL_TOP: f32 = ROW + 2.0;
 pub(super) const PFL_H: f32 = 18.0;
-/// Channel faders and meters.
+/// Channel faders and meters, down to (at the least) the fourth knob row's bottom.
 const FADER_TOP: f32 = PFL_TOP + PFL_H + 6.0;
-pub(super) const FADER_BOTTOM: f32 = 4.0 * ROW;
-/// The crossfader side button, under each channel fader.
-const XF_SIDE_TOP: f32 = FADER_BOTTOM - PFL_H;
-const XF_TOP: f32 = FADER_BOTTOM + 6.0;
+const MIN_FADER_BOTTOM: f32 = 4.0 * ROW;
+/// The crossfader, under the faders.
+const XF_GAP: f32 = 6.0;
 const XF_H: f32 = 20.0;
 const STRIP_W: f32 = KNOB_COL + FADER_COL + VU_W;
-pub const HEIGHT: f32 = XF_TOP + XF_H;
+/// The least height it needs (it fills more if given it).
+pub const HEIGHT: f32 = MASTER_H + MIN_FADER_BOTTOM + XF_GAP + XF_H;
 
 /// The mixer's width for these channels.
 pub fn width(decks: &[DeckId]) -> f32 {
-    channels_w(decks.len()) + MASTER_GAP + KNOB_COL
+    channels_w(decks.len())
 }
 
 fn channels_w(n: usize) -> f32 {
@@ -77,17 +79,23 @@ pub(super) fn bound(
     r
 }
 
-/// `decks`: the channels, in order.
+/// `decks`: the channels, in order. `height`: what to fill (at least [`HEIGHT`]).
 pub fn show(
     ui: &mut Ui,
     shared: Option<&EngineSnapshot>,
     decks: &[DeckId],
     out: &mut Vec<Command>,
+    height: f32,
 ) {
     let width = width(decks);
-    let (area, _) = ui.allocate_exact_size(vec2(width, HEIGHT), Sense::hover());
-    let at =
-        |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(area.min + vec2(x, y), vec2(w, h));
+    let height = height.max(HEIGHT);
+    let (area, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+    // The faders take the height to spare.
+    let fader_bottom = height - MASTER_H - XF_GAP - XF_H;
+    let xf_side_top = fader_bottom - PFL_H;
+    let xf_top = fader_bottom + XF_GAP;
+    let top = area.min + vec2(0.0, MASTER_H);
+    let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(top + vec2(x, y), vec2(w, h));
     let row = |x: f32, r: usize| at(x, r as f32 * ROW, KNOB_COL, ROW);
     let left: Vec<DeckId> = decks.iter().copied().filter(|d| on_left(*d)).collect();
     let right: Vec<DeckId> = decks.iter().copied().filter(|d| !on_left(*d)).collect();
@@ -170,7 +178,7 @@ pub fn show(
         if held(ui, &r) == Some(true) {
             out.extend(ch(DeckControl::Pfl).command(1.0));
         }
-        let fader_rect = at(fader_x, FADER_TOP, FADER_COL, XF_SIDE_TOP - 2.0 - FADER_TOP);
+        let fader_rect = at(fader_x, FADER_TOP, FADER_COL, xf_side_top - 2.0 - FADER_TOP);
         bound(ui, shared, ch(DeckControl::Volume), out, |ui, range, v| {
             ui.put(
                 fader_rect,
@@ -187,7 +195,7 @@ pub fn show(
         };
         let r = ui
             .put(
-                at(fader_x + 2.0, XF_SIDE_TOP, FADER_COL - 4.0, PFL_H),
+                at(fader_x + 2.0, xf_side_top, FADER_COL - 4.0, PFL_H),
                 HwButton::new(label, colour, vec2(FADER_COL - 4.0, PFL_H))
                     .font(8.0)
                     .lit(side != XfSide::Thru),
@@ -206,8 +214,8 @@ pub fn show(
         }
         let level = shared.map_or(0.0, |s| s.deck(deck).vu);
         ui.put(
-            at(vu_x, FADER_TOP, VU_W, FADER_BOTTOM - FADER_TOP),
-            Meter::new(level, vec2(VU_W - 2.0, FADER_BOTTOM - FADER_TOP)),
+            at(vu_x, FADER_TOP, VU_W, fader_bottom - FADER_TOP),
+            Meter::new(level, vec2(VU_W - 2.0, fader_bottom - FADER_TOP)),
         );
     }
 
@@ -219,9 +227,9 @@ pub fn show(
                 main_x + CENTRE_W / 2.0 - VU_W + side as f32 * VU_W,
                 FADER_TOP,
                 VU_W,
-                FADER_BOTTOM - FADER_TOP,
+                fader_bottom - FADER_TOP,
             ),
-            Meter::new(level, vec2(VU_W - 1.0, FADER_BOTTOM - FADER_TOP)),
+            Meter::new(level, vec2(VU_W - 1.0, fader_bottom - FADER_TOP)),
         );
     }
     // "MAIN", or a red "LIMIT" while (and a moment after) the limiter turns the
@@ -252,41 +260,40 @@ pub fn show(
     let crossfader = Control::Master(MasterParam::Crossfader);
     bound(ui, shared, crossfader, out, |ui, range, v| {
         ui.put(
-            at(KNOB_COL, XF_TOP, xf_w, XF_H),
+            at(KNOB_COL, xf_top, xf_w, XF_H),
             Fader::horizontal(range, v, vec2(xf_w, XF_H)).ticks(9),
         )
     });
 
-    // Main and headphone knobs on the right.
-    let mx = channels_w + MASTER_GAP;
-    for (r, (param, label)) in [
+    // Main and headphone knobs in a row across the top, spread over the width.
+    let masters = [
         (MasterParam::Gain, "MAIN"),
         (MasterParam::Balance, "BAL"),
         (MasterParam::HeadGain, "HEAD"),
         (MasterParam::HeadMix, "MIX"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    ];
+    let step = channels_w / masters.len() as f32;
+    for (i, (param, label)) in masters.into_iter().enumerate() {
+        let x = i as f32 * step + (step - KNOB_COL) / 2.0;
+        let rect = Rect::from_min_size(area.min + vec2(x, 0.0), vec2(KNOB_COL, ROW));
         bound(ui, shared, Control::Master(param), out, |ui, range, v| {
-            ui.put(row(mx, r), Knob::new(range, v).diameter(KNOB).label(label))
+            ui.put(rect, Knob::new(range, v).diameter(KNOB).label(label))
         });
     }
-    // Separator between the channels and the main section.
-    let x = area.left() + channels_w + MASTER_GAP / 2.0;
+    // Separator between them and the channels.
+    let y = area.top() + MASTER_H - 2.0;
     ui.painter().line_segment(
-        [
-            egui::pos2(x, area.top()),
-            egui::pos2(x, area.top() + FADER_BOTTOM),
-        ],
+        [egui::pos2(area.left(), y), egui::pos2(area.right(), y)],
         egui::Stroke::new(1.0_f32, THEME.line),
     );
 }
 
-/// The mixer for `decks`, in its frame, `width` wide (see [`width`]).
+/// The mixer for `decks`, in its frame, `width` wide (see [`width`]) and `height`
+/// tall (as tall as the decks beside it).
 pub struct MixerPanel<'a> {
     pub decks: &'a [DeckId],
     pub width: f32,
+    pub height: f32,
 }
 
 impl Panel for MixerPanel<'_> {
@@ -294,7 +301,13 @@ impl Panel for MixerPanel<'_> {
         crate::ui::theme::normal_text(ui);
         cx.theme.panel_frame().show(ui, |ui| {
             ui.set_width(self.width - 16.0);
-            show(ui, cx.engine.snap.as_ref(), self.decks, cx.out);
+            show(
+                ui,
+                cx.engine.snap.as_ref(),
+                self.decks,
+                cx.out,
+                self.height - 12.0,
+            );
         });
     }
 }

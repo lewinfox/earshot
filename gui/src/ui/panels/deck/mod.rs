@@ -168,23 +168,43 @@ impl Dims {
         2.0 * self.btn_h + 4.0
     }
 
-    /// Two rows of buttons.
+    /// The controls' row: as tall as the jog ring, which is taller than the two rows
+    /// of buttons beside it.
     fn controls_h(self) -> f32 {
-        self.double()
+        self.jog()
     }
 
-    /// The jog ring (with the BPM in it) fills the height of the controls.
+    /// The jog ring (with the BPM in it): half as tall again as two rows of buttons,
+    /// so the BPM reads from across the booth.
     fn jog(self) -> f32 {
-        self.controls_h()
+        JOG_SCALE * self.double()
     }
 }
 
-/// The two pages of a player's controls, picked with the tabs on their outer edge
-/// (as in Rekordbox): playing (hot cues, loops, beat jumps) or editing the grid.
+/// The jog ring against two rows of buttons.
+const JOG_SCALE: f32 = 1.5;
+
+/// A full-size deck panel's height, but for its jog ring's extra ([`jog_room`]).
+pub const PANEL_H: f32 = 198.0;
+
+/// How much taller a deck panel is for its jog ring than for its buttons alone: the
+/// views add it to their decks' heights.
+pub fn jog_room(compact: bool) -> f32 {
+    let d = if compact { Dims::COMPACT } else { Dims::FULL };
+    d.jog() - d.double()
+}
+
+/// The pages of a player's controls, picked with the tabs on their outer edge (as in
+/// Rekordbox): playing (hot cues, loops, beat jumps), editing the grid, or its stems.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Page {
     Player,
     Grid,
+    Stems,
+}
+
+impl Page {
+    const ALL: [Page; 3] = [Page::Player, Page::Grid, Page::Stems];
 }
 
 /// The tab strip's width.
@@ -268,7 +288,7 @@ pub struct DeckUi {
     page: Page,
     /// Each page's width (player, grid) at `page_dims`, measured once, so the box is
     /// as wide as the wider page and switching doesn't move anything.
-    page_widths: [Option<f32>; 2],
+    page_widths: [Option<f32>; 3],
     page_dims: Dims,
     /// Width of the page and CUE / play last frame, to keep a left deck's against
     /// the mixer.
@@ -298,7 +318,7 @@ impl DeckUi {
             scrub: None,
             wave: None,
             page: Page::Player,
-            page_widths: [None; 2],
+            page_widths: [None; 3],
             page_dims: Dims::FULL,
             controls_w: 0.0,
             side: Side::Left,
@@ -737,16 +757,15 @@ impl DeckUi {
     fn page(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>, mirrored: bool) {
         if self.page_dims != self.dims {
             self.page_dims = self.dims;
-            self.page_widths = [None; 2];
+            self.page_widths = [None; 3];
         }
-        let h = self.dims.controls_h();
-        // The other page, measured once without being shown (nothing on it can be
-        // clicked).
-        let other = match self.page {
-            Page::Player => Page::Grid,
-            Page::Grid => Page::Player,
-        };
-        if self.page_widths[other as usize].is_none() {
+        let h = self.dims.double();
+        // The other pages, each measured once without being shown (nothing on them can
+        // be clicked).
+        for other in Page::ALL {
+            if other == self.page || self.page_widths[other as usize].is_some() {
+                continue;
+            }
             // Room to spare, so nothing in it wraps or squeezes.
             let rect = Rect::from_min_size(ui.cursor().min, vec2(4000.0, h));
             let mut hidden = ui.new_child(
@@ -793,8 +812,6 @@ impl DeckUi {
         match page {
             Page::Player => {
                 if mirrored {
-                    self.stems(ui, info, out);
-                    ui.add_space(6.0);
                     self.jumps(ui, info, out);
                     ui.add_space(6.0);
                     self.loops(ui, info, out);
@@ -806,23 +823,25 @@ impl DeckUi {
                     self.loops(ui, info, out);
                     ui.add_space(6.0);
                     self.jumps(ui, info, out);
-                    ui.add_space(6.0);
-                    self.stems(ui, info, out);
                 }
             }
             Page::Grid => self.grid_editor(ui, info, out),
+            Page::Stems => self.stems(ui, info, out),
         }
         ui.cursor().min.x - start - ui.spacing().item_spacing.x
     }
 
-    /// The tabs on the controls' outer edge: the player's controls, or the grid editor.
+    /// The tabs on the controls' outer edge, as tall as the row together: the player's
+    /// controls, the grid editor, or the stems.
     fn page_tabs(&mut self, ui: &mut Ui) {
-        let h = (self.dims.controls_h() - 4.0) / 2.0;
+        let n = Page::ALL.len() as f32;
+        let h = (self.dims.controls_h() - 4.0 * (n - 1.0)) / n;
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
             for (page, tip) in [
                 (Page::Player, "Hot cues, loops and beat jumps"),
                 (Page::Grid, "Edit the beat grid"),
+                (Page::Stems, "Stems: drums, bass, vocals and the rest"),
             ] {
                 let (rect, r) = ui.allocate_exact_size(vec2(TABS_W, h), Sense::click());
                 let on = self.page == page;
@@ -855,6 +874,7 @@ impl DeckUi {
                         match page {
                             Page::Player => "Player controls",
                             Page::Grid => "Grid controls",
+                            Page::Stems => "Stem controls",
                         },
                     )
                 });
@@ -866,7 +886,7 @@ impl DeckUi {
     }
 }
 
-/// A tab's icon: four pads for the player, bars for the grid.
+/// A tab's icon: four pads for the player, bars for the grid, layers for the stems.
 fn page_icon(p: &egui::Painter, c: egui::Pos2, page: Page, ink: Color32) {
     match page {
         Page::Player => {
@@ -880,6 +900,15 @@ fn page_icon(p: &egui::Painter, c: egui::Pos2, page: Page, ink: Color32) {
                 let x = c.x - 4.5 + i as f32 * 3.0;
                 p.line_segment(
                     [egui::pos2(x, c.y - h / 2.0), egui::pos2(x, c.y + h / 2.0)],
+                    Stroke::new(1.5_f32, ink),
+                );
+            }
+        }
+        Page::Stems => {
+            for (i, w) in [10.0, 7.0, 11.0, 8.0].into_iter().enumerate() {
+                let y = c.y - 4.5 + i as f32 * 3.0;
+                p.line_segment(
+                    [egui::pos2(c.x - w / 2.0, y), egui::pos2(c.x + w / 2.0, y)],
                     Stroke::new(1.5_f32, ink),
                 );
             }

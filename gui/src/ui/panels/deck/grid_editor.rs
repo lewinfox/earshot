@@ -2,7 +2,7 @@
 //! a player's controls, built like the Player page: two rows of single-height
 //! buttons, and "put the 1 here" a double.
 
-use egui::{Align, Layout, RichText, Ui, vec2};
+use egui::{Align, RichText, Ui, vec2};
 
 use super::{DeckInfo, DeckUi};
 use crate::core::command::{Command, DeckCmd};
@@ -123,8 +123,10 @@ impl DeckUi {
                     format!("1 at {sign}{m:.0}:{s:06.3}")
                 },
             );
-            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                ui.add_space(4.0);
+            // One above the other, so the page stays narrow.
+            ui.add_space(4.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
                 ui.label(RichText::new(at).monospace().size(10.0).color(THEME.muted))
                     .on_hover_text("The bar's 1 nearest the playhead");
                 // Padded to the longest ("from tempo-lock sidecar"), so the page's
@@ -134,7 +136,6 @@ impl DeckUi {
                 } else {
                     format!("from {}", info.grid_source)
                 };
-                ui.add_space(8.0);
                 ui.label(
                     RichText::new(format!("{from:<23}"))
                         .monospace()

@@ -4,7 +4,7 @@ use std::f32::consts::TAU;
 
 use egui::{Align2, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui, pos2, vec2};
 
-use super::{DeckUi, Dims};
+use super::DeckUi;
 use crate::core::bus::DeckControl;
 use crate::core::command::Command;
 use crate::ui::theme::THEME;
@@ -69,7 +69,8 @@ impl DeckUi {
     pub(super) fn jog(&self, ui: &mut Ui, out: &mut Vec<Command>) {
         let s = self.state;
         let jog = self.dims.jog();
-        let k = jog / Dims::FULL.jog();
+        // Everything on it scales with it, from its sizes on a ring `JOG_BASE` tall.
+        let k = jog / JOG_BASE;
         let (rect, resp) = ui.allocate_exact_size(vec2(jog + JOG_LEFT * k, jog), Sense::click());
         let resp = resp.on_hover_text(
             "BPM at the current tempo; the tempo change and the fader's range. \
@@ -82,7 +83,7 @@ impl DeckUi {
         let c = pos2(rect.right() - jog / 2.0, rect.center().y);
         let r = jog / 2.0 - JOG_ROOM * k;
         // The text scales with the ring (it is smaller on a compact deck).
-        let t = k * r / (Dims::FULL.jog() / 2.0 - 2.0);
+        let t = k * r / (JOG_BASE / 2.0 - 2.0);
         let p = ui.painter();
         p.circle(
             c,
@@ -238,6 +239,9 @@ impl DeckUi {
 /// Room round the jog ring for its arrows, and extra on the left (towards CUE and
 /// play), at full size.
 const JOG_ROOM: f32 = 5.0;
+/// The ring's height that its text, dot and arrows are sized for (scaled to fit the
+/// ring as drawn).
+const JOG_BASE: f32 = 84.0;
 const JOG_LEFT: f32 = 6.0;
 
 /// The jog arrows, at full size: the dot between them (degrees clockwise from 3
