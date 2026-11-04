@@ -734,27 +734,28 @@ fn layout_is_kept_per_mode() {
     steps(&mut h, 3);
 }
 
-/// Perform's effect units show and hide from the top bar's FX switch, apart from the
-/// mixer's.
+/// The effect unit is in Perform's top bar, mixer or not: picking an effect from its
+/// dropdown puts that effect on.
 #[test]
-fn the_fx_switch_shows_and_hides_the_effect_units() {
+fn the_effect_unit_is_in_the_top_bar() {
     let mut h = start("fx");
     h.state_mut()
         .dispatch(ViewCmd::SetMode(Mode::Perform).into());
     steps(&mut h, 3);
     let fx = |h: &H| h.query_all_by_label("Effect level").count() > 0;
-    let mixer = |h: &H| h.query_all_by_label("Gain").count() > 0;
-    assert!(fx(&h) && mixer(&h));
-    h.get_by_label("FX").click();
+    assert!(fx(&h));
+    h.state_mut().dispatch(ViewCmd::ShowMixer(false).into());
     steps(&mut h, 3);
-    assert!(!fx(&h) && mixer(&h));
-    assert!(!h.state().prefs.show_fx);
-    h.get_by_label("Mixer").click();
+    assert!(fx(&h), "not with the mixer");
+    let kind = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().mixer.fx[0].kind;
+    let next = earshot_engine::FxKind::ALL
+        .into_iter()
+        .find(|k| *k != kind(h.state()))
+        .unwrap();
+    h.get_by_value(kind(h.state()).name()).click();
     steps(&mut h, 3);
-    assert!(!fx(&h) && !mixer(&h));
-    h.get_by_label("FX").click();
-    steps(&mut h, 3);
-    assert!(fx(&h) && !mixer(&h));
+    h.get_by_label(next.name()).click();
+    settle_until(&mut h, |a| kind(a) == next);
 }
 
 /// However the mixer and effects are switched, both decks stay inside the window:
@@ -773,7 +774,7 @@ fn decks_stay_inside_the_window() {
         syncs.iter().all(|r| r.right() <= right + 0.5)
     };
     assert!(inside(&h));
-    for switch in ["FX", "Mixer", "FX", "Mixer"] {
+    for switch in ["Mixer", "Mixer"] {
         h.get_by_label(switch).click();
         steps(&mut h, 5);
         assert!(inside(&h), "after {switch}");

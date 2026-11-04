@@ -28,8 +28,6 @@ pub struct UiPrefs {
     /// Perform's mixer, between the decks (the top bar's Mixer switch), while no
     /// controller hides it.
     pub show_mixer: bool,
-    /// Perform's effect units, beside the mixer (the top bar's FX switch).
-    pub show_fx: bool,
     /// Hide the mixer while a controller is connected (it has its own).
     pub auto_hide_mixer: bool,
     /// What the decks' stem buttons do.
@@ -66,7 +64,6 @@ impl Default for UiPrefs {
             four_decks: false,
             tables: Tables::default(),
             show_mixer: true,
-            show_fx: true,
             auto_hide_mixer: true,
             stem_mode: StemMode::default(),
             controller: false,

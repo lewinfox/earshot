@@ -1951,23 +1951,23 @@ mod tests {
             });
             rig.run(0.01);
         };
-        // Four shown: unit 2 goes B, C, D, main.
-        for t in [deck(2), deck(3), FxTarget::Master, deck(0)] {
-            next(&mut rig, 1);
-            assert_eq!(target(&rig, 1), t);
+        // Four shown: the unit (on A, its own) goes B, C, D, main, A.
+        for t in [deck(1), deck(2), deck(3), FxTarget::Master, deck(0)] {
+            next(&mut rig, 0);
+            assert_eq!(target(&rig, 0), t);
         }
-        // Unit 2 on D, then two shown: back to B.
+        // On D, then two shown: back to its own, A.
         for _ in 0..3 {
-            next(&mut rig, 1);
+            next(&mut rig, 0);
         }
-        assert_eq!(target(&rig, 1), deck(3));
+        assert_eq!(target(&rig, 0), deck(3));
         rig.send(Command::SetFxDecks(2));
         rig.run(0.01);
-        assert_eq!(target(&rig, 1), deck(1));
+        assert_eq!(target(&rig, 0), deck(0));
         // And on round B, main, A.
-        for t in [FxTarget::Master, deck(0), deck(1)] {
-            next(&mut rig, 1);
-            assert_eq!(target(&rig, 1), t);
+        for t in [deck(1), FxTarget::Master, deck(0)] {
+            next(&mut rig, 0);
+            assert_eq!(target(&rig, 0), t);
         }
         // Not put on C by hand either.
         rig.send(Command::Fx {

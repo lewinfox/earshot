@@ -165,8 +165,6 @@ pub enum ViewCmd {
     Resize(Region, f32),
     /// Show Perform's mixer (the top bar's Mixer switch).
     ShowMixer(bool),
-    /// Show Perform's effect units (the top bar's FX switch).
-    ShowFx(bool),
     /// Hide the mixer while a controller is connected.
     AutoHideMixer(bool),
     /// What the decks' stem buttons do.

@@ -10,7 +10,6 @@ use egui_extras::{Size, StripBuilder};
 use super::{Panels, library, row_frame};
 use crate::core::view::Region;
 use crate::ui::panels::deck::{DeckLayout, DeckPanel, Side, WavePanel, min_height};
-use crate::ui::panels::fx::{self, FxPanel};
 use crate::ui::panels::mixer::{self, MixerPanel};
 use crate::ui::panels::{Cx, Panel, resized};
 
@@ -99,11 +98,5 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
                 strip.cell(|ui| column(ui, Side::Right, panels, cx));
             });
         });
-    if cx.prefs.show_fx {
-        egui::TopBottomPanel::top("fx-perform")
-            .exact_height(fx::HEIGHT + 16.0 + 8.0)
-            .frame(row_frame(cx, Margin::symmetric(6, 4)))
-            .show(ctx, |ui| FxPanel.ui(ui, cx));
-    }
     library(ctx, panels, cx);
 }

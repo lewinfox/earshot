@@ -651,15 +651,6 @@ impl DeckUi {
             None => (s.position, s.duration),
         };
         ui.horizontal(|ui| {
-            // Deck number (Prepare's single player has none).
-            if !self.id.is_prepare() {
-                ui.label(
-                    RichText::new((self.id.index() + 1).to_string())
-                        .strong()
-                        .size(16.0)
-                        .color(self.colour()),
-                );
-            }
             // Title and details on the left, as wide as the times (and buttons) allow.
             let right = 90.0 + if buttons { BUTTONS_W } else { 0.0 };
             let left = (ui.available_width() - right).max(60.0);

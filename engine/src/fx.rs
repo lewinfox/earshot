@@ -13,8 +13,9 @@
 use crate::command::{DeckId, Set};
 use crate::dsp::{self, Smoothed};
 
-/// How many effect units there are.
-pub const FX_UNITS: usize = 2;
+/// How many effect units there are. One for now; everything is written for any
+/// number (the UI shows a row each, the keymap's targets are fx1, fx2, …).
+pub const FX_UNITS: usize = 1;
 
 /// The shortest and longest beat length a unit takes. The ◀ / ▶ buttons halve and
 /// double the length within this range, as on Pioneer's gear: 1/16, 1/8 … 8, 16.

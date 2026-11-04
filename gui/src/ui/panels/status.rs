@@ -55,7 +55,6 @@ pub struct TopBar<'a> {
 
 impl Panel for TopBar<'_> {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        let t = cx.theme;
         ui.horizontal(|ui| {
             ui.menu_button("Menu", |ui| {
                 ui.menu_button("Import", |ui| {
@@ -112,7 +111,6 @@ impl Panel for TopBar<'_> {
                     }
                 });
             }
-            ui.label(RichText::new("earshot").strong().color(t.accent));
             let mut mode = cx.prefs.mode;
             egui::ComboBox::from_id_salt("mode")
                 .selected_text(match mode {
@@ -132,59 +130,9 @@ impl Panel for TopBar<'_> {
             if mode == Mode::Perform {
                 deck_count(ui, cx);
                 panes(ui, cx);
+                centred_fx(ui, cx);
             }
-            let (audio, ok) = match self.audio {
-                Ok(i) => (
-                    format!(
-                        "{}{}{} · {} kHz · {} frames · {} ch",
-                        if i.null || i.phones_error.is_some() {
-                            "⚠ "
-                        } else {
-                            ""
-                        },
-                        i.device,
-                        i.phones
-                            .as_ref()
-                            .map_or(String::new(), |(p, _)| format!(" · headphones: {p}")),
-                        i.sample_rate / 1000,
-                        i.buffer_frames.map_or("default".into(), |b| b.to_string()),
-                        i.channels
-                    ),
-                    !i.null && i.phones_error.is_none(),
-                ),
-                Err(e) => (format!("no audio: {e}"), false),
-            };
-            let (audio, ok) = match self.audio_note {
-                Some(note) => (format!("⚠ {note}"), false),
-                None => (audio, ok),
-            };
-            let intent = if ok { Intent::Success } else { Intent::Warning };
-            if ui
-                .add(Pill::new(&audio, intent))
-                .on_hover_text("Audio settings")
-                .clicked()
-            {
-                cx.send(ViewCmd::Settings(SettingsTab::Audio));
-            }
-            let midi = if self.midi_ports.is_empty() {
-                "MIDI: none".to_string()
-            } else {
-                format!("MIDI: {}", self.midi_ports.join(", "))
-            };
-            let intent = if self.midi_ports.is_empty() {
-                Intent::Neutral
-            } else {
-                Intent::Success
-            };
-            if ui
-                .add(Pill::new(&midi, intent))
-                .on_hover_text("Click to reconnect MIDI")
-                .clicked()
-            {
-                cx.send(AppCmd::ReconnectMidi);
-            }
-            self.analysis_pill(ui, cx);
-            self.jobs_pill(ui, cx);
+            // The system's state on the right, built from the right edge in.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Keys").clicked() {
                     cx.send(ViewCmd::ToggleModal(Modal::Keys));
@@ -192,12 +140,76 @@ impl Panel for TopBar<'_> {
                 self.memory_meter(ui, cx);
                 ui.add_space(6.0);
                 self.cpu_meter(ui, cx);
+                ui.add_space(6.0);
+                self.midi_pill(ui, cx);
+                self.audio_pill(ui, cx);
+                self.jobs_pill(ui, cx);
+                self.analysis_pill(ui, cx);
             });
         });
     }
 }
 
 impl TopBar<'_> {
+    /// The output device and its format: green, or amber with a warning. Clicked,
+    /// Settings > Audio.
+    fn audio_pill(&self, ui: &mut Ui, cx: &mut Cx) {
+        let (audio, ok) = match self.audio {
+            Ok(i) => (
+                format!(
+                    "{}{}{} · {} kHz · {} frames · {} ch",
+                    if i.null || i.phones_error.is_some() {
+                        "⚠ "
+                    } else {
+                        ""
+                    },
+                    i.device,
+                    i.phones
+                        .as_ref()
+                        .map_or(String::new(), |(p, _)| format!(" · headphones: {p}")),
+                    i.sample_rate / 1000,
+                    i.buffer_frames.map_or("default".into(), |b| b.to_string()),
+                    i.channels
+                ),
+                !i.null && i.phones_error.is_none(),
+            ),
+            Err(e) => (format!("no audio: {e}"), false),
+        };
+        let (audio, ok) = match self.audio_note {
+            Some(note) => (format!("⚠ {note}"), false),
+            None => (audio, ok),
+        };
+        let intent = if ok { Intent::Success } else { Intent::Warning };
+        if ui
+            .add(Pill::new(&audio, intent))
+            .on_hover_text("Audio settings")
+            .clicked()
+        {
+            cx.send(ViewCmd::Settings(SettingsTab::Audio));
+        }
+    }
+
+    /// The MIDI controllers connected. Clicked, reconnect.
+    fn midi_pill(&self, ui: &mut Ui, cx: &mut Cx) {
+        let midi = if self.midi_ports.is_empty() {
+            "MIDI: none".to_string()
+        } else {
+            format!("MIDI: {}", self.midi_ports.join(", "))
+        };
+        let intent = if self.midi_ports.is_empty() {
+            Intent::Neutral
+        } else {
+            Intent::Success
+        };
+        if ui
+            .add(Pill::new(&midi, intent))
+            .on_hover_text("Click to reconnect MIDI")
+            .clicked()
+        {
+            cx.send(AppCmd::ReconnectMidi);
+        }
+    }
+
     /// "CPU" and a bar: green, amber from half, red from 80 % (where a callback
     /// counts as slow).
     fn cpu_meter(&self, ui: &mut Ui, cx: &mut Cx) {
@@ -347,7 +359,7 @@ impl TopBar<'_> {
 /// The MIDI messages last received, newest first.
 /// Perform's 2 / 4 deck toggle. Back to two only once decks 3 and 4 have stopped, so
 /// nothing plays out of sight.
-/// Switches for Perform's mixer and effect units, to show or hide them mid-set.
+/// The switch for Perform's mixer, to show or hide it mid-set.
 fn panes(ui: &mut Ui, cx: &mut Cx) {
     let mut mixer = cx.prefs.mixer_shown();
     if ui
@@ -357,13 +369,21 @@ fn panes(ui: &mut Ui, cx: &mut Cx) {
     {
         cx.send(ViewCmd::ShowMixer(mixer));
     }
-    let mut fx = cx.prefs.show_fx;
-    if ui
-        .add(Toggle::new(&mut fx, "FX"))
-        .on_hover_text("The effect units, in a strip under the decks")
-        .changed()
-    {
-        cx.send(ViewCmd::ShowFx(fx));
+}
+
+/// The effect units, centred in the bar (as far as what's left of them allows). Their
+/// width is last frame's: the first frame they sit a little off, then settle.
+fn centred_fx(ui: &mut Ui, cx: &mut Cx) {
+    let id = egui::Id::new("top-bar-fx-width");
+    let width: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(0.0);
+    let at = ui.max_rect().center().x - width / 2.0;
+    ui.add_space((at - ui.cursor().min.x).max(12.0));
+    let start = ui.cursor().min.x;
+    super::fx::show(ui, cx.engine.snap.as_ref(), cx.out);
+    let drawn = ui.cursor().min.x - start;
+    if (drawn - width).abs() > 0.5 {
+        ui.ctx().data_mut(|d| d.insert_temp(id, drawn));
+        ui.ctx().request_discard("the effects' width");
     }
 }
 

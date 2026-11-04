@@ -7,8 +7,8 @@
 #          Ctrl+ in front for the shifted key (Ctrl is Cmd on a Mac). Keys go by where they are on the keyboard, named as on
 #          a US layout. A shifted key with no binding of its own does what it does
 #          unshifted.
-# target   deck1 … deck4, prepare (Prepare mode's player), mixer, fx1, fx2 (the
-#          effect units), or library
+# target   deck1 … deck4, prepare (Prepare mode's player), mixer, fx1 (the
+#          effect unit; fx2 and on if there are more), or library
 # control  a control's name (core/bus.rs). The number is its parameter (the hot cue
 #          pad, the loop's beats, the grid nudge in ms) or the value it sends (how far
 #          to browse).
@@ -57,17 +57,12 @@ perform  Shift+0  deck2  hotcue_clear 4
 perform  Shift+Left   deck1  load_selected
 perform  Shift+Right  deck2  load_selected
 
-# Effect units: unit 1 under the left hand, unit 2 under the right.
+# The effect unit, under the left hand.
 perform  G        fx1    fx_on
 perform  T        fx1    fx_next
 perform  Shift+G  fx1    fx_target
 perform  C        fx1    fx_beats_down
 perform  V        fx1    fx_beats_up
-perform  H        fx2    fx_on
-perform  Y        fx2    fx_next
-perform  Shift+H  fx2    fx_target
-perform  B        fx2    fx_beats_down
-perform  N        fx2    fx_beats_up
 
 # ---- Prepare: Rekordbox's keys --------------------------------------------------------
 prepare  Space        prepare  play

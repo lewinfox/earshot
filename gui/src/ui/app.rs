@@ -761,7 +761,6 @@ impl EarshotApp {
             ViewCmd::CloseModal(m) => self.modals.close(m),
             ViewCmd::WaveZoom(z) => self.prefs.wave_zoom = z,
             ViewCmd::ShowMixer(show) => self.prefs.set_mixer(show),
-            ViewCmd::ShowFx(show) => self.prefs.show_fx = show,
             ViewCmd::AutoHideMixer(on) => self.prefs.auto_hide_mixer = on,
             ViewCmd::StemMode(m) => self.prefs.stem_mode = m,
             ViewCmd::UiScale(z) => {
