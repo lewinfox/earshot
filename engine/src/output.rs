@@ -362,7 +362,10 @@ fn phones_stream(
     let stream = device
         .build_output_stream(
             config,
-            move |data: &mut [f32], _| aligner.process(data, channels as usize),
+            move |data: &mut [f32], _| {
+                crate::dsp::flush_denormals();
+                aligner.process(data, channels as usize)
+            },
             move |err| {
                 if err.kind() == cpal::ErrorKind::Xrun {
                     err_stats.xruns.fetch_add(1, Relaxed);
@@ -394,6 +397,7 @@ where
         .build_output_stream(
             config,
             move |data: &mut [T], _| {
+                crate::dsp::flush_denormals();
                 if scratch.len() < data.len() {
                     scratch.resize(data.len(), 0.0);
                 }
