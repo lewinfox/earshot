@@ -659,15 +659,10 @@ impl DeckUi {
             let left = (ui.available_width() - right).max(60.0);
             ui.allocate_ui_with_layout(vec2(left, 36.0), Layout::top_down(Align::Min), |ui| {
                 ui.set_width(left);
-                let title = if info.title.is_empty() {
-                    "Drop a track here"
-                } else {
-                    &info.title
-                };
                 let title = if info.artist.is_empty() || info.title.is_empty() {
-                    title.to_string()
+                    info.title.clone()
                 } else {
-                    format!("{title} - {}", info.artist)
+                    format!("{} - {}", info.title, info.artist)
                 };
                 ui.horizontal(|ui| {
                     if let Some(k) = info.key {
