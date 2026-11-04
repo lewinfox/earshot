@@ -74,15 +74,21 @@ impl DeckUi {
                         .vertical_align(Align::Center),
                 )
                 .on_hover_text("The grid's BPM: type one and press Enter");
+            // Enter or clicking away sets it (Esc leaves it be). Read before the box is
+            // put back to the grid's BPM below.
+            let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            if edit.lost_focus()
+                && !esc
+                && let Ok(b) = self.bpm_text.trim().parse::<f64>()
+                && b > 0.0
+                && cur.is_some_and(|c| (c - b).abs() >= 0.005)
+            {
+                out.push(Command::Deck(self.id, DeckCmd::Grid(GridOp::SetBpm(b))));
+            }
             if !edit.has_focus() {
                 self.bpm_text = cur
                     .map(|b| format!("{:.2}", (b * 100.0).round() / 100.0))
                     .unwrap_or_default();
-            }
-            if edit.lost_focus()
-                && let Ok(b) = self.bpm_text.trim().parse::<f64>()
-            {
-                out.push(Command::Deck(self.id, DeckCmd::Grid(GridOp::SetBpm(b))));
             }
             for (label, d) in [("+0.01", 0.01), ("+0.1", 0.1)] {
                 self.grid_button(ui, out, label, w, "Faster: the grid's BPM", step(d));

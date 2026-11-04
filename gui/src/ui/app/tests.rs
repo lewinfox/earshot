@@ -1413,6 +1413,62 @@ fn deck_pages_switch_in_place() {
     );
 }
 
+/// The grid editor's BPM box: a BPM typed in is set on Enter, or on clicking away.
+#[test]
+fn typing_a_bpm_in_the_grid_editor_sets_it() {
+    let mut h = start("grid-bpm");
+    let id = ids(&h)[0];
+    h.state_mut().dispatch(LibraryCmd::Load(id).into());
+    settle_until(&mut h, |a| a.panels.decks[0].wave.is_some());
+    steps(&mut h, 5);
+    h.get_all_by_label("Grid controls").next().unwrap().click();
+    steps(&mut h, 5);
+    let bpm = |a: &EarshotApp| a.index.get(id).unwrap().bpm;
+    let shown = format!("{:.2}", bpm(h.state()).unwrap());
+    let field = h.get_all_by_value(&shown).next().unwrap();
+    field.click();
+    steps(&mut h, 2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.get_all_by_value(&shown)
+        .next()
+        .unwrap()
+        .type_text("128.5");
+    steps(&mut h, 2);
+    h.key_press(egui::Key::Enter);
+    settle_until(&mut h, |a| bpm(a) == Some(128.5));
+
+    // Clicking away sets it too.
+    let field = h.get_all_by_value("128.50").next().unwrap();
+    field.click();
+    steps(&mut h, 2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.get_all_by_value("128.50")
+        .next()
+        .unwrap()
+        .type_text("126");
+    steps(&mut h, 2);
+    // A click elsewhere (the tab already shown) takes the focus away.
+    let at = h
+        .get_all_by_label("Grid controls")
+        .next()
+        .unwrap()
+        .rect()
+        .center();
+    h.event(egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.event(egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    settle_until(&mut h, |a| bpm(a) == Some(126.0));
+}
+
 /// Hot cues play on when pressed unless Settings > Decks says "Play while held"; the
 /// choice is saved and reaches the player.
 #[test]
