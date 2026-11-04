@@ -1413,6 +1413,31 @@ fn deck_pages_switch_in_place() {
     );
 }
 
+/// Vinyl mode turns on and off from its VINYL label only, not a click on the ring.
+#[test]
+fn only_the_vinyl_label_toggles_vinyl_mode() {
+    let mut h = start("vinyl");
+    steps(&mut h, 5);
+    let deck = DeckId::new(0).unwrap();
+    let vinyl = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().deck(deck).vinyl;
+    let on = vinyl(h.state());
+    // The middle of the ring (its BPM): nothing.
+    let label = h.get_all_by_label("VINYL").next().unwrap().rect();
+    let ring = label.center() + vec2(0.0, 25.0);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: ring,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    steps(&mut h, 5);
+    assert_eq!(vinyl(h.state()), on);
+    h.get_all_by_label("VINYL").next().unwrap().click();
+    settle_until(&mut h, |a| vinyl(a) != on);
+}
+
 /// The grid editor's BPM box: a BPM typed in is set on Enter, or on clicking away.
 #[test]
 fn typing_a_bpm_in_the_grid_editor_sets_it() {

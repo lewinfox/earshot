@@ -73,15 +73,9 @@ impl DeckUi {
         let d = self.dims;
         let k = d.k;
         let jog = d.jog();
-        let (rect, resp) = ui.allocate_exact_size(vec2(jog + d.px(JOG_LEFT), jog), Sense::click());
-        let resp = resp.on_hover_text(
-            "BPM at the current tempo; the tempo change and the fader's range. \
-             VINYL: the jog wheel's top and the waveform scratch (click to turn off: \
-             then the jog wheel only bends)",
-        );
-        if resp.clicked() {
-            self.control(out, DeckControl::Vinyl, 1.0);
-        }
+        let (rect, resp) = ui.allocate_exact_size(vec2(jog + d.px(JOG_LEFT), jog), Sense::hover());
+        let resp =
+            resp.on_hover_text("BPM at the current tempo; the tempo change and the fader's range");
         let c = pos2(rect.right() - jog / 2.0, rect.center().y);
         let r = jog / 2.0 - d.px(JOG_ROOM);
         let p = ui.painter();
@@ -136,14 +130,37 @@ impl DeckUi {
         let y = c.y + d.px(TEMPO_DROP);
         p.galley(pos2(c.x - w / 2.0, y), pct.clone(), THEME.muted);
         p.galley(pos2(c.x - w / 2.0 + pct.size().x, y), range, self.colour());
-        let vinyl = if s.vinyl { self.colour() } else { THEME.line };
-        p.text(
-            pos2(c.x, top - d.px(VINYL_GAP)),
-            Align2::CENTER_BOTTOM,
-            "VINYL",
+        // VINYL: the only part that turns vinyl mode on or off, so a stray click on
+        // the ring can't.
+        let label = pos2(c.x, top - d.px(VINYL_GAP));
+        let text = p.layout_no_wrap(
+            "VINYL".into(),
             FontId::proportional(d.px(FONT_VINYL)),
-            vinyl,
+            THEME.text,
         );
+        let vinyl_rect = Align2::CENTER_BOTTOM
+            .anchor_size(label, text.size())
+            .expand(d.px(2.0));
+        let v = ui
+            .interact(vinyl_rect, resp.id.with("vinyl"), Sense::click())
+            .on_hover_text(
+                "Vinyl mode: the jog wheel's top and the waveform scratch (click to turn \
+                 off: then the jog wheel only bends)",
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        v.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::Button, true, s.vinyl, "VINYL")
+        });
+        if v.clicked() {
+            self.control(out, DeckControl::Vinyl, 1.0);
+        }
+        let ink = match (s.vinyl, v.hovered()) {
+            (true, _) => self.colour(),
+            (false, true) => THEME.muted,
+            (false, false) => THEME.line,
+        };
+        ui.painter()
+            .galley(vinyl_rect.shrink(d.px(2.0)).min, text, ink);
         self.jog_nudges(ui, out, resp.id, rect, c, r, k);
     }
 
