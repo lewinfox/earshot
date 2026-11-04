@@ -208,7 +208,7 @@ CREATE TABLE embeddings (
 CREATE TABLE cues (
   id        INTEGER PRIMARY KEY,
   track_id  INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
-  kind      INTEGER NOT NULL,          -- hot cue, memory cue, loop …
+  kind      INTEGER NOT NULL,          -- hot cue, memory cue, loop, main cue (slot 0) …
   slot      INTEGER,
   start_s   REAL NOT NULL,
   end_s     REAL,

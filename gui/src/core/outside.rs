@@ -52,6 +52,8 @@ pub struct OutsideTrack {
     pub hot: [Option<f64>; HOTCUES],
     pub hot_labels: [Option<String>; HOTCUES],
     pub memories: Vec<Memory>,
+    /// The main cue, once set by hand on a deck (kept for the session only).
+    pub main: Option<f64>,
     /// The library was read with its cues and grids (else they're still to come).
     pub has_cues: bool,
 }
@@ -155,6 +157,7 @@ impl Outside {
             hot: [None; HOTCUES],
             hot_labels: Default::default(),
             memories: vec![],
+            main: None,
             has_cues: read_cues,
         };
         match had {
@@ -163,6 +166,7 @@ impl Outside {
                 track.hot = old.hot;
                 track.hot_labels = old.hot_labels;
                 track.memories = old.memories;
+                track.main = old.main;
                 track.has_cues = old.has_cues;
             }
             _ => inner.set_cues(&mut track, &t.cues),
@@ -215,6 +219,13 @@ impl Outside {
             | StoreCmd::DeleteMemory { track, .. }
             | StoreCmd::SetMemoryLabel { track, .. }
             | StoreCmd::SetMemoryColor { track, .. } => *track,
+            StoreCmd::SaveMainCue { track, at } => {
+                // Nothing on screen lists it: no event to answer with.
+                if let Some(t) = inner.tracks.get_mut(track) {
+                    t.main = Some(*at);
+                }
+                return None;
+            }
             _ => return None,
         };
         let next_memory = {
@@ -308,6 +319,7 @@ pub fn touches_outside(cmd: &StoreCmd) -> bool {
         | StoreCmd::SetMeta { track, .. }
         | StoreCmd::SaveEmbedding { track, .. }
         | StoreCmd::SaveHotcues { track, .. }
+        | StoreCmd::SaveMainCue { track, .. }
         | StoreCmd::SetHotcueLabel { track, .. }
         | StoreCmd::AddMemory { track, .. }
         | StoreCmd::DeleteMemory { track, .. }

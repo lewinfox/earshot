@@ -256,6 +256,8 @@ struct Deck {
     /// Nothing has played it, moved the playhead or set the cue since the track was
     /// loaded, so [`Command::InitialCue`] may still move both.
     untouched: bool,
+    /// The cue point was set by hand since the track was loaded ([`DeckSnap::cue_by_hand`]).
+    cue_by_hand: bool,
     /// The loaded track's stems, once worked out ([`Command::SetStems`]).
     stems: Option<Arc<StemAudio>>,
     /// Each stem's level and mute, as set; and the gain it plays at now, which eases
@@ -318,6 +320,7 @@ impl Deck {
             tempo: 1.0,
             was_playing: false,
             untouched: false,
+            cue_by_hand: false,
             stems: None,
             stem_level: [1.0; stems::COUNT],
             stem_mute: [false; stems::COUNT],
@@ -456,6 +459,7 @@ impl Deck {
         self.player.scratch.cancel();
         self.cue_point = cue;
         self.untouched = true;
+        self.cue_by_hand = false;
         self.hotcues = track.cues.hot;
         self.nudge = 0.0;
         self.preview = Preview::None;
@@ -501,6 +505,7 @@ impl Deck {
             deck: self.id,
             generation: self.generation(),
             position: self.cue_point,
+            by_hand: false,
         });
     }
 
@@ -535,11 +540,13 @@ impl Deck {
                             self.player.transport.playing = true;
                         } else {
                             self.cue_point = self.snap(self.pos());
+                            self.cue_by_hand = true;
                             self.jump(self.cue_point, JumpReason::Cue);
                             out.send(EngineEvent::CueSet {
                                 deck: self.id,
                                 generation,
                                 position: self.cue_point,
+                                by_hand: true,
                             });
                         }
                     }
@@ -555,10 +562,12 @@ impl Deck {
             DeckCmd::SetCue(at) => {
                 self.untouched = false;
                 self.cue_point = at.unwrap_or_else(|| self.snap(self.pos())).max(-LEAD_IN);
+                self.cue_by_hand = true;
                 out.send(EngineEvent::CueSet {
                     deck: self.id,
                     generation,
                     position: self.cue_point,
+                    by_hand: true,
                 });
             }
             DeckCmd::StemLevel { stem, level } => {
@@ -804,6 +813,7 @@ impl Deck {
             loop_out: l.end,
             loop_active: l.active,
             cue_point: self.cue_point,
+            cue_by_hand: self.cue_by_hand,
             hotcues: self.hotcues,
             volume: ch.get(ChannelParam::Volume),
             pfl: ch.pfl,

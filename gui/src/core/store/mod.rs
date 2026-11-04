@@ -171,6 +171,9 @@ pub enum CueKind {
     Memory,
     /// A memory loop: `end_s` is set, no slot.
     Loop,
+    /// The main cue: where the track loads, moved by the Cue button. One per track,
+    /// always in slot 0, so `cues`' unique (track, kind, slot) keeps it to one.
+    Main,
 }
 
 impl CueKind {
@@ -179,6 +182,7 @@ impl CueKind {
             CueKind::Hot => 0,
             CueKind::Memory => 1,
             CueKind::Loop => 2,
+            CueKind::Main => 3,
         }
     }
 }
@@ -251,6 +255,11 @@ pub enum StoreCmd {
     SaveHotcues {
         track: i64,
         cues: [Option<f64>; HOTCUES],
+    },
+    /// A track's main cue (seconds), set by hand on a deck.
+    SaveMainCue {
+        track: i64,
+        at: f64,
     },
     /// Name a hot cue (`None` clears the name). Does nothing to a pad that isn't set.
     /// Answered with [`StoreEvent::Cues`].
@@ -759,6 +768,11 @@ impl Reader {
     /// A track's saved hot cues, by pad.
     pub fn hotcues(&self, id: i64) -> Result<[Option<f64>; HOTCUES]> {
         self.with(|c| read::hotcues(c, id))
+    }
+
+    /// A track's saved main cue, if it has one (set by hand on a deck).
+    pub fn main_cue(&self, id: i64) -> Result<Option<f64>> {
+        self.with(|c| read::main_cue(c, id))
     }
 
     /// A file of earshot's with this audio, if there's one.
