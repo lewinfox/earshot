@@ -2,7 +2,7 @@
 //! status line along the bottom: what earshot is doing in the background (with a
 //! progress bar when it can be counted), then the MIDI log.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use earshot_engine::OutputInfo;
 use egui::{RichText, Ui};
@@ -364,11 +364,10 @@ fn job_line(ui: &mut Ui, j: &Running, cx: &mut Cx) {
     });
 }
 
-/// The bottom line: the first job with its bar (the others in the top bar's jobs
-/// pill), then the MIDI messages last received, newest first.
+/// The bottom line: messages for the user, newest first, then the first job with
+/// its bar (the others in the top bar's jobs pill).
 pub struct StatusLine<'a> {
     pub jobs: &'a [Running],
-    pub midi: &'a VecDeque<String>,
     /// Messages for the user, oldest first (each drawn with a close button).
     pub notices: &'a [Notice],
 }
@@ -408,24 +407,16 @@ impl Panel for StatusLine<'_> {
                         });
                     });
             }
-            if !self.notices.is_empty() {
-                ui.separator();
-            }
             if let Some(first) = self.jobs.first() {
+                if !self.notices.is_empty() {
+                    ui.separator();
+                }
                 job_line(ui, first, cx);
                 let more = self.jobs.len() - 1;
                 if more > 0 {
                     muted(ui, format!("+{more} more"));
                 }
-                ui.separator();
             }
-            let log: Vec<&str> = self.midi.iter().map(|s| s.as_str()).collect();
-            ui.label(
-                RichText::new(format!("MIDI  {}", log.join("   |   ")))
-                    .monospace()
-                    .size(fs(11.0))
-                    .color(t.muted),
-            );
         });
     }
 }

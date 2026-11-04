@@ -80,7 +80,6 @@ pub struct EarshotApp {
     null_audio: bool,
     midi: Midi,
     midi_ports: Vec<String>,
-    midi_log: VecDeque<String>,
     /// Send track ids here to load their cover art.
     art_loader: std::sync::mpsc::Sender<i64>,
     /// Nudge after a scan: works out audio hashes the files' tags didn't have.
@@ -293,7 +292,6 @@ impl EarshotApp {
             null_audio: services.null_audio,
             midi: Midi::default(),
             midi_ports: vec![],
-            midi_log: VecDeque::new(),
             art_loader,
             hasher,
             tempo_lock,
@@ -918,12 +916,11 @@ impl EarshotApp {
                 }
                 .ui(ui, &mut cx)
             });
-        egui::TopBottomPanel::bottom("midi")
+        egui::TopBottomPanel::bottom("status")
             .frame(THEME.bar_frame())
             .show(ctx, |ui| {
                 StatusLine {
                     jobs: &jobs,
-                    midi: &self.midi_log,
                     notices: self.notices.shown(),
                 }
                 .ui(ui, &mut cx)

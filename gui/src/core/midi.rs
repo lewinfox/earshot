@@ -41,8 +41,6 @@ struct Mapping {
     data1: u8,
     control: Control,
     input: Input,
-    /// `[Group] key`, for the MIDI monitor.
-    name: String,
 }
 
 /// The DDJ-400's two decks, its mixer and browse knob, in Mixxx's names.
@@ -112,7 +110,6 @@ fn ddj400() -> Vec<Mapping> {
                 data1,
                 control,
                 input,
-                name: format!("{group} {key}"),
             })
         })
         .collect()
@@ -137,11 +134,11 @@ pub fn connect_all(sink: &Sink, lane: &Lane) -> Result<(Midi, Vec<String>), Stri
             continue;
         }
         let input = MidiInput::new("earshot").map_err(|e| e.to_string())?;
-        let (sink, lane, port_name, table) = (sink.clone(), lane.clone(), name.clone(), ddj400());
+        let (sink, lane, table) = (sink.clone(), lane.clone(), ddj400());
         match input.connect(
             port,
             "earshot-in",
-            move |_, bytes, _| on_message(&sink, &lane, &port_name, bytes, &table),
+            move |_, bytes, _| on_message(&sink, &lane, bytes, &table),
             (),
         ) {
             Ok(c) => {
@@ -189,14 +186,10 @@ fn translate<'a>(bytes: &[u8], table: &'a [Mapping]) -> Option<(&'a Mapping, Opt
     Some((mp, mp.control.command(value)))
 }
 
-fn on_message(sink: &Sink, lane: &Lane, port: &str, bytes: &[u8], table: &[Mapping]) {
-    let found = translate(bytes, table);
-    sink(Event::Midi {
-        port: port.into(),
-        bytes: bytes.to_vec(),
-        mapped: found.as_ref().map(|(mp, _)| mp.name.clone()),
-    });
-    let Some((_, Some(cmd))) = found else { return };
+fn on_message(sink: &Sink, lane: &Lane, bytes: &[u8], table: &[Mapping]) {
+    let Some((_, Some(cmd))) = translate(bytes, table) else {
+        return;
+    };
     match command::direct(cmd) {
         Ok(c) => {
             if let Err(e) = lane.send(c) {

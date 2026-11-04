@@ -50,11 +50,6 @@ use analysis::AnalysisEvent;
 #[derive(Debug)]
 pub enum Event {
     Analysis(AnalysisEvent),
-    Midi {
-        port: String,
-        bytes: Vec<u8>,
-        mapped: Option<String>,
-    },
     /// A command for the UI to dispatch (one that needs app state, e.g. from MIDI).
     Command(command::Command),
     Loaded {
