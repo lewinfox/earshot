@@ -1974,3 +1974,68 @@ fn show_in_library_goes_back_to_where_it_came_from() {
     h.state_mut().dispatch(ViewCmd::ShowInLibrary(deck).into());
     settle_until(&mut h, |a| shown_in(a, &Scope::All, Source::AllTracks));
 }
+
+/// Prepare isn't opened while a deck plays (the bottom bar says why); going back to
+/// Perform stops Prepare's player; closing the window while a deck plays asks first.
+#[test]
+fn mode_switches_and_quitting_mind_whats_playing() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = start_with("mode-switch", stand_in);
+    let id = ids(&h)[0];
+    let deck = h.state().prefs.decks()[0];
+    h.state_mut().load(Some(deck), id);
+    settle_until(&mut h, |a| a.panels.decks[deck.index()].wave.is_some());
+    let play =
+        |d, on: bool| Command::from((d, EngineCmd::Play(earshot_engine::Set::from_bool(on))));
+    let playing = |a: &EarshotApp, d| a.frame.snap.as_ref().is_some_and(|sh| sh.deck(d).playing);
+    h.state_mut().dispatch(play(deck, true));
+    settle_until(&mut h, |a| playing(a, deck));
+
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
+    steps(&mut h, 2);
+    assert_eq!(h.state().prefs.mode, Mode::Perform);
+    h.get_by_label_contains("Stop the playing decks before switching to Prepare.");
+
+    // Closing the window: asked, and Cancel keeps it open.
+    h.input_mut()
+        .viewports
+        .entry(egui::ViewportId::ROOT)
+        .or_default()
+        .events
+        .push(egui::ViewportEvent::Close);
+    steps(&mut h, 2);
+    h.get_by_label("Do you really want to quit?");
+    h.get_by_label("Cancel").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Do you really want to quit?").is_none());
+
+    h.state_mut().dispatch(play(deck, false));
+    settle_until(&mut h, |a| !playing(a, deck));
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
+    assert_eq!(h.state().prefs.mode, Mode::Prepare);
+    let prepare = DeckId::PREPARE;
+    h.state_mut().load(Some(prepare), id);
+    settle_until(&mut h, |a| a.panels.decks[prepare.index()].wave.is_some());
+    h.state_mut().dispatch(play(prepare, true));
+    settle_until(&mut h, |a| playing(a, prepare));
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Perform).into());
+    assert_eq!(h.state().prefs.mode, Mode::Perform);
+    settle_until(&mut h, |a| !playing(a, prepare));
+}
+
+/// A track dropped anywhere on Prepare's player panel loads, as on a Perform deck
+/// (not just on its waveform).
+#[test]
+fn a_track_drops_onto_prepares_player_panel() {
+    let mut h = start_prepare("prepare-drop", 0);
+    let other = ids(&h)[1];
+    h.state_mut()
+        .dispatch(ViewCmd::Source(Some(Source::AllTracks)).into());
+    steps(&mut h, 3);
+    let (from, to) = (at(&h, &title(&h, other)).center(), at(&h, "Q").center());
+    drag(&mut h, from, to, |_| {});
+    settle_until(&mut h, |a| prepared(a) == Some(other));
+}

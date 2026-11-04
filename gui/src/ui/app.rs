@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use earshot_engine::{
-    DeckCmd as EngineCmd, DeckId, Monitor, OutputInfo, OutputOptions, TempoRange,
+    DeckCmd as EngineCmd, DeckId, Monitor, OutputInfo, OutputOptions, Set, TempoRange,
 };
 use egui::Key;
 
@@ -71,6 +71,9 @@ pub struct EarshotApp {
     audio_note: Option<(String, Option<Instant>)>,
     /// Messages for the user, in the bottom bar.
     notices: Notices,
+    /// "Do you really want to quit?" is showing; and the user said yes.
+    asking_quit: bool,
+    quitting: bool,
     /// Each player's track and the list it was loaded from, by `DeckId::index()`.
     loaded_from: [Option<(i64, LoadedFrom)>; session::SLOTS],
     /// Always the null output (tests).
@@ -285,6 +288,8 @@ impl EarshotApp {
             audio_note: None,
             loaded_from: Default::default(),
             notices: Notices::default(),
+            asking_quit: false,
+            quitting: false,
             null_audio: services.null_audio,
             midi: Midi::default(),
             midi_ports: vec![],
@@ -439,6 +444,76 @@ impl EarshotApp {
         self.lib
             .store
             .send(settings::save(settings::AUDIO, &self.settings.audio));
+    }
+
+    /// How many of Perform's decks are playing.
+    fn decks_playing(&self) -> usize {
+        self.frame
+            .snap
+            .as_ref()
+            .map_or(0, |sh| sh.live().iter().filter(|d| d.playing).count())
+    }
+
+    /// Switch mode. Not to Prepare while a deck plays (the set would go on under
+    /// Prepare's player): says so instead, and returns false. To Perform, Prepare's
+    /// player stops.
+    pub(super) fn set_mode(&mut self, m: Mode) -> bool {
+        if m == self.prefs.mode {
+            return true;
+        }
+        match m {
+            Mode::Prepare if self.decks_playing() > 0 => {
+                let text = "Stop the playing decks before switching to Prepare.";
+                self.notify(notice::Level::Warning, text);
+                return false;
+            }
+            Mode::Perform
+                if self
+                    .frame
+                    .snap
+                    .as_ref()
+                    .is_some_and(|sh| sh.prepare.playing) =>
+            {
+                self.dispatch((DeckId::PREPARE, EngineCmd::Play(Set::Off)).into());
+            }
+            _ => {}
+        }
+        self.prefs.mode = m;
+        true
+    }
+
+    /// Closing the window in Perform while a deck plays: ask first ("Quit" closes it
+    /// again, for good).
+    fn confirm_quit(&mut self, ctx: &egui::Context) {
+        let asked = ctx.input(|i| i.viewport().close_requested());
+        if asked && !self.quitting && self.prefs.mode == Mode::Perform && self.decks_playing() > 0 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.asking_quit = true;
+        }
+        if !self.asking_quit {
+            return;
+        }
+        let n = self.decks_playing();
+        let r = egui::Modal::new(egui::Id::new("confirm-quit")).show(ctx, |ui| {
+            ui.heading("Do you really want to quit?");
+            if n > 0 {
+                let decks = if n == 1 { "A deck is" } else { "Decks are" };
+                ui.label(format!("{decks} still playing."));
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Quit").clicked() {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                if ui.button("Cancel").clicked() {
+                    self.asking_quit = false;
+                }
+            })
+        });
+        if r.should_close() {
+            self.asking_quit = false;
+        }
     }
 
     /// Show the user a message in the bottom bar.
@@ -666,7 +741,9 @@ impl EarshotApp {
                     eprintln!("effect decks: {e}");
                 }
             }
-            ViewCmd::SetMode(m) => self.prefs.mode = m,
+            ViewCmd::SetMode(m) => {
+                self.set_mode(m);
+            }
             ViewCmd::Source(s) => self.prefs.layout_mut().source = s,
             ViewCmd::Aside(a) => self.prefs.layout_mut().aside = a,
             ViewCmd::Tool(t) => self.prefs.layout_mut().tool = t,
@@ -900,6 +977,7 @@ impl eframe::App for EarshotApp {
                 .as_ref()
                 .is_some_and(|sh| sh.live().iter().any(|d| d.playing));
         self.lib.analyser.set_playing(playing);
+        self.confirm_quit(ctx);
         self.keyboard(ctx);
         input::full_screen_key(ctx);
         // Ctrl +/- and Ctrl 0 change the text size too (egui's shortcuts, our steps).

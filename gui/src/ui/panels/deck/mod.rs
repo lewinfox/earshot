@@ -466,48 +466,44 @@ impl DeckUi {
         } else {
             Dims::FULL
         };
-        let loading = self.pending.as_ref().map(PendingLoad::info);
-        let info = loading.as_ref().unwrap_or(info);
-        let resp = THEME
-            .panel_frame()
-            .show(ui, |ui| {
-                let inner = width - 18.0;
-                ui.set_width(inner);
-                ui.set_min_height(height - 12.0);
-                ui.spacing_mut().item_spacing = vec2(4.0, 5.0);
+        self.panel(
+            ui,
+            width,
+            height,
+            info,
+            out,
+            |deck, ui, info, out, inner_h| {
                 let left = if tempo_fader {
-                    inner - TEMPO_W - 8.0
+                    ui.available_width() - TEMPO_W - 8.0
                 } else {
-                    inner
+                    ui.available_width()
                 };
-                let inner_h = height - 12.0;
-                // The tempo fader on the outside edge (its buttons in the header without
-                // it).
+                // The tempo fader on the outside edge (its buttons in the header without it).
                 ui.horizontal_top(|ui| {
                     if tempo_fader && side == Side::Left {
-                        self.tempo(ui, info, out, inner_h);
+                        deck.tempo(ui, info, out, inner_h);
                         ui.add_space(4.0);
                     }
                     ui.vertical(|ui| {
                         ui.set_width(left);
                         let top = ui.cursor().min.y;
-                        self.header(ui, info, out, !tempo_fader);
+                        deck.header(ui, info, out, !tempo_fader);
                         // The overview takes what the header and controls leave, so the
                         // controls sit on the bottom edge.
                         let used = ui.cursor().min.y - top;
                         let overview_h =
-                            (inner_h - used - self.dims.controls_h() - ui.spacing().item_spacing.y)
+                            (inner_h - used - deck.dims.controls_h() - ui.spacing().item_spacing.y)
                                 .max(24.0);
-                        self.overview(ui, info, out, overview_h);
-                        self.controls(ui, info, out);
+                        deck.overview(ui, info, out, overview_h);
+                        deck.controls(ui, info, out);
                     });
                     if tempo_fader && side == Side::Right {
                         ui.add_space(4.0);
-                        self.tempo(ui, info, out, inner_h);
+                        deck.tempo(ui, info, out, inner_h);
                     }
                 });
-            })
-            .response;
+            },
+        );
         // Full-size controls that turn out not to fit: draw this frame again with
         // compact ones, so nothing is pushed off the edge.
         if self.dims == Dims::FULL {
@@ -516,6 +512,32 @@ impl DeckUi {
                 ui.ctx().request_discard("a deck's controls didn't fit");
             }
         }
+    }
+
+    /// The deck's panel, `width` × `height`, around a layout (`body`, given the
+    /// track's details, or the one loading's, and the height inside). A track
+    /// dropped anywhere on it loads, in every layout.
+    fn panel(
+        &mut self,
+        ui: &mut Ui,
+        width: f32,
+        height: f32,
+        info: &DeckInfo,
+        out: &mut Vec<Command>,
+        body: impl FnOnce(&mut DeckUi, &mut Ui, &DeckInfo, &mut Vec<Command>, f32),
+    ) {
+        let loading = self.pending.as_ref().map(PendingLoad::info);
+        let info = loading.as_ref().unwrap_or(info);
+        let resp = THEME
+            .panel_frame()
+            .show(ui, |ui| {
+                ui.set_width(width - 18.0);
+                let inner_h = height - 12.0;
+                ui.set_min_height(inner_h);
+                ui.spacing_mut().item_spacing = vec2(4.0, 5.0);
+                body(self, ui, info, out, inner_h);
+            })
+            .response;
         if drag::hovering_tracks(&resp) {
             ui.painter().rect_stroke(
                 resp.rect,
@@ -543,43 +565,45 @@ impl DeckUi {
         out: &mut Vec<Command>,
     ) {
         self.dims = Dims::FULL;
-        let loading = self.pending.as_ref().map(PendingLoad::info);
-        let info = loading.as_ref().unwrap_or(info);
-        THEME.panel_frame().show(ui, |ui| {
-            ui.set_width(width - 18.0);
-            let inner_h = height - 12.0;
-            ui.set_min_height(inner_h);
-            ui.spacing_mut().item_spacing = vec2(4.0, 5.0);
-            let top = ui.cursor().min.y;
-            self.header(ui, info, out, false);
-            let used = ui.cursor().min.y - top;
-            let overview_h =
-                (inner_h - used - self.dims.controls_h() - ui.spacing().item_spacing.y).max(24.0);
-            self.overview(ui, info, out, overview_h);
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing = vec2(3.0, 4.0);
-                self.transport(ui, out);
-                // Quantise beside the transport, on either page (Rekordbox has it by
-                // the jog).
-                let s = self.state;
-                let r = ui
-                    .add(
-                        HwButton::new("Q", THEME.accent, vec2(24.0, 18.0))
-                            .font(10.0)
-                            .lit(s.quantize),
-                    )
-                    .on_hover_text("Quantise: snap cues, loops and hot cues to the beat");
-                if held(ui, &r) == Some(true) {
-                    self.control(out, DeckControl::Quantize, 1.0);
-                }
-                ui.add_space(6.0);
-                self.page(ui, info, out, false);
-                // The tabs at the row's outer edge, as on the decks.
-                let tabs = TABS_W + ui.spacing().item_spacing.x;
-                ui.add_space((ui.available_width() - tabs).max(6.0));
-                self.page_tabs(ui);
-            });
-        });
+        self.panel(
+            ui,
+            width,
+            height,
+            info,
+            out,
+            |deck, ui, info, out, inner_h| {
+                let top = ui.cursor().min.y;
+                deck.header(ui, info, out, false);
+                let used = ui.cursor().min.y - top;
+                let overview_h =
+                    (inner_h - used - deck.dims.controls_h() - ui.spacing().item_spacing.y)
+                        .max(24.0);
+                deck.overview(ui, info, out, overview_h);
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(3.0, 4.0);
+                    deck.transport(ui, out);
+                    // Quantise beside the transport, on either page (Rekordbox has it by
+                    // the jog).
+                    let s = deck.state;
+                    let r = ui
+                        .add(
+                            HwButton::new("Q", THEME.accent, vec2(24.0, 18.0))
+                                .font(10.0)
+                                .lit(s.quantize),
+                        )
+                        .on_hover_text("Quantise: snap cues, loops and hot cues to the beat");
+                    if held(ui, &r) == Some(true) {
+                        deck.control(out, DeckControl::Quantize, 1.0);
+                    }
+                    ui.add_space(6.0);
+                    deck.page(ui, info, out, false);
+                    // The tabs at the row's outer edge, as on the decks.
+                    let tabs = TABS_W + ui.spacing().item_spacing.x;
+                    ui.add_space((ui.available_width() - tabs).max(6.0));
+                    deck.page_tabs(ui);
+                });
+            },
+        );
     }
 
     /// The deck number, title and times; with `buttons`, also SYNC, ★, Q and KEY (when

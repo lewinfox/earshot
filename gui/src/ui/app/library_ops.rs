@@ -260,10 +260,11 @@ impl EarshotApp {
         &mut self.panels.flow
     }
 
-    /// Prepare's Flow tab.
+    /// Prepare's Flow tab (not while a deck plays: see `set_mode`).
     pub(super) fn show_flow_tab(&mut self) {
-        self.prefs.mode = Mode::Prepare;
-        self.prefs.prepare.tool = Tool::Flow;
+        if self.set_mode(Mode::Prepare) {
+            self.prefs.prepare.tool = Tool::Flow;
+        }
     }
 
     /// Ask for the collections and the Flow that was open last time.
