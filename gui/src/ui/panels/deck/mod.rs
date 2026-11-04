@@ -153,9 +153,24 @@ impl Dims {
         btn_h: 28.0,
     };
 
-    /// CUE and play: circles this wide, one above the other.
+    /// Buttons this tall, for a controls row of whatever height. Widths grow a third
+    /// as fast as heights (which keeps [`Dims::COMPACT`]'s proportions).
+    fn of(btn_h: f32) -> Dims {
+        Dims {
+            btn_h,
+            btn_w: Dims::FULL.btn_w + (btn_h - Dims::FULL.btn_h) / 3.0,
+        }
+    }
+
+    /// The buttons for a controls row `h` tall (the jog ring's height).
+    fn for_row(h: f32) -> Dims {
+        Dims::of((h / JOG_SCALE - 4.0) / 2.0)
+    }
+
+    /// CUE and play: circles this wide, one above the other, as tall as the jog ring
+    /// together.
     fn transport(self) -> f32 {
-        self.btn_h
+        (self.jog() - 4.0) / 2.0
     }
 
     /// The standard heights of a control in the two rows: one row, or both (with the
@@ -184,14 +199,14 @@ impl Dims {
 /// The jog ring against two rows of buttons.
 const JOG_SCALE: f32 = 1.2;
 
-/// A full-size deck panel's height, but for its jog ring's extra ([`jog_room`]).
-pub const PANEL_H: f32 = 198.0;
-
-/// How much taller a deck panel is for its jog ring than for its buttons alone: the
-/// views add it to their decks' heights.
-pub fn jog_room(compact: bool) -> f32 {
-    let d = if compact { Dims::COMPACT } else { Dims::FULL };
-    d.jog() - d.double()
+/// A deck panel's least height, with full-size or compact buttons. Given more, its
+/// controls grow to fill it (the overview keeps its height).
+pub fn min_height(compact: bool) -> f32 {
+    if compact {
+        150.0 + Dims::COMPACT.jog() - Dims::COMPACT.double()
+    } else {
+        198.0 + Dims::FULL.jog() - Dims::FULL.double()
+    }
 }
 
 /// The pages of a player's controls, picked with the tabs on their outer edge (as in
@@ -297,9 +312,9 @@ pub struct DeckUi {
     side: Side,
     /// Its buttons' size, as last drawn.
     dims: Dims,
-    /// Width of the page and CUE / play with full-size buttons, as last drawn: when
-    /// the deck is too narrow for them, it uses the compact ones.
-    full_controls_w: Option<f32>,
+    /// The tallest buttons that fit the deck's width (the width they were found for,
+    /// and their height), once its controls turned out too wide for it.
+    fit: Option<(f32, f32)>,
     bpm_text: String,
     /// The engine's state for this frame.
     state: DeckSnap,
@@ -323,7 +338,7 @@ impl DeckUi {
             controls_w: 0.0,
             side: Side::Left,
             dims: Dims::FULL,
-            full_controls_w: None,
+            fit: None,
             bpm_text: String::new(),
             state: DeckSnap::default(),
             pending: None,
@@ -476,16 +491,21 @@ impl DeckUi {
             tempo_fader,
         } = layout;
         self.side = side;
-        // Compact when asked, or when full-size buttons don't fit in this width: the
-        // frame, the tempo fader, the controls, the tabs and the least gap between.
+        // Buttons as tall as the panel's height allows, but no taller than fit its
+        // width: the frame, the tempo fader, the controls, the tabs and the least gap
+        // between.
         let fader_w = if tempo_fader { TEMPO_W + 8.0 } else { 0.0 };
-        let fits = |controls: f32| 18.0 + fader_w + controls + TABS_W + 3.0 + 6.0 <= width;
-        let squeezed = self.full_controls_w.is_some_and(|c| !fits(c));
-        self.dims = if compact || squeezed {
-            Dims::COMPACT
-        } else {
-            Dims::FULL
-        };
+        let room = width - (18.0 + fader_w + TABS_W + 3.0 + 6.0);
+        let least = if compact { Dims::COMPACT } else { Dims::FULL };
+        let extra = (height - min_height(compact)).max(0.0);
+        let mut btn_h = Dims::for_row(least.controls_h() + extra).btn_h;
+        if self.fit.is_some_and(|(w, _)| w != width) {
+            self.fit = None;
+        }
+        if let Some((_, cap)) = self.fit {
+            btn_h = btn_h.min(cap).max(Dims::COMPACT.btn_h);
+        }
+        self.dims = Dims::of(btn_h);
         self.panel(
             ui,
             width,
@@ -524,13 +544,13 @@ impl DeckUi {
                 });
             },
         );
-        // Full-size controls that turn out not to fit: draw this frame again with
-        // compact ones, so nothing is pushed off the edge.
-        if self.dims == Dims::FULL {
-            self.full_controls_w = Some(self.controls_w);
-            if !fits(self.controls_w) {
-                ui.ctx().request_discard("a deck's controls didn't fit");
-            }
+        // Controls that turn out too wide: draw this frame again with smaller buttons
+        // (in a few steps, as only some of the controls' width scales with them), so
+        // nothing is pushed off the edge.
+        if self.controls_w > room && btn_h > Dims::COMPACT.btn_h {
+            let cap = (btn_h * room / self.controls_w - 1.0).max(Dims::COMPACT.btn_h);
+            self.fit = Some((width, cap));
+            ui.ctx().request_discard("a deck's controls didn't fit");
         }
     }
 
