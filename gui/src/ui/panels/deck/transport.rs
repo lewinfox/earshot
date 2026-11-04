@@ -74,8 +74,6 @@ impl DeckUi {
         let k = d.k;
         let jog = d.jog();
         let (rect, resp) = ui.allocate_exact_size(vec2(jog + d.px(JOG_LEFT), jog), Sense::hover());
-        let resp =
-            resp.on_hover_text("BPM at the current tempo; the tempo change and the fader's range");
         let c = pos2(rect.right() - jog / 2.0, rect.center().y);
         let r = jog / 2.0 - d.px(JOG_ROOM);
         let p = ui.painter();
@@ -116,6 +114,13 @@ impl DeckUi {
         let small_top = top + big.size().y - small.size().y - descent;
         p.galley(pos2(left, top), big.clone(), THEME.text);
         p.galley(pos2(left + big.size().x, small_top), small, THEME.text);
+        // Each part of the ring's text has its own tooltip; the ring itself has none.
+        let bpm_rect = Rect::from_min_size(pos2(left, top), vec2(w, big.size().y));
+        let tip = |rect: Rect, key: &str, text: &str| {
+            ui.interact(rect, resp.id.with(key), Sense::hover())
+                .on_hover_text(text);
+        };
+        tip(bpm_rect, "bpm", "BPM at the current tempo");
         let pct = p.layout_no_wrap(
             format!("{:+.1}%", s.rate * 100.0),
             FontId::monospace(d.px(FONT_TEMPO)),
@@ -129,7 +134,18 @@ impl DeckUi {
         let w = pct.size().x + range.size().x;
         let y = c.y + d.px(TEMPO_DROP);
         p.galley(pos2(c.x - w / 2.0, y), pct.clone(), THEME.muted);
+        let range_size = range.size();
         p.galley(pos2(c.x - w / 2.0 + pct.size().x, y), range, self.colour());
+        tip(
+            Rect::from_min_size(pos2(c.x - w / 2.0, y), pct.size()),
+            "pct",
+            "Tempo change: how far the pitch fader is from the track's own BPM",
+        );
+        tip(
+            Rect::from_min_size(pos2(c.x - w / 2.0 + pct.size().x, y), range_size),
+            "range",
+            "The pitch fader's range",
+        );
         // VINYL: the only part that turns vinyl mode on or off, so a stray click on
         // the ring can't.
         let label = pos2(c.x, top - d.px(VINYL_GAP));
