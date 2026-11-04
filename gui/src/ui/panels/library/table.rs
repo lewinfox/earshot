@@ -813,12 +813,7 @@ impl TrackTable<'_> {
                     for &(c, _) in &shown {
                         row.col(|ui| {
                             if playing {
-                                let gap = ui.spacing().item_spacing.x / 2.0;
-                                ui.painter().rect_filled(
-                                    ui.max_rect().expand2(vec2(gap, 0.0)),
-                                    0.0,
-                                    THEME.ok.gamma_multiply(0.3),
-                                );
+                                ui.visuals_mut().override_text_color = Some(THEME.ok);
                             }
                             let mut cell = Cell {
                                 t,
