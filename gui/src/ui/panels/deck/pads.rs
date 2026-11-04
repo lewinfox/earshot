@@ -2,6 +2,7 @@
 
 use egui::{RichText, Ui, vec2};
 
+use super::design::*;
 use super::{DeckInfo, DeckUi, LabelEdit, LabelTarget};
 use crate::core::bus::DeckControl;
 use crate::core::command::{Command, DeckCmd};
@@ -14,8 +15,9 @@ impl DeckUi {
     /// name it.
     pub(super) fn pads(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
         let shift = ui.input(|i| i.modifiers.shift);
+        let d = self.dims;
         egui::Grid::new(("pads", self.id.index()))
-            .spacing(vec2(3.0, 4.0))
+            .spacing(vec2(d.px(GAP_X), d.px(GAP_Y)))
             .show(ui, |ui| {
                 for row in 0..2 {
                     for col in 0..4 {
@@ -40,9 +42,10 @@ impl DeckUi {
                                 HwButton::new(
                                     &label,
                                     THEME.hotcue[i],
-                                    vec2(self.dims.btn_w, self.dims.btn_h),
+                                    vec2(d.px(BTN_W), d.px(BTN_H)),
                                 )
-                                .font(12.0)
+                                .font(d.px(FONT_PAD))
+                                .caption_font(d.px(FONT_CAPTION))
                                 .caption(name)
                                 .tinted(set.is_some()),
                             )

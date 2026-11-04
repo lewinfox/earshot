@@ -8,6 +8,7 @@ use earshot_engine::stems::{COUNT, NAMES};
 use earshot_engine::{DeckCmd as EngineCmd, Set};
 use egui::{Ui, vec2};
 
+use super::design::*;
 use super::{DeckInfo, DeckUi};
 use crate::core::command::Command;
 use crate::core::stems::StemsCmd;
@@ -31,13 +32,14 @@ pub(super) fn press(on: [bool; COUNT], s: usize) -> [bool; COUNT] {
 
 impl DeckUi {
     pub(super) fn stems(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
-        let w = self.dims.btn_w + 10.0;
+        let d = self.dims;
+        let w = d.px(STEM_W);
         let s = &self.state;
         if !s.stems {
             let Some(track) = s.track_id else {
                 // Nothing loaded: hold the group's place.
                 ui.allocate_exact_size(
-                    vec2(w * 2.0 + 3.0, self.dims.double()),
+                    vec2(w * 2.0 + d.px(GAP_X), d.double()),
                     egui::Sense::hover(),
                 );
                 return;
@@ -45,7 +47,7 @@ impl DeckUi {
             if crate::core::outside::is_outside(track) {
                 // Library tracks only, for now.
                 ui.allocate_exact_size(
-                    vec2(w * 2.0 + 3.0, self.dims.double()),
+                    vec2(w * 2.0 + d.px(GAP_X), d.double()),
                     egui::Sense::hover(),
                 );
                 return;
@@ -62,9 +64,9 @@ impl DeckUi {
                     HwButton::new(
                         &label,
                         THEME.loop_button,
-                        vec2(w * 2.0 + 3.0, self.dims.double()),
+                        vec2(w * 2.0 + d.px(GAP_X), d.double()),
                     )
-                    .font(10.0)
+                    .font(d.px(FONT_LOOP))
                     .lit(job.is_some()),
                 )
                 .on_hover_text(match job {
@@ -84,13 +86,9 @@ impl DeckUi {
                     for i in row {
                         let r = ui
                             .add(
-                                HwButton::new(
-                                    LABELS[i],
-                                    THEME.loop_button,
-                                    vec2(w, self.dims.btn_h),
-                                )
-                                .font(9.0)
-                                .lit(on[i]),
+                                HwButton::new(LABELS[i], THEME.loop_button, vec2(w, d.px(BTN_H)))
+                                    .font(d.px(FONT_STEM))
+                                    .lit(on[i]),
                             )
                             .on_hover_text(NAMES[i]);
                         if r.clicked() {

@@ -20,6 +20,7 @@ use earshot_engine::{DeckCmd as EngineCmd, DeckId, DeckSnap};
 use egui::{Align, Color32, FontId, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Ui, vec2};
 
 mod cue_pane;
+mod design;
 mod grid_editor;
 mod loops;
 mod pads;
@@ -28,6 +29,8 @@ mod tempo;
 mod transport;
 pub mod wave;
 mod waveform;
+
+use design::*;
 
 pub use self::cue_pane::{CUE_PANE_W, CuePane};
 pub use self::waveform::WavePanel;
@@ -136,77 +139,62 @@ const TEMPO_W: f32 = 76.0;
 /// SYNC and ★ over Q and KEY, in the header (without a tempo fader).
 const BUTTONS_W: f32 = TEMPO_W + 6.0;
 
-/// The size of a deck's buttons: full size, or smaller while Perform shows four decks.
+/// The controls row's scale: every size in it is [`design`]'s times `k`, so the row
+/// grows and shrinks as one piece.
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct Dims {
-    btn_w: f32,
-    btn_h: f32,
+    k: f32,
 }
 
 impl Dims {
-    const FULL: Dims = Dims {
-        btn_w: 34.0,
-        btn_h: 40.0,
-    };
-    const COMPACT: Dims = Dims {
-        btn_w: 30.0,
-        btn_h: 28.0,
-    };
+    const FULL: Dims = Dims { k: 1.0 };
 
-    /// Buttons this tall, for a controls row of whatever height. Widths grow a third
-    /// as fast as heights (which keeps [`Dims::COMPACT`]'s proportions).
-    fn of(btn_h: f32) -> Dims {
-        Dims {
-            btn_h,
-            btn_w: Dims::FULL.btn_w + (btn_h - Dims::FULL.btn_h) / 3.0,
-        }
+    /// While Perform shows four decks: the row this tall at least.
+    fn compact() -> Dims {
+        Dims::for_row(COMPACT_ROW)
     }
 
-    /// The buttons for a controls row `h` tall (the jog ring's height).
+    /// The scale for a controls row `h` tall.
     fn for_row(h: f32) -> Dims {
-        Dims::of((h / JOG_SCALE - 4.0) / 2.0)
+        Dims { k: h / row_h() }
     }
 
-    /// CUE and play: circles this wide, one above the other, as tall as the jog ring
-    /// together.
-    fn transport(self) -> f32 {
-        (self.jog() - 4.0) / 2.0
+    /// A design size, scaled.
+    fn px(self, v: f32) -> f32 {
+        v * self.k
     }
 
-    /// The standard heights of a control in the two rows: one row, or both (with the
-    /// gap between them).
+    /// The height of one row of buttons, or both (with the gap between them).
     fn single(self) -> f32 {
-        self.btn_h
+        self.px(design::BTN_H)
     }
 
     fn double(self) -> f32 {
-        2.0 * self.btn_h + 4.0
+        self.px(2.0 * design::BTN_H + design::GAP_Y)
     }
 
-    /// The controls' row: as tall as the jog ring, which is taller than the two rows
-    /// of buttons beside it.
+    /// The controls row: the two rows of buttons, or the jog ring if it's taller.
     fn controls_h(self) -> f32 {
-        self.jog()
+        self.px(row_h())
     }
 
-    /// The jog ring (with the BPM in it): half as tall again as two rows of buttons,
-    /// so the BPM reads from across the booth.
     fn jog(self) -> f32 {
-        JOG_SCALE * self.double()
+        self.px(design::JOG_D)
     }
 }
 
-/// The jog ring against two rows of buttons.
-const JOG_SCALE: f32 = 1.2;
+/// The controls row's height at its design size.
+fn row_h() -> f32 {
+    design::JOG_D.max(2.0 * design::BTN_H + design::GAP_Y)
+}
 
-/// A deck panel's least height, with full-size or compact buttons. Given more, its
-/// controls grow to fill it (the overview keeps its height).
+/// The controls row's least height while Perform shows four decks.
+const COMPACT_ROW: f32 = 60.0;
+
+/// A deck panel's least height, full size or while Perform shows four decks. Given
+/// more, its controls grow to fill it (the overview keeps its height).
 pub fn min_height(compact: bool) -> f32 {
-    if compact {
-        150.0 + Dims::COMPACT.jog() - Dims::COMPACT.double()
-    } else {
-        198.0 + Dims::FULL.jog() - Dims::FULL.double()
-    }
+    if compact { 150.0 } else { 198.0 }
 }
 
 /// The pages of a player's controls, picked with the tabs on their outer edge (as in
@@ -221,9 +209,6 @@ enum Page {
 impl Page {
     const ALL: [Page; 3] = [Page::Player, Page::Grid, Page::Stems];
 }
-
-/// The tab strip's width.
-const TABS_W: f32 = 22.0;
 
 /// What a label being typed belongs to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -312,8 +297,8 @@ pub struct DeckUi {
     side: Side,
     /// Its buttons' size, as last drawn.
     dims: Dims,
-    /// The tallest buttons that fit the deck's width (the width they were found for,
-    /// and their height), once its controls turned out too wide for it.
+    /// The largest scale that fits the deck's width (the width it was found for, and
+    /// the scale), once its controls turned out too wide for it.
     fit: Option<(f32, f32)>,
     bpm_text: String,
     /// The engine's state for this frame.
@@ -491,21 +476,21 @@ impl DeckUi {
             tempo_fader,
         } = layout;
         self.side = side;
-        // Buttons as tall as the panel's height allows, but no taller than fit its
-        // width: the frame, the tempo fader, the controls, the tabs and the least gap
-        // between.
+        // The controls as big as the panel's height allows, but no bigger than fits
+        // its width: the frame, the tempo fader, the controls, the tabs and the least
+        // gap between.
         let fader_w = if tempo_fader { TEMPO_W + 8.0 } else { 0.0 };
-        let room = width - (18.0 + fader_w + TABS_W + 3.0 + 6.0);
-        let least = if compact { Dims::COMPACT } else { Dims::FULL };
+        let least = if compact { Dims::compact() } else { Dims::FULL };
         let extra = (height - min_height(compact)).max(0.0);
-        let mut btn_h = Dims::for_row(least.controls_h() + extra).btn_h;
+        let mut k = Dims::for_row(least.controls_h() + extra).k;
         if self.fit.is_some_and(|(w, _)| w != width) {
             self.fit = None;
         }
+        let floor = Dims::compact().k;
         if let Some((_, cap)) = self.fit {
-            btn_h = btn_h.min(cap).max(Dims::COMPACT.btn_h);
+            k = k.min(cap).max(floor);
         }
-        self.dims = Dims::of(btn_h);
+        self.dims = Dims { k };
         self.panel(
             ui,
             width,
@@ -544,11 +529,13 @@ impl DeckUi {
                 });
             },
         );
-        // Controls that turn out too wide: draw this frame again with smaller buttons
-        // (in a few steps, as only some of the controls' width scales with them), so
-        // nothing is pushed off the edge.
-        if self.controls_w > room && btn_h > Dims::COMPACT.btn_h {
-            let cap = (btn_h * room / self.controls_w - 1.0).max(Dims::COMPACT.btn_h);
+        // Controls that turn out too wide: draw this frame again at the scale that
+        // fits (everything in the row scales with it), so nothing is pushed off the
+        // edge.
+        let fixed = 18.0 + fader_w + 6.0;
+        let tabs = TABS_W + GAP_X;
+        if self.controls_w + k * tabs > width - fixed && k > floor {
+            let cap = ((width - fixed) / (self.controls_w / k + tabs) * 0.995).max(floor);
             self.fit = Some((width, cap));
             ui.ctx().request_discard("a deck's controls didn't fit");
         }
@@ -604,7 +591,8 @@ impl DeckUi {
         info: &DeckInfo,
         out: &mut Vec<Command>,
     ) {
-        self.dims = Dims::FULL;
+        let extra = (height - min_height(false)).max(0.0);
+        self.dims = Dims::for_row(row_h() + extra);
         self.panel(
             ui,
             width,
@@ -619,27 +607,28 @@ impl DeckUi {
                     (inner_h - used - deck.dims.controls_h() - ui.spacing().item_spacing.y)
                         .max(24.0);
                 deck.overview(ui, info, out, overview_h);
+                let d = deck.dims;
                 ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(3.0, 4.0);
+                    ui.spacing_mut().item_spacing = vec2(d.px(GAP_X), d.px(GAP_Y));
                     deck.transport(ui, out);
                     // Quantise beside the transport, on either page (Rekordbox has it by
                     // the jog).
                     let s = deck.state;
                     let r = ui
                         .add(
-                            HwButton::new("Q", THEME.accent, vec2(24.0, 18.0))
-                                .font(10.0)
+                            HwButton::new("Q", THEME.accent, vec2(d.px(Q_W), d.px(Q_H)))
+                                .font(d.px(FONT_Q))
                                 .lit(s.quantize),
                         )
                         .on_hover_text("Quantise: snap cues, loops and hot cues to the beat");
                     if held(ui, &r) == Some(true) {
                         deck.control(out, DeckControl::Quantize, 1.0);
                     }
-                    ui.add_space(6.0);
+                    ui.add_space(d.px(GROUP_GAP));
                     deck.page(ui, info, out, false);
                     // The tabs at the row's outer edge, as on the decks.
-                    let tabs = TABS_W + ui.spacing().item_spacing.x;
-                    ui.add_space((ui.available_width() - tabs).max(6.0));
+                    let tabs = d.px(TABS_W) + ui.spacing().item_spacing.x;
+                    ui.add_space((ui.available_width() - tabs).max(d.px(GROUP_GAP)));
                     deck.page_tabs(ui);
                 });
             },
@@ -742,27 +731,28 @@ impl DeckUi {
     /// outer edge. A left deck's row is right-aligned and mirrored.
     fn controls(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
         let mirrored = self.side == Side::Left;
+        let d = self.dims;
         ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing = vec2(3.0, 4.0);
+            ui.spacing_mut().item_spacing = vec2(d.px(GAP_X), d.px(GAP_Y));
             // The tabs at the deck's outer edge (by the tempo fader); the page and CUE /
             // play against the mixer. The space between takes what's left (the group's
             // width is from last frame).
             let gap = |ui: &mut Ui, group: f32| {
-                let tabs = TABS_W + ui.spacing().item_spacing.x;
-                ui.add_space((ui.available_width() - group - tabs).max(6.0));
+                let tabs = d.px(TABS_W) + ui.spacing().item_spacing.x;
+                ui.add_space((ui.available_width() - group - tabs).max(d.px(GROUP_GAP)));
             };
             if mirrored {
                 self.page_tabs(ui);
                 gap(ui, self.controls_w);
                 let start = ui.cursor().min.x;
                 self.page(ui, info, out, true);
-                ui.add_space(6.0);
+                ui.add_space(d.px(GROUP_GAP));
                 self.transport(ui, out);
                 self.controls_w = ui.cursor().min.x - start;
             } else {
                 let start = ui.cursor().min.x;
                 self.transport(ui, out);
-                ui.add_space(6.0);
+                ui.add_space(d.px(GROUP_GAP));
                 self.page(ui, info, out, false);
                 self.controls_w = ui.cursor().min.x - start;
                 gap(ui, 0.0);
@@ -827,21 +817,22 @@ impl DeckUi {
         mirrored: bool,
         page: Page,
     ) -> f32 {
-        ui.spacing_mut().item_spacing = vec2(3.0, 4.0);
+        let d = self.dims;
+        ui.spacing_mut().item_spacing = vec2(d.px(GAP_X), d.px(GAP_Y));
         let start = ui.cursor().min.x;
         match page {
             Page::Player => {
                 if mirrored {
                     self.jumps(ui, info, out);
-                    ui.add_space(6.0);
+                    ui.add_space(d.px(GROUP_GAP));
                     self.loops(ui, info, out);
-                    ui.add_space(6.0);
+                    ui.add_space(d.px(GROUP_GAP));
                     self.pads(ui, info, out);
                 } else {
                     self.pads(ui, info, out);
-                    ui.add_space(6.0);
+                    ui.add_space(d.px(GROUP_GAP));
                     self.loops(ui, info, out);
-                    ui.add_space(6.0);
+                    ui.add_space(d.px(GROUP_GAP));
                     self.jumps(ui, info, out);
                 }
             }
@@ -855,15 +846,16 @@ impl DeckUi {
     /// controls, the grid editor, or the stems.
     fn page_tabs(&mut self, ui: &mut Ui) {
         let n = Page::ALL.len() as f32;
-        let h = (self.dims.controls_h() - 4.0 * (n - 1.0)) / n;
+        let d = self.dims;
+        let h = (d.controls_h() - d.px(TAB_GAP) * (n - 1.0)) / n;
         ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.spacing_mut().item_spacing.y = d.px(TAB_GAP);
             for (page, tip) in [
                 (Page::Player, "Hot cues, loops and beat jumps"),
                 (Page::Grid, "Edit the beat grid"),
                 (Page::Stems, "Stems: drums, bass, vocals and the rest"),
             ] {
-                let (rect, r) = ui.allocate_exact_size(vec2(TABS_W, h), Sense::click());
+                let (rect, r) = ui.allocate_exact_size(vec2(d.px(TABS_W), h), Sense::click());
                 let on = self.page == page;
                 let hovered = r.hovered();
                 let p = ui.painter();

@@ -3,6 +3,7 @@
 
 use egui::{Ui, vec2};
 
+use super::design::*;
 use super::{DeckInfo, DeckUi};
 use crate::core::bus::{DeckControl, JUMP_STEPS};
 use crate::core::command::Command;
@@ -32,8 +33,8 @@ impl DeckUi {
     ) {
         let r = ui
             .add(
-                HwButton::new(label, THEME.loop_button, vec2(w, self.dims.btn_h))
-                    .font(10.0)
+                HwButton::new(label, THEME.loop_button, vec2(w, self.dims.px(BTN_H)))
+                    .font(self.dims.px(FONT_LOOP))
                     .lit(lit),
             )
             .on_hover_text(tip);
@@ -48,7 +49,8 @@ impl DeckUi {
         let active = self.state.loop_active;
         let size = size_label(info.loop_size);
         // Every button the same width, so the two rows line up.
-        let w = self.dims.btn_w + 10.0 / 3.0;
+        let d = self.dims;
+        let w = d.px(LOOP_W);
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 for (label, control) in [
@@ -61,9 +63,9 @@ impl DeckUi {
                                 HwButton::new(
                                     &format!("⟲ {size}"),
                                     THEME.loop_button,
-                                    vec2(w, self.dims.btn_h),
+                                    vec2(w, d.px(BTN_H)),
                                 )
-                                .font(10.0)
+                                .font(d.px(FONT_LOOP))
                                 .lit(active),
                             )
                             .on_hover_text(format!(
@@ -80,8 +82,8 @@ impl DeckUi {
                     };
                     let r = ui
                         .add(
-                            HwButton::new(label, THEME.loop_button, vec2(w, self.dims.btn_h))
-                                .font(11.0),
+                            HwButton::new(label, THEME.loop_button, vec2(w, d.px(BTN_H)))
+                                .font(d.px(FONT_LOOP_STEP)),
                         )
                         .on_hover_text(format!("{tip} the loop (or the next loop's size)"));
                     if held(ui, &r) == Some(true) {
@@ -124,6 +126,7 @@ impl DeckUi {
     /// Beat jump: ◀ n / n ▶ over the step picker.
     pub(super) fn jumps(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
         let n = size_label(info.jump_size);
+        let d = self.dims;
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 for (label, control, tip) in [
@@ -132,12 +135,8 @@ impl DeckUi {
                 ] {
                     let r = ui
                         .add(
-                            HwButton::new(
-                                &label,
-                                THEME.text,
-                                vec2(self.dims.btn_w + 6.0, self.dims.btn_h),
-                            )
-                            .font(10.0),
+                            HwButton::new(&label, THEME.text, vec2(d.px(JUMP_W), d.px(BTN_H)))
+                                .font(d.px(FONT_JUMP)),
                         )
                         .on_hover_text(format!("{tip} {n} beats"));
                     if let Some(d) = held(ui, &r) {
@@ -151,9 +150,9 @@ impl DeckUi {
                     HwButton::new(
                         &format!("BEAT JUMP {n}"),
                         THEME.text,
-                        vec2(2.0 * (self.dims.btn_w + 6.0) + 3.0, self.dims.btn_h),
+                        vec2(d.px(2.0 * JUMP_W + GAP_X), d.px(BTN_H)),
                     )
-                    .font(10.0),
+                    .font(d.px(FONT_JUMP)),
                 )
                 .on_hover_text("How many beats a jump (← / →) moves");
             egui::Popup::menu(&r).show(|ui| {
