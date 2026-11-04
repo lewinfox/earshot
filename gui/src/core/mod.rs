@@ -23,6 +23,7 @@ pub mod keymap;
 pub mod keys;
 pub mod library;
 pub mod log;
+pub mod memlock;
 pub mod midi;
 pub mod notice;
 pub mod outside;

@@ -280,13 +280,16 @@ fn give(
     if inner.session(deck).generation != generation {
         return;
     }
+    let lock = super::memlock::MemLock::stems(&stems);
     let sent = inner.send(Command::SetStems {
         deck,
         generation,
         stems: Some(stems),
     });
     if sent.is_ok() {
-        inner.session_mut(deck).stem_waves = Some(waves);
+        let session = inner.session_mut(deck);
+        session.stem_waves = Some(waves);
+        session.locks.push(lock);
     }
 }
 

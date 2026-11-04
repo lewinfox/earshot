@@ -35,6 +35,8 @@ pub struct Meter<'a> {
     pub load: Option<f32>,
     /// Frame timing, and the audio callback's: the tooltip.
     pub detail: [&'a str; 2],
+    /// The memory watch's latest reading (`None` until it has one).
+    pub memory: Option<crate::core::log::Memory>,
 }
 
 pub struct TopBar<'a> {
@@ -187,6 +189,8 @@ impl Panel for TopBar<'_> {
                 if ui.button("Keys").clicked() {
                     cx.send(ViewCmd::ToggleModal(Modal::Keys));
                 }
+                self.memory_meter(ui, cx);
+                ui.add_space(6.0);
                 self.cpu_meter(ui, cx);
             });
         });
@@ -223,6 +227,56 @@ impl TopBar<'_> {
         };
         r.on_hover_text(tip);
         ui.label(RichText::new("CPU").size(fs(11.0)));
+    }
+
+    /// "MEM" and a bar: the machine's RAM in use. Amber when it's low (little free,
+    /// or the swap mostly used), red when it's stalling for memory (swapping hard,
+    /// which can stall the audio).
+    fn memory_meter(&self, ui: &mut Ui, cx: &mut Cx) {
+        let t = cx.theme;
+        let mem = self.hud.memory;
+        let (rect, r) = ui.allocate_exact_size(egui::vec2(60.0, 10.0), egui::Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(rect, 2.0, t.line);
+        if let Some(m) = mem {
+            let colour = if m.stalled() {
+                t.bad
+            } else if m.low() {
+                t.warn
+            } else {
+                t.ok
+            };
+            let mut fill = rect;
+            fill.set_width(rect.width() * m.used().clamp(0.02, 1.0));
+            p.rect_filled(fill, 2.0, colour);
+        }
+        let mb = |b: u64| b >> 20;
+        let tip = match mem {
+            Some(m) => {
+                let mut tip = format!(
+                    "Memory: {} of {} MB in use; swap {} of {} MB
+\
+                     Earshot: {} MB ({} MB of deck audio kept in RAM)",
+                    mb(m.total - m.available.min(m.total)),
+                    mb(m.total),
+                    mb(m.swap_total - m.swap_free.min(m.swap_total)),
+                    mb(m.swap_total),
+                    mb(m.ours),
+                    mb(m.locked),
+                );
+                if m.stalled() {
+                    tip += &format!(
+                        "\nThe system is waiting for memory {:.0} % of the time: \
+                         close something",
+                        m.stall
+                    );
+                }
+                tip
+            }
+            None => "Memory: not measured".into(),
+        };
+        r.on_hover_text(tip);
+        ui.label(RichText::new("MEM").size(fs(11.0)));
     }
 
     /// "3 jobs", with a spinner, while any run or wait; clicked, a dropdown with a

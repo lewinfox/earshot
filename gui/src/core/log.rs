@@ -20,12 +20,18 @@ static LOG: OnceLock<(Mutex<File>, Instant)> = OnceLock::new();
 /// The terminal stderr was, once it's copied to the log.
 static TERMINAL: OnceLock<Mutex<File>> = OnceLock::new();
 
+/// The memory watch's latest reading (see [`memory`]).
+static LATEST: Mutex<Option<Memory>> = Mutex::new(None);
+
 /// How many logs to keep.
 const KEEP: usize = 20;
 /// The app's memory growth worth a line.
 const STEP: u64 = 512 << 20;
 /// Free memory below this is worth a line (once a minute at most).
 const LOW: u64 = 1 << 30;
+/// Stalled for memory this share of the time (percent) is worth a line (twice a
+/// minute at most).
+const STALL: f64 = 5.0;
 
 /// Start logging into `data_dir/logs`. Returns the log's path, or why not.
 pub fn start(data_dir: &Path) -> Result<PathBuf, String> {
@@ -155,17 +161,68 @@ fn install_panic_hook() {
     }));
 }
 
-/// Every 10 s: a line when the app has grown by another `STEP`, or when the machine
-/// is low on memory.
+/// Memory, as the watch last read it (bytes, and percent for `stall`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Memory {
+    /// Earshot's resident memory, and how much of it is kept in RAM (`core::memlock`).
+    pub ours: u64,
+    pub locked: u64,
+    pub total: u64,
+    pub available: u64,
+    pub swap_total: u64,
+    pub swap_free: u64,
+    /// The share of the last 10 s every task waited for memory.
+    pub stall: f64,
+}
+
+impl Memory {
+    /// RAM in use, 0..1.
+    pub fn used(&self) -> f32 {
+        if self.total == 0 {
+            return 0.0;
+        }
+        (1.0 - self.available as f64 / self.total as f64) as f32
+    }
+
+    /// Low on memory: little RAM free, or most of the swap used.
+    pub fn low(&self) -> bool {
+        self.available < LOW || (self.swap_total > 0 && self.swap_free < self.swap_total / 4)
+    }
+
+    /// Stalling for memory: swapping hard.
+    pub fn stalled(&self) -> bool {
+        self.stall >= STALL
+    }
+}
+
+/// The memory watch's latest reading, if it's running (every 2 s).
+pub fn memory() -> Option<Memory> {
+    *LATEST.lock().unwrap()
+}
+
+/// Every 2 s: a reading for [`memory`]. A line in the log when the app has grown by
+/// another `STEP`, when the machine is low on memory (once a minute at most), or when
+/// it's stalling for memory (swapping hard: what can get the audio thread killed).
 fn watch_memory() {
     let _ = std::thread::Builder::new()
         .name("earshot-memwatch".into())
         .spawn(|| {
             let mut logged = 0;
             let mut low_at: Option<Instant> = None;
+            let mut stall_at: Option<Instant> = None;
             loop {
                 let ours = status_kb("/proc/self/status", "VmRSS:").unwrap_or(0) * 1024;
                 let free = status_kb("/proc/meminfo", "MemAvailable:").map(|kb| kb * 1024);
+                let info = |k: &str| status_kb("/proc/meminfo", k).unwrap_or(0) * 1024;
+                *LATEST.lock().unwrap() = Some(Memory {
+                    ours,
+                    locked: status_kb("/proc/self/status", "VmLck:").unwrap_or(0) * 1024,
+                    total: info("MemTotal:"),
+                    available: free.unwrap_or(0),
+                    swap_total: info("SwapTotal:"),
+                    swap_free: info("SwapFree:"),
+                    stall: memory_stall().unwrap_or(0.0),
+                });
                 if ours >= logged + STEP {
                     logged = ours - ours % STEP;
                     eprintln!("memory: earshot uses {} MB", ours >> 20);
@@ -180,9 +237,35 @@ fn watch_memory() {
                         ours >> 20
                     );
                 }
-                std::thread::sleep(Duration::from_secs(10));
+                if let Some(stalled) = memory_stall().filter(|p| *p >= STALL)
+                    && stall_at.is_none_or(|t| t.elapsed() > Duration::from_secs(30))
+                {
+                    stall_at = Some(Instant::now());
+                    let mb = |k: &str| status_kb("/proc/meminfo", k).map_or(0, |kb| kb >> 10);
+                    eprintln!(
+                        "memory: the system is stalled for memory {stalled:.0}% of the time \
+                         ({} MB free, {} MB of swap free; earshot uses {} MB)",
+                        mb("MemAvailable:"),
+                        mb("SwapFree:"),
+                        ours >> 20
+                    );
+                }
+                std::thread::sleep(Duration::from_secs(2));
             }
         });
+}
+
+/// The share of the last 10 s (percent) every task was stalled waiting for memory
+/// (Linux's pressure stall information; `None` without it).
+fn memory_stall() -> Option<f64> {
+    std::fs::read_to_string("/proc/pressure/memory")
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix("full "))?
+        .split_whitespace()
+        .find_map(|f| f.strip_prefix("avg10="))?
+        .parse()
+        .ok()
 }
 
 /// A `key: <n> kB` line's number from a /proc file.

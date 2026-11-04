@@ -915,6 +915,7 @@ impl EarshotApp {
                     hud: Meter {
                         load: self.hud.load,
                         detail: [&self.hud.text, &self.hud.audio],
+                        memory: crate::core::log::memory(),
                     },
                     undo: self.edits.next_undo().map(|e| e.label()),
                     redo: self.edits.next_redo().map(|e| e.label()),
