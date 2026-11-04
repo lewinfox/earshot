@@ -32,9 +32,13 @@ pub struct UiPrefs {
     pub auto_hide_mixer: bool,
     /// What the decks' stem buttons do.
     pub stem_mode: StemMode,
-    /// A MIDI controller is connected (not kept).
+    /// A MIDI controller is connected (not kept). Read [`UiPrefs::controller`], which
+    /// counts a pretend one too.
     #[serde(skip)]
     pub controller: bool,
+    /// Act as though a controller is connected (Menu > Debug), to see and build the
+    /// controller layout without one.
+    pub pretend_controller: bool,
     /// The mixer, while a controller hides it: shown again by hand. Not kept: each
     /// time a controller connects it starts hidden.
     #[serde(skip)]
@@ -67,6 +71,7 @@ impl Default for UiPrefs {
             auto_hide_mixer: true,
             stem_mode: StemMode::default(),
             controller: false,
+            pretend_controller: false,
             mixer_with_controller: false,
         }
     }
@@ -87,9 +92,15 @@ impl UiPrefs {
         }
     }
 
+    /// A controller is connected, or one is pretended: the whole app lays itself out
+    /// for one (the decks' pads, the mixer).
+    pub fn controller(&self) -> bool {
+        self.controller || self.pretend_controller
+    }
+
     /// The connected controller decides whether the mixer shows (Settings > Decks).
     fn mixer_hidden_by_controller(&self) -> bool {
-        self.auto_hide_mixer && self.controller
+        self.auto_hide_mixer && self.controller()
     }
 
     /// Show or hide the mixer: for now, while a controller hides it; else from now on.
@@ -103,10 +114,23 @@ impl UiPrefs {
 
     /// A controller was connected or disconnected (`true`: one is there now).
     pub fn set_controller(&mut self, connected: bool) {
-        if connected && !self.controller {
+        let was = self.controller();
+        self.controller = connected;
+        self.controller_changed(was);
+    }
+
+    /// Pretend a controller is connected, or stop.
+    pub fn set_pretend_controller(&mut self, on: bool) {
+        let was = self.controller();
+        self.pretend_controller = on;
+        self.controller_changed(was);
+    }
+
+    /// Each time one (real or pretend) comes, the mixer starts hidden.
+    fn controller_changed(&mut self, was: bool) {
+        if self.controller() && !was {
             self.mixer_with_controller = false;
         }
-        self.controller = connected;
     }
 
     pub fn layout(&self) -> &Layout {

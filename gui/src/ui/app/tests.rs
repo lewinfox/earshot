@@ -781,6 +781,39 @@ fn decks_stay_inside_the_window() {
     }
 }
 
+/// With a controller (here a pretend one, from Menu > Debug) the player page shows the
+/// controller's pads instead of the on-screen hot cues, loops and jumps, and the mixer
+/// hides; without, they're back.
+#[test]
+fn a_controller_swaps_the_pads_for_its_own() {
+    let mut h = start("pretend-controller");
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Perform).into());
+    steps(&mut h, 3);
+    let on_screen = |h: &H| h.query_all_by_label("BEAT JUMP 4").count() > 0;
+    let pads = |h: &H| h.query_all_by_label("Pad 1").count() > 0;
+    let mixer = |h: &H| h.query_all_by_label("Gain").count() > 0;
+    assert!(on_screen(&h) && !pads(&h) && mixer(&h));
+    h.state_mut()
+        .dispatch(ViewCmd::PretendController(true).into());
+    steps(&mut h, 5);
+    assert!(h.state().prefs.controller());
+    assert!(!on_screen(&h) && !mixer(&h));
+    render(&mut h, "controller-pads");
+    // Its tabs switch in place too: CUE doesn't move.
+    let cue = |h: &H| h.get_all_by_label("CUE").map(|n| n.rect()).collect::<Vec<_>>();
+    let before = cue(&h);
+    for tab in ["Grid controls", "Stem controls", "Player controls"] {
+        h.get_all_by_label(tab).next().unwrap().click();
+        steps(&mut h, 5);
+        assert_eq!(cue(&h), before, "{tab}");
+    }
+    h.state_mut()
+        .dispatch(ViewCmd::PretendController(false).into());
+    steps(&mut h, 5);
+    assert!(on_screen(&h) && !pads(&h) && mixer(&h));
+}
+
 /// Perform's mixer hides from the top bar's Mixer switch, and while a controller is connected
 /// (unless Settings says not to); it starts hidden each time one connects.
 #[test]

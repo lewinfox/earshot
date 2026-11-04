@@ -19,6 +19,7 @@ use earshot_engine::{DeckCmd as EngineCmd, DeckId, DeckSnap};
 
 use egui::{Align, Color32, FontId, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Ui, vec2};
 
+mod controller_pads;
 mod cue_pane;
 mod design;
 mod grid_editor;
@@ -288,12 +289,22 @@ pub struct DeckUi {
     stem_waves: Option<(Arc<crate::core::stems::StemWaves>, Vec<DeckWave>)>,
     /// What its stem buttons do (the setting, each frame).
     pub stem_mode: crate::core::view::StemMode,
+    /// A controller is connected (or pretended), each frame: the player page shows
+    /// the controller's pads instead of the on-screen hot cues, loops and jumps.
+    pub controller: bool,
     /// What the controls between the tabs and CUE / play show.
     page: Page,
     /// Each page's width (player, grid) at `page_dims`, measured once, so the box is
     /// as wide as the wider page and switching doesn't move anything.
     page_widths: [Option<f32>; 3],
     page_dims: Dims,
+    /// `controller` when they were measured (the player page differs with one).
+    page_controller: bool,
+    /// Room to spare beside the page box this frame, which it takes with a controller.
+    page_spare: f32,
+    /// The page box's width while the page shown is drawn (`None` while a hidden page
+    /// is measured): what a page that fills it fills.
+    page_box: Option<f32>,
     /// Width of the page and CUE / play last frame, to keep a left deck's against
     /// the mixer.
     controls_w: f32,
@@ -323,9 +334,13 @@ impl DeckUi {
             wave: None,
             stem_waves: None,
             stem_mode: Default::default(),
+            controller: false,
             page: Page::Player,
             page_widths: [None; 3],
             page_dims: Dims::FULL,
+            page_controller: false,
+            page_spare: 0.0,
+            page_box: None,
             controls_w: 0.0,
             side: Side::Left,
             dims: Dims::FULL,
@@ -733,20 +748,31 @@ impl DeckUi {
                 let tabs = d.px(TABS_W) + ui.spacing().item_spacing.x;
                 ui.add_space((ui.available_width() - group - tabs).max(d.px(GROUP_GAP)));
             };
+            // With a controller the page box takes the room to spare too, for the pads
+            // (`controls_w` stays the controls' own width, which the deck's fit goes by).
+            self.page_spare = if self.controller {
+                let tabs = d.px(TABS_W) + ui.spacing().item_spacing.x;
+                (ui.available_width() - tabs - self.controls_w - d.px(GROUP_GAP))
+                    .max(0.0)
+                    .floor()
+            } else {
+                0.0
+            };
+            let spare = self.page_spare;
             if mirrored {
                 self.page_tabs(ui);
-                gap(ui, self.controls_w);
+                gap(ui, self.controls_w + spare);
                 let start = ui.cursor().min.x;
                 self.page(ui, info, out, true);
                 ui.add_space(d.px(GROUP_GAP));
                 self.transport(ui, out);
-                self.controls_w = ui.cursor().min.x - start;
+                self.controls_w = ui.cursor().min.x - start - spare;
             } else {
                 let start = ui.cursor().min.x;
                 self.transport(ui, out);
                 ui.add_space(d.px(GROUP_GAP));
                 self.page(ui, info, out, false);
-                self.controls_w = ui.cursor().min.x - start;
+                self.controls_w = ui.cursor().min.x - start - spare;
                 gap(ui, 0.0);
                 self.page_tabs(ui);
             }
@@ -757,8 +783,9 @@ impl DeckUi {
     /// as the controls) so switching doesn't move or resize anything. `mirrored`: the
     /// player page's groups run the other way (a left deck).
     fn page(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>, mirrored: bool) {
-        if self.page_dims != self.dims {
+        if self.page_dims != self.dims || self.page_controller != self.controller {
             self.page_dims = self.dims;
+            self.page_controller = self.controller;
             self.page_widths = [None; 3];
         }
         let h = self.dims.double();
@@ -785,15 +812,23 @@ impl DeckUi {
             .iter()
             .flatten()
             .fold(0.0, |a: f32, b| a.max(*b));
-        let size = vec2(width, h);
+        let size = vec2(width + self.page_spare, h);
         let page = self.page;
+        self.page_box = Some(size.x);
         let used = ui
             .allocate_ui_with_layout(size, Layout::left_to_right(Align::Min), |ui| {
                 ui.set_min_size(size);
-                ui.set_max_height(h);
+                ui.set_max_size(size);
                 self.page_contents(ui, info, out, mirrored, page)
             })
             .inner;
+        self.page_box = None;
+        // The box's own share of it: what the page needs, without the room to spare.
+        let used = if used > width {
+            width.max(used - self.page_spare)
+        } else {
+            used
+        };
         // Never narrower than measured before (a hidden measure can come out a little
         // wider than the page drawn): the box mustn't shrink under the tabs.
         let known = self.page_widths[page as usize].unwrap_or(0.0);
@@ -813,6 +848,7 @@ impl DeckUi {
         ui.spacing_mut().item_spacing = vec2(d.px(GAP_X), d.px(GAP_Y));
         let start = ui.cursor().min.x;
         match page {
+            Page::Player if self.controller => self.controller_pads(ui, info, out),
             Page::Player => {
                 if mirrored {
                     self.jumps(ui, info, out);

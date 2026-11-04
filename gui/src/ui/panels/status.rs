@@ -92,6 +92,20 @@ impl Panel for TopBar<'_> {
                         }
                     });
                 });
+                ui.menu_button("Debug", |ui| {
+                    let mut pretend = cx.prefs.pretend_controller;
+                    if ui
+                        .checkbox(&mut pretend, "Pretend a controller is connected")
+                        .on_hover_text(
+                            "Lay the app out as it is with a controller (the decks' pads, \
+                             the mixer), without one",
+                        )
+                        .changed()
+                    {
+                        cx.send(ViewCmd::PretendController(pretend));
+                        ui.close();
+                    }
+                });
             });
             if cx.prefs.mode == Mode::Prepare {
                 ui.menu_button("Edit", |ui| {

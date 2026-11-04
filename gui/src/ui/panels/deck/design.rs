@@ -26,6 +26,8 @@ pub const JUMP_W: f32 = 40.0;
 /// The grid page: the BPM row's buttons (its BPM box is two wide) and the nudges.
 pub const GRID_W: f32 = 38.0;
 pub const NUDGE_W: f32 = 57.0;
+/// A controller's performance pad (4 by 2): wider than a hot cue pad, for its label.
+pub const PAD_W: f32 = 56.0;
 /// A stem, two by two: its waveform (at least this wide; it takes the page's spare
 /// width), level knob and button, a button high.
 pub const STEM_W: f32 = 44.0;

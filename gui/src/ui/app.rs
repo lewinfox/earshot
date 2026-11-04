@@ -763,6 +763,7 @@ impl EarshotApp {
             ViewCmd::ShowMixer(show) => self.prefs.set_mixer(show),
             ViewCmd::AutoHideMixer(on) => self.prefs.auto_hide_mixer = on,
             ViewCmd::StemMode(m) => self.prefs.stem_mode = m,
+            ViewCmd::PretendController(on) => self.prefs.set_pretend_controller(on),
             ViewCmd::UiScale(z) => {
                 self.prefs.ui_scale = z;
                 theme::set_text_scale(&self.ctx, z);

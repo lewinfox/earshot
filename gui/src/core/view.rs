@@ -169,6 +169,8 @@ pub enum ViewCmd {
     AutoHideMixer(bool),
     /// What the decks' stem buttons do.
     StemMode(StemMode),
+    /// Act as though a controller is connected.
+    PretendController(bool),
 }
 
 /// The parts of a view that can be resized.
