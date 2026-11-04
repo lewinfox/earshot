@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use egui::{Align, Color32, CornerRadius, RichText, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Align, Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use egui_extras::{Column, TableBuilder};
 use serde::{Deserialize, Serialize};
 
@@ -776,6 +776,7 @@ impl TrackTable<'_> {
         let mut widths: Vec<(ColumnId, f32)> = vec![];
         let mut acts: Vec<RowAct> = vec![];
         let mut row_rects: Vec<(usize, egui::Rect)> = vec![];
+        let mut outlines: Vec<(egui::Rect, Color32)> = vec![];
         let two_lines = row_height > 30.0;
         // Rows (and the waveforms in them) grow with the text.
         let row_height = fs(row_height);
@@ -809,12 +810,9 @@ impl TrackTable<'_> {
                     let tid = rows[i];
                     let Some(t) = v.lib.get(tid) else { return };
                     row.set_selected(show_selection && sel.contains(tid));
-                    let playing = v.playing.contains(&tid);
+                    let loaded_on = v.loaded.iter().find(|l| l.0 == tid).map(|l| l.1);
                     for &(c, _) in &shown {
                         row.col(|ui| {
-                            if playing {
-                                ui.visuals_mut().override_text_color = Some(THEME.ok);
-                            }
                             let mut cell = Cell {
                                 t,
                                 v: *v,
@@ -831,6 +829,9 @@ impl TrackTable<'_> {
                     }
                     let resp = row.response();
                     row_rects.push((i, resp.rect));
+                    if let Some(d) = loaded_on {
+                        outlines.push((resp.rect, THEME.deck_colour(d)));
+                    }
                     if resp.clicked() {
                         let m = resp.ctx.input(|i| i.modifiers);
                         acts.push(RowAct::Click(
@@ -864,6 +865,11 @@ impl TrackTable<'_> {
                 });
             });
         let area = body.inner_rect;
+        // The tracks on a player: outlined in its colour, over the rows.
+        let p = ui.painter().with_clip_rect(area);
+        for (rect, colour) in outlines {
+            p.rect_stroke(rect, 2.0, Stroke::new(1.5_f32, colour), StrokeKind::Inside);
+        }
 
         // The header's changes.
         if let Some(s) = menu_state.filter(|s| *s != state_now) {

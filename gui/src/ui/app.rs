@@ -854,7 +854,7 @@ impl EarshotApp {
             decks: self.prefs.decks().len(),
             drives: &self.drives,
             uses: &self.uses,
-            playing: &[],
+            loaded: &[],
         };
         lib.suggest
             .refresh(&view, &decks, prepare.as_ref(), selected);
@@ -867,14 +867,18 @@ impl EarshotApp {
             ctx.request_repaint_after(next.saturating_duration_since(Instant::now()));
         }
         let mut out: Vec<Command> = vec![];
-        // The decks and Prepare's player.
-        let mut players = self.decks_now();
-        players.push(self.deck_now(DeckId::PREPARE));
-        let playing: Vec<i64> = players
-            .into_iter()
-            .filter(|d| d.playing)
-            .filter_map(|d| d.track)
-            .collect();
+        // What's on the decks shown, and on Prepare's player in Prepare.
+        let mut players = self.prefs.decks();
+        if self.prefs.mode == Mode::Prepare {
+            players = vec![DeckId::PREPARE];
+        }
+        let loaded: Vec<(i64, DeckId)> = {
+            let p = self.player.lock().unwrap();
+            players
+                .into_iter()
+                .filter_map(|d| p.session(d).track_id.map(|t| (t, d)))
+                .collect()
+        };
         let mut cx = Cx {
             core: CoreView {
                 lib: &self.index,
@@ -884,7 +888,7 @@ impl EarshotApp {
                 decks: self.prefs.decks().len(),
                 drives: &self.drives,
                 uses: &self.uses,
-                playing: &playing,
+                loaded: &loaded,
             },
             engine: &self.frame,
             theme: &THEME,

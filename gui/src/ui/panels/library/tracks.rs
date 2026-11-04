@@ -81,15 +81,11 @@ fn art_wanted() -> egui::Id {
 
 // ---- cells -------------------------------------------------------------------------
 
-/// The title (dimmed once played this session), and the artist under it when
+/// The title (green once played this session), and the artist under it when
 /// `two_lines`.
 pub fn title_cell(ui: &mut Ui, t: &Track, played: bool, two_lines: bool) {
     let title = RichText::new(&t.title);
-    let title = if played {
-        title.color(THEME.muted)
-    } else {
-        title
-    };
+    let title = if played { title.color(THEME.ok) } else { title };
     if !two_lines {
         ui.add(egui::Label::new(title).truncate().selectable(false));
         return;
