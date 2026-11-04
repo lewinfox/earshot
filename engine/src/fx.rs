@@ -33,6 +33,15 @@ const ECHO_HIGH_CUT_HZ: f64 = 7000.0;
 /// Seconds for the echo time to follow a new length or tempo. It glides, so a change
 /// bends the repeats' pitch a little rather than clicking.
 const ECHO_GLIDE_SECS: f64 = 0.08;
+/// The echo keeps the mix no louder than the dry input: both are measured over about
+/// this long (seconds), and the whole output turned down to match when it's louder.
+/// Down quickly, back up slowly.
+const ECHO_MATCH_SECS: f64 = 0.4;
+const ECHO_DUCK_SECS: f64 = 0.05;
+const ECHO_RECOVER_SECS: f64 = 0.5;
+/// Dry input quieter than this (mean square, about -60 dBFS) doesn't hold the echo
+/// down: in a break, or after the music stops, the tail rings out as it is.
+const ECHO_DRY_FLOOR: f64 = 1e-6;
 /// Below this the echo's tail counts as gone.
 const SILENT: f32 = 1e-5;
 
@@ -246,6 +255,14 @@ struct Echo {
     /// nothing going in, the tail is over.
     quiet: usize,
     running: bool,
+    /// Mean square of the dry input and of the output, and the gain keeping the
+    /// output no louder than the input, with their easing rates.
+    dry_ms: f64,
+    out_ms: f64,
+    gain: f64,
+    k_match: f64,
+    k_duck: f64,
+    k_recover: f64,
 }
 
 impl Echo {
@@ -261,6 +278,12 @@ impl Echo {
             low_cut: OnePole::new(ECHO_LOW_CUT_HZ, sr),
             quiet: 0,
             running: false,
+            dry_ms: 0.0,
+            out_ms: 0.0,
+            gain: 1.0,
+            k_match: dsp::ease_per_sample(ECHO_MATCH_SECS, sr),
+            k_duck: dsp::ease_per_sample(ECHO_DUCK_SECS, sr),
+            k_recover: dsp::ease_per_sample(ECHO_RECOVER_SECS, sr),
         }
     }
 
@@ -295,6 +318,8 @@ impl Echo {
         for f in 0..n {
             let (s, g) = c.next();
             let d = self.delay.next(self.glide);
+            let mut mixed = [0.0; 2];
+            let (mut dry_sq, mut out_sq) = (0.0, 0.0);
             for ch in 0..2 {
                 let x = buf[2 * f + ch] as f64;
                 let wet = self.read(d, ch);
@@ -303,9 +328,29 @@ impl Echo {
                 let fb = dull - self.low_cut.run(ch, dull);
                 let w = 2 * (self.write & self.mask) + ch;
                 self.line[w] = (x * s + fb * ECHO_FEEDBACK) as f32;
-                let y = (wet * g) as f32;
-                peak = peak.max(y.abs());
-                buf[2 * f + ch] = (x + wet * g) as f32;
+                peak = peak.max((wet * g).abs() as f32);
+                mixed[ch] = x + wet * g;
+                dry_sq += x * x;
+                out_sq += mixed[ch] * mixed[ch];
+            }
+            // Repeats land on later beats and pile up: keep the whole no louder than
+            // the dry input (while there is one), so the echo is heard, not a jump in
+            // level.
+            self.dry_ms += (dry_sq - self.dry_ms) * self.k_match;
+            self.out_ms += (out_sq - self.out_ms) * self.k_match;
+            let target = if self.dry_ms > ECHO_DRY_FLOOR && self.out_ms > self.dry_ms {
+                (self.dry_ms / self.out_ms).sqrt()
+            } else {
+                1.0
+            };
+            let k = if target < self.gain {
+                self.k_duck
+            } else {
+                self.k_recover
+            };
+            self.gain += (target - self.gain) * k;
+            for ch in 0..2 {
+                buf[2 * f + ch] = (mixed[ch] * self.gain) as f32;
             }
             self.write = self.write.wrapping_add(1);
         }
@@ -326,6 +371,10 @@ impl Echo {
         self.quiet = 0;
         self.high_cut.z = [0.0; 2];
         self.low_cut.z = [0.0; 2];
+        // Off and silent, the output was the input: start the next one level.
+        self.dry_ms = 0.0;
+        self.out_ms = 0.0;
+        self.gain = 1.0;
     }
 }
 
@@ -526,6 +575,32 @@ mod tests {
         // Given long enough it dies away and stops running.
         run(&mut u, (SR * 12.0) as usize, |_| 0.0);
         assert!(!u.busy());
+    }
+
+    /// On music the repeats land on later beats and pile up; the echo turns the whole
+    /// down so it's no louder than the track without it.
+    #[test]
+    fn echo_doesnt_make_the_track_louder() {
+        let mut u = unit(FxKind::Echo, 1.0, 1.0);
+        // A kick-like thump every beat (120 BPM), for 8 s.
+        let beat = (SR * 0.5) as usize;
+        let thump = |f: usize| {
+            let t = (f % beat) as f32 / SR as f32;
+            (t * 60.0 * std::f32::consts::TAU).sin() * (-t * 12.0).exp() * 0.8
+        };
+        let n = (SR * 8.0) as usize;
+        let out = run(&mut u, n, thump);
+        let rms = |s: &mut dyn Iterator<Item = f32>| {
+            let v: Vec<f32> = s.collect();
+            (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt()
+        };
+        // The last 4 s, once the repeats have built up.
+        let dry = rms(&mut (n / 2..n).map(thump));
+        let wet = rms(&mut out[n / 2..].iter().copied());
+        assert!(wet <= dry * 1.06, "{wet} vs dry {dry}");
+        // And the echo is still in it: it isn't just the dry.
+        let diff = rms(&mut (n / 2..n).map(|f| out[f] - thump(f)));
+        assert!(diff > dry * 0.1, "{diff}");
     }
 
     #[test]

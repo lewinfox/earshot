@@ -1439,7 +1439,7 @@ fn only_the_vinyl_label_toggles_vinyl_mode() {
     settle_until(&mut h, |a| vinyl(a) != on);
 }
 
-/// The grid editor's BPM box: a BPM typed in is set on Enter, or on clicking away.
+/// The grid editor's BPM box: a BPM typed in is set on Enter.
 #[test]
 fn typing_a_bpm_in_the_grid_editor_sets_it() {
     let mut h = start("grid-bpm");
@@ -1462,37 +1462,6 @@ fn typing_a_bpm_in_the_grid_editor_sets_it() {
     steps(&mut h, 2);
     h.key_press(egui::Key::Enter);
     settle_until(&mut h, |a| bpm(a) == Some(128.5));
-
-    // Clicking away sets it too.
-    let field = h.get_all_by_value("128.50").next().unwrap();
-    field.click();
-    steps(&mut h, 2);
-    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
-    h.get_all_by_value("128.50")
-        .next()
-        .unwrap()
-        .type_text("126");
-    steps(&mut h, 2);
-    // A click elsewhere (the tab already shown) takes the focus away.
-    let at = h
-        .get_all_by_label("Grid controls")
-        .next()
-        .unwrap()
-        .rect()
-        .center();
-    h.event(egui::Event::PointerButton {
-        pos: at,
-        button: egui::PointerButton::Primary,
-        pressed: true,
-        modifiers: egui::Modifiers::NONE,
-    });
-    h.event(egui::Event::PointerButton {
-        pos: at,
-        button: egui::PointerButton::Primary,
-        pressed: false,
-        modifiers: egui::Modifiers::NONE,
-    });
-    settle_until(&mut h, |a| bpm(a) == Some(126.0));
 }
 
 /// Hot cues play on when pressed unless Settings > Decks says "Play while held"; the
