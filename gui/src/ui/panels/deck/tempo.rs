@@ -168,7 +168,7 @@ impl DeckUi {
             }
             let r = ui
                 .add(
-                    HwButton::new("KEY", THEME.accent, vec2(TEMPO_W - 28.0, 18.0))
+                    HwButton::new("KEYLOCK", THEME.accent, vec2(TEMPO_W - 28.0, 18.0))
                         .font(9.0)
                         .lit(s.keylock),
                 )

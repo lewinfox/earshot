@@ -91,8 +91,7 @@ fn unit_row(ui: &mut Ui, shared: Option<&EngineSnapshot>, unit: usize, out: &mut
         }
     }
 
-    let r = button(ui, "◀", STEP)
-        .on_hover_text("Halve the length: the echo's repeats, the Trans cuts come twice as often");
+    let r = button(ui, "◀", STEP).on_hover_text("Halve effect length");
     press(ui, &r, FxControl::BeatsDown, out);
     ui.add_sized(
         vec2(BEATS_W, H),
@@ -102,8 +101,8 @@ fn unit_row(ui: &mut Ui, shared: Option<&EngineSnapshot>, unit: usize, out: &mut
                 .color(THEME.text),
         ),
     )
-    .on_hover_text("The length, in beats");
-    let r = button(ui, "▶", STEP).on_hover_text("Double the length");
+    .on_hover_text("Effect length, in beats");
+    let r = button(ui, "▶", STEP).on_hover_text("Double effect length");
     press(ui, &r, FxControl::BeatsUp, out);
 
     bound(ui, shared, fx(FxControl::Level), out, |ui, range, v| {
