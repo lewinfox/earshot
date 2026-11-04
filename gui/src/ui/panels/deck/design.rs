@@ -26,8 +26,11 @@ pub const JUMP_W: f32 = 40.0;
 /// The grid page: the BPM row's buttons (its BPM box is two wide) and the nudges.
 pub const GRID_W: f32 = 38.0;
 pub const NUDGE_W: f32 = 57.0;
-/// A stem's button (two by two).
+/// A stem, two by two: its waveform (at least this wide; it takes the page's spare
+/// width), level knob and button, a button high.
 pub const STEM_W: f32 = 44.0;
+pub const STEM_KNOB_D: f32 = 30.0;
+pub const STEM_WAVE_MIN: f32 = 60.0;
 
 // ---- CUE / play and the jog ring ----
 /// CUE and play: circles, one above the other.

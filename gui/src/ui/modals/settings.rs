@@ -9,7 +9,7 @@ use super::ModalEnv;
 use super::audio::AudioUi;
 use crate::core::command::{AppCmd, Command};
 use crate::core::keymap::Origin;
-use crate::core::view::{SettingsTab, ViewCmd};
+use crate::core::view::{SettingsTab, StemMode, ViewCmd};
 use crate::ui::theme::THEME;
 use crate::ui::widgets::{Button, Seg, Slider, muted, segmented};
 use earshot_engine::HotcueMode;
@@ -147,6 +147,24 @@ fn decks(ui: &mut Ui, env: &ModalEnv) -> Vec<Command> {
         ui,
         "Perform's mixer starts hidden each time a controller connects; the Mixer switch in \
          the top bar shows it.",
+    );
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label("Stem toggle behaviour");
+        let choices = [
+            Seg::new(StemMode::Toggle, "Toggle")
+                .tip("A stem's button turns that stem off or on: VOX takes the vocals out"),
+            Seg::new(StemMode::Solo, "Solo")
+                .tip("With all stems on, a stem's button plays just that stem"),
+        ];
+        if let Some(m) = segmented(ui, env.stem_mode, &choices) {
+            out.push(Command::View(ViewCmd::StemMode(m)));
+        }
+    });
+    muted(
+        ui,
+        "Toggle: stem buttons toggle their channel on/off.\nSolo: First press of a stem button \
+        turns off all other stem tracks.",
     );
     out
 }

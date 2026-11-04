@@ -763,6 +763,7 @@ impl EarshotApp {
             ViewCmd::ShowMixer(show) => self.prefs.set_mixer(show),
             ViewCmd::ShowFx(show) => self.prefs.show_fx = show,
             ViewCmd::AutoHideMixer(on) => self.prefs.auto_hide_mixer = on,
+            ViewCmd::StemMode(m) => self.prefs.stem_mode = m,
             ViewCmd::UiScale(z) => {
                 self.prefs.ui_scale = z;
                 theme::set_text_scale(&self.ctx, z);
@@ -940,6 +941,7 @@ impl EarshotApp {
             hotcue_mode: self.settings.hotcue_mode,
             cue_first_beat: self.settings.cue_first_beat,
             auto_hide_mixer: self.prefs.auto_hide_mixer,
+            stem_mode: self.prefs.stem_mode,
             keymap: &self.keymap,
             mode: self.prefs.mode,
             analysis: AnalysisEnv {

@@ -8,6 +8,17 @@ use serde::{Deserialize, Serialize};
 use super::collections::Section;
 use super::sources::{SourceId, SourceKind};
 
+/// What a deck's stem button does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StemMode {
+    /// Turns its stem off or on (a controller's stem buttons: VOX takes the vocals out).
+    #[default]
+    Toggle,
+    /// With all on, plays just that stem; otherwise turns it off or on, and turning off
+    /// the last one puts them all back on.
+    Solo,
+}
+
 /// The two halves of the app, like Rekordbox's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Mode {
@@ -158,6 +169,8 @@ pub enum ViewCmd {
     ShowFx(bool),
     /// Hide the mixer while a controller is connected.
     AutoHideMixer(bool),
+    /// What the decks' stem buttons do.
+    StemMode(StemMode),
 }
 
 /// The parts of a view that can be resized.

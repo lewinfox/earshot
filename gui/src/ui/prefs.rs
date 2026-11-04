@@ -6,7 +6,7 @@ use earshot_engine::DeckId;
 use serde::{Deserialize, Serialize};
 
 use super::panels::library::table::Tables;
-use crate::core::view::{Aside, Mode, Source, Tool};
+use crate::core::view::{Aside, Mode, Source, StemMode, Tool};
 
 /// Where they're kept in eframe's storage.
 pub const KEY: &str = "earshot.ui";
@@ -32,6 +32,8 @@ pub struct UiPrefs {
     pub show_fx: bool,
     /// Hide the mixer while a controller is connected (it has its own).
     pub auto_hide_mixer: bool,
+    /// What the decks' stem buttons do.
+    pub stem_mode: StemMode,
     /// A MIDI controller is connected (not kept).
     #[serde(skip)]
     pub controller: bool,
@@ -66,6 +68,7 @@ impl Default for UiPrefs {
             show_mixer: true,
             show_fx: true,
             auto_hide_mixer: true,
+            stem_mode: StemMode::default(),
             controller: false,
             mixer_with_controller: false,
         }

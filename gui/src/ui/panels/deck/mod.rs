@@ -284,6 +284,10 @@ pub struct DeckUi {
     /// While dragging the waveform.
     scrub: Option<Scrub>,
     pub wave: Option<DeckWave>,
+    /// The stems' waveforms on the stems page, for the stems they were made from.
+    stem_waves: Option<(Arc<crate::core::stems::StemWaves>, Vec<DeckWave>)>,
+    /// What its stem buttons do (the setting, each frame).
+    pub stem_mode: crate::core::view::StemMode,
     /// What the controls between the tabs and CUE / play show.
     page: Page,
     /// Each page's width (player, grid) at `page_dims`, measured once, so the box is
@@ -317,6 +321,8 @@ impl DeckUi {
             seen_generation: u64::MAX,
             scrub: None,
             wave: None,
+            stem_waves: None,
+            stem_mode: Default::default(),
             page: Page::Player,
             page_widths: [None; 3],
             page_dims: Dims::FULL,
