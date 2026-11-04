@@ -182,7 +182,7 @@ impl Dims {
 }
 
 /// The jog ring against two rows of buttons.
-const JOG_SCALE: f32 = 1.5;
+const JOG_SCALE: f32 = 1.2;
 
 /// A full-size deck panel's height, but for its jog ring's extra ([`jog_room`]).
 pub const PANEL_H: f32 = 198.0;
