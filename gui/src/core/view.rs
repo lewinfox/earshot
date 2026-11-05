@@ -8,6 +8,17 @@ use serde::{Deserialize, Serialize};
 use super::collections::Section;
 use super::sources::{SourceId, SourceKind};
 
+/// What a deck's stem button does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StemMode {
+    /// Turns its stem off or on (a controller's stem buttons: VOX takes the vocals out).
+    #[default]
+    Toggle,
+    /// With all on, plays just that stem; otherwise turns it off or on, and turning off
+    /// the last one puts them all back on.
+    Solo,
+}
+
 /// The two halves of the app, like Rekordbox's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Mode {
@@ -128,11 +139,16 @@ pub enum ViewCmd {
     FocusSearch,
     /// Load the selected track onto this deck.
     LoadSelected(DeckId),
+    /// Show the deck's track in the library, in the list it was loaded from.
+    ShowInLibrary(DeckId),
     /// Move the selection in the focused list (negative is up) and load the track it
     /// lands on onto this deck: the previous or next track.
     LoadAdjacent(DeckId, i32),
     /// Four decks in Perform (false: two).
     FourDecks(bool),
+    /// Four decks: the left hand (0) between decks 1 and 3, or the right (1) between
+    /// 2 and 4.
+    SwitchLayer(usize),
     SetMode(Mode),
     /// Show a source in the library's left pane (`None` closes the pane).
     Source(Option<Source>),
@@ -152,10 +168,12 @@ pub enum ViewCmd {
     Resize(Region, f32),
     /// Show Perform's mixer (the top bar's Mixer switch).
     ShowMixer(bool),
-    /// Show Perform's effect units (the top bar's FX switch).
-    ShowFx(bool),
     /// Hide the mixer while a controller is connected.
     AutoHideMixer(bool),
+    /// What the decks' stem buttons do.
+    StemMode(StemMode),
+    /// Act as though a controller is connected.
+    PretendController(bool),
 }
 
 /// The parts of a view that can be resized.

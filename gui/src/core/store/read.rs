@@ -40,6 +40,8 @@ pub struct LibTrack {
     pub energy: Option<f64>,
     /// A static analysis found the tempo seems to drift.
     pub drifts: bool,
+    /// The user's say on whether it needs attention (`None`: up to analysis).
+    pub needs_attention: Option<bool>,
     /// 0-5 stars.
     pub rating: Option<u8>,
     pub colour: Option<u32>,
@@ -69,7 +71,8 @@ pub(super) fn source_rank(source: &str) -> u8 {
 /// Tracks with a file that's present: every one an enabled source has (`None`), or
 /// just these ids (wherever they are).
 pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
-    let base = "SELECT t.id, f.path, t.duration_s, t.bpm, g.source, t.rating, t.color
+    let base = "SELECT t.id, f.path, t.duration_s, t.bpm, g.source, t.rating, t.color,
+                t.needs_attention
          FROM tracks t
          JOIN files f ON f.id = (SELECT id FROM files
                                  WHERE track_id = t.id AND missing_since IS NULL
@@ -84,6 +87,7 @@ pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
         Option<String>,
         Option<i64>,
         Option<i64>,
+        Option<bool>,
     );
     let map = |r: &rusqlite::Row| -> rusqlite::Result<Row> {
         Ok((
@@ -94,6 +98,7 @@ pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
             r.get(4)?,
             r.get(5)?,
             r.get(6)?,
+            r.get(7)?,
         ))
     };
     let mut rows: Vec<Row> = vec![];
@@ -179,43 +184,46 @@ pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
     }
     Ok(rows
         .into_iter()
-        .map(|(id, path, duration, bpm, source, rating, colour)| {
-            let path = bytes_path(path);
-            let mut take = |f: &str| {
-                meta.remove(&(id, f.to_string()))
-                    .map(|(_, v)| v)
-                    .filter(|v| !v.is_empty())
-            };
-            let stem = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            LibTrack {
-                id,
-                title: take("title").unwrap_or(stem),
-                artist: take("artist").unwrap_or_default(),
-                tag_bpm: take("bpm").and_then(|b| b.trim().parse().ok()),
-                key: take("key"),
-                album: take("album").unwrap_or_default(),
-                genre: take("genre").unwrap_or_default(),
-                comment: take("comment").unwrap_or_default(),
-                rating: rating.and_then(|r| u8::try_from(r).ok()),
-                colour: colour.and_then(|c| u32::try_from(c).ok()),
-                tags: {
-                    let mut t = tags.remove(&id).unwrap_or_default();
-                    t.sort();
-                    t
-                },
-                duration,
-                bpm,
-                grid_source: source.as_deref().and_then(GridSource::parse),
-                energy: feats.get(&(id, "energy".into())).copied(),
-                drifts: feats.get(&(id, "drifts".into())).is_some_and(|d| *d != 0.0),
-                plays: played.get(&id).map_or(0, |p| p.0),
-                last_played: played.get(&id).map(|p| p.1),
-                path: path.to_string_lossy().into_owned(),
-            }
-        })
+        .map(
+            |(id, path, duration, bpm, source, rating, colour, needs_attention)| {
+                let path = bytes_path(path);
+                let mut take = |f: &str| {
+                    meta.remove(&(id, f.to_string()))
+                        .map(|(_, v)| v)
+                        .filter(|v| !v.is_empty())
+                };
+                let stem = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                LibTrack {
+                    id,
+                    title: take("title").unwrap_or(stem),
+                    artist: take("artist").unwrap_or_default(),
+                    tag_bpm: take("bpm").and_then(|b| b.trim().parse().ok()),
+                    key: take("key"),
+                    album: take("album").unwrap_or_default(),
+                    genre: take("genre").unwrap_or_default(),
+                    comment: take("comment").unwrap_or_default(),
+                    rating: rating.and_then(|r| u8::try_from(r).ok()),
+                    colour: colour.and_then(|c| u32::try_from(c).ok()),
+                    tags: {
+                        let mut t = tags.remove(&id).unwrap_or_default();
+                        t.sort();
+                        t
+                    },
+                    duration,
+                    bpm,
+                    grid_source: source.as_deref().and_then(GridSource::parse),
+                    energy: feats.get(&(id, "energy".into())).copied(),
+                    drifts: feats.get(&(id, "drifts".into())).is_some_and(|d| *d != 0.0),
+                    needs_attention,
+                    plays: played.get(&id).map_or(0, |p| p.0),
+                    last_played: played.get(&id).map(|p| p.1),
+                    path: path.to_string_lossy().into_owned(),
+                }
+            },
+        )
         .collect())
 }
 

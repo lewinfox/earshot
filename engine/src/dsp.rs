@@ -77,9 +77,44 @@ impl Biquad {
         let c = &self.c;
         let z = &mut self.z[ch];
         let y = c.b0 * x + z[0];
-        z[0] = c.b1 * x - c.a1 * y + z[1];
-        z[1] = c.b2 * x - c.a2 * y;
+        // Fading out after a sound, the state would sink into subnormal numbers,
+        // which are many times slower to work with: zero once it's inaudible.
+        z[0] = settle(c.b1 * x - c.a1 * y + z[1]);
+        z[1] = settle(c.b2 * x - c.a2 * y);
         y
+    }
+}
+
+/// Below this a filter's state is silence (some 600 dB down).
+const TINY: f64 = 1e-30;
+
+#[inline]
+fn settle(v: f64) -> f64 {
+    if v.abs() < TINY { 0.0 } else { v }
+}
+
+/// Have this thread treat subnormal numbers as zero (flush-to-zero and
+/// denormals-are-zero), so a decaying echo or filter can't slow the audio thread down
+/// enough to miss its deadline (a real-time thread that runs too long is killed, and
+/// earshot with it). Called at the top of every audio callback; cheap.
+#[inline]
+pub fn flush_denormals() {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: reads and writes this thread's SSE control register only. FTZ (bit 15)
+    // and DAZ (bit 6) change rounding of numbers below ~1e-38, nothing audible.
+    unsafe {
+        let mut csr: u32 = 0;
+        std::arch::asm!("stmxcsr [{}]", in(reg) &mut csr, options(nostack));
+        csr |= 0x8040;
+        std::arch::asm!("ldmxcsr [{}]", in(reg) &csr, options(nostack));
+    }
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: sets FZ (bit 24) in this thread's floating-point control register.
+    unsafe {
+        let mut fpcr: u64;
+        std::arch::asm!("mrs {}, fpcr", out(reg) fpcr, options(nomem, nostack));
+        fpcr |= 1 << 24;
+        std::arch::asm!("msr fpcr, {}", in(reg) fpcr, options(nomem, nostack));
     }
 }
 
@@ -294,6 +329,38 @@ pub fn ease_per_sample(secs: f64, sr: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    /// After a sound, then silence, the filters' state must reach zero, not linger as
+    /// subnormal numbers (each step on those can be ~100x slower, enough to make the
+    /// audio thread miss its deadline and be killed for running too long).
+    #[test]
+    fn eq_state_settles_to_zero_not_subnormals() {
+        let sr = 48_000.0;
+        let mut eq = super::Eq3::new(sr);
+        eq.run(0, 1.0, [1.0; 3]);
+        let mut subnormal = 0;
+        let t = std::time::Instant::now();
+        for _ in 0..(sr as usize * 60) {
+            let y = eq.run(0, 0.0, [1.0; 3]);
+            subnormal += y.is_subnormal() as usize;
+        }
+        eprintln!(
+            "60 s of silence: {:?}, {subnormal} subnormal outputs",
+            t.elapsed()
+        );
+        assert_eq!(subnormal, 0);
+    }
+
+    #[test]
+    fn the_audio_thread_treats_subnormals_as_zero() {
+        std::thread::spawn(|| {
+            super::flush_denormals();
+            let tiny = std::hint::black_box(f32::MIN_POSITIVE);
+            assert_eq!(tiny * std::hint::black_box(0.5_f32), 0.0);
+        })
+        .join()
+        .unwrap();
+    }
+
     #[test]
     fn limiter_keeps_peaks_under_the_ceiling_and_recovers() {
         let sr = 48_000.0;

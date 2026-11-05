@@ -61,6 +61,8 @@ pub struct LibraryUi {
     unanalysed: Vec<TrackId>,
     sel: Selection,
     scroll_to: Option<usize>,
+    /// A track to select and scroll to, as soon as the list shows it ([`Self::reveal`]).
+    reveal: Option<TrackId>,
     /// Groups of tracks with the same audio, as last found (`LibraryCmd::FindDuplicates`).
     duplicates: Option<Vec<Vec<TrackId>>>,
     /// The sessions that played something, newest first, as last listed
@@ -80,6 +82,35 @@ impl LibraryUi {
             self.scope = scope;
             self.rev += 1;
         }
+    }
+
+    /// Select `track` and scroll to it. If the search or the table's filters hide
+    /// it, they're cleared; if the list doesn't have it, All tracks is shown instead.
+    pub fn reveal(&mut self, track: TrackId) {
+        self.reveal = Some(track);
+    }
+
+    /// One step of [`Self::reveal`] a frame, with the list as it is now.
+    fn reveal_step(&mut self, ui: &Ui, table: &mut TableState) {
+        let Some(t) = self.reveal else { return };
+        if let Some(i) = self.shown.iter().position(|&s| s == t) {
+            self.sel.select_only(t);
+            self.scroll_to = Some(i);
+            self.reveal = None;
+            return;
+        }
+        if !self.search.is_empty() {
+            self.search.clear();
+            self.set_search();
+        } else if table.has_filters() {
+            table.filters.clear();
+        } else if self.scope != Scope::All {
+            self.set_scope(Scope::All);
+        } else {
+            self.reveal = None; // not in the library
+            return;
+        }
+        ui.ctx().request_repaint();
     }
 
     /// The groups of tracks with the same audio, as last found.
@@ -575,6 +606,7 @@ impl LibraryUi {
             });
         }
         self.refresh(v, table);
+        self.reveal_step(ui, table);
         // Nothing in the library at all (tracks imported from another library count,
         // wherever their files are).
         if self.folders.is_empty() && !self.scanning && v.lib.tracks().is_empty() {

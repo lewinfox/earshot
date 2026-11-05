@@ -80,9 +80,10 @@ impl EarshotApp {
                 });
             }
             ExportCmd::Convert(source) => {
-                self.dispatch(ViewCmd::SetMode(Mode::Prepare).into());
-                self.dispatch(ViewCmd::Tool(crate::core::view::Tool::Export).into());
-                self.panels.export.convert(&source);
+                if self.set_mode(Mode::Prepare) {
+                    self.dispatch(ViewCmd::Tool(crate::core::view::Tool::Export).into());
+                    self.panels.export.convert(&source);
+                }
             }
             ExportCmd::Run(x) => {
                 let roots = self.roots();

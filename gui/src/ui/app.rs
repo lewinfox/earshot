@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use earshot_engine::{
-    DeckCmd as EngineCmd, DeckId, Monitor, OutputInfo, OutputOptions, TempoRange,
+    DeckCmd as EngineCmd, DeckId, Monitor, OutputInfo, OutputOptions, Set, TempoRange,
 };
 use egui::Key;
 
@@ -22,7 +22,7 @@ use super::panels::deck::{DeckInfo, PendingLoad};
 use super::panels::flow::FlowUi;
 use super::panels::library::browser::Scope;
 use super::panels::library::tracks::take_wanted_art;
-use super::panels::library::{LibraryPane, drag};
+use super::panels::library::{LibraryPane, LoadedFrom, drag};
 use super::panels::status::{AnalysisSummary, Meter, StatusLine, TopBar};
 use super::panels::{CoreView, Cx, EngineFrame, Panel, PreviewState};
 use super::prefs::{self, UiPrefs};
@@ -40,6 +40,7 @@ use crate::core::index::{LibraryCmd, LibraryIndex};
 use crate::core::keymap::{self, Keymap};
 use crate::core::library::{self, Library};
 use crate::core::midi::{self, Midi};
+use crate::core::notice::{self, Notices};
 use crate::core::player::{self, AudioSettings, DECKS, Player};
 use crate::core::services::Services;
 use crate::core::session;
@@ -68,11 +69,17 @@ pub struct EarshotApp {
     /// stopped helping).
     audio_stalls: VecDeque<Instant>,
     audio_note: Option<(String, Option<Instant>)>,
+    /// Messages for the user, in the bottom bar.
+    notices: Notices,
+    /// "Do you really want to quit?" is showing; and the user said yes.
+    asking_quit: bool,
+    quitting: bool,
+    /// Each player's track and the list it was loaded from, by `DeckId::index()`.
+    loaded_from: [Option<(i64, LoadedFrom)>; session::SLOTS],
     /// Always the null output (tests).
     null_audio: bool,
     midi: Midi,
     midi_ports: Vec<String>,
-    midi_log: VecDeque<String>,
     /// Send track ids here to load their cover art.
     art_loader: std::sync::mpsc::Sender<i64>,
     /// Nudge after a scan: works out audio hashes the files' tags didn't have.
@@ -278,10 +285,13 @@ impl EarshotApp {
             audio,
             audio_stalls: VecDeque::new(),
             audio_note: None,
+            loaded_from: Default::default(),
+            notices: Notices::default(),
+            asking_quit: false,
+            quitting: false,
             null_audio: services.null_audio,
             midi: Midi::default(),
             midi_ports: vec![],
-            midi_log: VecDeque::new(),
             art_loader,
             hasher,
             tempo_lock,
@@ -434,6 +444,82 @@ impl EarshotApp {
             .send(settings::save(settings::AUDIO, &self.settings.audio));
     }
 
+    /// How many of Perform's decks are playing.
+    fn decks_playing(&self) -> usize {
+        self.frame
+            .snap
+            .as_ref()
+            .map_or(0, |sh| sh.live().iter().filter(|d| d.playing).count())
+    }
+
+    /// Switch mode. Not to Prepare while a deck plays (the set would go on under
+    /// Prepare's player): says so instead, and returns false. To Perform, Prepare's
+    /// player stops.
+    pub(super) fn set_mode(&mut self, m: Mode) -> bool {
+        if m == self.prefs.mode {
+            return true;
+        }
+        match m {
+            Mode::Prepare if self.decks_playing() > 0 => {
+                let text = "Stop the playing decks before switching to Prepare.";
+                self.notify(notice::Level::Warning, text);
+                return false;
+            }
+            Mode::Perform
+                if self
+                    .frame
+                    .snap
+                    .as_ref()
+                    .is_some_and(|sh| sh.prepare.playing) =>
+            {
+                self.dispatch((DeckId::PREPARE, EngineCmd::Play(Set::Off)).into());
+            }
+            _ => {}
+        }
+        self.prefs.mode = m;
+        true
+    }
+
+    /// Closing the window in Perform while a deck plays: ask first ("Quit" closes it
+    /// again, for good).
+    fn confirm_quit(&mut self, ctx: &egui::Context) {
+        let asked = ctx.input(|i| i.viewport().close_requested());
+        if asked && !self.quitting && self.prefs.mode == Mode::Perform && self.decks_playing() > 0 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.asking_quit = true;
+        }
+        if !self.asking_quit {
+            return;
+        }
+        let n = self.decks_playing();
+        let r = egui::Modal::new(egui::Id::new("confirm-quit")).show(ctx, |ui| {
+            ui.heading("Do you really want to quit?");
+            if n > 0 {
+                let decks = if n == 1 { "A deck is" } else { "Decks are" };
+                ui.label(format!("{decks} still playing."));
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Quit").clicked() {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                if ui.button("Cancel").clicked() {
+                    self.asking_quit = false;
+                }
+            })
+        });
+        if r.should_close() {
+            self.asking_quit = false;
+        }
+    }
+
+    /// Show the user a message in the bottom bar.
+    pub(super) fn notify(&mut self, level: notice::Level, text: impl Into<String>) {
+        self.notices.push(level, text, Instant::now());
+        self.ctx.request_repaint();
+    }
+
     /// Carry out a command, from whichever input: the only place app state changes.
     /// The decks', mixer's and engine's are done in core; what's left is the UI's.
     fn dispatch(&mut self, cmd: Command) {
@@ -491,6 +577,7 @@ impl EarshotApp {
                     .send(settings::save(settings::CUE_FIRST_BEAT, &on));
             }
             Command::App(AppCmd::ReloadKeymap) => self.reload_keymap(),
+            Command::App(AppCmd::DismissNotice(id)) => self.notices.dismiss(id),
             Command::App(c @ (AppCmd::CountStale | AppCmd::QueueStale)) => {
                 if self.stale == Stale::Counting {
                     return;
@@ -603,6 +690,40 @@ impl EarshotApp {
                     self.load(Some(deck), id);
                 }
             }
+            ViewCmd::ShowInLibrary(deck) => {
+                let Some(track) = self.player.lock().unwrap().session(deck).track_id else {
+                    return;
+                };
+                // Not if the deck's track changed since, or the crate, playlist or
+                // Flow doesn't have it any more: then All tracks.
+                let gone = |f: &LoadedFrom| match f {
+                    LoadedFrom::List {
+                        scope: Scope::Collection(id),
+                        ..
+                    } => self
+                        .collections
+                        .get(*id)
+                        .is_none_or(|c| c.kind.takes_tracks() && !c.tracks.contains(&track)),
+                    _ => false,
+                };
+                let from = self.loaded_from[deck.index()]
+                    .clone()
+                    .filter(|(t, f)| *t == track && !gone(f))
+                    .map(|(_, f)| f);
+                let mut source = self.prefs.layout().source;
+                let mut out = vec![];
+                let note = self
+                    .panels
+                    .library
+                    .show_track(track, from, &mut source, &mut out);
+                self.prefs.layout_mut().source = source;
+                if let Some(text) = note {
+                    self.notify(notice::Level::Info, text);
+                }
+                for c in out {
+                    self.dispatch(c);
+                }
+            }
             ViewCmd::LoadAdjacent(deck, n) => {
                 let from = lib.focused_track(flow);
                 lib.browse(n);
@@ -612,13 +733,20 @@ impl EarshotApp {
                     self.load(Some(deck), id);
                 }
             }
+            ViewCmd::SwitchLayer(side) => {
+                if let Some(l) = self.prefs.layers.get_mut(side) {
+                    *l = !*l;
+                }
+            }
             ViewCmd::FourDecks(on) => {
                 self.prefs.four_decks = on;
                 if let Err(e) = player::set_fx_decks(&self.player, self.prefs.decks().len()) {
                     eprintln!("effect decks: {e}");
                 }
             }
-            ViewCmd::SetMode(m) => self.prefs.mode = m,
+            ViewCmd::SetMode(m) => {
+                self.set_mode(m);
+            }
             ViewCmd::Source(s) => self.prefs.layout_mut().source = s,
             ViewCmd::Aside(a) => self.prefs.layout_mut().aside = a,
             ViewCmd::Tool(t) => self.prefs.layout_mut().tool = t,
@@ -638,8 +766,9 @@ impl EarshotApp {
             ViewCmd::CloseModal(m) => self.modals.close(m),
             ViewCmd::WaveZoom(z) => self.prefs.wave_zoom = z,
             ViewCmd::ShowMixer(show) => self.prefs.set_mixer(show),
-            ViewCmd::ShowFx(show) => self.prefs.show_fx = show,
             ViewCmd::AutoHideMixer(on) => self.prefs.auto_hide_mixer = on,
+            ViewCmd::StemMode(m) => self.prefs.stem_mode = m,
+            ViewCmd::PretendController(on) => self.prefs.set_pretend_controller(on),
             ViewCmd::UiScale(z) => {
                 self.prefs.ui_scale = z;
                 theme::set_text_scale(&self.ctx, z);
@@ -731,6 +860,7 @@ impl EarshotApp {
             decks: self.prefs.decks().len(),
             drives: &self.drives,
             uses: &self.uses,
+            loaded: &[],
         };
         lib.suggest
             .refresh(&view, &decks, prepare.as_ref(), selected);
@@ -739,7 +869,22 @@ impl EarshotApp {
     /// Draw the window, collecting what it asks for.
     fn draw(&mut self, ctx: &egui::Context) -> Vec<Command> {
         let jobs = self.jobs.list();
+        if let Some(next) = self.notices.expire(Instant::now()) {
+            ctx.request_repaint_after(next.saturating_duration_since(Instant::now()));
+        }
         let mut out: Vec<Command> = vec![];
+        // What's on the decks shown, and on Prepare's player in Prepare.
+        let mut players = self.prefs.decks();
+        if self.prefs.mode == Mode::Prepare {
+            players = vec![DeckId::PREPARE];
+        }
+        let loaded: Vec<(i64, DeckId)> = {
+            let p = self.player.lock().unwrap();
+            players
+                .into_iter()
+                .filter_map(|d| p.session(d).track_id.map(|t| (t, d)))
+                .collect()
+        };
         let mut cx = Cx {
             core: CoreView {
                 lib: &self.index,
@@ -749,6 +894,7 @@ impl EarshotApp {
                 decks: self.prefs.decks().len(),
                 drives: &self.drives,
                 uses: &self.uses,
+                loaded: &loaded,
             },
             engine: &self.frame,
             theme: &THEME,
@@ -774,18 +920,19 @@ impl EarshotApp {
                     hud: Meter {
                         load: self.hud.load,
                         detail: [&self.hud.text, &self.hud.audio],
+                        memory: crate::core::log::memory(),
                     },
                     undo: self.edits.next_undo().map(|e| e.label()),
                     redo: self.edits.next_redo().map(|e| e.label()),
                 }
                 .ui(ui, &mut cx)
             });
-        egui::TopBottomPanel::bottom("midi")
+        egui::TopBottomPanel::bottom("status")
             .frame(THEME.bar_frame())
             .show(ctx, |ui| {
                 StatusLine {
                     jobs: &jobs,
-                    midi: &self.midi_log,
+                    notices: self.notices.shown(),
                 }
                 .ui(ui, &mut cx)
             });
@@ -800,6 +947,7 @@ impl EarshotApp {
             hotcue_mode: self.settings.hotcue_mode,
             cue_first_beat: self.settings.cue_first_beat,
             auto_hide_mixer: self.prefs.auto_hide_mixer,
+            stem_mode: self.prefs.stem_mode,
             keymap: &self.keymap,
             mode: self.prefs.mode,
             analysis: AnalysisEnv {
@@ -838,6 +986,7 @@ impl eframe::App for EarshotApp {
                 .as_ref()
                 .is_some_and(|sh| sh.live().iter().any(|d| d.playing));
         self.lib.analyser.set_playing(playing);
+        self.confirm_quit(ctx);
         self.keyboard(ctx);
         input::full_screen_key(ctx);
         // Ctrl +/- and Ctrl 0 change the text size too (egui's shortcuts, our steps).

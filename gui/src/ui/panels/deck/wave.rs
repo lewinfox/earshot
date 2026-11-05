@@ -264,11 +264,18 @@ pub fn window(
         let half_h = rect.height() / 2.0;
         let cy = rect.center().y;
         let mut mesh = Mesh::default();
-        let cols = w.floor() as usize;
-        for c in 0..cols {
-            let x = rect.left() + c as f32;
-            let t0 = t_lo + (x - rect.left()) as f64 * spp;
-            let t1 = t0 + spp;
+        // A column per screen pixel, cut at fixed places in the track (multiples of
+        // its length), not from the view's edge: as the view scrolls each column keeps
+        // the same audio and the picture just slides. Cut from the edge, every column's
+        // audio changed a little each frame and the waveform shimmered.
+        let px = 1.0 / painter.pixels_per_point();
+        let col_t = spp * px as f64;
+        let first = (t_lo / col_t).floor() as i64;
+        let cols = (w / px).ceil() as i64 + 1;
+        for k in first..first + cols {
+            let t0 = k as f64 * col_t;
+            let t1 = t0 + col_t;
+            let x = x_of(t0);
             if t1 <= 0.0 || t0 >= end {
                 continue;
             }
@@ -302,11 +309,11 @@ pub fn window(
             // Screen y grows downwards: the signal's +1 is at the top.
             let y = |v: f32| cy - v * half_h;
             mesh.add_colored_rect(
-                Rect::from_x_y_ranges(x..=x + 1.0, y(shi)..=y(slo)),
+                Rect::from_x_y_ranges(x..=x + px, y(shi)..=y(slo)),
                 col.gamma_multiply(0.25),
             );
             mesh.add_colored_rect(
-                Rect::from_x_y_ranges(x..=x + 1.0, y(hi) - LINE_HALF..=y(lo) + LINE_HALF),
+                Rect::from_x_y_ranges(x..=x + px, y(hi) - LINE_HALF..=y(lo) + LINE_HALF),
                 col,
             );
         }

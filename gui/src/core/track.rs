@@ -36,6 +36,8 @@ pub struct Track {
     pub energy: Option<f32>,
     /// A static analysis found the tempo seems to drift.
     pub drifts: bool,
+    /// The user's say on whether it needs attention (`None`: up to analysis).
+    pub needs_attention: Option<bool>,
     /// 0-5 stars.
     pub rating: Option<u8>,
     pub colour: Option<u32>,
@@ -85,6 +87,7 @@ impl Track {
             energy_raw: l.energy,
             energy: None,
             drifts: l.drifts,
+            needs_attention: l.needs_attention,
             rating: l.rating,
             colour: l.colour,
             duration: l.duration,
@@ -104,6 +107,18 @@ impl Track {
     /// Has a beatgrid: analysed, fixed by hand or imported.
     pub fn analysed(&self) -> bool {
         self.grid_source.is_some()
+    }
+
+    /// Analysis found something to look at: the tempo drifts on a static grid.
+    pub fn analysis_attention(&self) -> bool {
+        self.drifts && !self.dynamic()
+    }
+
+    /// Needs attention, by the user's say or else analysis's (a failed analysis
+    /// aside: see `Status::of`).
+    pub fn needs_attention(&self) -> bool {
+        self.needs_attention
+            .unwrap_or_else(|| self.analysis_attention())
     }
 
     /// The grid follows the tempo (dynamic analysis).
@@ -144,7 +159,8 @@ pub enum Status {
     Done,
     /// Queued or being analysed.
     Busy,
-    /// The analysis failed, or the tempo drifts but the grid is a static one.
+    /// The analysis failed, the user marked it, or (unless the user marked it OK)
+    /// the tempo drifts but the grid is a static one.
     Attention,
 }
 
@@ -156,7 +172,7 @@ impl Status {
         match state {
             Some(AnalysisState::Failed(_)) => Status::Attention,
             Some(AnalysisState::Queued | AnalysisState::Running { .. }) => Status::Busy,
-            None if t.drifts && !t.dynamic() => Status::Attention,
+            None if t.needs_attention() => Status::Attention,
             None if t.analysed() => Status::Done,
             None => Status::None,
         }
@@ -211,6 +227,7 @@ pub(crate) fn lib_track(id: TrackId, title: &str, artist: &str) -> LibTrack {
         grid_source: None,
         energy: None,
         drifts: false,
+        needs_attention: None,
         rating: None,
         colour: None,
         tags: vec![],
@@ -262,6 +279,26 @@ mod tests {
             Status::Attention,
             "drifts on a static grid"
         );
+        l.needs_attention = Some(false);
+        assert_eq!(
+            Status::of(&Track::new(l.clone()), None),
+            Status::Done,
+            "marked OK"
+        );
+        assert_eq!(
+            Status::of(&Track::new(l.clone()), Some(&failed)),
+            Status::Attention,
+            "a failure still shows"
+        );
+        l.drifts = false;
+        l.needs_attention = Some(true);
+        assert_eq!(
+            Status::of(&Track::new(l.clone()), None),
+            Status::Attention,
+            "marked"
+        );
+        l.needs_attention = None;
+        l.drifts = true;
         l.grid_source = Some(GridSource::AnalysisDynamic);
         assert_eq!(Status::of(&Track::new(l), None), Status::Done);
         for s in Status::ALL {

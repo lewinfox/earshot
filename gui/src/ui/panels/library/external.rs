@@ -88,6 +88,8 @@ pub struct ExternalUi {
     /// The list's rows, and what they were worked out for.
     rows: Option<(RowsKey, Vec<TrackId>)>,
     sel: Selection,
+    /// A track to select and scroll to once the list has it ([`Self::reveal`]).
+    reveal: Option<TrackId>,
     /// The USB sticks plugged in, and the stick views' state (`sticks.rs`).
     drives: Vec<Drive>,
     stick: sticks::StickUi,
@@ -497,13 +499,42 @@ impl ExternalUi {
     }
 
     /// List a library's tracks, or a node's, in the middle.
+    /// The list's focused track.
+    #[cfg(test)]
+    pub fn focused(&self) -> Option<TrackId> {
+        self.sel.focused()
+    }
+
+    /// What the list shows: a library, and a node in it (`None`: all its tracks).
+    pub fn open_list(&self) -> Option<(SourceId, Option<NodePath>)> {
+        self.open.clone()
+    }
+
+    /// List library `id`'s `node` again and select `track` there. False if the
+    /// library isn't listed any more (its stick unplugged, say).
+    pub fn reveal(
+        &mut self,
+        id: SourceId,
+        node: Option<NodePath>,
+        track: TrackId,
+        out: &mut Vec<Command>,
+    ) -> bool {
+        let Some(source) = self.source(id).cloned().filter(|_| self.listed(id)) else {
+            return false;
+        };
+        self.show(&source, node, out);
+        self.reveal = Some(track);
+        true
+    }
+
     fn show(&mut self, source: &Source, node: Option<NodePath>, out: &mut Vec<Command>) {
         self.read_once(source, out);
         self.open = Some((source.id, node));
         self.stick.open = None;
     }
 
-    /// The middle: the picked library's or node's tracks.
+    /// The middle: the picked library's or node's tracks. True when a row was
+    /// clicked (the list takes focus).
     pub fn list(
         &mut self,
         ui: &mut Ui,
@@ -511,16 +542,16 @@ impl ExternalUi {
         media: &mut Media,
         table: &mut TableState,
         out: &mut Vec<Command>,
-    ) {
+    ) -> bool {
         let Some((id, node)) = self.open.clone() else {
-            return;
+            return false;
         };
         let Some(source) = self.source(id).cloned() else {
-            return;
+            return false;
         };
         let Some(Status::Ready(lib)) = self.status.get(&id) else {
             ui.label(RichText::new("Reading…").color(THEME.muted));
-            return;
+            return false;
         };
         let lib = lib.clone();
         let tracks = lib.tracks_in(node.as_deref());
@@ -588,6 +619,20 @@ impl ExternalUi {
             .as_ref()
             .map(|(_, r)| r.clone())
             .unwrap_or_default();
+        // A track to show: select it and scroll there, clearing filters that hide it.
+        let mut scroll_to = None;
+        if let Some(t) = self.reveal {
+            if let Some(i) = rows.iter().position(|&r| r == t) {
+                self.sel.select_only(t);
+                scroll_to = Some(i);
+                self.reveal = None;
+            } else if table.has_filters() {
+                table.filters.clear();
+                ui.ctx().request_repaint();
+            } else {
+                self.reveal = None; // not in that list any more
+            }
+        }
         TrackTable {
             id: "external",
             rows: &rows,
@@ -600,10 +645,11 @@ impl ExternalUi {
             reorder: false,
             takes_drops: false,
             scores: None,
-            scroll_to: None,
+            scroll_to,
             show_selection: true,
         }
-        .show(ui, v, media, out);
+        .show(ui, v, media, out)
+        .clicked
     }
 
     /// Ask whether to import another library's tracks before `then` (which puts

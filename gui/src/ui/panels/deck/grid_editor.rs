@@ -2,8 +2,9 @@
 //! a player's controls, built like the Player page: two rows of single-height
 //! buttons, and "put the 1 here" a double.
 
-use egui::{Align, Layout, RichText, Ui, vec2};
+use egui::{Align, RichText, Ui, vec2};
 
+use super::design::*;
 use super::{DeckInfo, DeckUi};
 use crate::core::command::{Command, DeckCmd};
 use crate::core::player::GridOp;
@@ -13,16 +14,13 @@ use crate::ui::widgets::{HwButton, Icon};
 impl DeckUi {
     pub(super) fn grid_editor(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
         let deck = self.id;
-        ui.spacing_mut().item_spacing = vec2(3.0, 4.0);
+        let d = self.dims;
+        ui.spacing_mut().item_spacing = vec2(d.px(GAP_X), d.px(GAP_Y));
         ui.horizontal_top(|ui| {
             let r = ui
                 .add(
-                    HwButton::new(
-                        "Anchor 1 here",
-                        THEME.text,
-                        vec2(self.dims.btn_w, self.dims.double()),
-                    )
-                    .icon(Icon::Downbeat),
+                    HwButton::new("Anchor 1 here", THEME.text, vec2(d.px(BTN_W), d.double()))
+                        .icon(Icon::Downbeat),
                 )
                 .on_hover_text(
                     "Put the 1 here: move the grid so a beat lands exactly on the playhead, \
@@ -31,7 +29,7 @@ impl DeckUi {
             if r.clicked() {
                 out.push(Command::Deck(deck, DeckCmd::Grid(GridOp::AnchorHere)));
             }
-            ui.add_space(6.0);
+            ui.add_space(d.px(GROUP_GAP));
             ui.vertical(|ui| {
                 self.tempo_row(ui, info, out);
                 self.nudge_row(ui, info, out);
@@ -51,7 +49,7 @@ impl DeckUi {
     ) {
         let size = vec2(width, self.dims.single());
         let r = ui
-            .add(HwButton::new(label, THEME.text, size).font(10.0))
+            .add(HwButton::new(label, THEME.text, size).font(self.dims.px(FONT_GRID)))
             .on_hover_text(tip);
         if r.clicked() {
             out.push(Command::Deck(self.id, DeckCmd::Grid(op)));
@@ -62,7 +60,7 @@ impl DeckUi {
     fn tempo_row(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
         let cur = info.grid.as_ref().map(|g| g.mean_bpm());
         let step = |d: f64| GridOp::SetBpm(((cur.unwrap_or(120.0) + d) * 100.0).round() / 100.0);
-        let w = self.dims.btn_w + 4.0;
+        let w = self.dims.px(GRID_W);
         ui.horizontal(|ui| {
             ui.set_height(self.dims.single());
             for (label, d) in [("-0.1", -0.1), ("-0.01", -0.01)] {
@@ -76,15 +74,21 @@ impl DeckUi {
                         .vertical_align(Align::Center),
                 )
                 .on_hover_text("The grid's BPM: type one and press Enter");
+            // Enter or clicking away sets it (Esc leaves it be). Read before the box is
+            // put back to the grid's BPM below.
+            let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            if edit.lost_focus()
+                && !esc
+                && let Ok(b) = self.bpm_text.trim().parse::<f64>()
+                && b > 0.0
+                && cur.is_some_and(|c| (c - b).abs() >= 0.005)
+            {
+                out.push(Command::Deck(self.id, DeckCmd::Grid(GridOp::SetBpm(b))));
+            }
             if !edit.has_focus() {
                 self.bpm_text = cur
                     .map(|b| format!("{:.2}", (b * 100.0).round() / 100.0))
                     .unwrap_or_default();
-            }
-            if edit.lost_focus()
-                && let Ok(b) = self.bpm_text.trim().parse::<f64>()
-            {
-                out.push(Command::Deck(self.id, DeckCmd::Grid(GridOp::SetBpm(b))));
             }
             for (label, d) in [("+0.01", 0.01), ("+0.1", 0.1)] {
                 self.grid_button(ui, out, label, w, "Faster: the grid's BPM", step(d));
@@ -97,7 +101,7 @@ impl DeckUi {
     /// Nudge the whole grid earlier or later, and where the bar's 1 nearest the
     /// playhead is, to the millisecond.
     fn nudge_row(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
-        let w = 1.5 * self.dims.btn_w + 6.0;
+        let w = self.dims.px(NUDGE_W);
         ui.horizontal(|ui| {
             ui.set_height(self.dims.single());
             for (label, ms) in [
@@ -123,9 +127,12 @@ impl DeckUi {
                     format!("1 at {sign}{m:.0}:{s:06.3}")
                 },
             );
-            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                ui.add_space(4.0);
-                ui.label(RichText::new(at).monospace().size(10.0).color(THEME.muted))
+            // One above the other, so the page stays narrow.
+            ui.add_space(self.dims.px(GAP_Y));
+            let note = self.dims.px(FONT_GRID_NOTE);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(RichText::new(at).monospace().size(note).color(THEME.muted))
                     .on_hover_text("The bar's 1 nearest the playhead");
                 // Padded to the longest ("from tempo-lock sidecar"), so the page's
                 // width doesn't change with it either.
@@ -134,11 +141,10 @@ impl DeckUi {
                 } else {
                     format!("from {}", info.grid_source)
                 };
-                ui.add_space(8.0);
                 ui.label(
                     RichText::new(format!("{from:<23}"))
                         .monospace()
-                        .size(10.0)
+                        .size(note)
                         .color(THEME.muted),
                 )
                 .on_hover_text("Where this grid came from");

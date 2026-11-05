@@ -4,7 +4,8 @@ use std::f32::consts::TAU;
 
 use egui::{Align2, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui, pos2, vec2};
 
-use super::{DeckUi, Dims};
+use super::DeckUi;
+use super::design::*;
 use crate::core::bus::DeckControl;
 use crate::core::command::Command;
 use crate::ui::theme::THEME;
@@ -14,7 +15,7 @@ impl DeckUi {
     /// One unit, like Rekordbox's: CUE above play, and the BPM ring to their right.
     pub(super) fn transport(&mut self, ui: &mut Ui, out: &mut Vec<Command>) {
         ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.spacing_mut().item_spacing.x = self.dims.px(TRANSPORT_GAP);
             self.cue_play(ui, out);
             self.jog(ui, out);
         });
@@ -22,7 +23,8 @@ impl DeckUi {
 
     pub(super) fn cue_play(&mut self, ui: &mut Ui, out: &mut Vec<Command>) {
         ui.vertical(|ui| {
-            let size = vec2(self.dims.transport(), self.dims.transport());
+            let d = self.dims;
+            let size = vec2(d.px(CUE_D), d.px(CUE_D));
             // CUE lights while the deck sits at its cue point, ready to go.
             let at_cue = !self.state.playing
                 && self.state.duration > 0.0
@@ -31,7 +33,7 @@ impl DeckUi {
                 .add(
                     HwButton::new("CUE", THEME.cue_button, size)
                         .round(true)
-                        .font(11.0)
+                        .font(d.px(FONT_CUE))
                         .tinted(true)
                         .lit(at_cue && self.pending.is_none()),
                 )
@@ -45,7 +47,7 @@ impl DeckUi {
                     HwButton::new("Play", THEME.play_button, size)
                         .round(true)
                         .icon(Icon::PlayPause)
-                        .font(12.0)
+                        .font(d.px(FONT_PLAY))
                         .tinted(true)
                         .lit(playing),
                 )
@@ -68,21 +70,12 @@ impl DeckUi {
     /// on the left so they keep clear of CUE and play.
     pub(super) fn jog(&self, ui: &mut Ui, out: &mut Vec<Command>) {
         let s = self.state;
-        let jog = self.dims.jog();
-        let k = jog / Dims::FULL.jog();
-        let (rect, resp) = ui.allocate_exact_size(vec2(jog + JOG_LEFT * k, jog), Sense::click());
-        let resp = resp.on_hover_text(
-            "BPM at the current tempo; the tempo change and the fader's range. \
-             VINYL: the jog wheel's top and the waveform scratch (click to turn off: \
-             then the jog wheel only bends)",
-        );
-        if resp.clicked() {
-            self.control(out, DeckControl::Vinyl, 1.0);
-        }
+        let d = self.dims;
+        let k = d.k;
+        let jog = d.jog();
+        let (rect, resp) = ui.allocate_exact_size(vec2(jog + d.px(JOG_LEFT), jog), Sense::hover());
         let c = pos2(rect.right() - jog / 2.0, rect.center().y);
-        let r = jog / 2.0 - JOG_ROOM * k;
-        // The text scales with the ring (it is smaller on a compact deck).
-        let t = k * r / (Dims::FULL.jog() / 2.0 - 2.0);
+        let r = jog / 2.0 - d.px(JOG_ROOM);
         let p = ui.painter();
         p.circle(
             c,
@@ -111,36 +104,79 @@ impl DeckUi {
             }
             None => ("-".into(), String::new()),
         };
-        let big = p.layout_no_wrap(whole, FontId::monospace(20.0 * t), THEME.text);
-        let small = p.layout_no_wrap(frac, FontId::monospace(12.0 * t), THEME.text);
+        let big = p.layout_no_wrap(whole, FontId::monospace(d.px(FONT_BPM)), THEME.text);
+        let small = p.layout_no_wrap(frac, FontId::monospace(d.px(FONT_BPM_FRAC)), THEME.text);
         let w = big.size().x + small.size().x;
-        let top = c.y - big.size().y + 2.0 * t;
+        let top = c.y - big.size().y + d.px(BPM_DROP);
         let left = c.x - w / 2.0;
-        let small_top = top + big.size().y - small.size().y - 2.0 * t;
+        // Their baselines level: the smaller font's descent is that much less.
+        let descent = d.px((FONT_BPM - FONT_BPM_FRAC) * 0.25);
+        let small_top = top + big.size().y - small.size().y - descent;
         p.galley(pos2(left, top), big.clone(), THEME.text);
         p.galley(pos2(left + big.size().x, small_top), small, THEME.text);
+        // Each part of the ring's text has its own tooltip; the ring itself has none.
+        let bpm_rect = Rect::from_min_size(pos2(left, top), vec2(w, big.size().y));
+        let tip = |rect: Rect, key: &str, text: &str| {
+            ui.interact(rect, resp.id.with(key), Sense::hover())
+                .on_hover_text(text);
+        };
+        tip(bpm_rect, "bpm", "BPM at the current tempo");
         let pct = p.layout_no_wrap(
             format!("{:+.1}%", s.rate * 100.0),
-            FontId::monospace(9.5 * t),
+            FontId::monospace(d.px(FONT_TEMPO)),
             THEME.muted,
         );
         let range = p.layout_no_wrap(
             format!(" {}", s.range.label()),
-            FontId::monospace(9.5 * t),
+            FontId::monospace(d.px(FONT_TEMPO)),
             self.colour(),
         );
         let w = pct.size().x + range.size().x;
-        let y = c.y + 4.0 * t;
+        let y = c.y + d.px(TEMPO_DROP);
         p.galley(pos2(c.x - w / 2.0, y), pct.clone(), THEME.muted);
+        let range_size = range.size();
         p.galley(pos2(c.x - w / 2.0 + pct.size().x, y), range, self.colour());
-        let vinyl = if s.vinyl { self.colour() } else { THEME.line };
-        p.text(
-            pos2(c.x, top - 2.0 * t),
-            Align2::CENTER_BOTTOM,
-            "VINYL",
-            FontId::proportional(8.0 * t),
-            vinyl,
+        tip(
+            Rect::from_min_size(pos2(c.x - w / 2.0, y), pct.size()),
+            "pct",
+            "Tempo change: how far the pitch fader is from the track's own BPM",
         );
+        tip(
+            Rect::from_min_size(pos2(c.x - w / 2.0 + pct.size().x, y), range_size),
+            "range",
+            "The pitch fader's range",
+        );
+        // VINYL: the only part that turns vinyl mode on or off, so a stray click on
+        // the ring can't.
+        let label = pos2(c.x, top - d.px(VINYL_GAP));
+        let text = p.layout_no_wrap(
+            "VINYL".into(),
+            FontId::proportional(d.px(FONT_VINYL)),
+            THEME.text,
+        );
+        let vinyl_rect = Align2::CENTER_BOTTOM
+            .anchor_size(label, text.size())
+            .expand(d.px(2.0));
+        let v = ui
+            .interact(vinyl_rect, resp.id.with("vinyl"), Sense::click())
+            .on_hover_text(
+                "Vinyl mode: the jog wheel's top and the waveform scratch (click to turn \
+                 off: then the jog wheel only bends)",
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        v.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::Button, true, s.vinyl, "VINYL")
+        });
+        if v.clicked() {
+            self.control(out, DeckControl::Vinyl, 1.0);
+        }
+        let ink = match (s.vinyl, v.hovered()) {
+            (true, _) => self.colour(),
+            (false, true) => THEME.muted,
+            (false, false) => THEME.line,
+        };
+        ui.painter()
+            .galley(vinyl_rect.shrink(d.px(2.0)).min, text, ink);
         self.jog_nudges(ui, out, resp.id, rect, c, r, k);
     }
 
@@ -234,11 +270,6 @@ impl DeckUi {
         );
     }
 }
-
-/// Room round the jog ring for its arrows, and extra on the left (towards CUE and
-/// play), at full size.
-const JOG_ROOM: f32 = 5.0;
-const JOG_LEFT: f32 = 6.0;
 
 /// The jog arrows, at full size: the dot between them (degrees clockwise from 3
 /// o'clock), the gap from the dot to each tail and how far each reaches (degrees),

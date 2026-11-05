@@ -72,6 +72,9 @@ pub struct CoreView<'a> {
     pub drives: &'a [Drive],
     /// Which of them earshot is using (not safe to pull out).
     pub uses: &'a Uses,
+    /// The tracks on a player now, and which (the library outlines their rows in the
+    /// player's colour).
+    pub loaded: &'a [(TrackId, DeckId)],
 }
 
 /// The engine as it is this frame, read once by the shell before anything is drawn.

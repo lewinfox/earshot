@@ -45,6 +45,11 @@ impl StemAudio {
         }
     }
 
+    /// The samples as held, for keeping them in RAM.
+    pub fn raw(&self) -> &[f16] {
+        &self.samples
+    }
+
     pub fn frames(&self) -> usize {
         self.frames
     }

@@ -47,6 +47,8 @@ pub struct DeckSession {
     pub detail: Arc<Vec<u8>>,
     /// Each stem's waveform, once the track's stems are on the deck.
     pub stem_waves: Option<Arc<super::stems::StemWaves>>,
+    /// The track's audio and stems kept in RAM while loaded ([`super::memlock`]).
+    pub locks: Vec<Arc<super::memlock::MemLock>>,
     /// The load counter the track went to the engine with. Events and snapshots about
     /// any other are stale.
     pub generation: u64,
@@ -92,6 +94,7 @@ impl DeckSession {
             waveform: Arc::default(),
             detail: Arc::default(),
             stem_waves: None,
+            locks: Vec::new(),
             generation: 0,
             auto_gain: 1.0,
             in_engine: false,
@@ -110,6 +113,7 @@ impl DeckSession {
         self.grid = track.grid.clone();
         self.generation = track.generation;
         self.stem_waves = None;
+        self.locks = vec![super::memlock::MemLock::track(&track.audio)];
         self.auto_gain = track.auto_gain;
         self.in_engine = false;
         self.cue_saved = false;

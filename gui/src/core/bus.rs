@@ -1169,27 +1169,26 @@ mod tests {
 
     #[test]
     fn effect_controls() {
-        let fx = |c: FxControl, v| Control::Fx(1, c).command(v);
+        let fx = |c: FxControl, v| Control::Fx(0, c).command(v);
         assert!(matches!(
             fx(FxControl::On, 1.0),
-            Some(Command::Fx(1, FxCmd::Enabled(Set::Toggle)))
+            Some(Command::Fx(0, FxCmd::Enabled(Set::Toggle)))
         ));
         assert!(fx(FxControl::On, 0.0).is_none());
         assert!(matches!(
             fx(FxControl::BeatsUp, 1.0),
-            Some(Command::Fx(1, FxCmd::BeatsStep(1)))
+            Some(Command::Fx(0, FxCmd::BeatsStep(1)))
         ));
         assert!(matches!(
             fx(FxControl::Level, 0.25),
-            Some(Command::Fx(1, FxCmd::Level(0.25)))
+            Some(Command::Fx(0, FxCmd::Level(0.25)))
         ));
         assert!(Control::Fx(FX_UNITS, FxControl::On).command(1.0).is_none());
         let mut snap = EngineSnapshot::default();
-        snap.mixer.fx[1].enabled = true;
-        snap.mixer.fx[1].level = 0.8;
-        assert_eq!(Control::Fx(1, FxControl::On).get(&snap), Some(1.0));
-        assert_eq!(Control::Fx(1, FxControl::Level).get(&snap), Some(0.8));
-        assert_eq!(Control::Fx(0, FxControl::On).get(&snap), Some(0.0));
+        snap.mixer.fx[0].enabled = true;
+        snap.mixer.fx[0].level = 0.8;
+        assert_eq!(Control::Fx(0, FxControl::On).get(&snap), Some(1.0));
+        assert_eq!(Control::Fx(0, FxControl::Level).get(&snap), Some(0.8));
     }
 
     #[test]

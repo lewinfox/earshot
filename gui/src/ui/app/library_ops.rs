@@ -49,7 +49,8 @@ impl EarshotApp {
                 if let Some(t) = self.index.get(track)
                     && let Err(e) = library::reveal(std::path::Path::new(&t.path))
                 {
-                    eprintln!("{e}");
+                    let text = format!("Couldn't show the file: {e}");
+                    self.notify(crate::core::notice::Level::Warning, text);
                 }
             }
             LibraryCmd::ListSessions => self.lib.store.send(StoreCmd::ListSessions),
@@ -259,10 +260,11 @@ impl EarshotApp {
         &mut self.panels.flow
     }
 
-    /// Prepare's Flow tab.
+    /// Prepare's Flow tab (not while a deck plays: see `set_mode`).
     pub(super) fn show_flow_tab(&mut self) {
-        self.prefs.mode = Mode::Prepare;
-        self.prefs.prepare.tool = Tool::Flow;
+        if self.set_mode(Mode::Prepare) {
+            self.prefs.prepare.tool = Tool::Flow;
+        }
     }
 
     /// Ask for the collections and the Flow that was open last time.
@@ -370,6 +372,10 @@ impl EarshotApp {
                 .find(|d| !decks[d.index()].playing())
                 .unwrap_or(DeckId::new(0).expect("deck 1")),
         });
+        let lib = &self.panels.library;
+        self.loaded_from[deck.index()] = lib
+            .here(self.prefs.layout().source, &self.panels.flow)
+            .map(|f| (track_id, f));
         // Show the track's details at once; the audio follows when it has decoded.
         // Only the newest request lands: an older one still decoding is dropped.
         let ticket = player::request_load(&self.player, deck);

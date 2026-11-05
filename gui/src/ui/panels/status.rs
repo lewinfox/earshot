@@ -2,7 +2,7 @@
 //! status line along the bottom: what earshot is doing in the background (with a
 //! progress bar when it can be counted), then the MIDI log.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use earshot_engine::OutputInfo;
 use egui::{RichText, Ui};
@@ -11,6 +11,7 @@ use super::{Cx, Panel};
 use crate::core::command::{AppCmd, Command, ViewCmd};
 use crate::core::index::LibraryCmd;
 use crate::core::jobs::Running;
+use crate::core::notice::{Level, Notice};
 use crate::core::view::{Modal, Mode, SettingsTab};
 use crate::ui::theme::fs;
 use crate::ui::widgets::{Intent, Pill, Seg, Toggle, muted, segmented};
@@ -34,6 +35,8 @@ pub struct Meter<'a> {
     pub load: Option<f32>,
     /// Frame timing, and the audio callback's: the tooltip.
     pub detail: [&'a str; 2],
+    /// The memory watch's latest reading (`None` until it has one).
+    pub memory: Option<crate::core::log::Memory>,
 }
 
 pub struct TopBar<'a> {
@@ -52,7 +55,6 @@ pub struct TopBar<'a> {
 
 impl Panel for TopBar<'_> {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        let t = cx.theme;
         ui.horizontal(|ui| {
             ui.menu_button("Menu", |ui| {
                 ui.menu_button("Import", |ui| {
@@ -90,6 +92,20 @@ impl Panel for TopBar<'_> {
                         }
                     });
                 });
+                ui.menu_button("Debug", |ui| {
+                    let mut pretend = cx.prefs.pretend_controller;
+                    if ui
+                        .checkbox(&mut pretend, "Pretend a controller is connected")
+                        .on_hover_text(
+                            "Lay the app out as it is with a controller (the decks' pads, \
+                             the mixer), without one",
+                        )
+                        .changed()
+                    {
+                        cx.send(ViewCmd::PretendController(pretend));
+                        ui.close();
+                    }
+                });
             });
             if cx.prefs.mode == Mode::Prepare {
                 ui.menu_button("Edit", |ui| {
@@ -109,7 +125,6 @@ impl Panel for TopBar<'_> {
                     }
                 });
             }
-            ui.label(RichText::new("earshot").strong().color(t.accent));
             let mut mode = cx.prefs.mode;
             egui::ComboBox::from_id_salt("mode")
                 .selected_text(match mode {
@@ -128,71 +143,88 @@ impl Panel for TopBar<'_> {
             }
             if mode == Mode::Perform {
                 deck_count(ui, cx);
+                layers(ui, cx);
                 panes(ui, cx);
+                centred_fx(ui, cx);
             }
-            let (audio, ok) = match self.audio {
-                Ok(i) => (
-                    format!(
-                        "{}{}{} · {} kHz · {} frames · {} ch",
-                        if i.null || i.phones_error.is_some() {
-                            "⚠ "
-                        } else {
-                            ""
-                        },
-                        i.device,
-                        i.phones
-                            .as_ref()
-                            .map_or(String::new(), |(p, _)| format!(" · headphones: {p}")),
-                        i.sample_rate / 1000,
-                        i.buffer_frames.map_or("default".into(), |b| b.to_string()),
-                        i.channels
-                    ),
-                    !i.null && i.phones_error.is_none(),
-                ),
-                Err(e) => (format!("no audio: {e}"), false),
-            };
-            let (audio, ok) = match self.audio_note {
-                Some(note) => (format!("⚠ {note}"), false),
-                None => (audio, ok),
-            };
-            let intent = if ok { Intent::Success } else { Intent::Warning };
-            if ui
-                .add(Pill::new(&audio, intent))
-                .on_hover_text("Audio settings")
-                .clicked()
-            {
-                cx.send(ViewCmd::Settings(SettingsTab::Audio));
-            }
-            let midi = if self.midi_ports.is_empty() {
-                "MIDI: none".to_string()
-            } else {
-                format!("MIDI: {}", self.midi_ports.join(", "))
-            };
-            let intent = if self.midi_ports.is_empty() {
-                Intent::Neutral
-            } else {
-                Intent::Success
-            };
-            if ui
-                .add(Pill::new(&midi, intent))
-                .on_hover_text("Click to reconnect MIDI")
-                .clicked()
-            {
-                cx.send(AppCmd::ReconnectMidi);
-            }
-            self.analysis_pill(ui, cx);
-            self.jobs_pill(ui, cx);
+            // The system's state on the right, built from the right edge in.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Keys").clicked() {
                     cx.send(ViewCmd::ToggleModal(Modal::Keys));
                 }
+                self.memory_meter(ui, cx);
+                ui.add_space(6.0);
                 self.cpu_meter(ui, cx);
+                ui.add_space(6.0);
+                self.midi_pill(ui, cx);
+                self.audio_pill(ui, cx);
+                self.jobs_pill(ui, cx);
+                self.analysis_pill(ui, cx);
             });
         });
     }
 }
 
 impl TopBar<'_> {
+    /// The output device and its format: green, or amber with a warning. Clicked,
+    /// Settings > Audio.
+    fn audio_pill(&self, ui: &mut Ui, cx: &mut Cx) {
+        let (audio, ok) = match self.audio {
+            Ok(i) => (
+                format!(
+                    "{}{}{} · {} kHz · {} frames · {} ch",
+                    if i.null || i.phones_error.is_some() {
+                        "⚠ "
+                    } else {
+                        ""
+                    },
+                    i.device,
+                    i.phones
+                        .as_ref()
+                        .map_or(String::new(), |(p, _)| format!(" · headphones: {p}")),
+                    i.sample_rate / 1000,
+                    i.buffer_frames.map_or("default".into(), |b| b.to_string()),
+                    i.channels
+                ),
+                !i.null && i.phones_error.is_none(),
+            ),
+            Err(e) => (format!("no audio: {e}"), false),
+        };
+        let (audio, ok) = match self.audio_note {
+            Some(note) => (format!("⚠ {note}"), false),
+            None => (audio, ok),
+        };
+        let intent = if ok { Intent::Success } else { Intent::Warning };
+        if ui
+            .add(Pill::new(&audio, intent))
+            .on_hover_text("Audio settings")
+            .clicked()
+        {
+            cx.send(ViewCmd::Settings(SettingsTab::Audio));
+        }
+    }
+
+    /// The MIDI controllers connected. Clicked, reconnect.
+    fn midi_pill(&self, ui: &mut Ui, cx: &mut Cx) {
+        let midi = if self.midi_ports.is_empty() {
+            "MIDI: none".to_string()
+        } else {
+            format!("MIDI: {}", self.midi_ports.join(", "))
+        };
+        let intent = if self.midi_ports.is_empty() {
+            Intent::Neutral
+        } else {
+            Intent::Success
+        };
+        if ui
+            .add(Pill::new(&midi, intent))
+            .on_hover_text("Click to reconnect MIDI")
+            .clicked()
+        {
+            cx.send(AppCmd::ReconnectMidi);
+        }
+    }
+
     /// "CPU" and a bar: green, amber from half, red from 80 % (where a callback
     /// counts as slow).
     fn cpu_meter(&self, ui: &mut Ui, cx: &mut Cx) {
@@ -222,6 +254,56 @@ impl TopBar<'_> {
         };
         r.on_hover_text(tip);
         ui.label(RichText::new("CPU").size(fs(11.0)));
+    }
+
+    /// "MEM" and a bar: the machine's RAM in use. Amber when it's low (little free,
+    /// or the swap mostly used), red when it's stalling for memory (swapping hard,
+    /// which can stall the audio).
+    fn memory_meter(&self, ui: &mut Ui, cx: &mut Cx) {
+        let t = cx.theme;
+        let mem = self.hud.memory;
+        let (rect, r) = ui.allocate_exact_size(egui::vec2(60.0, 10.0), egui::Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(rect, 2.0, t.line);
+        if let Some(m) = mem {
+            let colour = if m.stalled() {
+                t.bad
+            } else if m.low() {
+                t.warn
+            } else {
+                t.ok
+            };
+            let mut fill = rect;
+            fill.set_width(rect.width() * m.used().clamp(0.02, 1.0));
+            p.rect_filled(fill, 2.0, colour);
+        }
+        let mb = |b: u64| b >> 20;
+        let tip = match mem {
+            Some(m) => {
+                let mut tip = format!(
+                    "Memory: {} of {} MB in use; swap {} of {} MB
+\
+                     Earshot: {} MB ({} MB of deck audio kept in RAM)",
+                    mb(m.total - m.available.min(m.total)),
+                    mb(m.total),
+                    mb(m.swap_total - m.swap_free.min(m.swap_total)),
+                    mb(m.swap_total),
+                    mb(m.ours),
+                    mb(m.locked),
+                );
+                if m.stalled() {
+                    tip += &format!(
+                        "\nThe system is waiting for memory {:.0} % of the time: \
+                         close something",
+                        m.stall
+                    );
+                }
+                tip
+            }
+            None => "Memory: not measured".into(),
+        };
+        r.on_hover_text(tip);
+        ui.label(RichText::new("MEM").size(fs(11.0)));
     }
 
     /// "3 jobs", with a spinner, while any run or wait; clicked, a dropdown with a
@@ -292,7 +374,7 @@ impl TopBar<'_> {
 /// The MIDI messages last received, newest first.
 /// Perform's 2 / 4 deck toggle. Back to two only once decks 3 and 4 have stopped, so
 /// nothing plays out of sight.
-/// Switches for Perform's mixer and effect units, to show or hide them mid-set.
+/// The switch for Perform's mixer, to show or hide it mid-set.
 fn panes(ui: &mut Ui, cx: &mut Cx) {
     let mut mixer = cx.prefs.mixer_shown();
     if ui
@@ -302,14 +384,58 @@ fn panes(ui: &mut Ui, cx: &mut Cx) {
     {
         cx.send(ViewCmd::ShowMixer(mixer));
     }
-    let mut fx = cx.prefs.show_fx;
-    if ui
-        .add(Toggle::new(&mut fx, "FX"))
-        .on_hover_text("The effect units, in a strip under the decks")
-        .changed()
-    {
-        cx.send(ViewCmd::ShowFx(fx));
+}
+
+/// The effect units, centred in the bar (as far as what's left of them allows). Their
+/// width is last frame's: the first frame they sit a little off, then settle.
+fn centred_fx(ui: &mut Ui, cx: &mut Cx) {
+    let id = egui::Id::new("top-bar-fx-width");
+    let width: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(0.0);
+    let at = ui.max_rect().center().x - width / 2.0;
+    ui.add_space((at - ui.cursor().min.x).max(12.0));
+    let start = ui.cursor().min.x;
+    super::fx::show(ui, cx.engine.snap.as_ref(), cx.out);
+    let drawn = ui.cursor().min.x - start;
+    if (drawn - width).abs() > 0.5 {
+        ui.ctx().data_mut(|d| d.insert_temp(id, drawn));
+        ui.ctx().request_discard("the effects' width");
     }
+}
+
+/// Four decks and no controller: which deck each hand (the keyboard's) plays, as
+/// `[1] | [2]` in the decks' colours. The left switches between 1 and 3, the right
+/// between 2 and 4. A controller has its own buttons.
+fn layers(ui: &mut Ui, cx: &mut Cx) {
+    if !cx.prefs.four_decks || cx.prefs.controller() {
+        return;
+    }
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (side, hand, other) in [(0, "left", [1, 3]), (1, "right", [2, 4])] {
+            if side == 1 {
+                ui.label(RichText::new("|").color(cx.theme.muted));
+            }
+            let deck = cx.prefs.active_deck(side);
+            let n = deck.index() + 1;
+            let colour = cx.theme.deck_colour(deck);
+            let text = RichText::new(n.to_string()).strong().color(colour);
+            let r = ui
+                .add(
+                    egui::Button::new(text)
+                        .stroke(egui::Stroke::new(1.0_f32, colour))
+                        .min_size(egui::vec2(24.0, 0.0)),
+                )
+                .on_hover_text(format!(
+                    "The {hand} hand's keys play deck {n}. Click for deck {}",
+                    if n == other[0] { other[1] } else { other[0] }
+                ));
+            let name = format!("{}{} hand's deck", hand[..1].to_uppercase(), &hand[1..]);
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
+            if r.clicked() {
+                cx.send(ViewCmd::SwitchLayer(side));
+            }
+        }
+    });
 }
 
 fn deck_count(ui: &mut Ui, cx: &mut Cx) {
@@ -363,32 +489,59 @@ fn job_line(ui: &mut Ui, j: &Running, cx: &mut Cx) {
     });
 }
 
-/// The bottom line: the first job with its bar (the others in the top bar's jobs
-/// pill), then the MIDI messages last received, newest first.
+/// The bottom line: messages for the user, newest first, then the first job with
+/// its bar (the others in the top bar's jobs pill).
 pub struct StatusLine<'a> {
     pub jobs: &'a [Running],
-    pub midi: &'a VecDeque<String>,
+    /// Messages for the user, oldest first (each drawn with a close button).
+    pub notices: &'a [Notice],
 }
 
 impl Panel for StatusLine<'_> {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let t = cx.theme;
         ui.horizontal(|ui| {
+            // Newest first.
+            for n in self.notices.iter().rev() {
+                let (colour, icon) = match n.level {
+                    Level::Info => (t.warn, ""),
+                    Level::Warning => (t.bad, "⚠ "),
+                };
+                egui::Frame::new()
+                    .fill(colour.gamma_multiply(0.18))
+                    .stroke(egui::Stroke::new(1.0_f32, colour))
+                    .corner_radius(3)
+                    .inner_margin(egui::Margin::symmetric(6, 0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("{icon}{}", n.text))
+                                    .size(fs(11.0))
+                                    .color(colour),
+                            );
+                            if ui
+                                .add(
+                                    egui::Button::new(RichText::new("×").size(fs(13.0)))
+                                        .frame(false),
+                                )
+                                .on_hover_text("Dismiss")
+                                .clicked()
+                            {
+                                cx.send(AppCmd::DismissNotice(n.id));
+                            }
+                        });
+                    });
+            }
             if let Some(first) = self.jobs.first() {
+                if !self.notices.is_empty() {
+                    ui.separator();
+                }
                 job_line(ui, first, cx);
                 let more = self.jobs.len() - 1;
                 if more > 0 {
                     muted(ui, format!("+{more} more"));
                 }
-                ui.separator();
             }
-            let log: Vec<&str> = self.midi.iter().map(|s| s.as_str()).collect();
-            ui.label(
-                RichText::new(format!("MIDI  {}", log.join("   |   ")))
-                    .monospace()
-                    .size(fs(11.0))
-                    .color(t.muted),
-            );
         });
     }
 }

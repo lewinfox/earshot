@@ -107,6 +107,7 @@ pub struct HwButton<'a> {
     round: bool,
     /// Small text under the label (a hot cue's name), cut off at the button's edges.
     caption: Option<&'a str>,
+    caption_font: f32,
 }
 
 impl<'a> HwButton<'a> {
@@ -122,11 +123,17 @@ impl<'a> HwButton<'a> {
             tinted: false,
             round: false,
             caption: None,
+            caption_font: 8.5,
         }
     }
 
     pub fn caption(mut self, caption: Option<&'a str>) -> Self {
         self.caption = caption;
+        self
+    }
+
+    pub fn caption_font(mut self, size: f32) -> Self {
+        self.caption_font = size;
         self
     }
 
@@ -246,7 +253,11 @@ impl Widget for HwButton<'_> {
                         text,
                     );
                     // Left-aligned once it's too long to centre, and cut off.
-                    let galley = p.layout_no_wrap(caption.into(), FontId::proportional(8.5), text);
+                    let galley = p.layout_no_wrap(
+                        caption.into(),
+                        FontId::proportional(self.caption_font),
+                        text,
+                    );
                     let inner = rect.shrink(3.0);
                     let x = if galley.size().x > inner.width() {
                         inner.left()

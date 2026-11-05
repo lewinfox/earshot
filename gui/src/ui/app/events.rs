@@ -106,20 +106,6 @@ impl EarshotApp {
                     // Store as `TracksChanged` and `Previews`.
                     self.index.set_analysis(ev.track_id, ev.state);
                 }
-                Event::Midi {
-                    port,
-                    bytes,
-                    mapped,
-                } => {
-                    let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02X}")).collect();
-                    self.midi_log.push_front(format!(
-                        "{} = {}",
-                        hex.join(" "),
-                        mapped.unwrap_or_else(|| "unmapped".into())
-                    ));
-                    self.midi_log.truncate(6);
-                    let _ = port;
-                }
                 Event::Command(cmd) => self.dispatch(cmd),
                 Event::TempoLock(e) => self.tempo_lock_event(e),
                 Event::Stems(e) => self.panels.stems.on_event(e),

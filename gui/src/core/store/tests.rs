@@ -705,6 +705,33 @@ fn meta_sources_strongest_first() {
     assert!(m[&9999].is_empty());
 }
 
+/// The user's mark on whether a track needs attention outlasts analysis, and undoes.
+#[test]
+fn attention_mark_outlasts_analysis() {
+    use crate::core::edit::{EditCmd, Field, Value};
+    let (_dir, mut w, id) = one_track("attention");
+    w.save_analysis(analysis(id, 125.0, None, false)).unwrap();
+    assert_eq!(library(&mut w)[0].needs_attention, None);
+    let edit = w
+        .edit(EditCmd::Set {
+            tracks: vec![id],
+            values: vec![(Field::Attention, Some(Value::Flag(false)))],
+        })
+        .unwrap();
+    assert_eq!(library(&mut w)[0].needs_attention, Some(false));
+    let active = read::active_grid(w.conn(), id).unwrap().map(|g| g.0);
+    w.save_analysis(analysis(id, 125.0, active, true)).unwrap();
+    let t = &library(&mut w)[0];
+    assert!(t.drifts, "analysis still says it drifts");
+    assert_eq!(
+        t.needs_attention,
+        Some(false),
+        "analysing again keeps the mark"
+    );
+    w.apply_edit(&edit.unwrap().inverse()).unwrap();
+    assert_eq!(library(&mut w)[0].needs_attention, None);
+}
+
 /// Bug 1: a grid fixed by hand while analysis ran isn't overwritten.
 /// Bug 4: and analysis doesn't change the BPM that came with it.
 #[test]
@@ -1175,6 +1202,18 @@ fn smart_playlists_run_their_query_in_sql_like_in_memory() {
     ] {
         save_features(w.conn(), id(t), &[("energy", e)], None).unwrap();
     }
+    // Two drift, but Deep Space was marked OK; Warm Up was marked as needing attention.
+    for t in ["Shallow", "Deep Space"] {
+        save_features(w.conn(), id(t), &[("drifts", 1.0)], None).unwrap();
+    }
+    for (t, flag) in [("Deep Space", 0), ("Warm Up", 1)] {
+        w.conn()
+            .execute(
+                "UPDATE tracks SET needs_attention = ?2 WHERE id = ?1",
+                [id(t), flag],
+            )
+            .unwrap();
+    }
     // Plays: Shallow twice (the last an hour ago), Other once, long ago.
     for (t, ago) in [
         ("Shallow", 3 * 86_400),
@@ -1227,6 +1266,10 @@ fn smart_playlists_run_their_query_in_sql_like_in_memory() {
         "played:0",
         "sort:-plays sort:title",
         "sort:played sort:title",
+        "is:drifting",
+        "-is:drifting",
+        "status:attention",
+        "-status:attention",
     ] {
         w.set_query(1, q).unwrap();
         let parsed = query::parse(q).unwrap();

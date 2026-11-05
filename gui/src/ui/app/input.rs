@@ -48,6 +48,9 @@ impl EarshotApp {
             if repeat && !b.repeats() {
                 continue;
             }
+            // Deck 1's and 2's keys go to the decks the hands play (1 or 3, 2 or 4).
+            let mut b = b.clone();
+            b.control = self.prefs.layered(b.control);
             let (press, release) = (b.press(), b.release());
             if let Some(release) = release {
                 self.held_keys.insert(key, release);

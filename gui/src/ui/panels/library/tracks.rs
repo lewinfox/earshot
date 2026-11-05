@@ -9,7 +9,7 @@ use egui::{Color32, RichText, Sense, TextureHandle, TextureId, Ui, vec2};
 use crate::core::bus::deck_letter;
 use crate::core::collections::{CollectionCmd, CollectionId, CollectionKind, FlowCmd, Section};
 use crate::core::command::{Command, DeckCmd, PreviewCmd, ViewCmd};
-use crate::core::edit::EditCmd;
+use crate::core::edit::{EditCmd, Field, Value};
 use crate::core::external::ExternalCmd;
 use crate::core::index::LibraryCmd;
 use crate::core::outside::is_outside;
@@ -81,15 +81,11 @@ fn art_wanted() -> egui::Id {
 
 // ---- cells -------------------------------------------------------------------------
 
-/// The title (dimmed once played this session), and the artist under it when
+/// The title (green once played this session), and the artist under it when
 /// `two_lines`.
 pub fn title_cell(ui: &mut Ui, t: &Track, played: bool, two_lines: bool) {
     let title = RichText::new(&t.title);
-    let title = if played {
-        title.color(THEME.muted)
-    } else {
-        title
-    };
+    let title = if played { title.color(THEME.ok) } else { title };
     if !two_lines {
         ui.add(egui::Label::new(title).truncate().selectable(false));
         return;
@@ -120,13 +116,21 @@ pub fn status_mark(ui: &mut Ui, t: &Track, state: Option<&AnalysisState>) {
             stage.to_string(),
         ),
         Some(AnalysisState::Queued) => (Mark::Ring(THEME.warn), "Waiting to be analysed".into()),
+        None if t.needs_attention == Some(true) => (
+            Mark::Text("!".into(), THEME.bad),
+            "Marked as needing attention: right-click, Mark track as OK".into(),
+        ),
         None if t.dynamic() => (
             Mark::Text("~".into(), THEME.ok),
             "Analysed (dynamic): the grid follows the tempo".into(),
         ),
+        None if t.drifts && t.needs_attention == Some(false) => (
+            Mark::Dot(THEME.ok),
+            "Marked as OK (the tempo seems to drift)".into(),
+        ),
         None if t.drifts => (
             Mark::Text("~".into(), THEME.bad),
-            "The tempo seems to drift: right-click, Analyse (dynamic)".into(),
+            "The tempo seems to drift: right-click, Analyse (dynamic), or Mark track as OK".into(),
         ),
         None if t.analysed() => (
             Mark::Dot(THEME.ok),
@@ -247,6 +251,7 @@ pub fn track_menu(ui: &mut Ui, sel: &[TrackId], v: &CoreView, at: MenuAt, out: &
     }
     ui.separator();
     analyse_items(ui, sel, v, out);
+    attention_items(ui, sel, v, out);
     if let [first] = *sel
         && ui
             .button("Normalise tempo")
@@ -260,6 +265,52 @@ pub fn track_menu(ui: &mut Ui, sel: &[TrackId], v: &CoreView, at: MenuAt, out: &
         ]);
         ui.close();
     }
+}
+
+/// "Mark track as OK" for tracks that need attention (a DJ set whose tempo drifts,
+/// say), and "Mark track as needs attention" for any that don't. One undo step each.
+fn attention_items(ui: &mut Ui, sel: &[TrackId], v: &CoreView, out: &mut Vec<Command>) {
+    let (mut flagged, mut fine) = (vec![], vec![]);
+    for t in sel.iter().filter_map(|&i| v.lib.get(i)) {
+        if t.needs_attention() {
+            flagged.push(t.id);
+        } else {
+            fine.push(t.id);
+        }
+    }
+    let mut item = |ui: &mut Ui, tracks: Vec<TrackId>, flag: bool, tip: &str| {
+        if tracks.is_empty() {
+            return;
+        }
+        let state = if flag { "needs attention" } else { "OK" };
+        let label = match tracks.len() {
+            1 if sel.len() == 1 => format!("Mark track as {state}"),
+            1 => format!("Mark 1 track as {state}"),
+            n => format!("Mark {n} tracks as {state}"),
+        };
+        if ui.button(label).on_hover_text(tip).clicked() {
+            out.push(
+                EditCmd::Set {
+                    tracks,
+                    values: vec![(Field::Attention, Some(Value::Flag(flag)))],
+                }
+                .into(),
+            );
+            ui.close();
+        }
+    };
+    item(
+        ui,
+        flagged,
+        false,
+        "Stop flagging it, e.g. a DJ set whose tempo drifts. Analysing again keeps this.",
+    );
+    item(
+        ui,
+        fine,
+        true,
+        "Flag it to come back to (status:attention finds it)",
+    );
 }
 
 /// "Add" or "Add 3".

@@ -1,30 +1,28 @@
-//! Perform's effect units, in a strip across the window under the decks: unit 1 on
-//! the left half, unit 2 on the right. Each is a row: its effect, its length in beats
-//! (◀ ▶), its level, what it's on (a deck or the main mix) and its on button, in the
-//! colour of the deck it's on.
+//! Perform's effect units, in the top bar: a row each (one, for now). A row is its
+//! effect (a dropdown), its length in beats (◀ ▶), its level, what it's on (a deck
+//! or the main mix) and its on button, in the colour of the deck it's on.
 //!
 //! Like the mixer, every control is bound to its entry in the control registry, so
 //! keyboard and MIDI moves show here.
 
-use earshot_engine::{EngineSnapshot, FX_UNITS, FxTarget, FxUnitState};
-use egui::{Align, Layout, Response, RichText, Ui, vec2};
+use earshot_engine::{EngineSnapshot, FX_UNITS, FxKind, FxTarget, FxUnitState};
+use egui::{Response, RichText, Ui, vec2};
 
-use super::mixer::{KNOB, PFL_H, ROW, bound};
+use super::mixer::bound;
 use crate::core::bus::{Control, FxControl, deck_letter};
 use crate::core::command::Command;
-use crate::ui::panels::{Cx, Panel};
 use crate::ui::theme::THEME;
 use crate::ui::widgets::{HwButton, Knob, held};
 
-/// The strip's height, inside its frame: a knob and its label.
-pub const HEIGHT: f32 = ROW;
-/// The effect's button, and what it's on.
-const NAME_W: f32 = 64.0;
-const TARGET_W: f32 = 48.0;
-const ON_W: f32 = 40.0;
+/// Its buttons' height, and the level knob's size: the top bar's.
+const H: f32 = 18.0;
+const KNOB: f32 = 16.0;
+/// What the effect's on, and the on button.
+const TARGET_W: f32 = 44.0;
+const ON_W: f32 = 32.0;
 /// The ◀ and ▶ buttons, and the length between them.
 const STEP: f32 = 16.0;
-const BEATS_W: f32 = 32.0;
+const BEATS_W: f32 = 30.0;
 
 /// A length in beats as the units show it: `1/4`, `1/2`, `2`.
 fn fmt_beats(b: f64) -> String {
@@ -35,21 +33,14 @@ fn fmt_beats(b: f64) -> String {
     }
 }
 
+/// Every effect unit's row, side by side.
 pub fn show(ui: &mut Ui, shared: Option<&EngineSnapshot>, out: &mut Vec<Command>) {
-    let half = (ui.available_width() - 12.0) / FX_UNITS as f32;
-    ui.horizontal_centered(|ui| {
-        ui.spacing_mut().item_spacing.x = 12.0;
-        for unit in 0..FX_UNITS {
-            ui.allocate_ui_with_layout(
-                vec2(half, HEIGHT),
-                Layout::left_to_right(Align::Center),
-                |ui| {
-                    ui.set_width(half);
-                    unit_row(ui, shared, unit, out);
-                },
-            );
+    for unit in 0..FX_UNITS {
+        if unit > 0 {
+            ui.add_space(16.0);
         }
-    });
+        unit_row(ui, shared, unit, out);
+    }
 }
 
 fn unit_row(ui: &mut Ui, shared: Option<&EngineSnapshot>, unit: usize, out: &mut Vec<Command>) {
@@ -68,49 +59,54 @@ fn unit_row(ui: &mut Ui, shared: Option<&EngineSnapshot>, unit: usize, out: &mut
     };
     let button = |ui: &mut Ui, text: &str, w: f32| {
         ui.add_sized(
-            vec2(w, PFL_H),
-            HwButton::new(text, colour, vec2(w, PFL_H)).font(9.0),
+            vec2(w, H),
+            HwButton::new(text, colour, vec2(w, H)).font(9.0),
         )
     };
 
-    ui.label(
-        RichText::new(format!("FX{}", unit + 1))
-            .size(10.0)
-            .color(THEME.muted),
-    );
-    let name = state.kind.name().to_uppercase();
-    let r = ui
-        .add_sized(
-            vec2(NAME_W, PFL_H),
-            HwButton::new(&name, colour, vec2(NAME_W, PFL_H))
-                .font(9.0)
-                .tinted(true),
-        )
-        .on_hover_text("The effect. Click for the next one");
-    press(ui, &r, FxControl::Next, out);
+    // "FX", numbered once there's more than one.
+    let name = if FX_UNITS > 1 {
+        format!("FX{}", unit + 1)
+    } else {
+        "FX".into()
+    };
+    ui.label(RichText::new(name).size(10.0).color(THEME.muted));
+    // The effect: pick one, and the unit steps to it (it only knows "next").
+    let mut kind = state.kind;
+    egui::ComboBox::from_id_salt(("fx-kind", unit))
+        .selected_text(state.kind.name())
+        .width(64.0)
+        .show_ui(ui, |ui| {
+            for k in FxKind::ALL {
+                ui.selectable_value(&mut kind, k, k.name());
+            }
+        })
+        .response
+        .on_hover_text("The effect");
+    if kind != state.kind {
+        let at = |k: FxKind| FxKind::ALL.iter().position(|x| *x == k).unwrap_or(0);
+        let n = FxKind::ALL.len();
+        for _ in 0..(at(kind) + n - at(state.kind)) % n {
+            out.extend(fx(FxControl::Next).command(1.0));
+        }
+    }
 
-    let r = button(ui, "◀", STEP)
-        .on_hover_text("Halve the length: the echo's repeats, the Trans cuts come twice as often");
+    let r = button(ui, "◀", STEP).on_hover_text("Halve effect length");
     press(ui, &r, FxControl::BeatsDown, out);
     ui.add_sized(
-        vec2(BEATS_W, PFL_H),
+        vec2(BEATS_W, H),
         egui::Label::new(
             RichText::new(fmt_beats(state.beats))
                 .size(10.0)
                 .color(THEME.text),
         ),
     )
-    .on_hover_text("The length, in beats");
-    let r = button(ui, "▶", STEP).on_hover_text("Double the length");
+    .on_hover_text("Effect length, in beats");
+    let r = button(ui, "▶", STEP).on_hover_text("Double effect length");
     press(ui, &r, FxControl::BeatsUp, out);
 
     bound(ui, shared, fx(FxControl::Level), out, |ui, range, v| {
-        ui.add(
-            Knob::new(range, v)
-                .diameter(KNOB)
-                .label("LEVEL")
-                .colour(colour),
-        )
+        ui.add(Knob::new(range, v).diameter(KNOB).colour(colour))
     });
 
     let target = match state.target {
@@ -119,8 +115,8 @@ fn unit_row(ui: &mut Ui, shared: Option<&EngineSnapshot>, unit: usize, out: &mut
     };
     let r = ui
         .add_sized(
-            vec2(TARGET_W, PFL_H),
-            HwButton::new(&target, colour, vec2(TARGET_W, PFL_H))
+            vec2(TARGET_W, H),
+            HwButton::new(&target, colour, vec2(TARGET_W, H))
                 .font(9.0)
                 .tinted(true),
         )
@@ -128,28 +124,14 @@ fn unit_row(ui: &mut Ui, shared: Option<&EngineSnapshot>, unit: usize, out: &mut
     press(ui, &r, FxControl::Target, out);
     let r = ui
         .add_sized(
-            vec2(ON_W, PFL_H),
-            HwButton::new("ON", colour, vec2(ON_W, PFL_H))
+            vec2(ON_W, H),
+            HwButton::new("ON", colour, vec2(ON_W, H))
                 .font(9.0)
                 .lit(state.enabled)
                 .tinted(busy),
         )
         .on_hover_text("Effect on / off. An echo's repeats ring on after it's off");
     press(ui, &r, FxControl::On, out);
-}
-
-/// The effect units, in their frame, across the window.
-pub struct FxPanel;
-
-impl Panel for FxPanel {
-    fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        crate::ui::theme::normal_text(ui);
-        cx.theme.panel_frame().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.set_height(HEIGHT);
-            show(ui, cx.engine.snap.as_ref(), cx.out);
-        });
-    }
 }
 
 #[cfg(test)]

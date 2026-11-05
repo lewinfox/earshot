@@ -734,27 +734,28 @@ fn layout_is_kept_per_mode() {
     steps(&mut h, 3);
 }
 
-/// Perform's effect units show and hide from the top bar's FX switch, apart from the
-/// mixer's.
+/// The effect unit is in Perform's top bar, mixer or not: picking an effect from its
+/// dropdown puts that effect on.
 #[test]
-fn the_fx_switch_shows_and_hides_the_effect_units() {
+fn the_effect_unit_is_in_the_top_bar() {
     let mut h = start("fx");
     h.state_mut()
         .dispatch(ViewCmd::SetMode(Mode::Perform).into());
     steps(&mut h, 3);
     let fx = |h: &H| h.query_all_by_label("Effect level").count() > 0;
-    let mixer = |h: &H| h.query_all_by_label("Gain").count() > 0;
-    assert!(fx(&h) && mixer(&h));
-    h.get_by_label("FX").click();
+    assert!(fx(&h));
+    h.state_mut().dispatch(ViewCmd::ShowMixer(false).into());
     steps(&mut h, 3);
-    assert!(!fx(&h) && mixer(&h));
-    assert!(!h.state().prefs.show_fx);
-    h.get_by_label("Mixer").click();
+    assert!(fx(&h), "not with the mixer");
+    let kind = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().mixer.fx[0].kind;
+    let next = earshot_engine::FxKind::ALL
+        .into_iter()
+        .find(|k| *k != kind(h.state()))
+        .unwrap();
+    h.get_by_value(kind(h.state()).name()).click();
     steps(&mut h, 3);
-    assert!(!fx(&h) && !mixer(&h));
-    h.get_by_label("FX").click();
-    steps(&mut h, 3);
-    assert!(fx(&h) && !mixer(&h));
+    h.get_by_label(next.name()).click();
+    settle_until(&mut h, |a| kind(a) == next);
 }
 
 /// However the mixer and effects are switched, both decks stay inside the window:
@@ -773,11 +774,96 @@ fn decks_stay_inside_the_window() {
         syncs.iter().all(|r| r.right() <= right + 0.5)
     };
     assert!(inside(&h));
-    for switch in ["FX", "Mixer", "FX", "Mixer"] {
+    for switch in ["Mixer", "Mixer"] {
         h.get_by_label(switch).click();
         steps(&mut h, 5);
         assert!(inside(&h), "after {switch}");
     }
+}
+
+/// With a controller (here a pretend one, from Menu > Debug) the player page shows the
+/// controller's pads instead of the on-screen hot cues, loops and jumps, and the mixer
+/// hides; without, they're back.
+#[test]
+fn a_controller_swaps_the_pads_for_its_own() {
+    let mut h = start("pretend-controller");
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Perform).into());
+    steps(&mut h, 3);
+    let on_screen = |h: &H| h.query_all_by_label("BEAT JUMP 4").count() > 0;
+    let pads = |h: &H| h.query_all_by_label("Pad 1").count() > 0;
+    let mixer = |h: &H| h.query_all_by_label("Gain").count() > 0;
+    assert!(on_screen(&h) && !pads(&h) && mixer(&h));
+    h.state_mut()
+        .dispatch(ViewCmd::PretendController(true).into());
+    steps(&mut h, 5);
+    assert!(h.state().prefs.controller());
+    assert!(!on_screen(&h) && !mixer(&h));
+    render(&mut h, "controller-pads");
+    // Its tabs switch in place too: CUE doesn't move.
+    let cue = |h: &H| {
+        h.get_all_by_label("CUE")
+            .map(|n| n.rect())
+            .collect::<Vec<_>>()
+    };
+    let before = cue(&h);
+    for tab in ["Grid controls", "Stem controls", "Player controls"] {
+        h.get_all_by_label(tab).next().unwrap().click();
+        steps(&mut h, 5);
+        assert_eq!(cue(&h), before, "{tab}");
+    }
+    h.state_mut()
+        .dispatch(ViewCmd::PretendController(false).into());
+    steps(&mut h, 5);
+    assert!(on_screen(&h) && !pads(&h) && mixer(&h));
+}
+
+/// Four decks: the keyboard's hands play decks 1 and 2 until L or R in the top bar
+/// switches a hand to deck 3 or 4 (the left shows 1, then 3). The decks they play are
+/// outlined.
+#[test]
+fn l_and_r_switch_the_hands_between_decks() {
+    let mut h = start("layers");
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Perform).into());
+    h.state_mut().dispatch(ViewCmd::FourDecks(true).into());
+    let id = ids(&h)[0];
+    for d in [0, 2] {
+        let deck = DeckId::new(d).unwrap();
+        h.state_mut()
+            .dispatch(Command::Deck(deck, DeckCmd::Load(id)));
+    }
+    settle_until(&mut h, |a| {
+        [0, 2].iter().all(|&d| a.panels.decks[d].wave.is_some())
+    });
+    steps(&mut h, 3);
+    let playing = |a: &EarshotApp, d: usize| {
+        a.frame
+            .snap
+            .as_ref()
+            .unwrap()
+            .deck(DeckId::new(d).unwrap())
+            .playing
+    };
+    assert!(h.state().panels.decks[0].active && !h.state().panels.decks[2].active);
+    // The left hand's play key (S) plays deck 1.
+    h.key_press(egui::Key::S);
+    settle_until(&mut h, |a| playing(a, 0));
+    h.key_press(egui::Key::S);
+    settle_until(&mut h, |a| !playing(a, 0));
+    // L: now it plays deck 3, which is outlined instead.
+    h.get_by_label("Left hand's deck").click();
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.active_deck(0), DeckId::new(2).unwrap());
+    render(&mut h, "layers");
+    assert!(h.state().panels.decks[2].active && !h.state().panels.decks[0].active);
+    h.key_press(egui::Key::S);
+    settle_until(&mut h, |a| playing(a, 2));
+    assert!(!playing(h.state(), 0));
+    // Back to two decks: the left hand is on deck 1 again.
+    h.state_mut().dispatch(ViewCmd::FourDecks(false).into());
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.active_deck(0), DeckId::new(0).unwrap());
 }
 
 /// Perform's mixer hides from the top bar's Mixer switch, and while a controller is connected
@@ -1383,6 +1469,7 @@ fn deck_pages_switch_in_place() {
             first("CUE"),
             first("Player controls"),
             first("Grid controls"),
+            first("Stem controls"),
         )
     };
     let before = place(&h);
@@ -1393,12 +1480,73 @@ fn deck_pages_switch_in_place() {
         "the grid editor"
     );
     assert_eq!(place(&h), before);
+    // Stems have a tab of their own.
+    h.get_all_by_label("Stem controls").next().unwrap().click();
+    steps(&mut h, 5);
+    assert!(h.query_all_by_label("STEMS").count() > 0, "the stems page");
+    assert_eq!(place(&h), before);
+    render(&mut h, "deck-pages-stems");
     h.get_all_by_label("Player controls")
         .next()
         .unwrap()
         .click();
     steps(&mut h, 5);
     assert_eq!(place(&h), before);
+    assert_eq!(
+        h.query_all_by_label("STEMS").count(),
+        0,
+        "not on the player page"
+    );
+}
+
+/// Vinyl mode turns on and off from its VINYL label only, not a click on the ring.
+#[test]
+fn only_the_vinyl_label_toggles_vinyl_mode() {
+    let mut h = start("vinyl");
+    steps(&mut h, 5);
+    let deck = DeckId::new(0).unwrap();
+    let vinyl = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().deck(deck).vinyl;
+    let on = vinyl(h.state());
+    // The middle of the ring (its BPM): nothing.
+    let label = h.get_all_by_label("VINYL").next().unwrap().rect();
+    let ring = label.center() + vec2(0.0, 25.0);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: ring,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    steps(&mut h, 5);
+    assert_eq!(vinyl(h.state()), on);
+    h.get_all_by_label("VINYL").next().unwrap().click();
+    settle_until(&mut h, |a| vinyl(a) != on);
+}
+
+/// The grid editor's BPM box: a BPM typed in is set on Enter.
+#[test]
+fn typing_a_bpm_in_the_grid_editor_sets_it() {
+    let mut h = start("grid-bpm");
+    let id = ids(&h)[0];
+    h.state_mut().dispatch(LibraryCmd::Load(id).into());
+    settle_until(&mut h, |a| a.panels.decks[0].wave.is_some());
+    steps(&mut h, 5);
+    h.get_all_by_label("Grid controls").next().unwrap().click();
+    steps(&mut h, 5);
+    let bpm = |a: &EarshotApp| a.index.get(id).unwrap().bpm;
+    let shown = format!("{:.2}", bpm(h.state()).unwrap());
+    let field = h.get_all_by_value(&shown).next().unwrap();
+    field.click();
+    steps(&mut h, 2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.get_all_by_value(&shown)
+        .next()
+        .unwrap()
+        .type_text("128.5");
+    steps(&mut h, 2);
+    h.key_press(egui::Key::Enter);
+    settle_until(&mut h, |a| bpm(a) == Some(128.5));
 }
 
 /// Hot cues play on when pressed unless Settings > Decks says "Play while held"; the
@@ -1835,6 +1983,17 @@ fn library_tracks_in_the_table() {
             && a.panels.decks[deck.index()].wave.is_some()
     });
 
+    // "Show in library" from elsewhere comes back to Mixxx's list, with it selected.
+    let mixxx = crate::core::view::Source::Program(SourceKind::Mixxx);
+    h.state_mut()
+        .dispatch(ViewCmd::Source(Some(crate::core::view::Source::AllTracks)).into());
+    steps(&mut h, 2);
+    h.state_mut().dispatch(ViewCmd::ShowInLibrary(deck).into());
+    settle_until(&mut h, |a| {
+        a.prefs.layout().source == Some(mixxx)
+            && a.panels.library.external.focused() == Some(outside)
+    });
+
     // Into a playlist: it asks, then imports it and the playlist has earshot's track.
     let save = Command::from(crate::core::collections::CollectionCmd::SavePlaylist {
         name: "From Mixxx".into(),
@@ -1861,6 +2020,17 @@ fn library_tracks_in_the_table() {
                     .is_some_and(|t| t.path == theirs.to_string_lossy())
         })
     });
+
+    // Mixxx switched off: its track can't be shown, and the bottom bar says why.
+    h.state_mut()
+        .dispatch(LibraryCmd::RemoveSource(source.id).into());
+    settle_until(&mut h, |a| {
+        a.sources.iter().all(|s| s.id != source.id || !s.enabled)
+    });
+    h.state_mut().dispatch(ViewCmd::ShowInLibrary(deck).into());
+    steps(&mut h, 2);
+    h.get_by_label_contains("isn't there any more, so it can't be shown.");
+    render(&mut h, "notice");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1901,4 +2071,119 @@ fn everything_fits_at_the_narrowest_window() {
             .collect();
         assert!(past.is_empty(), "{mode:?}, four decks {four}: {past:#?}");
     }
+}
+
+/// "Show in library" goes back to the list a deck's track was loaded from (the same
+/// file can be in many) and selects it there; once that list no longer has it, it's
+/// shown in All tracks.
+#[test]
+fn show_in_library_goes_back_to_where_it_came_from() {
+    use crate::ui::panels::library::browser::Scope;
+    let mut h = start_with("show-in-library", stand_in);
+    let track = ids(&h)[1];
+    let boxed = make(&mut h, CollectionKind::Crate, "Box", vec![track]);
+    let deck = DeckId::new(0).unwrap();
+    h.state_mut()
+        .dispatch(ViewCmd::Source(Some(Source::Crates)).into());
+    let lib = &mut h.state_mut().panels.library;
+    lib.browser.set_scope(Scope::Collection(boxed));
+    lib.focused_pane = crate::core::view::Pane::Library;
+    h.state_mut()
+        .dispatch(Command::Deck(deck, DeckCmd::Load(track)));
+    let on = |a: &EarshotApp| a.player.lock().unwrap().session(deck).track_id;
+    settle_until(&mut h, |a| on(a) == Some(track));
+
+    // Looking somewhere else meanwhile.
+    h.state_mut()
+        .dispatch(ViewCmd::Source(Some(Source::AllTracks)).into());
+    h.state_mut().panels.library.browser.set_scope(Scope::All);
+    steps(&mut h, 2);
+    h.state_mut().dispatch(ViewCmd::ShowInLibrary(deck).into());
+    let shown_in = |a: &EarshotApp, scope: &Scope, source| {
+        let lib = &a.panels.library;
+        lib.browser.scope() == scope
+            && lib.browser.focused() == Some(track)
+            && a.prefs.layout().source == Some(source)
+    };
+    settle_until(&mut h, |a| {
+        shown_in(a, &Scope::Collection(boxed), Source::Crates)
+    });
+
+    // Taken out of the crate: All tracks has it.
+    h.state().lib.store.send(StoreCmd::RemoveTracks {
+        id: boxed,
+        tracks: vec![track],
+    });
+    settle_until(&mut h, |a| {
+        a.collections
+            .get(boxed)
+            .is_some_and(|c| c.tracks.is_empty())
+    });
+    h.state_mut().dispatch(ViewCmd::ShowInLibrary(deck).into());
+    settle_until(&mut h, |a| shown_in(a, &Scope::All, Source::AllTracks));
+}
+
+/// Prepare isn't opened while a deck plays (the bottom bar says why); going back to
+/// Perform stops Prepare's player; closing the window while a deck plays asks first.
+#[test]
+fn mode_switches_and_quitting_mind_whats_playing() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = start_with("mode-switch", stand_in);
+    let id = ids(&h)[0];
+    let deck = h.state().prefs.decks()[0];
+    h.state_mut().load(Some(deck), id);
+    settle_until(&mut h, |a| a.panels.decks[deck.index()].wave.is_some());
+    let play =
+        |d, on: bool| Command::from((d, EngineCmd::Play(earshot_engine::Set::from_bool(on))));
+    let playing = |a: &EarshotApp, d| a.frame.snap.as_ref().is_some_and(|sh| sh.deck(d).playing);
+    h.state_mut().dispatch(play(deck, true));
+    settle_until(&mut h, |a| playing(a, deck));
+
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
+    steps(&mut h, 2);
+    assert_eq!(h.state().prefs.mode, Mode::Perform);
+    h.get_by_label_contains("Stop the playing decks before switching to Prepare.");
+
+    // Closing the window: asked, and Cancel keeps it open.
+    h.input_mut()
+        .viewports
+        .entry(egui::ViewportId::ROOT)
+        .or_default()
+        .events
+        .push(egui::ViewportEvent::Close);
+    steps(&mut h, 2);
+    h.get_by_label("Do you really want to quit?");
+    h.get_by_label("Cancel").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Do you really want to quit?").is_none());
+
+    h.state_mut().dispatch(play(deck, false));
+    settle_until(&mut h, |a| !playing(a, deck));
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
+    assert_eq!(h.state().prefs.mode, Mode::Prepare);
+    let prepare = DeckId::PREPARE;
+    h.state_mut().load(Some(prepare), id);
+    settle_until(&mut h, |a| a.panels.decks[prepare.index()].wave.is_some());
+    h.state_mut().dispatch(play(prepare, true));
+    settle_until(&mut h, |a| playing(a, prepare));
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Perform).into());
+    assert_eq!(h.state().prefs.mode, Mode::Perform);
+    settle_until(&mut h, |a| !playing(a, prepare));
+}
+
+/// A track dropped anywhere on Prepare's player panel loads, as on a Perform deck
+/// (not just on its waveform).
+#[test]
+fn a_track_drops_onto_prepares_player_panel() {
+    let mut h = start_prepare("prepare-drop", 0);
+    let other = ids(&h)[1];
+    h.state_mut()
+        .dispatch(ViewCmd::Source(Some(Source::AllTracks)).into());
+    steps(&mut h, 3);
+    let (from, to) = (at(&h, &title(&h, other)).center(), at(&h, "Q").center());
+    drag(&mut h, from, to, |_| {});
+    settle_until(&mut h, |a| prepared(a) == Some(other));
 }

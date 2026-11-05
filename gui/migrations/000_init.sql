@@ -55,6 +55,9 @@ CREATE TABLE tracks (
   key_minor       INTEGER,            -- resolved `key` field (core/keys.rs `pitch_class`)
   rating          INTEGER,
   color           INTEGER,
+  -- The user's say on whether it needs attention: 1 yes, 0 no (it's fine, e.g. a DJ
+  -- set whose tempo drifts), NULL: up to analysis (core/track.rs `Status`).
+  needs_attention INTEGER CHECK (needs_attention IN (0, 1)),
   deleted_at      INTEGER
 ) STRICT;
 
