@@ -44,6 +44,8 @@ impl EarshotApp {
             let sh = self.frame.snap.as_ref().map(|s| s.deck(id));
             self.panels.decks[id.index()].stem_mode = self.prefs.stem_mode;
             self.panels.decks[id.index()].controller = self.prefs.controller();
+            self.panels.decks[id.index()].active =
+                self.prefs.four_decks && self.prefs.active_decks().contains(&id);
             self.panels.decks[id.index()].tick(ctx, sh, &info);
             self.frame.decks[id.index()] = Some(info);
         }

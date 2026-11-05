@@ -146,6 +146,9 @@ pub enum ViewCmd {
     LoadAdjacent(DeckId, i32),
     /// Four decks in Perform (false: two).
     FourDecks(bool),
+    /// Four decks: the left hand (0) between decks 1 and 3, or the right (1) between
+    /// 2 and 4.
+    SwitchLayer(usize),
     SetMode(Mode),
     /// Show a source in the library's left pane (`None` closes the pane).
     Source(Option<Source>),

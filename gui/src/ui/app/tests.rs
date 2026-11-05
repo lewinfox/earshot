@@ -801,7 +801,11 @@ fn a_controller_swaps_the_pads_for_its_own() {
     assert!(!on_screen(&h) && !mixer(&h));
     render(&mut h, "controller-pads");
     // Its tabs switch in place too: CUE doesn't move.
-    let cue = |h: &H| h.get_all_by_label("CUE").map(|n| n.rect()).collect::<Vec<_>>();
+    let cue = |h: &H| {
+        h.get_all_by_label("CUE")
+            .map(|n| n.rect())
+            .collect::<Vec<_>>()
+    };
     let before = cue(&h);
     for tab in ["Grid controls", "Stem controls", "Player controls"] {
         h.get_all_by_label(tab).next().unwrap().click();
@@ -812,6 +816,54 @@ fn a_controller_swaps_the_pads_for_its_own() {
         .dispatch(ViewCmd::PretendController(false).into());
     steps(&mut h, 5);
     assert!(on_screen(&h) && !pads(&h) && mixer(&h));
+}
+
+/// Four decks: the keyboard's hands play decks 1 and 2 until L or R in the top bar
+/// switches a hand to deck 3 or 4 (the left shows 1, then 3). The decks they play are
+/// outlined.
+#[test]
+fn l_and_r_switch_the_hands_between_decks() {
+    let mut h = start("layers");
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Perform).into());
+    h.state_mut().dispatch(ViewCmd::FourDecks(true).into());
+    let id = ids(&h)[0];
+    for d in [0, 2] {
+        let deck = DeckId::new(d).unwrap();
+        h.state_mut()
+            .dispatch(Command::Deck(deck, DeckCmd::Load(id)));
+    }
+    settle_until(&mut h, |a| {
+        [0, 2].iter().all(|&d| a.panels.decks[d].wave.is_some())
+    });
+    steps(&mut h, 3);
+    let playing = |a: &EarshotApp, d: usize| {
+        a.frame
+            .snap
+            .as_ref()
+            .unwrap()
+            .deck(DeckId::new(d).unwrap())
+            .playing
+    };
+    assert!(h.state().panels.decks[0].active && !h.state().panels.decks[2].active);
+    // The left hand's play key (S) plays deck 1.
+    h.key_press(egui::Key::S);
+    settle_until(&mut h, |a| playing(a, 0));
+    h.key_press(egui::Key::S);
+    settle_until(&mut h, |a| !playing(a, 0));
+    // L: now it plays deck 3, which is outlined instead.
+    h.get_by_label("Left hand's deck").click();
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.active_deck(0), DeckId::new(2).unwrap());
+    render(&mut h, "layers");
+    assert!(h.state().panels.decks[2].active && !h.state().panels.decks[0].active);
+    h.key_press(egui::Key::S);
+    settle_until(&mut h, |a| playing(a, 2));
+    assert!(!playing(h.state(), 0));
+    // Back to two decks: the left hand is on deck 1 again.
+    h.state_mut().dispatch(ViewCmd::FourDecks(false).into());
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.active_deck(0), DeckId::new(0).unwrap());
 }
 
 /// Perform's mixer hides from the top bar's Mixer switch, and while a controller is connected

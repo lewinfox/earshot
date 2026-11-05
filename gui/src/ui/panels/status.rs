@@ -143,6 +143,7 @@ impl Panel for TopBar<'_> {
             }
             if mode == Mode::Perform {
                 deck_count(ui, cx);
+                layers(ui, cx);
                 panes(ui, cx);
                 centred_fx(ui, cx);
             }
@@ -399,6 +400,42 @@ fn centred_fx(ui: &mut Ui, cx: &mut Cx) {
         ui.ctx().data_mut(|d| d.insert_temp(id, drawn));
         ui.ctx().request_discard("the effects' width");
     }
+}
+
+/// Four decks and no controller: which deck each hand (the keyboard's) plays, as
+/// `[1] | [2]` in the decks' colours. The left switches between 1 and 3, the right
+/// between 2 and 4. A controller has its own buttons.
+fn layers(ui: &mut Ui, cx: &mut Cx) {
+    if !cx.prefs.four_decks || cx.prefs.controller() {
+        return;
+    }
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (side, hand, other) in [(0, "left", [1, 3]), (1, "right", [2, 4])] {
+            if side == 1 {
+                ui.label(RichText::new("|").color(cx.theme.muted));
+            }
+            let deck = cx.prefs.active_deck(side);
+            let n = deck.index() + 1;
+            let colour = cx.theme.deck_colour(deck);
+            let text = RichText::new(n.to_string()).strong().color(colour);
+            let r = ui
+                .add(
+                    egui::Button::new(text)
+                        .stroke(egui::Stroke::new(1.0_f32, colour))
+                        .min_size(egui::vec2(24.0, 0.0)),
+                )
+                .on_hover_text(format!(
+                    "The {hand} hand's keys play deck {n}. Click for deck {}",
+                    if n == other[0] { other[1] } else { other[0] }
+                ));
+            let name = format!("{}{} hand's deck", hand[..1].to_uppercase(), &hand[1..]);
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
+            if r.clicked() {
+                cx.send(ViewCmd::SwitchLayer(side));
+            }
+        }
+    });
 }
 
 fn deck_count(ui: &mut Ui, cx: &mut Cx) {

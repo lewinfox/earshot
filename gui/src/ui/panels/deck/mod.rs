@@ -287,6 +287,8 @@ pub struct DeckUi {
     pub wave: Option<DeckWave>,
     /// The stems' waveforms on the stems page, for the stems they were made from.
     stem_waves: Option<(Arc<crate::core::stems::StemWaves>, Vec<DeckWave>)>,
+    /// Four decks, and the hands play this one (each frame): outlined.
+    pub active: bool,
     /// What its stem buttons do (the setting, each frame).
     pub stem_mode: crate::core::view::StemMode,
     /// A controller is connected (or pretended), each frame: the player page shows
@@ -334,6 +336,7 @@ impl DeckUi {
             wave: None,
             stem_waves: None,
             stem_mode: Default::default(),
+            active: false,
             controller: false,
             page: Page::Player,
             page_widths: [None; 3],
@@ -586,6 +589,14 @@ impl DeckUi {
                 body(self, ui, info, out, inner_h);
             })
             .response;
+        if self.active {
+            ui.painter().rect_stroke(
+                resp.rect,
+                8.0,
+                Stroke::new(1.5_f32, self.colour()),
+                StrokeKind::Inside,
+            );
+        }
         if drag::hovering_tracks(&resp) {
             ui.painter().rect_stroke(
                 resp.rect,

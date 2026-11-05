@@ -733,6 +733,11 @@ impl EarshotApp {
                     self.load(Some(deck), id);
                 }
             }
+            ViewCmd::SwitchLayer(side) => {
+                if let Some(l) = self.prefs.layers.get_mut(side) {
+                    *l = !*l;
+                }
+            }
             ViewCmd::FourDecks(on) => {
                 self.prefs.four_decks = on;
                 if let Err(e) = player::set_fx_decks(&self.player, self.prefs.decks().len()) {

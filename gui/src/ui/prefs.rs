@@ -6,6 +6,7 @@ use earshot_engine::DeckId;
 use serde::{Deserialize, Serialize};
 
 use super::panels::library::table::Tables;
+use crate::core::bus::Control;
 use crate::core::view::{Aside, Mode, Source, StemMode, Tool};
 
 /// Where they're kept in eframe's storage.
@@ -32,6 +33,10 @@ pub struct UiPrefs {
     pub auto_hide_mixer: bool,
     /// What the decks' stem buttons do.
     pub stem_mode: StemMode,
+    /// In four-deck mode, which deck each hand plays: the left on deck 1 or 3
+    /// (`false`, `true`), the right on 2 or 4 (not kept: each run starts on 1 and 2).
+    #[serde(skip)]
+    pub layers: [bool; 2],
     /// A MIDI controller is connected (not kept). Read [`UiPrefs::controller`], which
     /// counts a pretend one too.
     #[serde(skip)]
@@ -72,6 +77,7 @@ impl Default for UiPrefs {
             stem_mode: StemMode::default(),
             controller: false,
             pretend_controller: false,
+            layers: [false; 2],
             mixer_with_controller: false,
         }
     }
@@ -81,6 +87,29 @@ impl UiPrefs {
     /// The decks Perform shows: two or four.
     pub fn decks(&self) -> Vec<DeckId> {
         DeckId::first(if self.four_decks { 4 } else { 2 }).collect()
+    }
+
+    /// The deck the left (`side` 0) or right (1) hand plays: 1 or 3, 2 or 4 in
+    /// four-deck mode, else 1 or 2.
+    pub fn active_deck(&self, side: usize) -> DeckId {
+        let layer = self.four_decks && self.layers[side.min(1)];
+        DeckId::new(side.min(1) + if layer { 2 } else { 0 }).expect("a deck")
+    }
+
+    /// The decks the hands play.
+    pub fn active_decks(&self) -> [DeckId; 2] {
+        [self.active_deck(0), self.active_deck(1)]
+    }
+
+    /// A control for deck 1 or 2 (the keymap's left and right hands), sent to the deck
+    /// that hand plays now. Anything else as it is.
+    pub fn layered(&self, control: Control) -> Control {
+        match control {
+            Control::Deck(d, c) if self.mode == Mode::Perform && d.index() < 2 => {
+                Control::Deck(self.active_deck(d.index()), c)
+            }
+            other => other,
+        }
     }
 
     /// Perform shows the mixer.
