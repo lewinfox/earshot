@@ -1,16 +1,18 @@
-//! MIDI input. Every message is echoed to the UI's MIDI monitor and looked up in a
-//! hardcoded DDJ-400 table. The real thing will load Mixxx's XML + JS mappings instead
-//! (see docs/design.md); this table only proves the path from controller to engine.
+//! MIDI input. Every message is echoed to the UI (Controller mode's Mapping and
+//! History tabs) and looked up in the session's mapping ([`Learned`]): which command
+//! each message runs. The Mapping tab edits it while it runs, and saves it as a
+//! controller file.
 //!
-//! The table is written in Mixxx's `[Group] key` names and turned into registry
-//! controls ([`Control::from_mixxx`]) once, when the port opens. A message becomes a
-//! [`Command`]: one the engine can take as it is goes straight to it on MIDI's own ring
-//! ([`Lane`]), without the player lock; anything else (a beat jump by the deck's step,
-//! library browsing) goes to the UI as [`Event::Command`].
+//! When a DDJ-400 is connected the mapping starts from a built-in table, written in
+//! Mixxx's `[Group] key` names and turned into registry controls
+//! ([`Control::from_mixxx`]); any other controller starts with nothing mapped.
 //!
-//! The note and CC numbers below follow Mixxx's Pioneer DDJ-400 mapping as best I
-//! remember it and have NOT been checked against hardware. Use the MIDI monitor to
-//! confirm them and correct this table.
+//! A message becomes a [`Command`]: one the engine can take as it is goes straight to
+//! it on MIDI's own ring ([`Lane`]), without the player lock; anything else (a beat
+//! jump by the deck's step, library browsing) goes to the UI as [`Event::Command`].
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use midir::{MidiInput, MidiInputConnection};
 
@@ -20,7 +22,7 @@ use super::{Event, Sink};
 
 /// How a message's data byte becomes the control's value.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Input {
+pub enum Input {
     /// A note: velocity > 0 is a press (1), 0 a release (0).
     Note,
     /// A 7-bit absolute CC, across the control's travel.
@@ -115,6 +117,131 @@ fn ddj400() -> Vec<Mapping> {
         .collect()
 }
 
+/// A message's key: its status byte (a note-off counted as a note-on) and first data
+/// byte, which together say which control on the controller sent it.
+pub fn key(bytes: &[u8]) -> Option<(u8, u8)> {
+    let (status, data1) = (*bytes.first()?, *bytes.get(1)?);
+    Some(match status & 0xF0 {
+        0x80 => (0x90 | (status & 0x0F), data1),
+        _ => (status, data1),
+    })
+}
+
+/// One binding set by hand in the Mapping tab: the command a message runs, with the
+/// fixed word after its name (`deck_1_beat_jump -4`: `arg` -4).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Learn {
+    pub control: Control,
+    pub arg: Option<f64>,
+    pub input: Input,
+}
+
+/// The session's mapping: the command each message runs, by message key, on every
+/// port. Edited in the Mapping tab; it lasts until earshot quits (or it's saved as a
+/// file).
+#[derive(Clone, Default)]
+pub struct Learned(Arc<Mutex<Session>>);
+
+#[derive(Default)]
+struct Session {
+    map: BTreeMap<(u8, u8), Learn>,
+    /// The built-in table has been put in once (so clearing it sticks).
+    seeded: bool,
+}
+
+impl Learned {
+    pub fn get(&self, key: (u8, u8)) -> Option<Learn> {
+        self.0.lock().unwrap().map.get(&key).copied()
+    }
+
+    pub fn set(&self, key: (u8, u8), l: Learn) {
+        self.0.lock().unwrap().map.insert(key, l);
+    }
+
+    pub fn remove(&self, key: (u8, u8)) {
+        self.0.lock().unwrap().map.remove(&key);
+    }
+
+    pub fn clear(&self) {
+        self.0.lock().unwrap().map.clear();
+    }
+
+    pub fn all(&self) -> Vec<((u8, u8), Learn)> {
+        let s = self.0.lock().unwrap();
+        s.map.iter().map(|(k, l)| (*k, *l)).collect()
+    }
+
+    /// Start from the built-in DDJ-400 table, the first time one is connected.
+    fn seed_ddj400(&self) {
+        let mut s = self.0.lock().unwrap();
+        if std::mem::replace(&mut s.seeded, true) {
+            return;
+        }
+        for mp in ddj400() {
+            let l = Learn {
+                control: mp.control,
+                arg: None,
+                input: mp.input,
+            };
+            s.map.entry((mp.status, mp.data1)).or_insert(l);
+        }
+    }
+
+    /// The controller file for these bindings, as JSON. A line says only what a
+    /// message runs; how its value reads is left out where the message says it (a
+    /// note is a button, a CC a knob or fader).
+    pub fn to_json(&self, device: &str) -> String {
+        use serde_json::{Value, json};
+        let inputs: Vec<Value> = self
+            .all()
+            .into_iter()
+            .map(|((status, data1), l)| {
+                let (name, word) = l.control.name();
+                let mut o = serde_json::Map::new();
+                o.insert("message".into(), json!(format!("{status:02X} {data1:02X}")));
+                o.insert("command".into(), json!(name));
+                if let Some(w) = word.or_else(|| l.arg.map(|a| a.to_string())) {
+                    o.insert("value".into(), json!(w));
+                }
+                if l.input != default_input(status) {
+                    let (input, ticks) = match l.input {
+                        Input::Note => ("button", None),
+                        Input::Cc => ("absolute", None),
+                        Input::Relative => ("relative", None),
+                        Input::Jog(t) => ("jog", Some(t)),
+                    };
+                    o.insert("input".into(), json!(input));
+                    if let Some(t) = ticks {
+                        o.insert("ticks".into(), json!(t));
+                    }
+                }
+                Value::Object(o)
+            })
+            .collect();
+        let file = json!({ "device": device, "inputs": inputs });
+        serde_json::to_string_pretty(&file).expect("JSON") + "\n"
+    }
+}
+
+/// How a message reads unless a binding says otherwise: a note is a button, anything
+/// else a knob or fader.
+fn default_input(status: u8) -> Input {
+    match status & 0xF0 {
+        0x80 | 0x90 => Input::Note,
+        _ => Input::Cc,
+    }
+}
+
+/// How a newly mapped message reads: as a button for a note, steps for a control
+/// that takes steps, and a knob or fader for the rest.
+pub fn guess_input(key: (u8, u8), control: Control) -> Input {
+    match (default_input(key.0), control.spec().kind) {
+        (Input::Note, _) => Input::Note,
+        (_, Kind::Relative) => Input::Relative,
+        _ => Input::Cc,
+    }
+}
+
 /// A message as it came in, for the Controller mode's Mapping tab.
 #[derive(Clone, Debug)]
 pub struct MidiMsg {
@@ -122,7 +249,7 @@ pub struct MidiMsg {
     pub port: usize,
     pub bytes: Vec<u8>,
     pub at: std::time::Instant,
-    /// What the hardcoded table did with it, if it knew it.
+    /// The command it ran, if it's mapped.
     pub did: Option<Control>,
 }
 
@@ -134,7 +261,11 @@ pub struct Midi {
 
 /// Connect to every MIDI input port, sending to the engine on `lane`. Returns the
 /// connections and the port names.
-pub fn connect_all(sink: &Sink, lane: &Lane) -> Result<(Midi, Vec<String>), String> {
+pub fn connect_all(
+    sink: &Sink,
+    lane: &Lane,
+    learned: &Learned,
+) -> Result<(Midi, Vec<String>), String> {
     let probe = MidiInput::new("earshot-probe").map_err(|e| e.to_string())?;
     let ports = probe.ports();
     let mut names = Vec::new();
@@ -145,12 +276,15 @@ pub fn connect_all(sink: &Sink, lane: &Lane) -> Result<(Midi, Vec<String>), Stri
             continue;
         }
         let input = MidiInput::new("earshot").map_err(|e| e.to_string())?;
-        let (sink, lane, table) = (sink.clone(), lane.clone(), ddj400());
+        if name.contains("DDJ-400") {
+            learned.seed_ddj400();
+        }
+        let (sink, lane, learned) = (sink.clone(), lane.clone(), learned.clone());
         let index = names.len();
         match input.connect(
             port,
             "earshot-in",
-            move |_, bytes, _| on_message(&sink, &lane, bytes, &table, index),
+            move |_, bytes, _| on_message(&sink, &lane, bytes, &learned, index),
             (),
         ) {
             Ok(c) => {
@@ -168,25 +302,22 @@ pub fn connect_all(sink: &Sink, lane: &Lane) -> Result<(Midi, Vec<String>), Stri
     ))
 }
 
-/// The mapping a message matches, and the command it makes (if that value does
+/// The control a message runs, and the command it makes (if that value does
 /// anything).
-fn translate<'a>(bytes: &[u8], table: &'a [Mapping]) -> Option<(&'a Mapping, Option<Command>)> {
+fn translate(bytes: &[u8], learned: &Learned) -> Option<(Control, Option<Command>)> {
     if bytes.len() < 3 {
         return None;
     }
-    // Treat note-off as note-on with velocity 0.
-    let (status, data1, data2) = match bytes[0] & 0xF0 {
-        0x80 => (0x90 | (bytes[0] & 0x0F), bytes[1], 0),
-        _ => (bytes[0], bytes[1], bytes[2]),
-    };
-    let mp = table
-        .iter()
-        .find(|mp| mp.status == status && mp.data1 == data1)?;
-    let value = match mp.input {
-        Input::Note => (data2 > 0) as u8 as f64,
+    let key = key(bytes)?;
+    // A note-off is a note-on with velocity 0.
+    let data2 = if bytes[0] & 0xF0 == 0x80 { 0 } else { bytes[2] };
+    let l = learned.get(key)?;
+    let value = match l.input {
+        Input::Note if data2 > 0 => l.control.press_value(l.arg),
+        Input::Note => 0.0,
         Input::Cc => {
             let travel = data2 as f64 / 127.0;
-            match mp.control.spec().kind {
+            match l.control.spec().kind {
                 Kind::Continuous(range) => range.from_pos(travel),
                 _ => travel,
             }
@@ -195,16 +326,22 @@ fn translate<'a>(bytes: &[u8], table: &'a [Mapping]) -> Option<(&'a Mapping, Opt
         Input::Relative => data2 as f64 - 128.0,
         Input::Jog(ticks) => (data2 as f64 - 64.0) * SECS_PER_TURN / ticks as f64,
     };
-    Some((mp, mp.control.command(value)))
+    Some((l.control, l.control.command(value)))
 }
 
-fn on_message(sink: &Sink, lane: &Lane, bytes: &[u8], table: &[Mapping], port: usize) {
-    let found = translate(bytes, table);
+fn on_message(
+    sink: &Sink,
+    lane: &Lane,
+    bytes: &[u8],
+    learned: &Learned,
+    port: usize,
+) {
+    let found = translate(bytes, learned);
     sink(Event::Midi(MidiMsg {
         port,
         bytes: bytes.to_vec(),
         at: std::time::Instant::now(),
-        did: found.as_ref().map(|(mp, _)| mp.control),
+        did: found.as_ref().map(|(c, _)| *c),
     }));
     let Some((_, Some(cmd))) = found else {
         return;
@@ -231,13 +368,86 @@ mod tests {
         DeckId::new(i).unwrap()
     }
 
+    fn ddj() -> Learned {
+        let l = Learned::default();
+        l.seed_ddj400();
+        l
+    }
+
     fn cmd(bytes: impl AsRef<[u8]>) -> Option<Command> {
-        translate(bytes.as_ref(), &ddj400())?.1
+        translate(bytes.as_ref(), &ddj())?.1
+    }
+
+    /// A DDJ-400 starts from the built-in table, once; any binding can be changed,
+    /// and a button can send a fixed value.
+    #[test]
+    fn the_session_mapping() {
+        use crate::core::bus::DeckControl;
+        let learned = ddj();
+        let run = |b: &[u8]| translate(b, &learned).and_then(|(_, c)| c);
+        // Deck 1's play button jumps back 4 beats instead.
+        let jump = Control::Deck(deck(0), DeckControl::BeatJump);
+        learned.set(
+            (0x90, 0x0B),
+            Learn {
+                control: jump,
+                arg: Some(-4.0),
+                input: guess_input((0x90, 0x0B), jump),
+            },
+        );
+        assert!(matches!(
+            run(&[0x90, 0x0B, 0x7F]),
+            Some(Command::Deck(_, DeckCmd::Engine(EngineCmd::BeatJump(b)))) if b == -4.0
+        ));
+        assert!(run(&[0x80, 0x0B, 0x00]).is_none(), "nothing on release");
+        let scratch = Control::Deck(deck(1), DeckControl::JogTurn);
+        assert_eq!(guess_input((0xB5, 0x01), scratch), Input::Relative);
+        assert_eq!(guess_input((0x95, 0x01), scratch), Input::Note);
+        assert_eq!(
+            guess_input((0xB5, 0x01), Control::Master(MasterParam::Crossfader)),
+            Input::Cc
+        );
+        learned.set(
+            (0xB0, 0x22),
+            Learn {
+                control: scratch,
+                arg: None,
+                input: Input::Jog(720),
+            },
+        );
+        let json = learned.to_json("DDJ-400");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["device"], "DDJ-400");
+        let line = |m: &str| {
+            v["inputs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["message"] == m)
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(
+            line("90 0B"),
+            serde_json::json!({ "message": "90 0B", "command": "deck_1_beat_jump", "value": "-4" })
+        );
+        assert_eq!(
+            line("B0 22"),
+            serde_json::json!({ "message": "B0 22", "command": "deck_2_scratch", "input": "jog", "ticks": 720 })
+        );
+        assert_eq!(line("B0 13")["command"], "deck_1_channel_fader");
+        // Unmapped: does nothing. Cleared, it stays cleared on the next connect.
+        learned.remove((0x90, 0x0B));
+        assert!(run(&[0x90, 0x0B, 0x7F]).is_none());
+        learned.clear();
+        learned.seed_ddj400();
+        assert!(learned.all().is_empty());
     }
 
     #[test]
     fn every_entry_maps_to_a_control() {
         assert_eq!(ddj400().len(), ddj400_names().len());
+        assert!(translate(&[0x90, 0x0B, 0x7F], &Learned::default()).is_none(), "nothing mapped");
     }
 
     #[test]

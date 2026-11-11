@@ -468,7 +468,13 @@ fn deck_count(ui: &mut Ui, cx: &mut Cx) {
             .disabled_tip("Stop decks 3 and 4 first"),
         Seg::new(4, "4 decks").tip("Four decks, smaller"),
     ];
-    if let Some(n) = segmented(ui, now, &counts) {
+    // One deck is for Prepare only.
+    let counts = if cx.prefs.mode == Mode::Prepare {
+        &counts[..]
+    } else {
+        &counts[1..]
+    };
+    if let Some(n) = segmented(ui, now, counts) {
         cx.send(ViewCmd::DeckCount(n));
     }
 }

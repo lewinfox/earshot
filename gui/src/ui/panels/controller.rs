@@ -1,66 +1,58 @@
-//! Controller mode's Mapping tab: phase 0 of docs/controllers/README.md. Finds the
-//! connected device's Mixxx mapping, then looks up every message it sends: which
-//! binding it is (the mapping's own description), what Mixxx would do with it, and
-//! whether earshot can (works / needs JS / missing). Messages the mapping doesn't
-//! know are listed too. "Copy report" puts the lot on the clipboard.
+//! Controller mode's Mapping and History tabs, for mapping a controller by pressing
+//! its buttons.
 //!
-//! The hardcoded table in `core::midi` is still what drives the engine; its column
-//! ("earshot now") shows what it did, so the two can be checked against each other.
+//! Mapping lists every message the session knows: the ones mapped (a DDJ-400 starts
+//! from the built-in table; anything else from nothing) and every one pressed since.
+//! Pressing something runs its command, adds its message to the list if it's new, and
+//! scrolls the list to it. Each row's command can be picked from a list, and takes
+//! effect at once, for the rest of the session. "Save JSON…" writes the lot as a
+//! controller file, to go in the repo.
+//!
+//! History is the stream of messages as they came in, newest first.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::fmt::Write as _;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use egui::{Color32, RichText, Ui};
-use egui_extras::{Column, Size, StripBuilder, TableBuilder};
+use egui::{Align, RichText, Ui};
+use egui_extras::{Column, TableBuilder};
 
 use super::{Cx, Panel};
-use crate::core::bus::{Control, deck_letter};
+use crate::core::bus::{self, Control};
 use crate::core::command::AppCmd;
-use crate::core::midi::MidiMsg;
-use crate::core::mixxx::{self, Found, Mapping, Outcome};
+use crate::core::midi::{self, Input, Learn, Learned, MidiMsg};
 
-/// How many log rows to keep.
+/// How many history rows to keep.
 const LOG_ROWS: usize = 500;
-/// How long a touched binding stays lit.
+/// How long a pressed row stays lit.
 const FLASH: Duration = Duration::from_millis(600);
 
 /// Controller mode's tabs, under the decks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ControllerTab {
-    Library,
     #[default]
     Mapping,
+    History,
+    Library,
 }
 
-/// One line of the live log: a run of messages from the same control.
+/// One line of the history: a run of messages from the same control.
 struct Row {
     at: Instant,
     port: usize,
     /// The last message of the run.
     bytes: Vec<u8>,
     count: u32,
-    /// Its binding in the mapping.
-    binding: Option<usize>,
-    /// What the hardcoded table did.
+    /// The command it ran.
     did: Option<Control>,
 }
 
-/// A binding's use since the last clear.
-#[derive(Clone, Copy, Default)]
-struct Hit {
-    count: u32,
-    value: u8,
-    at: Option<Instant>,
-    did: Option<Control>,
-}
-
-/// A message the mapping doesn't know.
+/// A message pressed this session.
 #[derive(Clone, Copy)]
-struct Stray {
+struct Seen {
     count: u32,
     value: u8,
-    did: Option<Control>,
+    at: Instant,
 }
 
 #[derive(Default)]
@@ -68,53 +60,68 @@ pub struct ControllerUi {
     pub tab: ControllerTab,
     /// The MIDI ports open now (the app sets this when it connects).
     pub ports: Vec<String>,
-    /// Every Mixxx mapping on disk, once looked for.
-    found: Option<Vec<Found>>,
-    /// The ports the mapping was last picked for, so it's picked again when they change.
-    picked_for: Option<Vec<String>>,
-    mapping: Option<Mapping>,
-    error: Option<String>,
+    /// The session's mapping; the MIDI ports read it too.
+    pub learned: Learned,
+    seen: BTreeMap<(u8, u8), Seen>,
+    /// The last message's key, so a stream from one knob scrolls the list once.
+    last: Option<(u8, u8)>,
+    /// The row to scroll the list to on the next frame.
+    scroll_to: Option<(u8, u8)>,
+    /// What's typed in a command list's search box.
+    search: String,
+    /// A number being typed, and its row.
+    value_edit: Option<((u8, u8), String)>,
     log: VecDeque<Row>,
-    hits: Vec<Hit>,
-    strays: BTreeMap<(u8, u8), Stray>,
     started: Option<Instant>,
-    filter: String,
-    touched_only: bool,
     paused: bool,
+    /// What saving the file came to (from the save dialog's thread).
+    saved: Arc<Mutex<Option<String>>>,
+}
+
+/// A command as the history shows it: its name, then its fixed word if any.
+fn command_text(c: Control, arg: Option<f64>) -> String {
+    let (name, word) = c.name();
+    match word.or_else(|| arg.map(|a| a.to_string())) {
+        Some(w) => format!("{name} {w}"),
+        None => name,
+    }
+}
+
+/// The word after a mapped command's name (`-4`, `size`), if it has one.
+fn word(l: &Learn) -> String {
+    l.control
+        .name()
+        .1
+        .or_else(|| l.arg.map(|a| a.to_string()))
+        .unwrap_or_default()
 }
 
 impl ControllerUi {
-    /// A message came in.
+    /// A message came in (it has already run its command).
     pub fn on_midi(&mut self, m: MidiMsg) {
+        if let Some(key) = midi::key(&m.bytes) {
+            let value = if m.bytes[0] & 0xF0 == 0x80 {
+                0
+            } else {
+                m.bytes.get(2).copied().unwrap_or(0)
+            };
+            let s = self.seen.entry(key).or_insert(Seen {
+                count: 0,
+                value,
+                at: m.at,
+            });
+            s.count += 1;
+            s.value = value;
+            s.at = m.at;
+            if self.last != Some(key) {
+                self.scroll_to = Some(key);
+            }
+            self.last = Some(key);
+        }
         if self.paused {
             return;
         }
         self.started.get_or_insert(m.at);
-        let binding = self
-            .mapping
-            .as_ref()
-            .and_then(|map| map.lookup(&m.bytes))
-            .map(|(i, _)| i);
-        let value = m.bytes.get(2).copied().unwrap_or(0);
-        match binding {
-            Some(i) => {
-                let h = &mut self.hits[i];
-                h.count += 1;
-                h.value = value;
-                h.at = Some(m.at);
-                h.did = m.did.or(h.did);
-            }
-            None if m.bytes.len() >= 2 => {
-                let s = self.strays.entry((m.bytes[0], m.bytes[1])).or_insert(Stray {
-                    count: 0,
-                    value,
-                    did: m.did,
-                });
-                s.count += 1;
-                s.value = value;
-            }
-            None => {}
-        }
         // A jog wheel or a knob sends a stream: one row per run. A 14-bit knob sends
         // two messages each move (a coarse one and a fine one, alternating), so a
         // message joins either of the newest two rows.
@@ -124,6 +131,7 @@ impl ControllerUi {
             last.count += 1;
             last.at = m.at;
             last.bytes = m.bytes;
+            last.did = m.did;
             return;
         }
         self.log.push_front(Row {
@@ -131,123 +139,68 @@ impl ControllerUi {
             port: m.port,
             bytes: m.bytes,
             count: 1,
-            binding,
             did: m.did,
         });
         self.log.truncate(LOG_ROWS);
     }
 
-    fn clear(&mut self) {
-        self.log.clear();
-        self.strays.clear();
-        self.started = None;
-        self.hits = vec![Hit::default(); self.mapping.as_ref().map_or(0, |m| m.bindings.len())];
+    /// Every message in the list: the mapped ones and the ones pressed, in order.
+    fn keys(&self) -> Vec<(u8, u8)> {
+        let mut keys: Vec<(u8, u8)> = self.learned.all().into_iter().map(|(k, _)| k).collect();
+        keys.extend(self.seen.keys());
+        keys.sort();
+        keys.dedup();
+        keys
     }
 
-    fn set_mapping(&mut self, m: Option<Mapping>) {
-        self.mapping = m;
-        self.clear();
-    }
-
-    /// Pick the mapping for the connected ports, if they've changed since last time.
-    fn pick(&mut self) {
-        if self.picked_for.as_ref() == Some(&self.ports) {
+    /// Map `key` to the command called `name`, keeping how it reads if it was mapped.
+    /// A command that needs a number gets a first guess (`size`, else 1) to change.
+    fn map_to(&mut self, key: (u8, u8), name: &str) {
+        let Some((control, arg)) = [None, Some("size"), Some("1")]
+            .into_iter()
+            .find_map(|w| Control::parse(name, w).ok())
+        else {
             return;
-        }
-        self.picked_for = Some(self.ports.clone());
-        let found = self.found.get_or_insert_with(mixxx::find_all);
-        let m = self.ports.iter().find_map(|p| mixxx::for_port(p, found));
-        self.error = match (&m, self.ports.is_empty(), found.is_empty()) {
-            (_, _, true) => Some("No Mixxx mappings found (is Mixxx installed?)".into()),
-            (None, false, _) => Some("No Mixxx mapping matches this device: pick one".into()),
-            _ => None,
         };
-        if m.is_some() || self.mapping.is_none() {
-            self.set_mapping(m);
+        let input = self
+            .learned
+            .get(key)
+            .map_or_else(|| midi::guess_input(key, control), |l| l.input);
+        self.learned.set(key, Learn { control, arg, input });
+    }
+
+    /// Change the number after a mapped command (`-4`, `size`). False if the command
+    /// doesn't take it.
+    fn set_word(&mut self, key: (u8, u8), w: &str) -> bool {
+        let Some(l) = self.learned.get(key) else {
+            return false;
+        };
+        let name = l.control.name().0;
+        let w = Some(w.trim()).filter(|w| !w.is_empty());
+        match Control::parse(&name, w) {
+            Ok((control, arg)) => {
+                self.learned.set(key, Learn { control, arg, ..l });
+                true
+            }
+            Err(_) => false,
         }
     }
 
-    /// The text "Copy report" puts on the clipboard.
-    fn report(&self) -> String {
-        let mut s = String::new();
-        let _ = writeln!(s, "earshot controller report");
-        let _ = writeln!(s, "ports: {}", self.ports.join(", "));
-        let Some(map) = &self.mapping else {
-            let _ = writeln!(s, "no mapping");
-            return s;
-        };
-        let _ = writeln!(s, "mapping: {} ({})", map.name, map.path.display());
-        let _ = writeln!(s, "{}", summary(map, &self.hits, self.strays.len()));
-        let _ = writeln!(s, "\n## touched bindings");
-        for (b, h) in map.bindings.iter().zip(&self.hits).filter(|(_, h)| h.count > 0) {
-            let _ = writeln!(
-                s,
-                "{:<20} x{:<4} {:<9} {:<45} {}  | earshot now: {}",
-                named_key(b.status, b.midino),
-                h.count,
-                b.outcome().label(),
-                b.target(),
-                b.description,
-                h.did.map_or("-".into(), name),
-            );
-        }
-        let _ = writeln!(s, "\n## messages not in the mapping");
-        for ((st, d1), x) in &self.strays {
-            let _ = writeln!(
-                s,
-                "{:<20} x{:<4} last {:3}  | earshot now: {}",
-                named_key(*st, *d1),
-                x.count,
-                x.value,
-                x.did.map_or("-".into(), name),
-            );
-        }
-        let _ = writeln!(s, "\n## untouched bindings");
-        for (b, _) in map.bindings.iter().zip(&self.hits).filter(|(_, h)| h.count == 0) {
-            let _ = writeln!(
-                s,
-                "{:<20} {:<9} {:<45} {}",
-                named_key(b.status, b.midino),
-                b.outcome().label(),
-                b.target(),
-                b.description
-            );
-        }
-        s
+    fn device(&self) -> String {
+        self.ports
+            .first()
+            .and_then(|p| p.split(':').next())
+            .unwrap_or("controller")
+            .to_string()
     }
 }
 
-/// "201 inputs: 70 work, 35 missing, 96 need JS · touched 12 · …".
-fn summary(map: &Mapping, hits: &[Hit], strays: usize) -> String {
-    let (mut works, mut missing, mut script) = (0, 0, 0);
-    let (mut t_works, mut touched) = (0, 0);
-    for (b, h) in map.bindings.iter().zip(hits) {
-        let o = b.outcome();
-        match o {
-            Outcome::Control(_) => works += 1,
-            Outcome::Missing => missing += 1,
-            Outcome::Script => script += 1,
-        }
-        if h.count > 0 {
-            touched += 1;
-            t_works += matches!(o, Outcome::Control(_)) as u32;
-        }
-    }
-    format!(
-        "{} inputs: {works} work, {missing} missing, {script} need JS · {} LEDs (not yet) · \
-         touched {touched} ({t_works} work) · {strays} messages not in the mapping",
-        map.bindings.len(),
-        map.outputs,
-    )
-}
-
-/// "deck A: play / pause", "crossfader".
-fn name(c: Control) -> String {
-    let what = c.describe(None);
-    match c {
-        Control::Deck(d, _) => format!("deck {}: {what}", deck_letter(d)),
-        _ => what,
-    }
+fn hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A message's kind, channel (1–16), number and value, read by `wmidi`.
@@ -264,14 +217,6 @@ fn parts(bytes: &[u8]) -> Option<(&'static str, u8, u8, u16)> {
     })
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|b| format!("{b:02X}"))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 /// The bytes, then the message in words: "90 0B 7F  note on ch 1 #11 = 127".
 fn named(bytes: &[u8]) -> String {
     match parts(bytes) {
@@ -282,7 +227,7 @@ fn named(bytes: &[u8]) -> String {
     }
 }
 
-/// Which control a binding listens to, without a value: "90 0B  note ch 1 #11".
+/// Which control a message comes from, without a value: "90 0B  note ch 1 #11".
 fn named_key(status: u8, midino: u8) -> String {
     // A value of 1, so a note reads as a note on (wmidi takes 0 as note off).
     match parts(&[status, midino, 1]) {
@@ -294,11 +239,20 @@ fn named_key(status: u8, midino: u8) -> String {
     }
 }
 
-fn outcome_colour(o: Outcome, cx: &Cx) -> Color32 {
-    match o {
-        Outcome::Control(_) => cx.theme.ok,
-        Outcome::Script => cx.theme.warn,
-        Outcome::Missing => cx.theme.bad,
+/// How a message's value reads, as the list names it.
+const READINGS: [(Input, &str); 4] = [
+    (Input::Note, "button"),
+    (Input::Cc, "knob / fader"),
+    (Input::Relative, "steps (1 = +1, 127 = -1)"),
+    (Input::Jog(720), "jog wheel (64 = still)"),
+];
+
+fn reading_name(i: Input) -> &'static str {
+    match i {
+        Input::Note => READINGS[0].1,
+        Input::Cc => READINGS[1].1,
+        Input::Relative => READINGS[2].1,
+        Input::Jog(_) => READINGS[3].1,
     }
 }
 
@@ -309,250 +263,357 @@ pub struct MappingPanel<'a> {
 impl Panel for MappingPanel<'_> {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let t = &mut *self.tab;
-        t.pick();
-        header(ui, t, cx);
+        let mapped = t.learned.all().len();
+        ui.horizontal(|ui| {
+            ui.label("Device:");
+            let ports = if t.ports.is_empty() {
+                RichText::new("none connected").color(cx.theme.bad)
+            } else {
+                RichText::new(t.ports.join(", ")).strong()
+            };
+            ui.label(ports);
+            if ui
+                .button("Reconnect")
+                .on_hover_text("Open every MIDI input again, e.g. after plugging the controller in")
+                .clicked()
+            {
+                cx.send(AppCmd::ReconnectMidi);
+            }
+            ui.add_space(16.0);
+            ui.label(format!("{mapped} mapped"));
+            if ui
+                .add_enabled(mapped > 0, egui::Button::new("Save JSON…"))
+                .on_hover_text("Write this mapping as a controller file")
+                .clicked()
+            {
+                save(t, ui.ctx());
+            }
+            if ui
+                .add_enabled(mapped > 0, egui::Button::new("Clear all"))
+                .on_hover_text("Unmap everything, to map the controller from scratch")
+                .clicked()
+            {
+                t.learned.clear();
+            }
+            if let Some(note) = t.saved.lock().unwrap().as_ref() {
+                ui.label(RichText::new(note).color(cx.theme.muted));
+            }
+        });
+        ui.label(
+            RichText::new(
+                "Press, turn or move anything on the controller: it runs its command, and \
+                 its message shows here. Pick the command it should run.",
+            )
+            .color(cx.theme.muted),
+        );
         ui.separator();
-        let Some(map) = &t.mapping else {
-            ui.label("Pick a mapping above to look messages up in.");
-            return;
-        };
-        if t.hits.len() != map.bindings.len() {
-            t.hits = vec![Hit::default(); map.bindings.len()];
-        }
-        ui.label(RichText::new(summary(map, &t.hits, t.strays.len())).color(cx.theme.muted));
-        ui.add_space(4.0);
+        mapping_table(ui, t, cx);
         let now = Instant::now();
-        // Two columns, each stacked top to bottom: the log, then the bindings.
-        StripBuilder::new(ui)
-            .size(Size::relative(0.5))
-            .size(Size::remainder())
-            .horizontal(|mut strip| {
-                strip.cell(|ui| {
-                    ui.push_id("log", |ui| log_table(ui, t, now, cx));
-                });
-                strip.cell(|ui| {
-                    ui.push_id("bindings", |ui| bindings_table(ui, t, now, cx));
-                });
-            });
-        // Keep the flashes fading while anything is lit.
-        if t.hits.iter().any(|h| h.at.is_some_and(|a| now - a < FLASH)) {
+        if t.seen.values().any(|s| now - s.at < FLASH) {
             ui.ctx().request_repaint_after(Duration::from_millis(50));
         }
     }
 }
 
-fn header(ui: &mut Ui, t: &mut ControllerUi, cx: &mut Cx) {
-    ui.horizontal(|ui| {
-        ui.label("Device:");
-        let ports = if t.ports.is_empty() {
-            RichText::new("none connected").color(cx.theme.bad)
-        } else {
-            RichText::new(t.ports.join(", ")).strong()
+/// Ask where to save the mapping, and save it there.
+fn save(t: &ControllerUi, ctx: &egui::Context) {
+    let device = t.device();
+    let json = t.learned.to_json(&device);
+    let (saved, ctx) = (t.saved.clone(), ctx.clone());
+    std::thread::spawn(move || {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Save the controller mapping as")
+            .set_file_name(format!("{device}.json"))
+            .add_filter("JSON", &["json"])
+            .save_file()
+        else {
+            return;
         };
-        ui.label(ports);
-        if ui
-            .button("Reconnect")
-            .on_hover_text("Open every MIDI input again, e.g. after plugging the controller in")
-            .clicked()
-        {
-            cx.send(AppCmd::ReconnectMidi);
-            t.picked_for = None;
-        }
-        ui.add_space(12.0);
-        ui.label("Mixxx mapping:");
-        let current = t.mapping.as_ref().map(|m| m.path.clone());
-        let label = t.mapping.as_ref().map_or("none".into(), |m| m.name.clone());
-        let found = t.found.get_or_insert_with(mixxx::find_all).clone();
-        let mut chosen = None;
-        egui::ComboBox::from_id_salt("mixxx-mapping")
-            .selected_text(label)
-            .width(220.0)
-            .height(400.0)
-            .show_ui(ui, |ui| {
-                for f in &found {
-                    let on = current.as_ref() == Some(&f.path);
-                    if ui
-                        .selectable_label(on, &f.name)
-                        .on_hover_text(f.path.display().to_string())
-                        .clicked()
-                    {
-                        chosen = Some(f.path.clone());
-                    }
-                }
-            });
-        if let Some(p) = chosen {
-            match mixxx::read(&p) {
-                Ok(m) => {
-                    t.set_mapping(Some(m));
-                    t.error = None;
-                }
-                Err(e) => t.error = Some(e),
-            }
-        }
-        ui.add_space(12.0);
-        if ui.button("Clear").on_hover_text("Forget what's been pressed").clicked() {
-            t.clear();
-        }
-        let pause = if t.paused { "Resume" } else { "Pause" };
-        if ui.button(pause).clicked() {
-            t.paused = !t.paused;
-        }
-        if ui
-            .button("Copy report")
-            .on_hover_text("Everything pressed, what each does, and what's missing, as text")
-            .clicked()
-        {
-            ui.ctx().copy_text(t.report());
-        }
+        let note = match std::fs::write(&path, json) {
+            Ok(()) => format!("Saved {}", path.display()),
+            Err(e) => format!("Couldn't save {}: {e}", path.display()),
+        };
+        *saved.lock().unwrap() = Some(note);
+        ctx.request_repaint();
     });
-    if let Some(e) = &t.error {
-        ui.label(RichText::new(e).color(cx.theme.warn));
-    }
 }
 
-fn log_table(ui: &mut Ui, t: &ControllerUi, now: Instant, cx: &Cx) {
-    let map = t.mapping.as_ref().expect("a mapping");
-    ui.label(RichText::new("Live (newest first)").strong());
-    if t.log.is_empty() {
-        ui.label(RichText::new("Press, turn or move something on the controller.").color(cx.theme.muted));
+fn mapping_table(ui: &mut Ui, t: &mut ControllerUi, cx: &mut Cx) {
+    let keys = t.keys();
+    if keys.is_empty() {
+        ui.label(RichText::new("Nothing yet.").color(cx.theme.muted));
         return;
     }
-    let start = t.started.unwrap_or(now);
-    TableBuilder::new(ui)
+    let now = Instant::now();
+    let names = bus::command_names();
+    let mut table = TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
         .auto_shrink(false)
-        .column(Column::exact(56.0))
-        .column(Column::exact(260.0))
-        .column(Column::initial(220.0).clip(true))
-        .column(Column::exact(64.0))
-        .column(Column::remainder().clip(true))
+        .column(Column::exact(200.0))
+        .column(Column::exact(50.0))
+        .column(Column::exact(60.0))
+        .column(Column::exact(280.0))
+        .column(Column::exact(80.0))
+        .column(Column::remainder());
+    if let Some(i) = t
+        .scroll_to
+        .take()
+        .and_then(|k| keys.iter().position(|x| *x == k))
+    {
+        table = table.scroll_to_row(i, Some(Align::Center));
+    }
+    table
         .header(18.0, |mut h| {
-            for name in ["time", "message", "binding", "Mixxx", "earshot now"] {
+            for name in ["message", "value", "pressed", "earshot_command", "number", "reads as"] {
                 h.col(|ui| {
                     ui.label(RichText::new(name).color(cx.theme.muted));
                 });
             }
         })
         .body(|body| {
-            body.rows(18.0, t.log.len(), |mut row| {
-                let r = &t.log[row.index()];
-                let b = r.binding.map(|i| &map.bindings[i]);
+            body.rows(24.0, keys.len(), |mut row| {
+                let key = keys[row.index()];
+                let seen = t.seen.get(&key).copied();
+                let l = t.learned.get(key);
+                row.set_selected(seen.is_some_and(|s| now - s.at < FLASH));
                 row.col(|ui| {
-                    ui.monospace(format!("{:6.2}", (r.at - start).as_secs_f64()));
+                    ui.monospace(named_key(key.0, key.1));
                 });
                 row.col(|ui| {
-                    let x = if r.count > 1 {
-                        format!("{}  ×{}", named(&r.bytes), r.count)
-                    } else {
-                        named(&r.bytes)
-                    };
-                    ui.monospace(x);
-                });
-                row.col(|ui| match b {
-                    Some(b) => {
-                        ui.label(&b.description).on_hover_text(b.target());
-                    }
-                    None => {
-                        ui.label(RichText::new("not in the mapping").color(cx.theme.muted));
+                    if let Some(s) = seen {
+                        ui.monospace(s.value.to_string());
                     }
                 });
                 row.col(|ui| {
-                    if let Some(b) = b {
-                        let o = b.outcome();
-                        ui.label(RichText::new(o.label()).color(outcome_colour(o, cx)));
+                    if let Some(s) = seen {
+                        ui.monospace(s.count.to_string());
+                    }
+                });
+                row.col(|ui| command_picker(ui, t, key, l, &names, cx));
+                row.col(|ui| {
+                    if let Some(l) = l.filter(|l| l.control.takes_number()) {
+                        number_field(ui, t, key, &l);
                     }
                 });
                 row.col(|ui| {
-                    let differs = matches!(
-                        (b.map(|b| b.outcome()), r.did),
-                        (Some(Outcome::Control(x)), Some(y)) if x != y
-                    );
-                    let text = r.did.map_or("-".into(), name);
-                    let mut l = RichText::new(text);
-                    if differs {
-                        l = l.color(cx.theme.warn);
-                    }
-                    let resp = ui.label(l);
-                    if differs {
-                        resp.on_hover_text("The mapping says otherwise: the hardcoded table may be wrong");
-                    }
+                    let Some(l) = l else { return };
+                    egui::ComboBox::from_id_salt(("reads", key))
+                        .selected_text(reading_name(l.input))
+                        .width(180.0)
+                        .show_ui(ui, |ui| {
+                            for (input, name) in READINGS {
+                                let on = reading_name(l.input) == name;
+                                if ui.selectable_label(on, name).clicked() && !on {
+                                    t.learned.set(key, Learn { input, ..l });
+                                }
+                            }
+                        });
                 });
             });
         });
 }
 
-fn bindings_table(ui: &mut Ui, t: &mut ControllerUi, now: Instant, cx: &Cx) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Bindings").strong());
-        ui.add(
-            egui::TextEdit::singleline(&mut t.filter)
-                .hint_text("filter")
-                .desired_width(140.0),
-        );
-        ui.checkbox(&mut t.touched_only, "Touched only");
-    });
-    let map = t.mapping.as_ref().expect("a mapping");
-    let filter = t.filter.to_lowercase();
-    let rows: Vec<usize> = (0..map.bindings.len())
-        .filter(|&i| !t.touched_only || t.hits[i].count > 0)
-        .filter(|&i| {
-            let b = &map.bindings[i];
-            filter.is_empty()
-                || b.description.to_lowercase().contains(&filter)
-                || b.target().to_lowercase().contains(&filter)
-        })
-        .collect();
-    TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .auto_shrink(false)
-        .column(Column::exact(190.0))
-        .column(Column::initial(240.0).clip(true))
-        .column(Column::initial(180.0).clip(true))
-        .column(Column::exact(64.0))
-        .column(Column::remainder())
-        .header(18.0, |mut h| {
-            for name in ["message", "description", "Mixxx target", "earshot", "hits"] {
-                h.col(|ui| {
-                    ui.label(RichText::new(name).color(cx.theme.muted));
-                });
+/// The row's command: a list to pick from, with a search box at the top. Picking one
+/// maps the message to it at once.
+fn command_picker(
+    ui: &mut Ui,
+    t: &mut ControllerUi,
+    key: (u8, u8),
+    l: Option<Learn>,
+    names: &[String],
+    cx: &Cx,
+) {
+    let current = l.map(|l| l.control.name().0);
+    let shown = match &current {
+        Some(n) => RichText::new(n).monospace(),
+        None => RichText::new("—").color(cx.theme.muted),
+    };
+    let r = egui::ComboBox::from_id_salt(("command", key))
+        .selected_text(shown)
+        .width(270.0)
+        .height(360.0)
+        // Clicking the search box mustn't close it; picking a command does.
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show_ui(ui, |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut t.search)
+                    .hint_text("search")
+                    .desired_width(250.0),
+            )
+            .request_focus();
+            ui.separator();
+            if ui.selectable_label(current.is_none(), "— (nothing)").clicked() {
+                t.learned.remove(key);
+                t.search.clear();
+                ui.close();
             }
-        })
-        .body(|body| {
-            body.rows(18.0, rows.len(), |mut row| {
-                let i = rows[row.index()];
-                let (b, h) = (&map.bindings[i], t.hits[i]);
-                let lit = h.at.is_some_and(|a| now - a < FLASH);
-                row.set_selected(lit);
-                row.col(|ui| {
-                    ui.monospace(named_key(b.status, b.midino));
-                });
-                row.col(|ui| {
-                    ui.label(&b.description);
-                });
-                row.col(|ui| {
-                    ui.label(b.target());
-                });
-                row.col(|ui| {
-                    let o = b.outcome();
-                    let resp = ui.label(RichText::new(o.label()).color(outcome_colour(o, cx)));
-                    if let Outcome::Control(c) = o {
-                        resp.on_hover_text(name(c));
-                    }
-                });
-                row.col(|ui| {
-                    if h.count > 0 {
-                        ui.monospace(format!("{} ({})", h.count, h.value));
-                    }
+            let typed = t.search.trim().to_lowercase();
+            for n in names.iter().filter(|n| n.contains(&typed)) {
+                let on = current.as_deref() == Some(n.as_str());
+                if ui
+                    .selectable_label(on, RichText::new(n).monospace())
+                    .clicked()
+                {
+                    t.map_to(key, n);
+                    t.search.clear();
+                    ui.close();
+                }
+            }
+        });
+    if let Some(l) = l {
+        r.response.on_hover_text(l.control.describe(l.arg));
+    }
+}
+
+/// The number after the row's command (`-4`, `8`, `size`), set when the field loses
+/// focus.
+fn number_field(ui: &mut Ui, t: &mut ControllerUi, key: (u8, u8), l: &Learn) {
+    let mut text = match &t.value_edit {
+        Some((k, w)) if *k == key => w.clone(),
+        _ => word(l),
+    };
+    let r = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .font(egui::TextStyle::Monospace)
+            .desired_width(70.0),
+    );
+    if r.has_focus() {
+        t.value_edit = Some((key, text.clone()));
+    }
+    if r.lost_focus() {
+        t.set_word(key, &text);
+        t.value_edit = None;
+    }
+}
+
+pub struct HistoryPanel<'a> {
+    pub tab: &'a mut ControllerUi,
+}
+
+impl Panel for HistoryPanel<'_> {
+    fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let t = &mut *self.tab;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Newest first").strong());
+            if ui.button("Clear").clicked() {
+                t.log.clear();
+                t.started = None;
+            }
+            let pause = if t.paused { "Resume" } else { "Pause" };
+            if ui.button(pause).clicked() {
+                t.paused = !t.paused;
+            }
+        });
+        if t.log.is_empty() {
+            ui.label(
+                RichText::new("Press, turn or move something on the controller.")
+                    .color(cx.theme.muted),
+            );
+            return;
+        }
+        let now = Instant::now();
+        let start = t.started.unwrap_or(now);
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .auto_shrink(false)
+            .column(Column::exact(64.0))
+            .column(Column::exact(300.0))
+            .column(Column::remainder().clip(true))
+            .header(18.0, |mut h| {
+                for name in ["time", "message", "earshot_command"] {
+                    h.col(|ui| {
+                        ui.label(RichText::new(name).color(cx.theme.muted));
+                    });
+                }
+            })
+            .body(|body| {
+                body.rows(18.0, t.log.len(), |mut row| {
+                    let r = &t.log[row.index()];
+                    row.col(|ui| {
+                        ui.monospace(format!("{:6.2}", (r.at - start).as_secs_f64()));
+                    });
+                    row.col(|ui| {
+                        let x = if r.count > 1 {
+                            format!("{}  ×{}", named(&r.bytes), r.count)
+                        } else {
+                            named(&r.bytes)
+                        };
+                        ui.monospace(x);
+                    });
+                    row.col(|ui| match r.did {
+                        Some(c) => {
+                            ui.monospace(command_text(c, None));
+                        }
+                        None => {
+                            ui.label(RichText::new("not mapped").color(cx.theme.muted));
+                        }
+                    });
                 });
             });
-        });
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::bus::DeckControl;
+    use earshot_engine::DeckId;
+
+    fn msg(bytes: &[u8]) -> MidiMsg {
+        MidiMsg {
+            port: 0,
+            bytes: bytes.to_vec(),
+            at: Instant::now(),
+            did: None,
+        }
+    }
+
+    /// Press something new: it joins the list and the list scrolls to it. Pick its
+    /// command and number; they go in the file.
+    #[test]
+    fn mapping_by_pressing() {
+        let deck1 = DeckId::new(0).unwrap();
+        let mut t = ControllerUi::default();
+        t.on_midi(msg(&[0x92, 0x01, 0x7F]));
+        t.on_midi(msg(&[0x82, 0x01, 0x00]));
+        assert_eq!(t.keys(), [(0x92, 0x01)], "a note-off is the same control");
+        assert_eq!(t.scroll_to, Some((0x92, 0x01)));
+        assert_eq!(t.seen[&(0x92, 0x01)].count, 2);
+        assert!(t.learned.get((0x92, 0x01)).is_none());
+
+        // A command that needs a number gets one to change.
+        t.map_to((0x92, 0x01), "deck_1_beat_loop");
+        let l = t.learned.get((0x92, 0x01)).unwrap();
+        assert_eq!(l.control, Control::Deck(deck1, DeckControl::Loop));
+        assert_eq!(l.input, Input::Note);
+        assert!(t.set_word((0x92, 0x01), "8"));
+        assert_eq!(
+            t.learned.get((0x92, 0x01)).unwrap().control,
+            Control::Deck(deck1, DeckControl::BeatLoop(8.0))
+        );
+        assert!(!t.set_word((0x92, 0x01), "x"));
+        t.map_to((0x92, 0x01), "deck_1_beat_jump");
+        assert!(t.set_word((0x92, 0x01), "-4"));
+        let l = t.learned.get((0x92, 0x01)).unwrap();
+        assert_eq!(l.arg, Some(-4.0));
+        assert_eq!(word(&l), "-4");
+
+        // A knob reads as a fader; a new command keeps how it reads.
+        t.on_midi(msg(&[0xB5, 0x10, 0x40]));
+        assert_eq!(t.scroll_to, Some((0xB5, 0x10)));
+        t.map_to((0xB5, 0x10), "mixer_crossfader");
+        let l = t.learned.get((0xB5, 0x10)).unwrap();
+        assert_eq!(l.input, Input::Cc);
+        t.learned.set((0xB5, 0x10), Learn { input: Input::Jog(720), ..l });
+        t.map_to((0xB5, 0x10), "deck_2_scratch");
+        assert_eq!(t.learned.get((0xB5, 0x10)).unwrap().input, Input::Jog(720));
+
+        let json = t.learned.to_json("Mystery");
+        assert!(json.contains("\"deck_1_beat_jump\""), "{json}");
+        assert!(json.contains("\"deck_2_scratch\""), "{json}");
+    }
 
     #[test]
     fn messages_in_words() {

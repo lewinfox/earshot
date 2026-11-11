@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::collections::Section;
 use super::sources::{SourceId, SourceKind};
+use super::track::TrackId;
 
 /// What a deck's stem button does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,7 +26,7 @@ pub enum Mode {
     /// The decks and the mixer, for playing a set.
     #[default]
     Perform,
-    /// One player across the top for setting cues, fixing grids and building playlists.
+    /// The same decks, over tools for setting cues, fixing grids and building playlists.
     Prepare,
     /// Perform's decks over the library and a controller's mapping, for setting up and
     /// testing a MIDI controller.
@@ -33,6 +34,15 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// As the top bar names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Perform => "Perform",
+            Mode::Prepare => "Prepare",
+            Mode::Controller => "Controller",
+        }
+    }
+
     /// The mode whose keymap bindings it uses: Controller uses Perform's.
     pub fn keys(self) -> Mode {
         match self {
@@ -169,6 +179,9 @@ pub enum ViewCmd {
     /// 2 and 4.
     SwitchLayer(usize),
     SetMode(Mode),
+    /// Open the track in Prepare's Tempo lock tab and chart it (the track menu's
+    /// "Normalise tempo"). Nothing happens if the switch to Prepare is refused.
+    NormaliseTempo(TrackId),
     /// Show a source in the library's left pane (`None` closes the pane).
     Source(Option<Source>),
     /// Open a pane on the library's right (`None` closes it).

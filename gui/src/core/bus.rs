@@ -4,6 +4,12 @@
 //! keymap and MIDI all go through here, so a control means the same thing however
 //! it's touched.
 //!
+//! Each control has a name that goes from the general to the particular: where it is,
+//! then what it is, then the part, then what to do to it (`deck_1_hot_cue_3_clear`,
+//! `mixer_crossfader`, `fx_1_on`). A number in the name says *which* (the deck, the
+//! pad); a number after it is the value (`deck_1_beat_jump -4`). `docs/commands.md`
+//! lists them all, made from here ([`commands_markdown`]).
+//!
 //! Values are in the engine's units (filter -1..1, EQ linear gain, …). Mixxx's
 //! `[Group] key` names exist only for the MIDI edge ([`Control::mixxx`],
 //! [`Control::from_mixxx`]).
@@ -12,7 +18,7 @@ use std::time::Instant;
 
 use earshot_engine::{
     ChannelParam, DeckCmd as EngineCmd, DeckId, DeckSnap, EQ_HIGH, EQ_LOW, EQ_MID, EngineSnapshot,
-    FX_UNITS, FxCmd, MasterParam, ParamId, Press, Set,
+    FX_UNITS, FxCmd, HOTCUES, MAX_DECKS, MasterParam, ParamId, Press, Set,
 };
 
 use super::command::{Command, DeckCmd, ViewCmd};
@@ -269,6 +275,14 @@ const fn spec(name: &'static str, help: &'static str, kind: Kind) -> ControlSpec
     ControlSpec { name, help, kind }
 }
 
+/// The word after a control's name.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Word {
+    Num(f64),
+    /// The deck's configured beat jump or loop size (`size`, or `-size` for back).
+    Size { back: bool },
+}
+
 /// A control on a particular deck, the mixer or the library.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Control {
@@ -306,12 +320,12 @@ impl FxControl {
     pub fn spec(self) -> ControlSpec {
         use FxControl::*;
         match self {
-            On => spec("fx_on", "effect on / off", Kind::Toggle),
-            Level => spec("fx_level", "effect level", Kind::Continuous(FX_LEVEL)),
-            BeatsDown => spec("fx_beats_down", "halve the effect's length", Kind::Button),
-            BeatsUp => spec("fx_beats_up", "double the effect's length", Kind::Button),
-            Next => spec("fx_next", "next effect", Kind::Button),
-            Target => spec("fx_target", "effect on the next deck / main", Kind::Button),
+            On => spec("on", "effect on / off", Kind::Toggle),
+            Level => spec("level", "effect level", Kind::Continuous(FX_LEVEL)),
+            BeatsDown => spec("beats_halve", "halve the effect's length", Kind::Button),
+            BeatsUp => spec("beats_double", "double the effect's length", Kind::Button),
+            Next => spec("effect_next", "next effect", Kind::Button),
+            Target => spec("channel_next", "effect on the next deck / main", Kind::Button),
         }
     }
 
@@ -358,18 +372,14 @@ pub enum DeckControl {
     /// A hot cue pad (0-based).
     Hotcue(u8),
     HotcueClear(u8),
-    /// Beat jump by the deck's step.
+    /// Beat jump by the deck's configured size (`beat_jump -size`, `beat_jump size`).
     JumpBack,
     JumpForward,
-    /// Beat jump by the value, in beats.
+    /// Beat jump by the value, in beats (negative: back).
     BeatJump,
-    /// The deck's beat jump step, in beats.
-    JumpSize,
-    /// The loop button: a loop of the deck's loop size, or end the loop (whatever its
-    /// size by now).
+    /// A loop of the deck's configured loop size, or end the loop (whatever its size
+    /// by now): `beat_loop size`.
     Loop,
-    /// The size the loop button makes, in beats.
-    LoopSize,
     /// A loop this many beats long; the same again ends it, another size resizes it.
     BeatLoop(f64),
     LoopIn,
@@ -432,52 +442,50 @@ impl DeckControl {
         match self {
             Play => spec("play", "play / pause", Toggle),
             Cue => spec("cue", "cue", Button),
-            SetCue => spec("set_cue", "set the cue point here", Button),
-            Sync => spec("sync", "sync", Toggle),
+            SetCue => spec("cue_set", "set the cue point here", Button),
+            Sync => spec("beat_sync", "beat sync", Toggle),
             Quantize => spec("quantize", "quantise", Toggle),
-            Keylock => spec("keylock", "keylock", Toggle),
-            Pfl => spec("pfl", "headphone cue", Toggle),
-            Hotcue(_) => spec("hotcue", "hot cue", Button),
-            HotcueClear(_) => spec("hotcue_clear", "clear hot cue", Button),
-            JumpBack => spec("jump_back", "beat jump back", Button),
-            JumpForward => spec("jump_forward", "beat jump forward", Button),
-            BeatJump => spec("beatjump", "beat jump", Continuous(BEATS)),
-            JumpSize => spec("jump_size", "beat jump step", Continuous(BEATS)),
-            Loop => spec("loop", "loop on / off", Button),
-            LoopSize => spec("loop_size", "loop size", Continuous(BEATS)),
-            BeatLoop(_) => spec("beatloop", "loop", Button),
+            Keylock => spec("key_lock", "key lock", Toggle),
+            Pfl => spec("headphone_cue", "headphone cue", Toggle),
+            Hotcue(_) => spec("hot_cue", "hot cue", Button),
+            HotcueClear(_) => spec("hot_cue_clear", "clear hot cue", Button),
+            JumpBack => spec("beat_jump", "beat jump back", Button),
+            JumpForward => spec("beat_jump", "beat jump forward", Button),
+            BeatJump => spec("beat_jump", "beat jump", Continuous(BEATS)),
+            Loop => spec("beat_loop", "loop on / off", Button),
+            BeatLoop(_) => spec("beat_loop", "loop", Button),
             LoopIn => spec("loop_in", "loop in", Button),
             LoopOut => spec("loop_out", "loop out", Button),
-            Reloop => spec("reloop", "reloop / exit", Button),
+            Reloop => spec("loop_exit", "leave the loop / reloop", Button),
             LoopHalve => spec("loop_halve", "halve the loop", Button),
             LoopDouble => spec("loop_double", "double the loop", Button),
-            NudgeDown => spec("nudge_down", "nudge slower", Button),
-            NudgeUp => spec("nudge_up", "nudge faster", Button),
-            TempoRangeNext => spec("tempo_range", "next tempo range", Button),
+            NudgeDown => spec("pitch_bend_down", "slow down while held", Button),
+            NudgeUp => spec("pitch_bend_up", "speed up while held", Button),
+            TempoRangeNext => spec("tempo_range_next", "next tempo range", Button),
             Tempo => spec("tempo", "tempo fader", Continuous(TEMPO)),
             Position => spec("position", "go to", Continuous(POSITION)),
-            Volume => spec("volume", "channel fader", Continuous(VOLUME)),
-            Trim => spec("trim", "gain", Continuous(GAIN)),
+            Volume => spec("channel_fader", "channel fader", Continuous(VOLUME)),
+            Trim => spec("trim", "trim (gain)", Continuous(GAIN)),
             Eq(b) => spec(
                 ["eq_low", "eq_mid", "eq_high"][b.min(2)],
                 "EQ",
                 Continuous(EQ[b.min(2)]),
             ),
             Filter => spec("filter", "filter", Continuous(FILTER)),
-            SaveMemory => spec("save_memory", "save the cue (or loop) to memory", Button),
+            SaveMemory => spec("memory_cue_save", "save the cue (or loop) to memory", Button),
             GridNudge(_) => spec("grid_nudge", "nudge the grid", Button),
             LoadSelected => spec("load_selected", "load the selected track", Button),
             LoadStep(_) => spec("load_step", "load the next track", Button),
-            Vinyl => spec("vinyl", "vinyl mode (jog wheels scratch)", Toggle),
-            JogTouch => spec("jog_touch", "hand on the record (scratch)", Button),
-            JogTurn => spec("jog_turn", "scratch", Relative),
-            JogBend => spec("jog_bend", "bend the speed", Relative),
+            Vinyl => spec("vinyl_mode", "vinyl mode (jog wheels scratch)", Toggle),
+            JogTouch => spec("scratch_hold", "hand on the record (scratch)", Button),
+            JogTurn => spec("scratch", "scratch", Relative),
+            JogBend => spec("pitch_bend", "bend the speed", Relative),
         }
     }
 
     /// Every deck control, with sample parameters for the parametrised ones (for
     /// looking names up and for tests).
-    pub const ALL: [DeckControl; 38] = {
+    pub const ALL: [DeckControl; 36] = {
         use DeckControl::*;
         [
             Play,
@@ -492,9 +500,7 @@ impl DeckControl {
             JumpBack,
             JumpForward,
             BeatJump,
-            JumpSize,
             Loop,
-            LoopSize,
             BeatLoop(4.0),
             LoopIn,
             LoopOut,
@@ -521,26 +527,65 @@ impl DeckControl {
         ]
     };
 
-    /// By keymap name, with its parameter (`hotcue 1` is pad 0).
-    pub fn parse(name: &str, arg: Option<f64>) -> Option<DeckControl> {
+    /// By its name after the deck (`play`, `hot_cue_3`) and the word after that.
+    fn parse(name: &str, word: Option<Word>) -> Option<DeckControl> {
         use DeckControl::*;
-        Some(match name {
-            "hotcue" | "hotcue_clear" => {
-                let n = arg.filter(|n| *n >= 1.0 && n.fract() == 0.0)? as u8 - 1;
-                if name == "hotcue" {
-                    Hotcue(n)
+        let num = match word {
+            Some(Word::Num(n)) => Some(n),
+            _ => None,
+        };
+        if let Some(rest) = name.strip_prefix("hot_cue_") {
+            let (n, clear) = match rest.strip_suffix("_clear") {
+                Some(n) => (n, true),
+                None => (rest, false),
+            };
+            let n = n.parse::<usize>().ok().filter(|n| (1..=HOTCUES).contains(n))? as u8 - 1;
+            return word.is_none().then_some(if clear { HotcueClear(n) } else { Hotcue(n) });
+        }
+        Some(match (name, word) {
+            ("beat_jump", Some(Word::Size { back })) => {
+                if back {
+                    JumpBack
                 } else {
-                    HotcueClear(n)
+                    JumpForward
                 }
             }
-            "beatloop" => BeatLoop(arg.filter(|b| *b > 0.0)?),
-            "grid_nudge" => GridNudge(arg?),
-            "load_selected" => LoadSelected,
-            "load_step" => LoadStep(arg.filter(|n| n.fract() == 0.0 && *n != 0.0)? as i32),
+            ("beat_jump", _) => BeatJump,
+            ("beat_loop", Some(Word::Size { back: false })) => Loop,
+            ("beat_loop", _) => BeatLoop(num.filter(|b| *b > 0.0)?),
+            ("grid_nudge", _) => GridNudge(num?),
+            ("load_step", _) => LoadStep(num.filter(|n| n.fract() == 0.0 && *n != 0.0)? as i32),
+            (_, Some(Word::Size { .. })) => return None,
             _ => *Self::ALL
                 .iter()
-                .find(|c| c.spec().name == name && !c.parametrised())?,
+                .chain(&[LoadSelected])
+                .find(|c| c.spec().name == name && !c.parametrised() && !c.sized())?,
         })
+    }
+
+    /// Whether it acts by the deck's configured size (`size` after its name).
+    fn sized(self) -> bool {
+        matches!(
+            self,
+            DeckControl::JumpBack | DeckControl::JumpForward | DeckControl::Loop
+        )
+    }
+
+    /// Its name after the deck (`hot_cue_3`), and the fixed word after that, if it
+    /// has one (`-size`, the loop's `8`).
+    fn name(self) -> (String, Option<String>) {
+        use DeckControl::*;
+        let name = self.spec().name;
+        match self {
+            Hotcue(n) => (format!("hot_cue_{}", n + 1), None),
+            HotcueClear(n) => (format!("hot_cue_{}_clear", n + 1), None),
+            JumpBack => (name.into(), Some("-size".into())),
+            JumpForward | Loop => (name.into(), Some("size".into())),
+            BeatLoop(b) => (name.into(), Some(b.to_string())),
+            GridNudge(ms) => (name.into(), Some(ms.to_string())),
+            LoadStep(n) => (name.into(), Some(n.to_string())),
+            _ => (name.into(), None),
+        }
     }
 
     /// Whether the keymap's number is part of the control (the pad, the loop size)
@@ -557,8 +602,7 @@ impl DeckControl {
     }
 
     /// The control's value in a snapshot, for widgets and controller LEDs. `None` for
-    /// controls the engine doesn't hold (the beat jump step and loop size live in the
-    /// deck's session) and for plain buttons.
+    /// controls the engine doesn't hold and for plain buttons.
     pub fn get(self, d: &DeckSnap) -> Option<f64> {
         use DeckControl::*;
         let on = |b: bool| Some(b as u8 as f64);
@@ -605,9 +649,7 @@ impl DeckControl {
             JumpBack => on_press(DeckCmd::Jump { forward: false }),
             JumpForward => on_press(DeckCmd::Jump { forward: true }),
             BeatJump if value != 0.0 => engine(EngineCmd::BeatJump(value)),
-            JumpSize => Some(Command::Deck(deck, DeckCmd::SetJumpSize(value))),
             Loop => on_press(DeckCmd::LoopButton),
-            LoopSize => Some(Command::Deck(deck, DeckCmd::SetLoopSize(value))),
             BeatLoop(beats) if pressed => engine(EngineCmd::BeatLoop(beats)),
             LoopIn if pressed => engine(EngineCmd::LoopIn),
             LoopOut if pressed => engine(EngineCmd::LoopOut),
@@ -658,9 +700,7 @@ impl DeckControl {
             JumpBack => key("beatjump_backward"),
             JumpForward => key("beatjump_forward"),
             BeatJump => key("beatjump"),
-            JumpSize => key("beatjump_size"),
             Loop => key("beatloop_activate"),
-            LoopSize => key("beatloop_size"),
             BeatLoop(b) => Some((MixxxGroup::Channel, format!("beatloop_{b}_toggle"))),
             LoopIn => key("loop_in"),
             LoopOut => key("loop_out"),
@@ -695,7 +735,7 @@ impl LibraryControl {
         match self {
             LibraryControl::Browse => spec("browse", "move through the list", Kind::Relative),
             LibraryControl::TogglePane => {
-                spec("toggle_pane", "library / suggestions", Kind::Button)
+                spec("pane_toggle", "library / suggestions", Kind::Button)
             }
             LibraryControl::Search => spec("search", "search", Kind::Button),
             LibraryControl::Undo => spec("undo", "undo", Kind::Button),
@@ -728,10 +768,10 @@ fn master_spec(p: MasterParam) -> ControlSpec {
     let c = |name, help, range| spec(name, help, Kind::Continuous(range));
     match p {
         MasterParam::Crossfader => c("crossfader", "crossfader", CROSSFADER),
-        MasterParam::Gain => c("main_gain", "main level", MAIN_GAIN),
-        MasterParam::Balance => c("balance", "balance", BALANCE),
-        MasterParam::HeadGain => c("head_gain", "headphone level", HEAD_GAIN),
-        MasterParam::HeadMix => c("head_mix", "headphone mix", HEAD_MIX),
+        MasterParam::Gain => c("main_level", "main level", MAIN_GAIN),
+        MasterParam::Balance => c("main_balance", "balance", BALANCE),
+        MasterParam::HeadGain => c("headphone_level", "headphone level", HEAD_GAIN),
+        MasterParam::HeadMix => c("headphone_mix", "headphone mix", HEAD_MIX),
     }
 }
 
@@ -841,6 +881,101 @@ impl Control {
         }
     }
 
+    /// Its full name (`deck_1_hot_cue_3`) and the fixed word after it, if it has one
+    /// (`-size`, a loop's `8`). Controls that take a value (a knob, `beat_jump`) have
+    /// none: the value comes when it's sent.
+    pub fn name(self) -> (String, Option<String>) {
+        match self {
+            Control::Deck(d, c) => {
+                let (name, word) = c.name();
+                (format!("deck_{}_{name}", d.index() + 1), word)
+            }
+            Control::Master(p) => (format!("mixer_{}", master_spec(p).name), None),
+            Control::Fx(u, c) => (format!("fx_{}_{}", u + 1, c.spec().name), None),
+            Control::Library(c) => (format!("library_{}", c.spec().name), None),
+        }
+    }
+
+    /// The control a name and the word after it stand for, with that word's number
+    /// (`deck_1_beat_jump -4`: beat jump, -4). The word is a number, or `size` /
+    /// `-size` for the deck's configured beat jump or loop size.
+    pub fn parse(name: &str, word: Option<&str>) -> Result<(Control, Option<f64>), String> {
+        let word = match word {
+            None => None,
+            Some("size") => Some(Word::Size { back: false }),
+            Some("-size") => Some(Word::Size { back: true }),
+            Some(n) => Some(Word::Num(
+                n.parse::<f64>().map_err(|_| format!("{n} isn't a number"))?,
+            )),
+        };
+        let num = match word {
+            Some(Word::Num(n)) => Some(n),
+            _ => None,
+        };
+        let unknown = || format!("no command {name}");
+        let numbered = |rest: &str, count: usize| -> Option<(usize, String)> {
+            let (n, thing) = rest.split_once('_')?;
+            let n = n.parse::<usize>().ok()?.checked_sub(1).filter(|n| *n < count)?;
+            Some((n, thing.to_string()))
+        };
+        let size_only_on_decks = || match word {
+            Some(Word::Size { .. }) => Err(format!("{name} has no configured size")),
+            _ => Ok(()),
+        };
+        let control = if let Some(thing) = name.strip_prefix("mixer_") {
+            size_only_on_decks()?;
+            MASTER
+                .iter()
+                .map(|(p, _)| *p)
+                .find(|p| master_spec(*p).name == thing)
+                .map(Control::Master)
+        } else if let Some(thing) = name.strip_prefix("library_") {
+            size_only_on_decks()?;
+            LibraryControl::ALL
+                .into_iter()
+                .find(|c| c.spec().name == thing)
+                .map(Control::Library)
+        } else if let Some(rest) = name.strip_prefix("fx_") {
+            size_only_on_decks()?;
+            numbered(rest, FX_UNITS).and_then(|(u, thing)| {
+                let c = FxControl::ALL.into_iter().find(|c| c.spec().name == thing)?;
+                Some(Control::Fx(u, c))
+            })
+        } else if let Some(rest) = name.strip_prefix("deck_") {
+            numbered(rest, MAX_DECKS).and_then(|(d, thing)| {
+                Some(Control::Deck(
+                    DeckId::new(d)?,
+                    DeckControl::parse(&thing, word)?,
+                ))
+            })
+        } else {
+            None
+        };
+        Ok((control.ok_or_else(unknown)?, num))
+    }
+
+    /// Whether a button mapped to it needs a number after its name (how far to jump,
+    /// the loop's beats).
+    pub fn takes_number(self) -> bool {
+        use DeckControl::*;
+        matches!(
+            self,
+            Control::Deck(
+                _,
+                BeatJump | JumpBack | JumpForward | Loop | BeatLoop(_) | GridNudge(_) | LoadStep(_)
+            ) | Control::Library(LibraryControl::Browse)
+        )
+    }
+
+    /// The value a button press sends, given the word after the control's name: that
+    /// number, unless it's part of the control (a loop's beats), else 1.
+    pub fn press_value(self, arg: Option<f64>) -> f64 {
+        match self {
+            Control::Deck(_, c) if c.parametrised() || c.sized() => 1.0,
+            _ => arg.unwrap_or(1.0),
+        }
+    }
+
     /// What it does, in a few words, with its parameter (`arg`: the keymap's number,
     /// for controls that send one).
     pub fn describe(self, arg: Option<f64>) -> String {
@@ -852,6 +987,10 @@ impl Control {
                 format!("loop {bars} bar{}", if bars == 1.0 { "" } else { "s" })
             }
             Control::Deck(_, DeckControl::BeatLoop(b)) => format!("loop {b} beats"),
+            Control::Deck(_, DeckControl::BeatJump) => match arg {
+                Some(b) => format!("beat jump {} {}", b.abs(), if b < 0.0 { "back" } else { "forward" }),
+                None => self.spec().help.into(),
+            },
             Control::Deck(_, DeckControl::GridNudge(ms)) => format!(
                 "nudge the grid {} ms {}",
                 ms.abs(),
@@ -951,6 +1090,120 @@ impl Control {
     }
 }
 
+/// Every command's name, once each (`deck_1_beat_jump`, `deck_1_hot_cue_3`), in the
+/// registry's order, for picking one from a list.
+pub fn command_names() -> Vec<String> {
+    let mut all: Vec<Control> = vec![];
+    for d in DeckId::first(MAX_DECKS) {
+        for c in DeckControl::ALL.iter().chain(&[DeckControl::LoadSelected]) {
+            match c {
+                DeckControl::Hotcue(_) => {
+                    all.extend((0..HOTCUES as u8).map(|n| Control::Deck(d, DeckControl::Hotcue(n))))
+                }
+                DeckControl::HotcueClear(_) => all.extend(
+                    (0..HOTCUES as u8).map(|n| Control::Deck(d, DeckControl::HotcueClear(n))),
+                ),
+                c => all.push(Control::Deck(d, *c)),
+            }
+        }
+    }
+    all.extend(MASTER.iter().map(|(p, _)| Control::Master(*p)));
+    for u in 0..FX_UNITS {
+        all.extend(FxControl::ALL.iter().map(|c| Control::Fx(u, *c)));
+    }
+    all.extend(LibraryControl::ALL.iter().map(|c| Control::Library(*c)));
+    let mut names: Vec<String> = vec![];
+    for c in all {
+        let name = c.name().0;
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// What the number after a command is, for `docs/commands.md`.
+#[cfg(test)]
+fn value_doc(c: Control) -> String {
+    use DeckControl::*;
+    match c {
+        Control::Deck(_, BeatJump) => "beats (negative: back), or `size` / `-size`".into(),
+        Control::Deck(_, BeatLoop(_)) => "beats, or `size`".into(),
+        Control::Deck(_, GridNudge(_)) => "milliseconds (negative: earlier)".into(),
+        Control::Deck(_, LoadStep(_)) => "tracks (negative: previous)".into(),
+        Control::Deck(_, JogTurn | JogBend) => "seconds of track (negative: back)".into(),
+        Control::Library(LibraryControl::Browse) => "rows (negative: up)".into(),
+        _ => match c.spec().kind {
+            Kind::Button => "pressed (1) or let go (0)".into(),
+            Kind::Toggle => "—".into(),
+            Kind::Relative => "steps (negative: back)".into(),
+            Kind::Continuous(r) => format!("{} to {}", r.min, r.max),
+        },
+    }
+}
+
+/// `docs/commands.md`: every command, made from the registry.
+#[cfg(test)]
+pub fn commands_markdown() -> String {
+    let mut out = String::from(
+        "# Commands\n\n\
+         Everything earshot can be told to do, by a key (`keymap.txt`), a controller or its \
+         own buttons. Made from `gui/src/core/bus.rs` by a test: don't edit by hand \
+         (`EARSHOT_WRITE_DOCS=1 cargo test commands_doc` rewrites it).\n\n\
+         A name goes from the general to the particular: where, what, which part, what to \
+         do. A number in the name says which (`deck_2`, `hot_cue_3`); a number after it is \
+         the value (`deck_1_beat_jump -4`). `size` stands for the deck's configured beat \
+         jump or loop size.\n",
+    );
+    let mut table = |title: &str, rows: Vec<(String, String, String)>| {
+        out.push_str(&format!("\n## {title}\n\n| Command | Number | What it does |\n|---|---|---|\n"));
+        for (name, value, help) in rows {
+            out.push_str(&format!("| `{name}` | {value} | {help} |\n"));
+        }
+    };
+    let row = |c: Control, pattern: Option<String>| {
+        let name = pattern.unwrap_or_else(|| c.name().0);
+        (name, value_doc(c), c.spec().help.to_string())
+    };
+    let d = DeckId::new(0).expect("deck 1");
+    let deck_rows = DeckControl::ALL
+        .iter()
+        .chain(&[DeckControl::LoadSelected])
+        .filter(|c| !c.sized())
+        .map(|&c| {
+            let pattern = match c {
+                DeckControl::Hotcue(_) => Some("deck_N_hot_cue_M".to_string()),
+                DeckControl::HotcueClear(_) => Some("deck_N_hot_cue_M_clear".to_string()),
+                _ => Some(Control::Deck(d, c).name().0.replacen("deck_1_", "deck_N_", 1)),
+            };
+            row(Control::Deck(d, c), pattern)
+        })
+        .collect();
+    table(
+        &format!("Decks: `deck_N_`, N = 1 to {MAX_DECKS}; hot cue pads M = 1 to {HOTCUES}"),
+        deck_rows,
+    );
+    table(
+        "Mixer: `mixer_`",
+        MASTER.iter().map(|(p, _)| row(Control::Master(*p), None)).collect(),
+    );
+    table(
+        &format!("Effect units: `fx_N_`, N = 1 to {FX_UNITS}"),
+        FxControl::ALL
+            .iter()
+            .map(|&c| {
+                let name = Control::Fx(0, c).name().0.replacen("fx_1_", "fx_N_", 1);
+                row(Control::Fx(0, c), Some(name))
+            })
+            .collect(),
+    );
+    table(
+        "Library: `library_`",
+        LibraryControl::ALL.iter().map(|&c| row(Control::Library(c), None)).collect(),
+    );
+    out
+}
+
 /// "A", "B", … for decks 1, 2, ….
 pub fn deck_letter(deck: DeckId) -> char {
     (b'A' + deck.index() as u8) as char
@@ -1014,8 +1267,8 @@ mod tests {
         assert_eq!(get(DeckControl::Hotcue(2)), Some(1.0));
         assert_eq!(get(DeckControl::Hotcue(3)), Some(0.0));
         assert_eq!(get(DeckControl::Loop), Some(1.0));
-        // Held by the deck's session, not the engine.
-        assert_eq!(get(DeckControl::JumpSize), None);
+        // Plain buttons have no value.
+        assert_eq!(get(DeckControl::JumpBack), None);
         // Deck A's values are its own.
         assert_eq!(
             Control::Deck(deck(0), DeckControl::Play).get(&snap),
@@ -1144,18 +1397,78 @@ mod tests {
 
     #[test]
     fn names_parse_back() {
-        for c in DeckControl::ALL {
-            let arg = match c {
-                DeckControl::Hotcue(n) | DeckControl::HotcueClear(n) => Some(n as f64 + 1.0),
-                DeckControl::BeatLoop(b) => Some(b),
-                DeckControl::GridNudge(ms) => Some(ms),
-                _ => None,
-            };
-            assert_eq!(DeckControl::parse(c.spec().name, arg), Some(c));
+        let mut all: Vec<Control> = vec![];
+        for d in DeckId::first(MAX_DECKS) {
+            for c in DeckControl::ALL.iter().chain(&[
+                DeckControl::Hotcue(7),
+                DeckControl::LoadSelected,
+                DeckControl::LoadStep(-1),
+            ]) {
+                all.push(Control::Deck(d, *c));
+            }
         }
-        assert_eq!(DeckControl::parse("hotcue", Some(0.0)), None);
-        assert_eq!(DeckControl::parse("hotcue", None), None);
-        assert_eq!(DeckControl::parse("bogus", None), None);
+        all.extend(MASTER.iter().map(|(p, _)| Control::Master(*p)));
+        all.extend(FxControl::ALL.iter().map(|c| Control::Fx(0, *c)));
+        all.extend(LibraryControl::ALL.iter().map(|c| Control::Library(*c)));
+        for c in all {
+            let (name, word) = c.name();
+            let (back, _) = Control::parse(&name, word.as_deref()).unwrap();
+            assert_eq!(back, c, "{name} {word:?}");
+        }
+        let parse = |n: &str, w: Option<&str>| Control::parse(n, w).map(|(c, _)| c);
+        let d = deck(1);
+        assert_eq!(
+            parse("deck_2_hot_cue_3_clear", None),
+            Ok(Control::Deck(d, DeckControl::HotcueClear(2)))
+        );
+        assert_eq!(
+            Control::parse("deck_2_beat_jump", Some("-4")),
+            Ok((Control::Deck(d, DeckControl::BeatJump), Some(-4.0)))
+        );
+        assert_eq!(
+            parse("deck_2_beat_jump", Some("-size")),
+            Ok(Control::Deck(d, DeckControl::JumpBack))
+        );
+        assert_eq!(
+            parse("deck_2_beat_loop", Some("size")),
+            Ok(Control::Deck(d, DeckControl::Loop))
+        );
+        assert_eq!(
+            parse("mixer_crossfader", None),
+            Ok(Control::Master(MasterParam::Crossfader))
+        );
+        for bad in [
+            "deck_1_hot_cue_9",
+            "deck_1_hot_cue_0",
+            "deck_5_play",
+            "deck_1_dance",
+            "fx_2_on",
+            "mixer_play",
+            "play",
+        ] {
+            assert!(parse(bad, None).is_err(), "{bad}");
+        }
+        assert!(parse("deck_1_beat_loop", None).is_err(), "needs its beats");
+        assert!(parse("deck_1_beat_loop", Some("-size")).is_err());
+        assert!(parse("deck_1_play", Some("size")).is_err());
+        assert!(parse("mixer_crossfader", Some("size")).is_err());
+        assert!(parse("deck_1_hot_cue_1", Some("2")).is_err());
+        assert!(parse("deck_1_beat_jump", Some("x")).unwrap_err().contains("isn't a number"));
+    }
+
+    /// `docs/commands.md` is the registry as it is.
+    #[test]
+    fn commands_doc() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/commands.md");
+        let want = commands_markdown();
+        if std::env::var_os("EARSHOT_WRITE_DOCS").is_some() {
+            std::fs::write(&path, &want).unwrap();
+        }
+        let have = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            have == want,
+            "docs/commands.md is out of date: EARSHOT_WRITE_DOCS=1 cargo test commands_doc"
+        );
     }
 
     #[test]

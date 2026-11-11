@@ -1,21 +1,26 @@
 //! Controller: Perform's decks and mixer across the top (so the controller can be
-//! played as it would be in a set), then two tabs: the library (to try the browse
-//! knob and load buttons) and the Mapping tab (what each message is, and whether
-//! earshot can do it).
+//! played as it would be in a set), then three tabs: Mapping (map each message to a
+//! command, by pressing it), History (the messages as they came in) and the library
+//! (to try the browse knob and load buttons).
 
 use egui::{Margin, vec2};
 
 use super::perform::decks_rows;
 use super::{Panels, library, row_frame};
-use crate::ui::panels::controller::{ControllerTab, MappingPanel};
+use crate::ui::panels::controller::{ControllerTab, HistoryPanel, MappingPanel};
 use crate::ui::panels::{Cx, Panel};
 use crate::ui::widgets::{Tab, tool_tabs};
 
-const TABS: [Tab<ControllerTab>; 2] = [
+const TABS: [Tab<ControllerTab>; 3] = [
     Tab {
         id: ControllerTab::Mapping,
         name: "Mapping",
-        tip: "Every message the controller sends, looked up in its Mixxx mapping",
+        tip: "Every message the controller sends, and the command it runs",
+    },
+    Tab {
+        id: ControllerTab::History,
+        name: "History",
+        tip: "The messages as they came in, newest first",
     },
     Tab {
         id: ControllerTab::Library,
@@ -39,14 +44,16 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
         });
     match current {
         ControllerTab::Library => library(ctx, panels, cx),
-        ControllerTab::Mapping => {
+        tab => {
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(cx.theme.bg).inner_margin(6))
                 .show(ctx, |ui| {
-                    MappingPanel {
-                        tab: &mut panels.controller,
+                    let t = &mut panels.controller;
+                    if tab == ControllerTab::History {
+                        HistoryPanel { tab: t }.ui(ui, cx)
+                    } else {
+                        MappingPanel { tab: t }.ui(ui, cx)
                     }
-                    .ui(ui, cx)
                 });
         }
     }

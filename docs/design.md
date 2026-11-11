@@ -32,8 +32,8 @@ more than two decks.
 
 ## Shape
 
-One native desktop app. The decks are always across the top: 1, 2 or 4 of them,
-the same decks in every mode, behaving the same way. A **mode** only chooses which
+One native desktop app. The decks are always across the top: 2 or 4 of them
+(Prepare can also show just 1), the same decks in every mode, behaving the same way. A **mode** only chooses which
 tabs show below them:
 
 | Mode | Tabs below the decks |
@@ -42,7 +42,9 @@ tabs show below them:
 | **Prepare** | Tempo lock, Stems, Trim, Flow, Export, each with the library beside it |
 | **Controller** | Mapping (set up and test a MIDI controller), the library |
 
-- Switching modes changes nothing that's playing or loaded.
+- Switching modes pauses any playing deck, leaving its track loaded where it was.
+  Leaving Perform while a deck plays is refused, so a set can't be stopped by
+  mistake.
 - Prepare is for trying tracks out for a set, so two tracks can play together to
   work out cues and transitions.
 - Prepare's tools act on the **target track**: the track on the deck picked in the
@@ -109,28 +111,39 @@ boundary). The uv-managed venv gives the isolation Docker was wanted for.
 
 ## The control vocabulary
 
-Every action is a named control: `<where> <what> [number]`, e.g. `deck1 play`,
-`deck1 beat_jump 4`, `mixer crossfader`. The keyboard, on-screen controls and MIDI
-controllers all use these names, so a control means the same thing however it's
-touched.
+Every action is a named command. The keyboard, on-screen controls and MIDI
+controllers all send these, so a command means the same thing however it's sent.
+[commands.md](commands.md) lists them all (made from `gui/src/core/bus.rs` by a
+test, so it can't drift).
 
-- **Where:** `deck1`–`deck4`, `mixer`, `fx1`, `fx2`, …, `library`. Decks are
-  positions: `deck1` is deck 1 in every mode.
-- **What:** Pioneer's words (from the DDJ and CDJ manuals and Rekordbox), spelled
-  out in full: `beat_jump n`, `beat_loop n`, `loop_in`, `loop_out`, `loop_exit`,
-  `cue_point_jump`, `beat_sync`, `hot_cue n`, `jog_wheel_touch`,
-  `jog_wheel_turn`. Exact names are settled as each one is built.
-- **Commands are musical; controller files are physical.** A controller file
-  names what the hand did (`jog_wheel_touch`, `jog_wheel_turn`); the core turns
-  that into musical commands, the same for every controller:
+- **Names go from the general to the particular:** where, then what, then which
+  part, then what to do to it. `deck_1_hot_cue_3_clear`, `deck_2_eq_low`,
+  `mixer_crossfader`, `fx_1_on`, `library_browse`.
+- **Where:** `deck_1`–`deck_4`, `mixer`, `fx_1`, …, `library`. Decks are positions:
+  `deck_1` is deck 1 in every mode. A deck's strip on the mixer (fader, trim, EQ,
+  filter, headphone cue) belongs to the deck; `mixer_` is only for what belongs to
+  no deck (crossfader, main and headphone levels).
+- **A number in the name says which; a number after it is the value.**
+  `deck_1_hot_cue_3`, but `deck_1_beat_jump -4` (negative: back) and
+  `deck_1_eq_low 0.5`.
+- **What:** Pioneer's words, spelled out: `beat_jump`, `beat_loop`, `loop_exit`,
+  `beat_sync`, `hot_cue_N`, `headphone_cue`, `vinyl_mode`.
+- **Commands say exactly what to do.** Anything that depends on state is worked
+  out before it becomes a command. The GUI's ◀ button reads the deck's beat jump
+  size (8, say) and sends `deck_1_beat_jump -8`; the size itself is not a command.
+  In `keymap.txt`, `size` stands for that size (`deck_1_beat_jump -size`). A
+  controller without an effect selector dial steps through effects; the core turns
+  each step into the exact effect.
+- **Shift:** where the controller sends its own message for a shifted button (the
+  DDJ-400 does for most), the controller file maps that message to a command, as
+  printed on the hardware. The core handles Shift only where it doesn't.
+- **Commands are musical; controller files are physical.** For the jog wheel:
 
   | The hand | Command |
   |---|---|
-  | Turns the jog wheel with its top touched (vinyl mode on) | `scratch_hold`, then `scratch n` |
+  | Touches the top (vinyl mode on), then turns it | `scratch_hold`, then `scratch n` |
   | Turns it untouched, or turns the side ring | `pitch_bend n` |
-  | Turns it with Shift held | `search n` |
-
-  The keyboard and screen send commands directly.
+  | Turns it with Shift held | `search n` (not built yet) |
 
 Inputs set controls; the core acts on them; outputs read them back:
 

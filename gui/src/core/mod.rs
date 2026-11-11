@@ -25,7 +25,6 @@ pub mod library;
 pub mod log;
 pub mod memlock;
 pub mod midi;
-pub mod mixxx;
 pub mod notice;
 pub mod outside;
 pub mod player;

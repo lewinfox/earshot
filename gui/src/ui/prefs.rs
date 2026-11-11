@@ -32,7 +32,8 @@ pub struct UiPrefs {
     pub wave_zoom: f64,
     /// The text size, as a multiple of normal (see [`crate::ui::theme::fs`]).
     pub ui_scale: f32,
-    /// How many decks show, in every mode: 1, 2 or 4. The engine always runs four.
+    /// How many decks show: 1, 2 or 4. The engine always runs four. Read
+    /// [`UiPrefs::deck_total`]: one deck is for Prepare only.
     pub deck_count: usize,
     /// Prepare's target: the deck (by index) whose track its tools act on. Read
     /// [`UiPrefs::target`], which keeps it to a deck that's showing.
@@ -99,20 +100,29 @@ impl Default for UiPrefs {
 }
 
 impl UiPrefs {
+    /// How many decks show: 1, 2 or 4, but never 1 outside Prepare (Perform and
+    /// Controller mode show two instead, and Prepare goes back to one).
+    pub fn deck_total(&self) -> usize {
+        match deck_count(self.deck_count) {
+            1 if self.mode != Mode::Prepare => 2,
+            n => n,
+        }
+    }
+
     /// The decks showing: 1, 2 or 4.
     pub fn decks(&self) -> Vec<DeckId> {
-        DeckId::first(deck_count(self.deck_count)).collect()
+        DeckId::first(self.deck_total()).collect()
     }
 
     /// Four decks show: each hand switches between two.
     pub fn four_decks(&self) -> bool {
-        deck_count(self.deck_count) == 4
+        self.deck_total() == 4
     }
 
     /// Prepare's target deck: the one its tools act on (deck 1 if the chosen one is
     /// hidden).
     pub fn target(&self) -> DeckId {
-        let i = if self.target < deck_count(self.deck_count) {
+        let i = if self.target < self.deck_total() {
             self.target
         } else {
             0

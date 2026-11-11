@@ -1307,7 +1307,6 @@ dependencies = [
  "libc",
  "midir",
  "rfd",
- "roxmltree",
  "rusqlite",
  "serde",
  "serde_json",

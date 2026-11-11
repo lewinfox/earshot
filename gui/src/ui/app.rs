@@ -381,7 +381,8 @@ impl EarshotApp {
         // Close the old ports first so they can be reopened.
         self.midi = Midi::default();
         let lane = self.player.lock().unwrap().midi.clone();
-        (self.midi, self.midi_ports) = midi::connect_all(&self.sink, &lane).unwrap_or_else(|e| {
+        let learned = self.panels.controller.learned.clone();
+        (self.midi, self.midi_ports) = midi::connect_all(&self.sink, &lane, &learned).unwrap_or_else(|e| {
             eprintln!("MIDI: {e}");
             (Midi::default(), vec![])
         });
@@ -453,9 +454,29 @@ impl EarshotApp {
             .map_or(0, |sh| sh.live().iter().filter(|d| d.playing).count())
     }
 
-    /// Switch mode: only the tabs under the decks change.
-    pub(super) fn set_mode(&mut self, m: Mode) {
+    /// Switch mode: only the tabs under the decks change. Refused (with a note in the
+    /// bottom bar) when leaving Perform while a deck plays; any other switch pauses the
+    /// playing decks, leaving their tracks loaded where they were. True if it switched.
+    pub(super) fn set_mode(&mut self, m: Mode) -> bool {
+        if m == self.prefs.mode {
+            return true;
+        }
+        if self.prefs.mode == Mode::Perform && self.decks_playing() > 0 {
+            let text = format!("Stop the playing decks before switching to {}.", m.name());
+            self.notify(notice::Level::Warning, text);
+            return false;
+        }
+        let playing: Vec<DeckId> = self.frame.snap.as_ref().map_or(vec![], |sh| {
+            (sh.live().iter().enumerate())
+                .filter(|(_, d)| d.playing)
+                .filter_map(|(i, _)| DeckId::new(i))
+                .collect()
+        });
+        for d in playing {
+            self.dispatch((d, EngineCmd::Play(Set::Off)).into());
+        }
         self.prefs.mode = m;
+        true
     }
 
     /// Closing the window while a deck plays: ask first ("Quit" closes it
@@ -736,6 +757,12 @@ impl EarshotApp {
             }
             ViewCmd::SetMode(m) => {
                 self.set_mode(m);
+            }
+            ViewCmd::NormaliseTempo(id) => {
+                if self.set_mode(Mode::Prepare) {
+                    self.prefs.prepare.tool = Tool::TempoLock;
+                    self.tempo_lock.run(TempoLockCmd::Analyse(id));
+                }
             }
             ViewCmd::Source(s) => self.prefs.layout_mut().source = s,
             ViewCmd::Aside(a) => self.prefs.layout_mut().aside = a,

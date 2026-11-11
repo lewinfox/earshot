@@ -13,7 +13,6 @@ fontdb = { version = "0.23.0", default-features = false, features = ["fs", "memm
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 midir = "0.11.0"
 rfd = "0.17.2"
-roxmltree = "0.20.0"
 wmidi = "4.0.11"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }

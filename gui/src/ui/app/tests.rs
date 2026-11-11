@@ -963,7 +963,7 @@ fn settings() {
     h.state_mut().dispatch(AppCmd::CopyKeymap.into());
     assert_eq!(h.state().keymap_origin, keymap::Origin::File);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), keymap::BUILT_IN);
-    std::fs::write(&path, "perform  P  deck1  play\nperform  P  deck2  play\n").unwrap();
+    std::fs::write(&path, "perform  P  deck_1_play\nperform  P  deck_2_play\n").unwrap();
     // Not over the user's file.
     h.state_mut().dispatch(AppCmd::CopyKeymap.into());
     assert!(
@@ -976,11 +976,11 @@ fn settings() {
         h.state().keymap.find(Mode::Perform, "S", false).is_some(),
         "built in"
     );
-    std::fs::write(&path, "perform  P  deck1  play\n").unwrap();
+    std::fs::write(&path, "perform  P  deck_1_play\n").unwrap();
     h.state_mut().dispatch(AppCmd::ReloadKeymap.into());
     assert_eq!(h.state().keymap_origin, keymap::Origin::File);
     assert!(h.state().keymap.find(Mode::Perform, "S", false).is_none());
-    std::fs::write(&path, "perform  P  deck1  play\nperform  P  deck2  play\n").unwrap();
+    std::fs::write(&path, "perform  P  deck_1_play\nperform  P  deck_2_play\n").unwrap();
     h.state_mut().dispatch(AppCmd::ReloadKeymap.into());
     h.state_mut()
         .dispatch(ViewCmd::Settings(SettingsTab::Keymap).into());
@@ -2165,17 +2165,44 @@ fn mode_switches_leave_the_decks_and_quitting_asks() {
     let play =
         |d, on: bool| Command::from((d, EngineCmd::Play(earshot_engine::Set::from_bool(on))));
     let playing = |a: &EarshotApp, d| a.frame.snap.as_ref().is_some_and(|sh| sh.deck(d).playing);
+    let position = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().deck(deck).position;
     h.state_mut().dispatch(play(deck, true));
     settle_until(&mut h, |a| playing(a, deck));
 
-    for mode in [Mode::Prepare, Mode::Controller, Mode::Perform, Mode::Prepare] {
+    // Leaving Perform while a deck plays is refused, with a note in the bottom bar.
+    h.state_mut().dispatch(ViewCmd::SetMode(Mode::Prepare).into());
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.mode, Mode::Perform);
+    assert!(playing(h.state(), deck));
+    h.get_by_label_contains("Stop the playing decks before switching to Prepare.");
+
+    // Any other switch pauses the deck, leaving its track loaded where it was.
+    h.state_mut().dispatch(play(deck, false));
+    settle_until(&mut h, |a| !playing(a, deck));
+    for mode in [Mode::Prepare, Mode::Controller, Mode::Perform] {
         h.state_mut().dispatch(ViewCmd::SetMode(mode).into());
         steps(&mut h, 3);
         assert_eq!(h.state().prefs.mode, mode);
-        assert!(playing(h.state(), deck), "still playing in {mode:?}");
+        h.state_mut().dispatch(play(deck, true));
+        settle_until(&mut h, |a| playing(a, deck));
+        if mode == Mode::Perform {
+            break;
+        }
+        let next = if mode == Mode::Prepare { Mode::Controller } else { Mode::Perform };
+        h.state_mut().dispatch(ViewCmd::SetMode(next).into());
+        settle_until(&mut h, |a| !playing(a, deck));
+        let at = position(h.state());
+        assert!(at > 0.0, "kept its place in {next:?}");
+        assert_eq!(
+            h.state().player.lock().unwrap().session(deck).track_id,
+            Some(id),
+            "still loaded in {next:?}"
+        );
+        steps(&mut h, 3);
+        assert_eq!(position(h.state()), at, "stays paused in {next:?}");
     }
 
-    // Closing the window (here in Prepare): asked, and Cancel keeps it open.
+    // Closing the window while a deck plays: asked, and Cancel keeps it open.
     h.input_mut()
         .viewports
         .entry(egui::ViewportId::ROOT)
@@ -2214,10 +2241,21 @@ fn the_target_deck_is_picked_in_prepare() {
     steps(&mut h, 3);
     assert_eq!(h.state().prefs.decks().len(), 1);
     assert_eq!(h.state().prefs.target(), deck(0));
+    // One deck is for Prepare only: Perform shows two and offers 2 or 4, and Prepare
+    // goes back to one.
+    h.state_mut().dispatch(ViewCmd::SetMode(Mode::Perform).into());
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.decks().len(), 2);
+    assert!(h.query_by_label("1 deck").is_none());
+    h.get_by_label("2 decks");
+    h.state_mut().dispatch(ViewCmd::SetMode(Mode::Prepare).into());
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.decks().len(), 1);
+    h.get_by_label("1 deck");
 }
 
-/// Controller mode: Perform's decks, then the Mapping and Library tabs. MIDI messages
-/// reach the Mapping tab's log.
+/// Controller mode: Perform's decks, then the Mapping, History and Library tabs. MIDI
+/// messages reach the Mapping tab's list and the History.
 #[test]
 fn controller_mode_has_the_decks_and_its_tabs() {
     use crate::core::midi::MidiMsg;
@@ -2226,15 +2264,44 @@ fn controller_mode_has_the_decks_and_its_tabs() {
         .dispatch(ViewCmd::SetMode(Mode::Controller).into());
     steps(&mut h, 5);
     assert!(h.query_all_by_label("CUE").count() >= 2, "the decks");
-    assert!(h.query_all_by_label("Copy report").count() > 0, "the Mapping tab");
+    assert!(h.query_all_by_label("Save JSON…").count() > 0, "the Mapping tab");
     h.state_mut().panels.controller.on_midi(MidiMsg {
         port: 0,
         bytes: vec![0x90, 0x0B, 0x7F],
         at: std::time::Instant::now(),
         did: None,
     });
+    // The message joins the list, to map to a command; one mapped, for the picture.
+    let crossfader = crate::core::bus::Control::Master(earshot_engine::MasterParam::Crossfader);
+    h.state().panels.controller.learned.set(
+        (0xB6, 0x1F),
+        crate::core::midi::Learn {
+            control: crossfader,
+            arg: None,
+            input: crate::core::midi::Input::Cc,
+        },
+    );
+    steps(&mut h, 3);
+    assert!(h.query_all_by_label_contains("90 0B").count() > 0);
+    render(&mut h, "controller-mode");
+    // Pick a command for the message pressed: open its list, search, click.
+    h.query_by_label("—").or_else(|| h.query_by_value("—")).expect("the row's command list").click();
+    steps(&mut h, 3);
+    h.get_by_role(egui::accesskit::Role::TextInput).type_text("deck_2_pl");
+    steps(&mut h, 3);
+    h.get_by_label("deck_2_play").click();
+    steps(&mut h, 3);
+    let l = h.state().panels.controller.learned.get((0x90, 0x0B)).expect("mapped");
+    assert_eq!(
+        l.control,
+        crate::core::bus::Control::Deck(DeckId::new(1).unwrap(), crate::core::bus::DeckControl::Play)
+    );
+    assert!(h.query_by_label("deck_2_play").or_else(|| h.query_by_value("deck_2_play")).is_some(), "shown in its row");
+    h.get_all_by_label("History").next().unwrap().click();
+    steps(&mut h, 3);
+    assert!(h.query_all_by_label_contains("not mapped").count() > 0);
     h.get_all_by_label("Library").next().unwrap().click();
     steps(&mut h, 5);
-    assert!(h.query_all_by_label("Copy report").count() == 0);
+    assert!(h.query_all_by_label("Save JSON…").count() == 0);
     assert_eq!(h.state().prefs.mode, Mode::Controller);
 }

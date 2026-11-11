@@ -70,9 +70,8 @@ pub enum DeckCmd {
     Jump {
         forward: bool,
     },
+    /// The size the deck's beat jump buttons (and `beat_jump size`) jump by.
     SetJumpSize(f64),
-    /// The size the loop button makes.
-    SetLoopSize(f64),
     /// The loop button: end the loop (whatever its size by now), or start one of the
     /// deck's loop size.
     LoopButton,
@@ -242,8 +241,7 @@ pub fn dispatch(player: &Player, store: &Store, cmd: Command) -> Result<Option<C
             inner.send(engine(EngineCmd::BeatJump(beats)))?;
         }
         DeckCmd::SetJumpSize(beats) if beats > 0.0 => inner.session_mut(deck).jump_size = beats,
-        DeckCmd::SetLoopSize(beats) if beats > 0.0 => inner.session_mut(deck).loop_size = beats,
-        DeckCmd::SetJumpSize(_) | DeckCmd::SetLoopSize(_) => {}
+        DeckCmd::SetJumpSize(_) => {}
         DeckCmd::LoopButton => {
             let c = if looping {
                 EngineCmd::Reloop(Set::Off)
