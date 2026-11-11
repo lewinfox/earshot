@@ -167,7 +167,7 @@ impl DeckUi {
         v.widget_info(|| {
             egui::WidgetInfo::selected(egui::WidgetType::Button, true, s.vinyl, "VINYL")
         });
-        if v.clicked() {
+        if held(ui, &v) == Some(true) {
             self.control(out, DeckControl::Vinyl, 1.0);
         }
         let ink = match (s.vinyl, v.hovered()) {

@@ -35,7 +35,10 @@ A name goes from the general to the particular: where, what, which part, what to
 | `deck_N_eq_mid` | 0 to 4 | EQ |
 | `deck_N_eq_high` | 0 to 4 | EQ |
 | `deck_N_filter` | -1 to 1 | filter |
-| `deck_N_memory_cue_save` | pressed (1) or let go (0) | save the cue (or loop) to memory |
+| `deck_N_cue_save_as_memory` | pressed (1) or let go (0) | save the cue (or loop) to memory |
+| `deck_N_cue_jump_to_prev` | pressed (1) or let go (0) | previous memory cue (looping: halve the loop) |
+| `deck_N_cue_jump_to_next` | pressed (1) or let go (0) | next memory cue (looping: double the loop) |
+| `deck_N_cue_delete` | pressed (1) or let go (0) | delete the memory cue just called |
 | `deck_N_grid_nudge` | milliseconds (negative: earlier) | nudge the grid |
 | `deck_N_vinyl_mode` | — | vinyl mode (jog wheels scratch) |
 | `deck_N_scratch_hold` | pressed (1) or let go (0) | hand on the record (scratch) |
@@ -49,6 +52,7 @@ A name goes from the general to the particular: where, what, which part, what to
 | `deck_N_set_pad_mode_pad_fx_1` | pressed (1) or let go (0) | pad mode |
 | `deck_N_set_pad_mode_pad_fx_2` | pressed (1) or let go (0) | pad mode |
 | `deck_N_set_pad_mode_key_shift` | pressed (1) or let go (0) | pad mode |
+| `deck_N_shift` | pressed (1) or let go (0) | shift (held) |
 | `deck_N_load_selected` | pressed (1) or let go (0) | load the selected track |
 
 ## Mixer: `mixer_`

@@ -5,12 +5,15 @@
 //! from the built-in table; anything else from nothing) and every one pressed since.
 //! Pressing something runs its command, adds its message to the list if it's new, and
 //! scrolls the list to it. Each row's command can be picked from a list, and takes
-//! effect at once, for the rest of the session. "Save JSON…" writes the lot as a
-//! controller file, to go in the repo.
+//! effect at once. The mapping is kept as a draft file as it changes, and read back
+//! when earshot starts, so work in progress survives a restart. "New mapping" starts
+//! again: empty, from a built-in profile, or from a controller file. "Save JSON…"
+//! writes the lot as a controller file, to go in the repo.
 //!
 //! History is the stream of messages as they came in, newest first.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,7 +23,20 @@ use egui_extras::{Column, TableBuilder};
 use super::{Cx, Panel};
 use crate::core::bus::{self, Control};
 use crate::core::command::AppCmd;
-use crate::core::midi::{self, Input, Learn, Learned, MidiMsg};
+use crate::core::midi::{self, Input, Learn, Learned, Map, MidiMsg};
+
+/// The draft file's name, in earshot's data folder.
+pub const DRAFT_FILE: &str = "controller-draft.json";
+
+/// Where a new mapping starts from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum NewFrom {
+    Empty,
+    /// One of [`midi::profiles`].
+    Profile(usize),
+    /// A controller file, picked in a dialog.
+    File,
+}
 
 /// How many history rows to keep.
 const LOG_ROWS: usize = 500;
@@ -74,8 +90,16 @@ pub struct ControllerUi {
     log: VecDeque<Row>,
     started: Option<Instant>,
     paused: bool,
-    /// What saving the file came to (from the save dialog's thread).
+    /// What saving or opening a file came to (from the dialogs' threads).
     saved: Arc<Mutex<Option<String>>>,
+    /// The draft file, kept as the mapping changes (the app sets it).
+    pub draft: Option<PathBuf>,
+    /// The mapping's version when the draft was last written.
+    draft_version: u64,
+    /// A new mapping asked for, waiting for "replace the current one?".
+    confirm_new: Option<NewFrom>,
+    /// A controller file read in the open dialog's thread, to put in.
+    opened: Arc<Mutex<Option<Map>>>,
 }
 
 /// A command as the history shows it: its name, then its fixed word if any.
@@ -105,6 +129,10 @@ impl ControllerUi {
             } else {
                 m.bytes.get(2).copied().unwrap_or(0)
             };
+            // A button let go (a note-off, or a note-on at 0) doesn't light its row or
+            // scroll the list: letting go of Shift after Shift + pad leaves the list on
+            // the pad.
+            let release = key.0 & 0xF0 == 0x90 && value == 0;
             let s = self.seen.entry(key).or_insert(Seen {
                 count: 0,
                 value,
@@ -112,11 +140,13 @@ impl ControllerUi {
             });
             s.count += 1;
             s.value = value;
-            s.at = m.at;
-            if self.last != Some(key) {
-                self.scroll_to = Some(key);
+            if !release {
+                s.at = m.at;
+                if self.last != Some(key) {
+                    self.scroll_to = Some(key);
+                }
+                self.last = Some(key);
             }
-            self.last = Some(key);
         }
         if self.paused {
             return;
@@ -183,6 +213,72 @@ impl ControllerUi {
                 true
             }
             Err(_) => false,
+        }
+    }
+
+    /// Read the draft back, if there is one: the mapping as it was when earshot last
+    /// ran. Call before the ports open (so a DDJ-400's table isn't put on top).
+    pub fn load_draft(&mut self) {
+        let Some(path) = &self.draft else { return };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        match midi::from_json(&text) {
+            Ok((_, map)) => self.learned.replace(map),
+            Err(e) => {
+                *self.saved.lock().unwrap() =
+                    Some(format!("The draft ({}) couldn't be read: {e}", path.display()))
+            }
+        }
+        self.draft_version = self.learned.version();
+    }
+
+    /// Write the draft if the mapping changed since it was last written.
+    fn keep_draft(&mut self) {
+        let v = self.learned.version();
+        if v == self.draft_version {
+            return;
+        }
+        self.draft_version = v;
+        let Some(path) = &self.draft else { return };
+        if let Err(e) = std::fs::write(path, self.learned.to_json(&self.device())) {
+            *self.saved.lock().unwrap() = Some(format!("Couldn't keep the draft: {e}"));
+        }
+    }
+
+    /// Start a new mapping, in place of the current one.
+    fn start_new(&mut self, from: NewFrom, ctx: &egui::Context) {
+        match from {
+            NewFrom::Empty => self.learned.clear(),
+            NewFrom::Profile(i) => {
+                if let Some((_, map)) = midi::profiles().into_iter().nth(i) {
+                    self.learned.replace(map);
+                }
+            }
+            NewFrom::File => {
+                let (opened, note, ctx) = (self.opened.clone(), self.saved.clone(), ctx.clone());
+                std::thread::spawn(move || {
+                    let Some(path) = rfd::FileDialog::new()
+                        .set_title("Start from a controller file")
+                        .add_filter("JSON", &["json"])
+                        .pick_file()
+                    else {
+                        return;
+                    };
+                    let read = std::fs::read_to_string(&path).map_err(|e| e.to_string());
+                    match read.and_then(|t| midi::from_json(&t)) {
+                        Ok((_, map)) => {
+                            *opened.lock().unwrap() = Some(map);
+                            *note.lock().unwrap() = Some(format!("Started from {}", path.display()));
+                        }
+                        Err(e) => {
+                            *note.lock().unwrap() =
+                                Some(format!("Couldn't read {}: {e}", path.display()))
+                        }
+                    }
+                    ctx.request_repaint();
+                });
+            }
         }
     }
 
@@ -288,12 +384,28 @@ impl Panel for MappingPanel<'_> {
             {
                 save(t, ui.ctx());
             }
-            if ui
-                .add_enabled(mapped > 0, egui::Button::new("Clear all"))
-                .on_hover_text("Unmap everything, to map the controller from scratch")
-                .clicked()
-            {
-                t.learned.clear();
+            let mut asked = None;
+            ui.menu_button("New mapping", |ui| {
+                if ui.button("Empty").on_hover_text("Map the controller from scratch").clicked() {
+                    asked = Some(NewFrom::Empty);
+                }
+                for (i, (name, _)) in midi::profiles().iter().enumerate() {
+                    if ui.button(*name).clicked() {
+                        asked = Some(NewFrom::Profile(i));
+                    }
+                }
+                if ui.button("From a file…").on_hover_text("A saved controller file").clicked() {
+                    asked = Some(NewFrom::File);
+                }
+            })
+            .response
+            .on_hover_text("Start again, empty or from a mapping (this one is replaced)");
+            if let Some(from) = asked {
+                if mapped > 0 {
+                    t.confirm_new = Some(from);
+                } else {
+                    t.start_new(from, ui.ctx());
+                }
             }
             if let Some(note) = t.saved.lock().unwrap().as_ref() {
                 ui.label(RichText::new(note).color(cx.theme.muted));
@@ -308,10 +420,45 @@ impl Panel for MappingPanel<'_> {
         );
         ui.separator();
         mapping_table(ui, t, cx);
+        confirm_new(ui, t, mapped);
+        if let Some(map) = t.opened.lock().unwrap().take() {
+            t.learned.replace(map);
+        }
+        t.keep_draft();
         let now = Instant::now();
         if t.seen.values().any(|s| now - s.at < FLASH) {
             ui.ctx().request_repaint_after(Duration::from_millis(50));
         }
+    }
+}
+
+/// "Replace the current mapping?", while a new one is asked for.
+fn confirm_new(ui: &mut Ui, t: &mut ControllerUi, mapped: usize) {
+    let Some(from) = t.confirm_new else { return };
+    let r = egui::Modal::new(egui::Id::new("confirm-new-mapping")).show(ui.ctx(), |ui| {
+        ui.heading("Start a new mapping?");
+        ui.label(format!(
+            "The current one ({mapped} mapped) is replaced. Save JSON first to keep it."
+        ));
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button("Start new").clicked() {
+                Some(true)
+            } else if ui.button("Cancel").clicked() {
+                Some(false)
+            } else {
+                None
+            }
+        })
+        .inner
+    });
+    match r.inner.or(r.should_close().then_some(false)) {
+        Some(true) => {
+            t.confirm_new = None;
+            t.start_new(from, ui.ctx());
+        }
+        Some(false) => t.confirm_new = None,
+        None => {}
     }
 }
 
@@ -613,6 +760,64 @@ mod tests {
         let json = t.learned.to_json("Mystery");
         assert!(json.contains("\"deck_1_beat_jump\""), "{json}");
         assert!(json.contains("\"deck_2_scratch\""), "{json}");
+    }
+
+    /// The mapping is kept as a draft as it changes, and read back on the next run;
+    /// a new mapping starts from nothing or a profile.
+    #[test]
+    fn drafts_survive_a_restart() {
+        let dir = std::env::temp_dir().join(format!("earshot-draft-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(DRAFT_FILE);
+        let _ = std::fs::remove_file(&path);
+        let ctx = egui::Context::default();
+
+        let mut t = ControllerUi { draft: Some(path.clone()), ..Default::default() };
+        t.load_draft();
+        assert!(t.learned.all().is_empty(), "no draft yet");
+        t.on_midi(msg(&[0x92, 0x01, 0x7F]));
+        t.map_to((0x92, 0x01), "deck_1_play");
+        t.keep_draft();
+        assert!(path.exists());
+
+        let mut again = ControllerUi { draft: Some(path.clone()), ..Default::default() };
+        again.load_draft();
+        assert_eq!(again.learned.all(), t.learned.all());
+
+        again.start_new(NewFrom::Profile(0), &ctx);
+        assert!(again.learned.all().len() > 50, "the DDJ-400's table");
+        again.start_new(NewFrom::Empty, &ctx);
+        assert!(again.learned.all().is_empty());
+        again.keep_draft();
+        let mut third = ControllerUi { draft: Some(path.clone()), ..Default::default() };
+        third.load_draft();
+        assert!(third.learned.all().is_empty(), "the empty one was kept");
+
+        std::fs::write(&path, "nonsense").unwrap();
+        let mut broken = ControllerUi { draft: Some(path), ..Default::default() };
+        broken.load_draft();
+        assert!(broken.saved.lock().unwrap().as_ref().unwrap().contains("couldn't be read"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Shift + pad: the list goes to Shift, then the pad, and stays on the pad when
+    /// Shift (then the pad) is let go.
+    #[test]
+    fn letting_go_doesnt_move_the_list() {
+        let mut t = ControllerUi::default();
+        t.on_midi(msg(&[0x90, 0x3F, 0x7F]));
+        assert_eq!(t.scroll_to.take(), Some((0x90, 0x3F)));
+        t.on_midi(msg(&[0x98, 0x00, 0x7F]));
+        assert_eq!(t.scroll_to.take(), Some((0x98, 0x00)));
+        t.on_midi(msg(&[0x90, 0x3F, 0x00]));
+        t.on_midi(msg(&[0x88, 0x00, 0x40]));
+        assert_eq!(t.scroll_to, None);
+        // A knob still scrolls, at any value.
+        t.on_midi(msg(&[0xB0, 0x13, 0x00]));
+        assert_eq!(t.scroll_to.take(), Some((0xB0, 0x13)));
+        // Pressing Shift again goes back to it.
+        t.on_midi(msg(&[0x90, 0x3F, 0x7F]));
+        assert_eq!(t.scroll_to, Some((0x90, 0x3F)));
     }
 
     #[test]

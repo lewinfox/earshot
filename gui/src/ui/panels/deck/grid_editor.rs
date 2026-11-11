@@ -9,7 +9,7 @@ use super::{DeckInfo, DeckUi};
 use crate::core::command::{Command, DeckCmd};
 use crate::core::player::GridOp;
 use crate::ui::theme::THEME;
-use crate::ui::widgets::{HwButton, Icon};
+use crate::ui::widgets::{HwButton, Icon, held};
 
 impl DeckUi {
     pub(super) fn grid_editor(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
@@ -26,7 +26,7 @@ impl DeckUi {
                     "Put the 1 here: move the grid so a beat lands exactly on the playhead, \
                      and make it the 1",
                 );
-            if r.clicked() {
+            if held(ui, &r) == Some(true) {
                 out.push(Command::Deck(deck, DeckCmd::Grid(GridOp::AnchorHere)));
             }
             ui.add_space(d.px(GROUP_GAP));
@@ -51,7 +51,7 @@ impl DeckUi {
         let r = ui
             .add(HwButton::new(label, THEME.text, size).font(self.dims.px(FONT_GRID)))
             .on_hover_text(tip);
-        if r.clicked() {
+        if held(ui, &r) == Some(true) {
             out.push(Command::Deck(self.id, DeckCmd::Grid(op)));
         }
     }

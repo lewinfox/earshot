@@ -73,7 +73,7 @@ prepare  Shift+Right  target_grid_nudge 10
 prepare  Ctrl+Left    target_grid_nudge -10
 prepare  Ctrl+Right   target_grid_nudge 10
 prepare  C            target_cue_set
-prepare  M            target_memory_cue_save
+prepare  M            target_cue_save_as_memory
 prepare  6            target_beat_loop 4
 prepare  7            target_beat_loop 8
 prepare  8            target_beat_loop 16

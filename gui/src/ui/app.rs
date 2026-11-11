@@ -370,6 +370,9 @@ impl EarshotApp {
                 app.lib.store.send(StoreCmd::UpdateSource(s));
             }
         }
+        // The controller mapping in progress, as it was last run.
+        app.panels.controller.draft = Some(data_dir.join(crate::ui::panels::controller::DRAFT_FILE));
+        app.panels.controller.load_draft();
         if services.midi {
             app.connect_midi();
         }
@@ -452,6 +455,45 @@ impl EarshotApp {
             .snap
             .as_ref()
             .map_or(0, |sh| sh.live().iter().filter(|d| d.playing).count())
+    }
+
+    /// The memory cues and loops of the track on `deck`, earliest first.
+    fn memories(&self, deck: DeckId) -> Vec<store::Memory> {
+        let track = self.player.lock().unwrap().session(deck).track_id;
+        let mut m = track
+            .and_then(|t| self.cues.get(&t))
+            .map_or(vec![], |c| c.memories.clone());
+        m.sort_by(|a, b| a.start.total_cmp(&b.start));
+        m
+    }
+
+    /// The memory cue just before (or after) the playhead on `deck`. One right at the
+    /// playhead doesn't count, so pressing again moves on.
+    fn memory_beside(&self, deck: DeckId, forward: bool) -> Option<store::Memory> {
+        const NEAR: f64 = 0.05;
+        let at = self.frame.snap.as_ref()?.deck(deck).position;
+        let m = self.memories(deck);
+        if forward {
+            m.into_iter().find(|m| m.start > at + NEAR)
+        } else {
+            m.into_iter().rev().find(|m| m.start < at - NEAR)
+        }
+    }
+
+    /// The memory cue or loop last called on `deck`: a cue at the cue point (calling
+    /// one puts the cue point there), or the loop playing.
+    fn called_memory(&self, deck: DeckId) -> Option<i64> {
+        const NEAR: f64 = 0.01;
+        let d = self.frame.snap.as_ref()?.deck(deck);
+        let near = |a: f64, b: f64| (a - b).abs() < NEAR;
+        self.memories(deck).into_iter().find_map(|m| {
+            let hit = match (m.end, d.loop_in, d.loop_out) {
+                (Some(end), Some(i), Some(o)) => d.loop_active && near(m.start, i) && near(end, o),
+                (Some(_), ..) => false,
+                (None, ..) => near(m.start, d.cue_point),
+            };
+            hit.then_some(m.id)
+        })
     }
 
     /// Switch mode: only the tabs under the decks change. Refused (with a note in the
@@ -609,6 +651,16 @@ impl EarshotApp {
             }
             Command::Deck(deck, DeckCmd::Load(id)) => {
                 self.load(Some(deck), id);
+            }
+            Command::Deck(deck, DeckCmd::CallMemory { forward }) => {
+                if let Some(m) = self.memory_beside(deck, forward) {
+                    self.dispatch(Command::Deck(deck, DeckCmd::RecallMemory(m)));
+                }
+            }
+            Command::Deck(deck, DeckCmd::DeleteCalledMemory) => {
+                if let Some(id) = self.called_memory(deck) {
+                    self.dispatch(Command::Deck(deck, DeckCmd::DeleteMemory(id)));
+                }
             }
             Command::Library(c) => self.library_cmd(c),
             Command::External(c) => self.external_cmd(c),

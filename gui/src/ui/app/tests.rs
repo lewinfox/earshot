@@ -359,6 +359,79 @@ fn prepare() {
     assert!(h.state().settle_until.is_none());
 }
 
+/// CUE/LOOP CALL: ◀ / ▶ go to the memory cue before / after the playhead (or halve
+/// / double a loop); with Shift, delete the one just called, or save one.
+#[test]
+fn cue_loop_call() {
+    use crate::core::bus::{Control, DeckControl};
+    let mut h = start_prepare("cue-call", 1);
+    let deck = DeckId::new(0).unwrap();
+    let id = ids(&h)[1];
+    let press = |h: &mut H, c: DeckControl| {
+        let cmd = Control::Deck(deck, c).command(1.0).unwrap();
+        h.state_mut().dispatch(cmd);
+        steps(h, 3);
+    };
+    let pos = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().deck(deck).position;
+    let memories = |a: &EarshotApp| a.cues.get(&id).map_or(0, |c| c.memories.len());
+    let duration = h.state().frame.snap.as_ref().unwrap().deck(deck).duration;
+    // The track's cues are in from the Store (they put the playhead on the cue when
+    // they arrive, so seeking before then can be undone).
+    settle_until(&mut h, |a| a.cues.contains_key(&id));
+    steps(&mut h, 5);
+    // Memory cues at a quarter and half way.
+    for (n, at) in [(1, 0.25), (2, 0.5)] {
+        // Seek, and again if something just after loading (a busy machine's late
+        // news) put the playhead back.
+        let there = |a: &EarshotApp| (pos(a) - at * duration).abs() < 0.1;
+        for _ in 0..20 {
+            h.state_mut().dispatch(Command::Deck(deck, DeckCmd::SeekFraction(at)));
+            steps(&mut h, 20);
+            if there(h.state()) {
+                break;
+            }
+        }
+        assert!(there(h.state()), "the seek landed");
+        h.state_mut().dispatch(Command::Deck(deck, DeckCmd::SetCue));
+        settle_until(&mut h, |a| {
+            (a.frame.snap.as_ref().unwrap().deck(deck).cue_point - at * duration).abs() < 0.5
+        });
+        press(&mut h, DeckControl::SaveMemory);
+        settle_until(&mut h, |a| memories(a) == n);
+    }
+    h.state_mut().dispatch(Command::Deck(deck, DeckCmd::SeekFraction(0.75)));
+    settle_until(&mut h, |a| pos(a) > 0.7 * duration);
+    // (Saved on the beat, so near those points, not at them.)
+    let starts: Vec<f64> = h.state().cues[&id].memories.iter().map(|m| m.start).collect();
+    let (first, second) = (starts[0].min(starts[1]), starts[0].max(starts[1]));
+    let near = |a: &EarshotApp, t: f64| (pos(a) - t).abs() < 0.01;
+    press(&mut h, DeckControl::CueJumpPrev);
+    settle_until(&mut h, |a| near(a, second));
+    press(&mut h, DeckControl::CueJumpPrev);
+    settle_until(&mut h, |a| near(a, first));
+    press(&mut h, DeckControl::CueJumpPrev);
+    steps(&mut h, 5);
+    assert!(near(h.state(), first), "nothing before the first");
+    press(&mut h, DeckControl::CueJumpNext);
+    settle_until(&mut h, |a| near(a, second));
+    // Shift ◀: the one just called goes.
+    press(&mut h, DeckControl::CueDelete);
+    settle_until(&mut h, |a| memories(a) == 1);
+    assert_eq!(h.state().cues[&id].memories[0].start, first);
+    // Looping: ▶ doubles the loop instead of moving.
+    h.state_mut().dispatch((deck, EngineCmd::BeatLoop(2.0)).into());
+    settle_until(&mut h, |a| a.frame.snap.as_ref().unwrap().deck(deck).loop_active);
+    let len = |a: &EarshotApp| {
+        let d = a.frame.snap.as_ref().unwrap().deck(deck);
+        d.loop_out.unwrap() - d.loop_in.unwrap()
+    };
+    let before = len(h.state());
+    press(&mut h, DeckControl::CueJumpNext);
+    settle_until(&mut h, |a| (len(a) - 2.0 * before).abs() < 0.01);
+    press(&mut h, DeckControl::CueJumpPrev);
+    settle_until(&mut h, |a| (len(a) - before).abs() < 0.01);
+}
+
 /// Prepare's Flow tab with two cards and the "+" suggestions open.
 #[test]
 fn flow() {

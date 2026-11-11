@@ -89,6 +89,13 @@ pub enum DeckCmd {
     SaveMemory,
     /// Go to a memory cue (it becomes the cue point) or start a memory loop.
     RecallMemory(Memory),
+    /// CUE/LOOP CALL: go to the memory cue before (`forward` false) or after the
+    /// playhead; while looping, halve (double) the loop instead. The UI finds the cue
+    /// (it has the list).
+    CallMemory { forward: bool },
+    /// Delete the memory cue or loop just called: the one at the cue point (or the
+    /// loop playing). The UI finds it.
+    DeleteCalledMemory,
     /// Forget one of the loaded track's memory cues.
     DeleteMemory(i64),
     /// Name one of the loaded track's memory cues (`None` clears it).
@@ -235,6 +242,13 @@ pub fn dispatch(player: &Player, store: &Store, cmd: Command) -> Result<Option<C
     let session = inner.session(deck);
     let (jump_size, loop_size, track) = (session.jump_size, session.loop_size, session.track_id);
     let grid = session.grid.clone();
+    // CUE/LOOP CALL scales the loop while looping; otherwise the UI finds the cue.
+    let cmd = match cmd {
+        DeckCmd::CallMemory { forward } if looping => {
+            DeckCmd::ScaleLoop(if forward { 2.0 } else { 0.5 })
+        }
+        c => c,
+    };
     match cmd {
         DeckCmd::Jump { forward } => {
             let beats = if forward { jump_size } else { -jump_size };
@@ -328,7 +342,9 @@ pub fn dispatch(player: &Player, store: &Store, cmd: Command) -> Result<Option<C
                 store.send(StoreCmd::SetHotcueLabel { track, slot, label });
             }
         }
-        DeckCmd::Load(_) => return Ok(Some(Command::Deck(deck, cmd))),
+        DeckCmd::Load(_) | DeckCmd::CallMemory { .. } | DeckCmd::DeleteCalledMemory => {
+            return Ok(Some(Command::Deck(deck, cmd)));
+        }
         DeckCmd::Engine(_) | DeckCmd::Grid(_) => unreachable!("handled above"),
     }
     Ok(None)

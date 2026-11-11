@@ -90,7 +90,7 @@ impl DeckUi {
                     let r = ui
                         .add(HwButton::new(s.range.label(), THEME.text, vec2(24.0, 18.0)).font(8.0))
                         .on_hover_text("Tempo range: ±6, ±10, ±16 % or WIDE (0 to 256 % speed)");
-                    if r.clicked() {
+                    if held(ui, &r) == Some(true) {
                         self.control(out, DeckControl::TempoRangeNext, 1.0);
                     }
                     r.context_menu(|ui| {
@@ -145,7 +145,7 @@ impl DeckUi {
                 } else {
                     "Make this deck the sync leader: synced decks follow it"
                 });
-            if r.clicked() {
+            if held(ui, &r) == Some(true) {
                 out.push(Command::Mixer(MixerCmd::SyncLeader(lead)));
             }
         });

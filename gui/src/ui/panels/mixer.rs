@@ -201,7 +201,7 @@ pub fn show(
                     .lit(side != XfSide::Thru),
             )
             .on_hover_text(format!("{tip}. Click: L, THRU, R"));
-        if r.clicked() {
+        if held(ui, &r) == Some(true) {
             let next = match side {
                 XfSide::Left => XfSide::Thru,
                 XfSide::Thru => XfSide::Right,

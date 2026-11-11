@@ -412,6 +412,16 @@ pub enum DeckControl {
     /// The controller's pads are in this mode now (its pad mode buttons): the deck's
     /// pads page shows what they do.
     SetPadMode(PadMode),
+    /// CUE/LOOP CALL ◀ / ▶: go to the memory cue before (after) the playhead; while
+    /// looping, halve (double) the loop instead.
+    CueJumpPrev,
+    CueJumpNext,
+    /// Delete the memory cue (or loop) just called: the one at the cue point.
+    CueDelete,
+    /// The controller's Shift button, held (1) or let go (0). It does nothing itself:
+    /// a controller that sends its own messages for shifted buttons (the DDJ-400)
+    /// needs no more, but its Shift still sends a message, so it has a name.
+    Shift,
     /// Vinyl mode: the jog wheels' tops (and the mouse on the waveform) scratch. Off,
     /// they only bend.
     Vinyl,
@@ -476,10 +486,20 @@ impl DeckControl {
                 Continuous(EQ[b.min(2)]),
             ),
             Filter => spec("filter", "filter", Continuous(FILTER)),
-            SaveMemory => spec("memory_cue_save", "save the cue (or loop) to memory", Button),
+            SaveMemory => spec("cue_save_as_memory", "save the cue (or loop) to memory", Button),
+            CueJumpPrev => spec(
+                "cue_jump_to_prev",
+                "previous memory cue (looping: halve the loop)",
+                Button,
+            ),
+            CueJumpNext => {
+                spec("cue_jump_to_next", "next memory cue (looping: double the loop)", Button)
+            }
+            CueDelete => spec("cue_delete", "delete the memory cue just called", Button),
             GridNudge(_) => spec("grid_nudge", "nudge the grid", Button),
             LoadSelected => spec("load_selected", "load the selected track", Button),
             LoadStep(_) => spec("load_step", "load the next track", Button),
+            Shift => spec("shift", "shift (held)", Button),
             SetPadMode(m) => spec(
                 match m {
                     PadMode::HotCue => "set_pad_mode_hot_cue",
@@ -503,7 +523,7 @@ impl DeckControl {
 
     /// Every deck control, with sample parameters for the parametrised ones (for
     /// looking names up and for tests).
-    pub const ALL: [DeckControl; 44] = {
+    pub const ALL: [DeckControl; 48] = {
         use DeckControl::*;
         [
             Play,
@@ -537,6 +557,9 @@ impl DeckControl {
             Eq(EQ_HIGH),
             Filter,
             SaveMemory,
+            CueJumpPrev,
+            CueJumpNext,
+            CueDelete,
             GridNudge(10.0),
             Vinyl,
             JogTouch,
@@ -550,6 +573,7 @@ impl DeckControl {
             SetPadMode(PadMode::PadFx1),
             SetPadMode(PadMode::PadFx2),
             SetPadMode(PadMode::KeyShift),
+            Shift,
         ]
     };
 
@@ -695,6 +719,9 @@ impl DeckControl {
             Eq(b) => channel(ChannelParam::Eq(b)),
             Filter => channel(ChannelParam::Filter),
             SaveMemory => on_press(DeckCmd::SaveMemory),
+            CueJumpPrev => on_press(DeckCmd::CallMemory { forward: false }),
+            CueJumpNext => on_press(DeckCmd::CallMemory { forward: true }),
+            CueDelete => on_press(DeckCmd::DeleteCalledMemory),
             GridNudge(ms) => on_press(DeckCmd::Grid(GridOp::Nudge(ms))),
             LoadSelected if pressed => Some(Command::View(ViewCmd::LoadSelected(deck))),
             LoadStep(n) if pressed => Some(Command::View(ViewCmd::LoadAdjacent(deck, n))),
@@ -755,7 +782,8 @@ impl DeckControl {
             JogTouch => key("jog_touch"),
             JogTurn => key("jog_turn"),
             JogBend => key("jog_bend"),
-            SaveMemory | GridNudge(_) | LoadStep(_) | SetPadMode(_) => None,
+            SaveMemory | CueJumpPrev | CueJumpNext | CueDelete | GridNudge(_) | LoadStep(_)
+            | SetPadMode(_) | Shift => None,
         }
     }
 }

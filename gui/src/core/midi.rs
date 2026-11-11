@@ -102,16 +102,26 @@ fn ddj400_names() -> Vec<(u8, u8, String, String, Input)> {
 }
 
 /// The DDJ-400's pads in beat loop and beat jump mode (each mode's pads send their
-/// own notes), in earshot's names. From Mixxx's DDJ-400 mapping: pads 1-8 on notes
-/// 0x60-0x67 (loops) and 0x20-0x27 (jumps), deck 1 on 0x97, deck 2 on 0x99.
-fn ddj400_pads() -> Vec<(u8, u8, String, f64)> {
+/// own notes), and its Shift buttons, in earshot's names. From Mixxx's DDJ-400
+/// mapping: pads 1-8 on notes 0x60-0x67 (loops) and 0x20-0x27 (jumps), deck 1 on
+/// 0x97, deck 2 on 0x99; on each deck's channel, Shift on 0x3F and CUE/LOOP CALL on
+/// 0x51 / 0x53 (with Shift: 0x3E / 0x3D).
+fn ddj400_pads() -> Vec<(u8, u8, String, Option<f64>)> {
     let mut v = vec![];
+    for (d, status) in [(1, 0x90u8), (2, 0x91)] {
+        v.push((status, 0x3F, format!("deck_{d}_shift"), None));
+        // CUE/LOOP CALL ◀ ▶, and with Shift: delete / save a memory cue.
+        v.push((status, 0x51, format!("deck_{d}_cue_jump_to_prev"), None));
+        v.push((status, 0x53, format!("deck_{d}_cue_jump_to_next"), None));
+        v.push((status, 0x3E, format!("deck_{d}_cue_delete"), None));
+        v.push((status, 0x3D, format!("deck_{d}_cue_save_as_memory"), None));
+    }
     for (d, status) in [(1, 0x97u8), (2, 0x99)] {
         for (i, beats) in [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0].into_iter().enumerate() {
-            v.push((status, 0x60 + i as u8, format!("deck_{d}_beat_loop"), beats));
+            v.push((status, 0x60 + i as u8, format!("deck_{d}_beat_loop"), Some(beats)));
         }
         for (i, beats) in [-1.0, 1.0, -2.0, 2.0, -4.0, 4.0, -8.0, 8.0].into_iter().enumerate() {
-            v.push((status, 0x20 + i as u8, format!("deck_{d}_beat_jump"), beats));
+            v.push((status, 0x20 + i as u8, format!("deck_{d}_beat_jump"), Some(beats)));
         }
     }
     v
@@ -134,7 +144,8 @@ fn ddj400() -> Vec<Mapping> {
             })
         });
     let pads = ddj400_pads().into_iter().filter_map(|(status, data1, name, beats)| {
-        let (control, arg) = Control::parse(&name, Some(&beats.to_string())).ok()?;
+        let word = beats.map(|b| b.to_string());
+        let (control, arg) = Control::parse(&name, word.as_deref()).ok()?;
         Some(Mapping {
             status,
             data1,
@@ -174,9 +185,15 @@ pub struct Learned(Arc<Mutex<Session>>);
 #[derive(Default)]
 struct Session {
     map: BTreeMap<(u8, u8), Learn>,
-    /// The built-in table has been put in once (so clearing it sticks).
+    /// The built-in table has been put in once, or a mapping was loaded (so the
+    /// table isn't added on top).
     seeded: bool,
+    /// Counts changes, so whoever keeps a copy (the draft file) knows when to.
+    version: u64,
 }
+
+/// A mapping: the command each message runs, by message key.
+pub type Map = BTreeMap<(u8, u8), Learn>;
 
 impl Learned {
     pub fn get(&self, key: (u8, u8)) -> Option<Learn> {
@@ -184,15 +201,32 @@ impl Learned {
     }
 
     pub fn set(&self, key: (u8, u8), l: Learn) {
-        self.0.lock().unwrap().map.insert(key, l);
+        let mut s = self.0.lock().unwrap();
+        s.map.insert(key, l);
+        s.version += 1;
     }
 
     pub fn remove(&self, key: (u8, u8)) {
-        self.0.lock().unwrap().map.remove(&key);
+        let mut s = self.0.lock().unwrap();
+        s.map.remove(&key);
+        s.version += 1;
     }
 
     pub fn clear(&self) {
-        self.0.lock().unwrap().map.clear();
+        self.replace(Map::new());
+    }
+
+    /// Put `map` in place of the whole mapping.
+    pub fn replace(&self, map: Map) {
+        let mut s = self.0.lock().unwrap();
+        s.map = map;
+        s.seeded = true;
+        s.version += 1;
+    }
+
+    /// How many changes so far.
+    pub fn version(&self) -> u64 {
+        self.0.lock().unwrap().version
     }
 
     pub fn all(&self) -> Vec<((u8, u8), Learn)> {
@@ -200,20 +234,17 @@ impl Learned {
         s.map.iter().map(|(k, l)| (*k, *l)).collect()
     }
 
-    /// Start from the built-in DDJ-400 table, the first time one is connected.
+    /// Start from the built-in DDJ-400 table, the first time one is connected (unless
+    /// a mapping was loaded first).
     fn seed_ddj400(&self) {
         let mut s = self.0.lock().unwrap();
         if std::mem::replace(&mut s.seeded, true) {
             return;
         }
-        for mp in ddj400() {
-            let l = Learn {
-                control: mp.control,
-                arg: mp.arg,
-                input: mp.input,
-            };
-            s.map.entry((mp.status, mp.data1)).or_insert(l);
+        for (k, l) in ddj400_map() {
+            s.map.entry(k).or_insert(l);
         }
+        s.version += 1;
     }
 
     /// The controller file for these bindings, as JSON. A line says only what a
@@ -250,6 +281,71 @@ impl Learned {
         let file = json!({ "device": device, "inputs": inputs });
         serde_json::to_string_pretty(&file).expect("JSON") + "\n"
     }
+}
+
+/// A controller file (see [`Learned::to_json`]): its device name and mapping. Errors
+/// say which input is wrong.
+pub fn from_json(text: &str) -> Result<(String, Map), String> {
+    #[derive(serde::Deserialize)]
+    struct File {
+        #[serde(default)]
+        device: String,
+        inputs: Vec<Line>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Line {
+        message: String,
+        command: String,
+        value: Option<String>,
+        input: Option<String>,
+        ticks: Option<u32>,
+    }
+    let file: File = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let mut map = Map::new();
+    for (i, line) in file.inputs.iter().enumerate() {
+        let at = |e: String| format!("input {} ({}): {e}", i + 1, line.message);
+        let bytes: Vec<u8> = line
+            .message
+            .split_whitespace()
+            .map(|b| u8::from_str_radix(b, 16))
+            .collect::<Result<_, _>>()
+            .map_err(|_| at("the message isn't two hex bytes".into()))?;
+        let [status, data1] = bytes[..] else {
+            return Err(at("the message isn't two hex bytes".into()));
+        };
+        let k = key(&[status, data1]).expect("two bytes");
+        let (control, arg) = Control::parse(&line.command, line.value.as_deref()).map_err(at)?;
+        let input = match line.input.as_deref() {
+            None => default_input(k.0),
+            Some("button") => Input::Note,
+            Some("absolute") => Input::Cc,
+            Some("relative") => Input::Relative,
+            Some("jog") => Input::Jog(line.ticks.unwrap_or(720)),
+            Some(x) => return Err(at(format!("no input kind {x}"))),
+        };
+        map.insert(k, Learn { control, arg, input });
+    }
+    Ok((file.device, map))
+}
+
+/// Mappings earshot knows without a file, to start a new one from.
+pub fn profiles() -> Vec<(&'static str, Map)> {
+    vec![("Pioneer DDJ-400 (built-in)", ddj400_map())]
+}
+
+/// The built-in DDJ-400 table as a mapping.
+fn ddj400_map() -> Map {
+    ddj400()
+        .into_iter()
+        .map(|mp| {
+            let l = Learn {
+                control: mp.control,
+                arg: mp.arg,
+                input: mp.input,
+            };
+            ((mp.status, mp.data1), l)
+        })
+        .collect()
 }
 
 /// How a message reads unless a binding says otherwise: a note is a button, anything
@@ -473,6 +569,28 @@ mod tests {
         assert!(learned.all().is_empty());
     }
 
+    /// A saved file reads back as the same mapping; a bad line says which.
+    #[test]
+    fn files_round_trip() {
+        let learned = ddj();
+        let v = learned.version();
+        let (device, map) = from_json(&learned.to_json("DDJ-400")).unwrap();
+        assert_eq!(device, "DDJ-400");
+        assert_eq!(map, ddj400_map());
+        let fresh = Learned::default();
+        fresh.replace(map);
+        assert!(fresh.version() > 0);
+        fresh.seed_ddj400();
+        assert_eq!(fresh.all().len(), ddj400_map().len(), "not seeded on top");
+        assert_eq!(learned.version(), v);
+        let bad = r#"{"inputs": [{"message": "90 0B", "command": "deck_1_play"},
+                                 {"message": "90 0C", "command": "deck_1_dance"}]}"#;
+        let e = from_json(bad).unwrap_err();
+        assert!(e.contains("input 2 (90 0C)") && e.contains("no command deck_1_dance"), "{e}");
+        assert!(from_json(r#"{"inputs": [{"message": "90", "command": "deck_1_play"}]}"#).is_err());
+        assert!(from_json("nonsense").is_err());
+    }
+
     #[test]
     fn every_entry_maps_to_a_control() {
         assert_eq!(ddj400().len(), ddj400_names().len() + ddj400_pads().len());
@@ -525,6 +643,10 @@ mod tests {
             Some(Command::Deck(d, DeckCmd::Engine(EngineCmd::BeatJump(b)))) if d == deck(1) && b == 8.0
         ));
         assert!(cmd([0x87, 0x20, 0x00]).is_none(), "nothing on release");
+        // Shift is mapped (it has a name) but does nothing itself.
+        let shift = translate(&[0x91, 0x3F, 0x7F], &ddj()).unwrap();
+        assert_eq!(shift.0.name().0, "deck_2_shift");
+        assert!(shift.1.is_none());
     }
 
     #[test]
