@@ -473,12 +473,6 @@ impl DeckUi {
         }
     }
 
-    /// There's a layer called `key` over the waveform.
-    #[cfg(test)]
-    pub fn has_overlay(&self, key: &str) -> bool {
-        self.overlays.iter().any(|o| o.key == key)
-    }
-
     /// Put `layer` over the waveform as `key` (replacing the one there by that name),
     /// or take `key`'s away.
     pub fn set_overlay(&mut self, key: &'static str, layer: Option<Arc<dyn Layer>>) {
