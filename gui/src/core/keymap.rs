@@ -541,7 +541,7 @@ mod tests {
         assert_eq!(titles, ["Deck A", "Deck B", "Effects", "Library", "Edit"]);
         let a = &help[0].rows;
         assert!(a.contains(&("S".into(), "play / pause".into())));
-        assert!(a.contains(&("4".into(), "hot cue 4".into())));
+        assert!(a.contains(&("4".into(), "hot cue D".into())));
         assert!(a.contains(&("Shift ←".into(), "load to deck A".into())));
         assert!(!a.iter().any(|r| r.1.starts_with("clear")), "in the note");
         let help = km.help(Mode::Prepare);

@@ -52,6 +52,37 @@ impl Mode {
     }
 }
 
+/// What a controller's performance pads do, picked with its pad mode buttons. The
+/// deck's pads page shows what each pad does in it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PadMode {
+    #[default]
+    HotCue,
+    BeatLoop,
+    BeatJump,
+    Sampler,
+    Keyboard,
+    PadFx1,
+    PadFx2,
+    KeyShift,
+}
+
+impl PadMode {
+    /// As the controller prints it.
+    pub fn label(self) -> &'static str {
+        match self {
+            PadMode::HotCue => "Hot cue",
+            PadMode::BeatLoop => "Beat loop",
+            PadMode::BeatJump => "Beat jump",
+            PadMode::Sampler => "Sampler",
+            PadMode::Keyboard => "Keyboard",
+            PadMode::PadFx1 => "Pad FX 1",
+            PadMode::PadFx2 => "Pad FX 2",
+            PadMode::KeyShift => "Key shift",
+        }
+    }
+}
+
 /// What the library's left icon stack shows: where to look for music. The first
 /// four are views of earshot's own library; the rest are other places tracks come
 /// from (`core::sources`), each with an icon of its own.
@@ -175,6 +206,8 @@ pub enum ViewCmd {
     DeckCount(usize),
     /// Prepare's target: the deck its tools act on.
     Target(DeckId),
+    /// The controller's pads on this deck are in this mode now.
+    PadMode(DeckId, PadMode),
     /// Four decks: the left hand (0) between decks 1 and 3, or the right (1) between
     /// 2 and 4.
     SwitchLayer(usize),

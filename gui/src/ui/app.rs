@@ -740,6 +740,7 @@ impl EarshotApp {
                     *l = !*l;
                 }
             }
+            ViewCmd::PadMode(d, m) => self.panels.decks[d.index()].pad_mode = m,
             ViewCmd::Target(d) => {
                 // The tools' marks leave the old deck; they're drawn on the new one
                 // from the next frame.

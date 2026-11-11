@@ -5,9 +5,9 @@
 //! it's touched.
 //!
 //! Each control has a name that goes from the general to the particular: where it is,
-//! then what it is, then the part, then what to do to it (`deck_1_hot_cue_3_clear`,
-//! `mixer_crossfader`, `fx_1_on`). A number in the name says *which* (the deck, the
-//! pad); a number after it is the value (`deck_1_beat_jump -4`). `docs/commands.md`
+//! then what it is, then the part, then what to do to it (`deck_1_hot_cue_c_clear`,
+//! `mixer_crossfader`, `fx_1_on`). A number or letter in the name says *which* (the
+//! deck, the hot cue); a number after it is the value (`deck_1_beat_jump -4`). `docs/commands.md`
 //! lists them all, made from here ([`commands_markdown`]).
 //!
 //! Values are in the engine's units (filter -1..1, EQ linear gain, …). Mixxx's
@@ -22,6 +22,7 @@ use earshot_engine::{
 };
 
 use super::command::{Command, DeckCmd, ViewCmd};
+use super::view::PadMode;
 use super::player::GridOp;
 
 // ---- values -------------------------------------------------------------------------
@@ -408,6 +409,9 @@ pub enum DeckControl {
     LoadSelected,
     /// Load the previous (-1) or next (1) track in the library's focused list.
     LoadStep(i32),
+    /// The controller's pads are in this mode now (its pad mode buttons): the deck's
+    /// pads page shows what they do.
+    SetPadMode(PadMode),
     /// Vinyl mode: the jog wheels' tops (and the mouse on the waveform) scratch. Off,
     /// they only bend.
     Vinyl,
@@ -476,6 +480,20 @@ impl DeckControl {
             GridNudge(_) => spec("grid_nudge", "nudge the grid", Button),
             LoadSelected => spec("load_selected", "load the selected track", Button),
             LoadStep(_) => spec("load_step", "load the next track", Button),
+            SetPadMode(m) => spec(
+                match m {
+                    PadMode::HotCue => "set_pad_mode_hot_cue",
+                    PadMode::BeatLoop => "set_pad_mode_beat_loop",
+                    PadMode::BeatJump => "set_pad_mode_beat_jump",
+                    PadMode::Sampler => "set_pad_mode_sampler",
+                    PadMode::Keyboard => "set_pad_mode_keyboard",
+                    PadMode::PadFx1 => "set_pad_mode_pad_fx_1",
+                    PadMode::PadFx2 => "set_pad_mode_pad_fx_2",
+                    PadMode::KeyShift => "set_pad_mode_key_shift",
+                },
+                "pad mode",
+                Button,
+            ),
             Vinyl => spec("vinyl_mode", "vinyl mode (jog wheels scratch)", Toggle),
             JogTouch => spec("scratch_hold", "hand on the record (scratch)", Button),
             JogTurn => spec("scratch", "scratch", Relative),
@@ -485,7 +503,7 @@ impl DeckControl {
 
     /// Every deck control, with sample parameters for the parametrised ones (for
     /// looking names up and for tests).
-    pub const ALL: [DeckControl; 36] = {
+    pub const ALL: [DeckControl; 44] = {
         use DeckControl::*;
         [
             Play,
@@ -524,10 +542,18 @@ impl DeckControl {
             JogTouch,
             JogTurn,
             JogBend,
+            SetPadMode(PadMode::HotCue),
+            SetPadMode(PadMode::BeatLoop),
+            SetPadMode(PadMode::BeatJump),
+            SetPadMode(PadMode::Sampler),
+            SetPadMode(PadMode::Keyboard),
+            SetPadMode(PadMode::PadFx1),
+            SetPadMode(PadMode::PadFx2),
+            SetPadMode(PadMode::KeyShift),
         ]
     };
 
-    /// By its name after the deck (`play`, `hot_cue_3`) and the word after that.
+    /// By its name after the deck (`play`, `hot_cue_c`) and the word after that.
     fn parse(name: &str, word: Option<Word>) -> Option<DeckControl> {
         use DeckControl::*;
         let num = match word {
@@ -539,7 +565,7 @@ impl DeckControl {
                 Some(n) => (n, true),
                 None => (rest, false),
             };
-            let n = n.parse::<usize>().ok().filter(|n| (1..=HOTCUES).contains(n))? as u8 - 1;
+            let n = hot_cue_slot(n)?;
             return word.is_none().then_some(if clear { HotcueClear(n) } else { Hotcue(n) });
         }
         Some(match (name, word) {
@@ -571,14 +597,17 @@ impl DeckControl {
         )
     }
 
-    /// Its name after the deck (`hot_cue_3`), and the fixed word after that, if it
+    /// Its name after the deck (`hot_cue_c`), and the fixed word after that, if it
     /// has one (`-size`, the loop's `8`).
     fn name(self) -> (String, Option<String>) {
         use DeckControl::*;
         let name = self.spec().name;
         match self {
-            Hotcue(n) => (format!("hot_cue_{}", n + 1), None),
-            HotcueClear(n) => (format!("hot_cue_{}_clear", n + 1), None),
+            Hotcue(n) => (format!("hot_cue_{}", hot_cue_letter(n).to_ascii_lowercase()), None),
+            HotcueClear(n) => (
+                format!("hot_cue_{}_clear", hot_cue_letter(n).to_ascii_lowercase()),
+                None,
+            ),
             JumpBack => (name.into(), Some("-size".into())),
             JumpForward | Loop => (name.into(), Some("size".into())),
             BeatLoop(b) => (name.into(), Some(b.to_string())),
@@ -669,6 +698,7 @@ impl DeckControl {
             GridNudge(ms) => on_press(DeckCmd::Grid(GridOp::Nudge(ms))),
             LoadSelected if pressed => Some(Command::View(ViewCmd::LoadSelected(deck))),
             LoadStep(n) if pressed => Some(Command::View(ViewCmd::LoadAdjacent(deck, n))),
+            SetPadMode(m) if pressed => Some(Command::View(ViewCmd::PadMode(deck, m))),
             JogTouch => engine(EngineCmd::Hand(pressed)),
             JogTurn if value != 0.0 => engine(EngineCmd::HandMove {
                 by: value,
@@ -725,7 +755,7 @@ impl DeckControl {
             JogTouch => key("jog_touch"),
             JogTurn => key("jog_turn"),
             JogBend => key("jog_bend"),
-            SaveMemory | GridNudge(_) | LoadStep(_) => None,
+            SaveMemory | GridNudge(_) | LoadStep(_) | SetPadMode(_) => None,
         }
     }
 }
@@ -881,7 +911,7 @@ impl Control {
         }
     }
 
-    /// Its full name (`deck_1_hot_cue_3`) and the fixed word after it, if it has one
+    /// Its full name (`deck_1_hot_cue_c`) and the fixed word after it, if it has one
     /// (`-size`, a loop's `8`). Controls that take a value (a knob, `beat_jump`) have
     /// none: the value comes when it's sent.
     pub fn name(self) -> (String, Option<String>) {
@@ -980,8 +1010,10 @@ impl Control {
     /// for controls that send one).
     pub fn describe(self, arg: Option<f64>) -> String {
         match self {
-            Control::Deck(_, DeckControl::Hotcue(n)) => format!("hot cue {}", n + 1),
-            Control::Deck(_, DeckControl::HotcueClear(n)) => format!("clear hot cue {}", n + 1),
+            Control::Deck(_, DeckControl::Hotcue(n)) => format!("hot cue {}", hot_cue_letter(n)),
+            Control::Deck(_, DeckControl::HotcueClear(n)) => {
+                format!("clear hot cue {}", hot_cue_letter(n))
+            }
             Control::Deck(_, DeckControl::BeatLoop(b)) if b >= 4.0 && b % 4.0 == 0.0 => {
                 let bars = b / 4.0;
                 format!("loop {bars} bar{}", if bars == 1.0 { "" } else { "s" })
@@ -1090,7 +1122,7 @@ impl Control {
     }
 }
 
-/// Every command's name, once each (`deck_1_beat_jump`, `deck_1_hot_cue_3`), in the
+/// Every command's name, once each (`deck_1_beat_jump`, `deck_1_hot_cue_c`), in the
 /// registry's order, for picking one from a list.
 pub fn command_names() -> Vec<String> {
     let mut all: Vec<Control> = vec![];
@@ -1151,7 +1183,7 @@ pub fn commands_markdown() -> String {
          own buttons. Made from `gui/src/core/bus.rs` by a test: don't edit by hand \
          (`EARSHOT_WRITE_DOCS=1 cargo test commands_doc` rewrites it).\n\n\
          A name goes from the general to the particular: where, what, which part, what to \
-         do. A number in the name says which (`deck_2`, `hot_cue_3`); a number after it is \
+         do. A number or letter in the name says which (`deck_2`, `hot_cue_c`); a number after it is \
          the value (`deck_1_beat_jump -4`). `size` stands for the deck's configured beat \
          jump or loop size.\n",
     );
@@ -1172,15 +1204,18 @@ pub fn commands_markdown() -> String {
         .filter(|c| !c.sized())
         .map(|&c| {
             let pattern = match c {
-                DeckControl::Hotcue(_) => Some("deck_N_hot_cue_M".to_string()),
-                DeckControl::HotcueClear(_) => Some("deck_N_hot_cue_M_clear".to_string()),
+                DeckControl::Hotcue(_) => Some("deck_N_hot_cue_X".to_string()),
+                DeckControl::HotcueClear(_) => Some("deck_N_hot_cue_X_clear".to_string()),
                 _ => Some(Control::Deck(d, c).name().0.replacen("deck_1_", "deck_N_", 1)),
             };
             row(Control::Deck(d, c), pattern)
         })
         .collect();
     table(
-        &format!("Decks: `deck_N_`, N = 1 to {MAX_DECKS}; hot cue pads M = 1 to {HOTCUES}"),
+        &format!(
+            "Decks: `deck_N_`, N = 1 to {MAX_DECKS}; hot cues X = a to {}",
+            hot_cue_letter(HOTCUES as u8 - 1).to_ascii_lowercase()
+        ),
         deck_rows,
     );
     table(
@@ -1202,6 +1237,20 @@ pub fn commands_markdown() -> String {
         LibraryControl::ALL.iter().map(|&c| row(Control::Library(c), None)).collect(),
     );
     out
+}
+
+/// A hot cue's letter, as Pioneer names them: A for pad 0, B, … H.
+pub fn hot_cue_letter(slot: u8) -> char {
+    (b'A' + slot) as char
+}
+
+/// The hot cue a letter names (`a` or `A`: pad 0).
+fn hot_cue_slot(letter: &str) -> Option<u8> {
+    let &[c] = letter.as_bytes() else {
+        return None;
+    };
+    let slot = c.to_ascii_uppercase().checked_sub(b'A')?;
+    ((slot as usize) < HOTCUES).then_some(slot)
 }
 
 /// "A", "B", … for decks 1, 2, ….
@@ -1418,7 +1467,7 @@ mod tests {
         let parse = |n: &str, w: Option<&str>| Control::parse(n, w).map(|(c, _)| c);
         let d = deck(1);
         assert_eq!(
-            parse("deck_2_hot_cue_3_clear", None),
+            parse("deck_2_hot_cue_c_clear", None),
             Ok(Control::Deck(d, DeckControl::HotcueClear(2)))
         );
         assert_eq!(
@@ -1438,8 +1487,9 @@ mod tests {
             Ok(Control::Master(MasterParam::Crossfader))
         );
         for bad in [
-            "deck_1_hot_cue_9",
-            "deck_1_hot_cue_0",
+            "deck_1_hot_cue_i",
+            "deck_1_hot_cue_1",
+            "deck_1_hot_cue_ab",
             "deck_5_play",
             "deck_1_dance",
             "fx_2_on",
@@ -1452,7 +1502,7 @@ mod tests {
         assert!(parse("deck_1_beat_loop", Some("-size")).is_err());
         assert!(parse("deck_1_play", Some("size")).is_err());
         assert!(parse("mixer_crossfader", Some("size")).is_err());
-        assert!(parse("deck_1_hot_cue_1", Some("2")).is_err());
+        assert!(parse("deck_1_hot_cue_a", Some("2")).is_err());
         assert!(parse("deck_1_beat_jump", Some("x")).unwrap_err().contains("isn't a number"));
     }
 

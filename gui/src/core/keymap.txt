@@ -26,14 +26,14 @@ perform  E            deck_1_beat_loop size
 perform  R            deck_1_loop_exit
 perform  Z            deck_1_pitch_bend_down
 perform  X            deck_1_pitch_bend_up
-perform  1            deck_1_hot_cue_1
-perform  2            deck_1_hot_cue_2
-perform  3            deck_1_hot_cue_3
-perform  4            deck_1_hot_cue_4
-perform  Shift+1      deck_1_hot_cue_1_clear
-perform  Shift+2      deck_1_hot_cue_2_clear
-perform  Shift+3      deck_1_hot_cue_3_clear
-perform  Shift+4      deck_1_hot_cue_4_clear
+perform  1            deck_1_hot_cue_a
+perform  2            deck_1_hot_cue_b
+perform  3            deck_1_hot_cue_c
+perform  4            deck_1_hot_cue_d
+perform  Shift+1      deck_1_hot_cue_a_clear
+perform  Shift+2      deck_1_hot_cue_b_clear
+perform  Shift+3      deck_1_hot_cue_c_clear
+perform  Shift+4      deck_1_hot_cue_d_clear
 
 perform  J            deck_2_cue
 perform  K            deck_2_play
@@ -45,14 +45,14 @@ perform  O            deck_2_beat_loop size
 perform  P            deck_2_loop_exit
 perform  M            deck_2_pitch_bend_down
 perform  ,            deck_2_pitch_bend_up
-perform  7            deck_2_hot_cue_1
-perform  8            deck_2_hot_cue_2
-perform  9            deck_2_hot_cue_3
-perform  0            deck_2_hot_cue_4
-perform  Shift+7      deck_2_hot_cue_1_clear
-perform  Shift+8      deck_2_hot_cue_2_clear
-perform  Shift+9      deck_2_hot_cue_3_clear
-perform  Shift+0      deck_2_hot_cue_4_clear
+perform  7            deck_2_hot_cue_a
+perform  8            deck_2_hot_cue_b
+perform  9            deck_2_hot_cue_c
+perform  0            deck_2_hot_cue_d
+perform  Shift+7      deck_2_hot_cue_a_clear
+perform  Shift+8      deck_2_hot_cue_b_clear
+perform  Shift+9      deck_2_hot_cue_c_clear
+perform  Shift+0      deck_2_hot_cue_d_clear
 
 perform  Shift+Left   deck_1_load_selected
 perform  Shift+Right  deck_2_load_selected

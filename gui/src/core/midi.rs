@@ -42,6 +42,8 @@ struct Mapping {
     status: u8,
     data1: u8,
     control: Control,
+    /// The number after the command's name (`deck_1_beat_jump -1`).
+    arg: Option<f64>,
     input: Input,
 }
 
@@ -99,8 +101,24 @@ fn ddj400_names() -> Vec<(u8, u8, String, String, Input)> {
     v
 }
 
+/// The DDJ-400's pads in beat loop and beat jump mode (each mode's pads send their
+/// own notes), in earshot's names. From Mixxx's DDJ-400 mapping: pads 1-8 on notes
+/// 0x60-0x67 (loops) and 0x20-0x27 (jumps), deck 1 on 0x97, deck 2 on 0x99.
+fn ddj400_pads() -> Vec<(u8, u8, String, f64)> {
+    let mut v = vec![];
+    for (d, status) in [(1, 0x97u8), (2, 0x99)] {
+        for (i, beats) in [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0].into_iter().enumerate() {
+            v.push((status, 0x60 + i as u8, format!("deck_{d}_beat_loop"), beats));
+        }
+        for (i, beats) in [-1.0, 1.0, -2.0, 2.0, -4.0, 4.0, -8.0, 8.0].into_iter().enumerate() {
+            v.push((status, 0x20 + i as u8, format!("deck_{d}_beat_jump"), beats));
+        }
+    }
+    v
+}
+
 fn ddj400() -> Vec<Mapping> {
-    ddj400_names()
+    let mixxx = ddj400_names()
         .into_iter()
         .filter_map(|(status, data1, group, key, input)| {
             let Some(control) = Control::from_mixxx(&group, &key) else {
@@ -111,10 +129,21 @@ fn ddj400() -> Vec<Mapping> {
                 status,
                 data1,
                 control,
+                arg: None,
                 input,
             })
+        });
+    let pads = ddj400_pads().into_iter().filter_map(|(status, data1, name, beats)| {
+        let (control, arg) = Control::parse(&name, Some(&beats.to_string())).ok()?;
+        Some(Mapping {
+            status,
+            data1,
+            control,
+            arg,
+            input: Input::Note,
         })
-        .collect()
+    });
+    mixxx.chain(pads).collect()
 }
 
 /// A message's key: its status byte (a note-off counted as a note-on) and first data
@@ -180,7 +209,7 @@ impl Learned {
         for mp in ddj400() {
             let l = Learn {
                 control: mp.control,
-                arg: None,
+                arg: mp.arg,
                 input: mp.input,
             };
             s.map.entry((mp.status, mp.data1)).or_insert(l);
@@ -446,7 +475,7 @@ mod tests {
 
     #[test]
     fn every_entry_maps_to_a_control() {
-        assert_eq!(ddj400().len(), ddj400_names().len());
+        assert_eq!(ddj400().len(), ddj400_names().len() + ddj400_pads().len());
         assert!(translate(&[0x90, 0x0B, 0x7F], &Learned::default()).is_none(), "nothing mapped");
     }
 
@@ -474,6 +503,28 @@ mod tests {
         ));
         assert!(cmd([0x90, 0x7E, 0x7F]).is_none(), "unmapped");
         assert!(cmd([0x90, 0x0B]).is_none(), "too short");
+    }
+
+    /// Pads in beat loop and beat jump mode: their own notes, each a fixed size.
+    #[test]
+    fn loop_and_jump_pads() {
+        assert!(matches!(
+            cmd([0x97, 0x60, 0x7F]),
+            Some(Command::Deck(d, DeckCmd::Engine(EngineCmd::BeatLoop(b)))) if d == deck(0) && b == 0.25
+        ));
+        assert!(matches!(
+            cmd([0x99, 0x67, 0x7F]),
+            Some(Command::Deck(d, DeckCmd::Engine(EngineCmd::BeatLoop(b)))) if d == deck(1) && b == 32.0
+        ));
+        assert!(matches!(
+            cmd([0x97, 0x20, 0x7F]),
+            Some(Command::Deck(_, DeckCmd::Engine(EngineCmd::BeatJump(b)))) if b == -1.0
+        ));
+        assert!(matches!(
+            cmd([0x99, 0x27, 0x7F]),
+            Some(Command::Deck(d, DeckCmd::Engine(EngineCmd::BeatJump(b)))) if d == deck(1) && b == 8.0
+        ));
+        assert!(cmd([0x87, 0x20, 0x00]).is_none(), "nothing on release");
     }
 
     #[test]

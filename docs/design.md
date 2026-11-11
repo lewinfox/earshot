@@ -117,17 +117,17 @@ controllers all send these, so a command means the same thing however it's sent.
 test, so it can't drift).
 
 - **Names go from the general to the particular:** where, then what, then which
-  part, then what to do to it. `deck_1_hot_cue_3_clear`, `deck_2_eq_low`,
+  part, then what to do to it. `deck_1_hot_cue_c_clear`, `deck_2_eq_low`,
   `mixer_crossfader`, `fx_1_on`, `library_browse`.
 - **Where:** `deck_1`–`deck_4`, `mixer`, `fx_1`, …, `library`. Decks are positions:
   `deck_1` is deck 1 in every mode. A deck's strip on the mixer (fader, trim, EQ,
   filter, headphone cue) belongs to the deck; `mixer_` is only for what belongs to
   no deck (crossfader, main and headphone levels).
-- **A number in the name says which; a number after it is the value.**
-  `deck_1_hot_cue_3`, but `deck_1_beat_jump -4` (negative: back) and
+- **A number or letter in the name says which; a number after it is the value.**
+  `deck_1_hot_cue_c`, but `deck_1_beat_jump -4` (negative: back) and
   `deck_1_eq_low 0.5`.
 - **What:** Pioneer's words, spelled out: `beat_jump`, `beat_loop`, `loop_exit`,
-  `beat_sync`, `hot_cue_N`, `headphone_cue`, `vinyl_mode`.
+  `beat_sync`, `hot_cue_a`…`hot_cue_h`, `headphone_cue`, `vinyl_mode`.
 - **Commands say exactly what to do.** Anything that depends on state is worked
   out before it becomes a command. The GUI's ◀ button reads the deck's beat jump
   size (8, say) and sends `deck_1_beat_jump -8`; the size itself is not a command.

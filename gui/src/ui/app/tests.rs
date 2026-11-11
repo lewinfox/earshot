@@ -2254,6 +2254,54 @@ fn the_target_deck_is_picked_in_prepare() {
     h.get_by_label("1 deck");
 }
 
+/// The controller's pad mode buttons change what each deck's pads show: hot cues
+/// (letter and time), loops, or beat jumps in pairs; a pad clicked does the same.
+#[test]
+fn pad_modes_label_the_pads() {
+    use crate::core::bus::{Control, DeckControl};
+    use crate::core::view::PadMode;
+    let mut h = start("pad-modes");
+    h.state_mut().prefs.pretend_controller = true;
+    let deck = DeckId::new(0).unwrap();
+    let id = ids(&h)[0];
+    h.state_mut().load(Some(deck), id);
+    settle_until(&mut h, |a| a.panels.decks[0].wave.is_some());
+    steps(&mut h, 3);
+    let set = |h: &mut H, m| {
+        let (c, _) = Control::parse(Control::Deck(deck, DeckControl::SetPadMode(m)).name().0.as_str(), None).unwrap();
+        h.state_mut().dispatch(c.command(1.0).unwrap());
+        steps(h, 3);
+    };
+    // Hot cue mode (the start): letters; a set cue shows its time.
+    assert!(h.query_all_by_label("A").count() >= 2, "both decks");
+    assert!(h.query_all_by_label("H").count() >= 2);
+    h.state_mut()
+        .dispatch((deck, EngineCmd::Hotcue { slot: 0, press: earshot_engine::Press::Down }).into());
+    h.state_mut()
+        .dispatch((deck, EngineCmd::Hotcue { slot: 0, press: earshot_engine::Press::Up }).into());
+    settle_until(&mut h, |a| a.frame.snap.as_ref().unwrap().deck(deck).hotcues[0].is_some());
+    steps(&mut h, 3);
+    assert!(h.query_all_by_label_contains("A 00:0").count() > 0, "A and its time");
+    render(&mut h, "pad-modes-hot-cue");
+
+    set(&mut h, PadMode::BeatLoop);
+    assert_eq!(h.state().panels.decks[0].pad_mode, PadMode::BeatLoop);
+    h.get_by_label("1/4");
+    h.get_by_label("32");
+
+    set(&mut h, PadMode::BeatJump);
+    h.get_by_label("◀ 1");
+    h.get_by_label("8 ▶");
+    render(&mut h, "pad-modes-beat-jump");
+    // Pad 6 jumps forward 4 beats.
+    let before = h.state().frame.snap.as_ref().unwrap().deck(deck).position;
+    h.get_by_label("4 ▶").click();
+    settle_until(&mut h, |a| a.frame.snap.as_ref().unwrap().deck(deck).position > before + 0.5);
+
+    // Deck 2 keeps its own mode.
+    assert_eq!(h.state().panels.decks[1].pad_mode, PadMode::HotCue);
+}
+
 /// Controller mode: Perform's decks, then the Mapping, History and Library tabs. MIDI
 /// messages reach the Mapping tab's list and the History.
 #[test]

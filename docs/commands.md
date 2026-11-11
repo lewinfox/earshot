@@ -2,9 +2,9 @@
 
 Everything earshot can be told to do, by a key (`keymap.txt`), a controller or its own buttons. Made from `gui/src/core/bus.rs` by a test: don't edit by hand (`EARSHOT_WRITE_DOCS=1 cargo test commands_doc` rewrites it).
 
-A name goes from the general to the particular: where, what, which part, what to do. A number in the name says which (`deck_2`, `hot_cue_3`); a number after it is the value (`deck_1_beat_jump -4`). `size` stands for the deck's configured beat jump or loop size.
+A name goes from the general to the particular: where, what, which part, what to do. A number or letter in the name says which (`deck_2`, `hot_cue_c`); a number after it is the value (`deck_1_beat_jump -4`). `size` stands for the deck's configured beat jump or loop size.
 
-## Decks: `deck_N_`, N = 1 to 4; hot cue pads M = 1 to 8
+## Decks: `deck_N_`, N = 1 to 4; hot cues X = a to h
 
 | Command | Number | What it does |
 |---|---|---|
@@ -15,8 +15,8 @@ A name goes from the general to the particular: where, what, which part, what to
 | `deck_N_quantize` | — | quantise |
 | `deck_N_key_lock` | — | key lock |
 | `deck_N_headphone_cue` | — | headphone cue |
-| `deck_N_hot_cue_M` | pressed (1) or let go (0) | hot cue |
-| `deck_N_hot_cue_M_clear` | pressed (1) or let go (0) | clear hot cue |
+| `deck_N_hot_cue_X` | pressed (1) or let go (0) | hot cue |
+| `deck_N_hot_cue_X_clear` | pressed (1) or let go (0) | clear hot cue |
 | `deck_N_beat_jump` | beats (negative: back), or `size` / `-size` | beat jump |
 | `deck_N_beat_loop` | beats, or `size` | loop |
 | `deck_N_loop_in` | pressed (1) or let go (0) | loop in |
@@ -41,6 +41,14 @@ A name goes from the general to the particular: where, what, which part, what to
 | `deck_N_scratch_hold` | pressed (1) or let go (0) | hand on the record (scratch) |
 | `deck_N_scratch` | seconds of track (negative: back) | scratch |
 | `deck_N_pitch_bend` | seconds of track (negative: back) | bend the speed |
+| `deck_N_set_pad_mode_hot_cue` | pressed (1) or let go (0) | pad mode |
+| `deck_N_set_pad_mode_beat_loop` | pressed (1) or let go (0) | pad mode |
+| `deck_N_set_pad_mode_beat_jump` | pressed (1) or let go (0) | pad mode |
+| `deck_N_set_pad_mode_sampler` | pressed (1) or let go (0) | pad mode |
+| `deck_N_set_pad_mode_keyboard` | pressed (1) or let go (0) | pad mode |
+| `deck_N_set_pad_mode_pad_fx_1` | pressed (1) or let go (0) | pad mode |
+| `deck_N_set_pad_mode_pad_fx_2` | pressed (1) or let go (0) | pad mode |
+| `deck_N_set_pad_mode_key_shift` | pressed (1) or let go (0) | pad mode |
 | `deck_N_load_selected` | pressed (1) or let go (0) | load the selected track |
 
 ## Mixer: `mixer_`

@@ -41,6 +41,7 @@ use crate::core::bus::{Control, DeckControl};
 use crate::core::command::{Command, DeckCmd, ViewCmd};
 use crate::core::store::TrackCues;
 use crate::core::track::Track;
+use crate::core::view::PadMode;
 use crate::ui::panels::library::drag;
 use crate::ui::panels::{Cx, Panel};
 use crate::ui::theme::THEME;
@@ -326,12 +327,15 @@ pub struct DeckUi {
     edit: Option<LabelEdit>,
     /// Layers tools add over its waveform ([`DeckUi::set_overlay`]).
     overlays: Vec<Overlay>,
+    /// The controller's pad mode on this deck: what its pads page shows.
+    pub pad_mode: PadMode,
 }
 
 impl DeckUi {
     pub fn new(id: DeckId) -> DeckUi {
         DeckUi {
             overlays: Vec::new(),
+            pad_mode: PadMode::default(),
             id,
             shown: 0.0,
             seen_generation: u64::MAX,
