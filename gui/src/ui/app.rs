@@ -386,6 +386,7 @@ impl EarshotApp {
             (Midi::default(), vec![])
         });
         self.prefs.set_controller(!self.midi_ports.is_empty());
+        self.panels.controller.ports = self.midi_ports.clone();
     }
 
     /// Each deck's tempo range, as the engine has it.
@@ -465,7 +466,7 @@ impl EarshotApp {
                 self.notify(notice::Level::Warning, text);
                 return false;
             }
-            Mode::Perform
+            Mode::Perform | Mode::Controller
                 if self
                     .frame
                     .snap
@@ -484,7 +485,7 @@ impl EarshotApp {
     /// again, for good).
     fn confirm_quit(&mut self, ctx: &egui::Context) {
         let asked = ctx.input(|i| i.viewport().close_requested());
-        if asked && !self.quitting && self.prefs.mode == Mode::Perform && self.decks_playing() > 0 {
+        if asked && !self.quitting && self.prefs.mode.decks() && self.decks_playing() > 0 {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.asking_quit = true;
         }
@@ -608,13 +609,16 @@ impl EarshotApp {
                 }
                 self.reload_keymap();
             }
-            Command::Deck(deck, DeckCmd::Load(id)) => self.load(Some(deck), id),
+            Command::Deck(deck, DeckCmd::Load(id)) => {
+                self.load(Some(deck), id);
+            }
             Command::Library(c) => self.library_cmd(c),
             Command::External(c) => self.external_cmd(c),
             Command::Export(c) => self.export_cmd(c),
-            Command::TempoLock(TempoLockCmd::Listen(c)) => self.listen(c),
+            Command::TempoLock(TempoLockCmd::Listen { version, at }) => self.listen(version, at),
             Command::TempoLock(c) => self.tempo_lock.run(c),
             Command::Stems(c) => self.stems.run(c),
+            Command::Trim(c) => self.trim_cmd(c),
             Command::Collection(c) => self.collection_cmd(c),
             Command::Flow(c) => self.flow_cmd(c),
             Command::Edit(c) => self.edit_cmd(c),
@@ -977,9 +981,10 @@ impl eframe::App for EarshotApp {
         self.drain_events(ctx);
         self.read_engine(ctx);
         self.sync_tempo_lock();
+        self.sync_trim();
         // Background analysis holds back while a deck plays in Perform mode. In Prepare,
         // listening while an import analyses is normal, so it runs at full width.
-        let playing = self.prefs.mode == Mode::Perform
+        let playing = self.prefs.mode.decks()
             && self
                 .frame
                 .snap
@@ -1048,3 +1053,4 @@ mod preview;
 mod tempo_lock;
 #[cfg(test)]
 mod tests;
+mod trim;

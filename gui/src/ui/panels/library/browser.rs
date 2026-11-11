@@ -511,6 +511,7 @@ impl LibraryUi {
                         LibraryCmd::Analyse {
                             tracks,
                             dynamic: false,
+                            asked: false,
                         }
                         .into(),
                     );
@@ -703,7 +704,14 @@ fn folder_menu(ui: &mut Ui, path: &str, root: bool, v: &CoreView, out: &mut Vec<
     let drifting: Vec<TrackId> = inside.iter().filter(|t| t.drifts).map(|t| t.id).collect();
     let all: Vec<TrackId> = inside.iter().map(|t| t.id).collect();
     let mut analyse = |ui: &mut Ui, tracks: Vec<TrackId>, dynamic: bool| {
-        out.push(LibraryCmd::Analyse { tracks, dynamic }.into());
+        out.push(
+            LibraryCmd::Analyse {
+                tracks,
+                dynamic,
+                asked: false,
+            }
+            .into(),
+        );
         ui.close();
     };
     if ui

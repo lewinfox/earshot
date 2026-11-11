@@ -1197,6 +1197,24 @@ impl Renderer {
             }
         }
 
+        // The preview player plays at its own pace on the headphone bus, or on the main
+        // mix (under its level) when the headphones go nowhere.
+        if let Some(audio) = self.preview.as_deref() {
+            let buf = &mut self.preview_buf[..n * 2];
+            buf.fill(0.0);
+            self.preview_player.render(&Mix::plain(audio), buf, sr, now);
+            let (bus, g) = match self.routing.phones {
+                Out::Off => (&mut self.master, 0.8 * self.preview_gain),
+                _ => (
+                    &mut self.phones,
+                    0.8 * self.head_gain.current as f32 * self.preview_gain,
+                ),
+            };
+            for (o, s) in bus.iter_mut().zip(buf.iter()) {
+                *o += g * s;
+            }
+        }
+
         // Main level and balance, metered before the limiter so over 0 dB shows when
         // it's working.
         let master = &mut self.master[..n * 2];
@@ -1212,16 +1230,6 @@ impl Renderer {
         let lowest = self.limiters[0].process(master);
         self.limiting = -20.0 * (lowest as f64).log10();
 
-        // The preview player plays at its own pace on the headphone bus only.
-        if let Some(audio) = self.preview.as_deref() {
-            let buf = &mut self.preview_buf[..n * 2];
-            buf.fill(0.0);
-            self.preview_player.render(&Mix::plain(audio), buf, sr, now);
-            let g = 0.8 * self.head_gain.current as f32 * self.preview_gain;
-            for (o, s) in self.phones.iter_mut().zip(buf.iter()) {
-                *o += g * s;
-            }
-        }
         // The headphones get their own limiter, after the preview is mixed in.
         self.limiters[1].process(&mut self.phones[..n * 2]);
     }
@@ -2755,6 +2763,31 @@ mod tests {
         rig.run(0.1);
         assert_eq!(peaks(&rig.out, 4)[2], 0.0);
         assert!(!rig.snap().preview.playing);
+    }
+
+    /// With the headphones going nowhere (a laptop's one pair), the preview plays on
+    /// the main output instead, under the main level.
+    #[test]
+    fn preview_plays_on_main_when_headphones_are_off() {
+        let mut rig = Rig::new();
+        rig.send(Command::SetRouting(Routing::default_for(2)));
+        let (audio, _) = demo(124.0, 124.0, 10.0, 5);
+        rig.send(Command::Preview(PreviewCmd::Start {
+            audio: Arc::new(audio),
+            start: 1.0,
+            gain: 1.0,
+        }));
+        let mut out = vec![0.0; 256 * 2];
+        for _ in 0..40 {
+            rig.r.process(&mut out, 2);
+        }
+        let p = peaks(&out, 2);
+        assert!(p[0] > 0.01 && p[1] > 0.01, "main plays: {p:?}");
+        rig.master(MasterParam::Gain, 0.0);
+        for _ in 0..40 {
+            rig.r.process(&mut out, 2);
+        }
+        assert_eq!(peaks(&out, 2), vec![0.0, 0.0], "under the main level");
     }
 
     #[test]

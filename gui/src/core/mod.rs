@@ -25,6 +25,7 @@ pub mod library;
 pub mod log;
 pub mod memlock;
 pub mod midi;
+pub mod mixxx;
 pub mod notice;
 pub mod outside;
 pub mod player;
@@ -39,6 +40,7 @@ pub mod store;
 pub mod suggest;
 pub mod tempo_lock;
 pub mod track;
+pub mod trim;
 pub mod view;
 pub mod worker_client;
 pub mod worker_env;
@@ -83,6 +85,10 @@ pub enum Event {
     TempoLock(tempo_lock::TempoLockEvent),
     /// News from the stems tool.
     Stems(stems::StemsEvent),
+    /// The Trim tool saved a cut, or couldn't.
+    Trim(trim::TrimEvent),
+    /// A MIDI message came in (it has already gone to the engine, if it does anything).
+    Midi(midi::MidiMsg),
 }
 
 /// Where background threads send [`Event`]s (the UI's channel, plus a repaint).

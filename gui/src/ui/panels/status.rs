@@ -130,6 +130,7 @@ impl Panel for TopBar<'_> {
                 .selected_text(match mode {
                     Mode::Prepare => "Prepare",
                     Mode::Perform => "Perform",
+                    Mode::Controller => "Controller",
                 })
                 .width(90.0)
                 .show_ui(ui, |ui| {
@@ -137,11 +138,13 @@ impl Panel for TopBar<'_> {
                         .on_hover_text("One player: set cues, fix beat grids, build playlists");
                     ui.selectable_value(&mut mode, Mode::Perform, "Perform")
                         .on_hover_text("Two or four decks and the mixer");
+                    ui.selectable_value(&mut mode, Mode::Controller, "Controller")
+                        .on_hover_text("Perform's decks, with a MIDI controller's mapping to test");
                 });
             if mode != cx.prefs.mode {
                 cx.send(ViewCmd::SetMode(mode));
             }
-            if mode == Mode::Perform {
+            if mode.decks() {
                 deck_count(ui, cx);
                 layers(ui, cx);
                 panes(ui, cx);
@@ -306,14 +309,18 @@ impl TopBar<'_> {
         ui.label(RichText::new("MEM").size(fs(11.0)));
     }
 
-    /// "3 jobs", with a spinner, while any run or wait; clicked, a dropdown with a
-    /// row for each (and Stop analysis, while there's analysis).
+    /// "3 jobs", with a spinner, while any run or wait (summary rows like "5 tracks
+    /// waiting" aren't counted); clicked, a dropdown with a row for each (and Stop
+    /// analysis, while there's analysis).
     fn jobs_pill(&self, ui: &mut Ui, cx: &mut Cx) {
-        let n = self.jobs.len();
-        if n == 0 {
+        if self.jobs.is_empty() {
             return;
         }
-        let text = format!("{n} job{}", if n == 1 { "" } else { "s" });
+        let n = self.jobs.iter().filter(|j| j.counted).count();
+        let text = match n {
+            0 => "waiting".to_string(),
+            n => format!("{n} job{}", if n == 1 { "" } else { "s" }),
+        };
         let analysing = !self.analysis.busy.is_empty();
         let r = ui.add(Pill::new(&text, Intent::Info).busy());
         egui::Popup::menu(&r)

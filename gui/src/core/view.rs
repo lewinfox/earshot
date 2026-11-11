@@ -27,6 +27,24 @@ pub enum Mode {
     Perform,
     /// One player across the top for setting cues, fixing grids and building playlists.
     Prepare,
+    /// Perform's decks over the library and a controller's mapping, for setting up and
+    /// testing a MIDI controller.
+    Controller,
+}
+
+impl Mode {
+    /// It shows Perform's decks (and plays a set on them).
+    pub fn decks(self) -> bool {
+        matches!(self, Mode::Perform | Mode::Controller)
+    }
+
+    /// The mode whose keymap bindings it uses: Controller uses Perform's.
+    pub fn keys(self) -> Mode {
+        match self {
+            Mode::Controller => Mode::Perform,
+            m => m,
+        }
+    }
 }
 
 /// What the library's left icon stack shows: where to look for music. The first
@@ -89,6 +107,8 @@ pub enum Tool {
     Export,
     /// Split the player's track into stems, and play them with a level and mute each.
     Stems,
+    /// Cut the player's track down to the part between two points; save it as a new file.
+    Trim,
 }
 
 /// The windows over the app. They stack: the last one opened is on top.

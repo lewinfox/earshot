@@ -18,6 +18,8 @@ pub struct UiPrefs {
     pub mode: Mode,
     pub perform: Layout,
     pub prepare: Layout,
+    /// Controller mode's layout.
+    pub controller_view: Layout,
     /// Real seconds of waveform either side of the playhead, shared by every deck.
     pub wave_zoom: f64,
     /// The text size, as a multiple of normal (see [`crate::ui::theme::fs`]).
@@ -68,6 +70,7 @@ impl Default for UiPrefs {
             mode: Mode::default(),
             perform: Layout::default(),
             prepare: Layout::default(),
+            controller_view: Layout::default(),
             wave_zoom: 4.0,
             ui_scale: 1.0,
             four_decks: false,
@@ -105,7 +108,7 @@ impl UiPrefs {
     /// that hand plays now. Anything else as it is.
     pub fn layered(&self, control: Control) -> Control {
         match control {
-            Control::Deck(d, c) if self.mode == Mode::Perform && d.index() < 2 => {
+            Control::Deck(d, c) if self.mode.decks() && d.index() < 2 => {
                 Control::Deck(self.active_deck(d.index()), c)
             }
             other => other,
@@ -166,6 +169,7 @@ impl UiPrefs {
         match self.mode {
             Mode::Perform => &self.perform,
             Mode::Prepare => &self.prepare,
+            Mode::Controller => &self.controller_view,
         }
     }
 
@@ -178,6 +182,7 @@ impl UiPrefs {
         match self.mode {
             Mode::Perform => &mut self.perform,
             Mode::Prepare => &mut self.prepare,
+            Mode::Controller => &mut self.controller_view,
         }
     }
 }

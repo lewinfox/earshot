@@ -9,7 +9,7 @@ impl EarshotApp {
         if self.index.get(id).is_some_and(|t| !t.analysed()) && self.index.analysis(id).is_none() {
             self.lib
                 .analyser
-                .queue(id, None, false, AnalysisMode::Static);
+                .queue(id, None, false, false, AnalysisMode::Static);
         }
         let decoding = Arc::new(AtomicBool::new(true));
         self.preview = Some(Preview {

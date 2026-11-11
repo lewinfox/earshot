@@ -22,9 +22,34 @@ pub(super) fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-/// Where [`scratch`] puts one test's folder.
+/// Where [`scratch`] puts one test's folder: under this run's folder in
+/// `earshot-app-tests`.
 pub(super) fn scratch_dir(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("earshot-app-{name}-{}", std::process::id()))
+    static SWEPT: std::sync::Once = std::sync::Once::new();
+    let root = std::env::temp_dir().join("earshot-app-tests");
+    // A folder is left behind by every run (the harness outlives the test body), at
+    // ~2 GB a run: the first test of a run clears out earlier runs' folders. One
+    // untouched for an hour is from a run that's over.
+    SWEPT.call_once(|| sweep(&root, std::time::Duration::from_secs(3600)));
+    root.join(std::process::id().to_string()).join(name)
+}
+
+/// Delete the folders in `root` not changed for `age`.
+fn sweep(root: &Path, age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|d| d > age);
+        if old {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 /// Write `seconds` of a four-to-the-floor beat at `bpm`: a decaying low thump on
@@ -90,6 +115,7 @@ pub(super) fn start(test: &str) -> H {
         LibraryCmd::Analyse {
             tracks: ids,
             dynamic: false,
+            asked: false,
         }
         .into(),
     );
@@ -976,6 +1002,7 @@ fn a_worker_with_another_grid_version_is_refused() {
         LibraryCmd::Analyse {
             tracks: vec![id],
             dynamic: false,
+            asked: false,
         }
         .into(),
     );
@@ -1676,6 +1703,7 @@ fn the_status_line_shows_whats_running() {
         LibraryCmd::Analyse {
             tracks: ids.clone(),
             dynamic: false,
+            asked: false,
         }
         .into(),
     );
@@ -1686,7 +1714,8 @@ fn the_status_line_shows_whats_running() {
     let jobs = h.state().jobs.list();
     assert!(jobs[0].title.starts_with("Analysing "), "{jobs:?}");
     h.get_by_label_contains(&jobs[0].title);
-    let n = jobs.len();
+    let n = jobs.iter().filter(|j| j.counted).count();
+    assert!(jobs.iter().all(|j| j.counted || j.title == "Analysis"));
     h.get_by_label(&format!("{n} job{}", if n == 1 { "" } else { "s" }))
         .click();
     steps(&mut h, 2);
@@ -2186,4 +2215,27 @@ fn a_track_drops_onto_prepares_player_panel() {
     let (from, to) = (at(&h, &title(&h, other)).center(), at(&h, "Q").center());
     drag(&mut h, from, to, |_| {});
     settle_until(&mut h, |a| prepared(a) == Some(other));
+}
+
+/// Controller mode: Perform's decks, then the Mapping and Library tabs. MIDI messages
+/// reach the Mapping tab's log.
+#[test]
+fn controller_mode_has_the_decks_and_its_tabs() {
+    use crate::core::midi::MidiMsg;
+    let mut h = start("controller-mode");
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Controller).into());
+    steps(&mut h, 5);
+    assert!(h.query_all_by_label("CUE").count() >= 2, "the decks");
+    assert!(h.query_all_by_label("Copy report").count() > 0, "the Mapping tab");
+    h.state_mut().panels.controller.on_midi(MidiMsg {
+        port: 0,
+        bytes: vec![0x90, 0x0B, 0x7F],
+        at: std::time::Instant::now(),
+        did: None,
+    });
+    h.get_all_by_label("Library").next().unwrap().click();
+    steps(&mut h, 5);
+    assert!(h.query_all_by_label("Copy report").count() == 0);
+    assert!(h.state().prefs.mode.decks());
 }

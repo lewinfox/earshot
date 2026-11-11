@@ -17,10 +17,17 @@ use crate::ui::panels::{Cx, Panel, resized};
 const STACK_GAP: f32 = 4.0;
 
 pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
+    decks_rows(ctx, panels, cx, "perform");
+    library(ctx, panels, cx);
+}
+
+/// The waveforms' row and the decks' row (with the mixer), as Perform draws them.
+/// Controller mode draws the same. `mode` keeps each mode's panel ids apart.
+pub fn decks_rows(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx, mode: &str) {
     let decks = cx.prefs.decks();
     let compact = decks.len() > 2;
-    let waves_h = cx.prefs.perform.sizes.waves;
-    let r = egui::TopBottomPanel::top("waves-perform")
+    let waves_h = cx.prefs.layout().sizes.waves;
+    let r = egui::TopBottomPanel::top(format!("waves-{mode}"))
         .resizable(true)
         .default_height(waves_h)
         .height_range(60.0..=520.0)
@@ -43,7 +50,7 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
     let gaps = STACK_GAP * (per_side - 1.0);
     let height = (min_height(compact) * per_side + gaps).max(mixer::HEIGHT + 12.0);
     let deck_h = (height - gaps) / per_side;
-    egui::TopBottomPanel::top("decks-perform")
+    egui::TopBottomPanel::top(format!("decks-{mode}"))
         .exact_height(height + 8.0)
         .frame(row_frame(cx, Margin::symmetric(6, 4)))
         .show(ctx, |ui| {
@@ -98,5 +105,4 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
                 strip.cell(|ui| column(ui, Side::Right, panels, cx));
             });
         });
-    library(ctx, panels, cx);
 }

@@ -441,7 +441,14 @@ fn title_case(s: &str) -> String {
 fn analyse_items(ui: &mut Ui, sel: &[TrackId], v: &CoreView, out: &mut Vec<Command>) {
     let n = sel.len();
     let mut push = |ui: &mut Ui, tracks: Vec<TrackId>, dynamic| {
-        out.push(LibraryCmd::Analyse { tracks, dynamic }.into());
+        out.push(
+            LibraryCmd::Analyse {
+                tracks,
+                dynamic,
+                asked: true,
+            }
+            .into(),
+        );
         ui.close();
     };
     if let [first] = *sel {

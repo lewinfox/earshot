@@ -341,40 +341,6 @@ pub fn preview(player: &Player, store: &Store, id: i64, start: f64) -> Result<()
     inner.send(Command::Preview(PreviewCmd::Start { audio, start, gain }))
 }
 
-/// Ask for a preview of audio that isn't a library track (the tempo lock tab's A/B):
-/// its number, for [`preview_audio`] once the audio is ready.
-pub fn next_preview(player: &Player) -> u64 {
-    let mut inner = player.lock().unwrap();
-    inner.preview.seq += 1;
-    inner.preview.seq
-}
-
-/// Play `audio` in the headphones from `start` seconds at `gain`, unless another
-/// preview was asked for since [`next_preview`] gave `seq`. Whether it started.
-pub fn preview_audio(
-    player: &Player,
-    seq: u64,
-    audio: Arc<decode::TrackAudio>,
-    start: f64,
-    gain: f64,
-) -> Result<bool, String> {
-    let mut inner = player.lock().unwrap();
-    if inner.preview.seq != seq {
-        return Ok(false);
-    }
-    inner.preview = PreviewSession {
-        seq,
-        track_id: None,
-        audio: Some(audio.clone()),
-        gain,
-        position: start,
-        playing: true,
-    };
-    inner
-        .send(Command::Preview(PreviewCmd::Start { audio, start, gain }))
-        .map(|_| true)
-}
-
 /// Pause or resume the preview.
 pub fn play_preview(player: &Player, on: bool) -> Result<(), String> {
     player
@@ -505,7 +471,7 @@ pub fn load_track(
                 // starting now. The deck goes on with no grid, gets an estimated one a
                 // moment later, and the analysed one when it arrives.
                 lib.analyser
-                    .queue(id, Some(audio.clone()), false, Mode::Static);
+                    .queue(id, Some(audio.clone()), false, false, Mode::Static);
                 estimate = true;
                 (None, NO_GRID_YET_LABEL.into())
             }

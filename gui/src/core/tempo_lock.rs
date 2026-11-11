@@ -32,8 +32,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-use earshot_engine::decode::{self, TrackAudio};
-use earshot_engine::waveform;
+use earshot_engine::decode;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -58,23 +57,10 @@ pub enum TempoLockCmd {
     /// Copy the straightened MP3 into this music folder (a folder source) and scan
     /// it in.
     SaveToLibrary(PathBuf),
-    /// Listen to the original or the straightened version in the headphones. The UI's
-    /// shell plays these (it has the player); [`TempoLock::run`] ignores them.
-    Listen(ListenCmd),
-}
-
-/// The tab's A/B player, on the headphones' preview player.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ListenCmd {
-    /// Play `version` from `at` seconds into it (in its own time), with a click on
-    /// every beat of its grid if `clicks`.
-    Play {
-        version: Version,
-        at: f64,
-        clicks: bool,
-    },
-    Pause,
-    Stop,
+    /// Put a version in Prepare's player, `at` seconds into it (in its own time),
+    /// playing on if the player was. The UI's shell does this (it has the player);
+    /// [`TempoLock::run`] ignores it.
+    Listen { version: Version, at: f64 },
 }
 
 /// Which audio: the track as it was, or straightened.
@@ -202,13 +188,10 @@ pub type TempoLockSink = Arc<dyn Fn(TempoLockEvent) + Send + Sync>;
 
 // ---- what the charts draw --------------------------------------------------------------
 
-/// Everything tempo-lock's page draws for a track: its tempo analysis and waveform.
+/// Everything tempo-lock's page draws for a track: its tempo analysis.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Chart {
     pub analysis: TempoAnalysis,
-    /// Ours, not the worker's.
-    #[serde(skip)]
-    pub wave: Waveform,
 }
 
 /// The beats and the tempo they make (tempo-lock's `Analysis`). Times in seconds from
@@ -276,42 +259,6 @@ pub enum ChangeKind {
     DoubleTime,
 }
 
-/// A version's waveform as the decks have theirs, from our own decode of it (empty if
-/// it wouldn't decode).
-#[derive(Clone, Default, PartialEq)]
-pub struct Waveform {
-    /// 4 bytes per 1/150 s: peak, low, mid, high (`waveform::summarise`).
-    pub bands: Arc<Vec<u8>>,
-    /// Min/max per 1/2000 s (`waveform::detail`).
-    pub detail: Arc<Vec<u8>>,
-}
-
-impl Waveform {
-    pub fn of(audio: &TrackAudio) -> Waveform {
-        Waveform {
-            bands: Arc::new(waveform::summarise(audio)),
-            detail: Arc::new(waveform::detail(audio)),
-        }
-    }
-
-    /// The waveform of the audio file at `path`.
-    fn of_file(path: &Path) -> Result<Waveform, String> {
-        let (audio, _) = decode::decode(&path.into())?;
-        Ok(Waveform::of(&audio))
-    }
-}
-
-impl std::fmt::Debug for Waveform {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Waveform({} band bytes, {} detail bytes)",
-            self.bands.len(),
-            self.detail.len()
-        )
-    }
-}
-
 /// A straightened track.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Straightened {
@@ -322,9 +269,6 @@ pub struct Straightened {
     pub level: f64,
     pub engine: String,
     pub grid: StraightGrid,
-    /// Ours, from decoding `output`, not the worker's.
-    #[serde(skip)]
-    pub wave: Waveform,
     pub duration: f64,
     pub bitrate_kbps: u32,
 }
@@ -493,7 +437,7 @@ impl Straightened {
 
 // ---- listening -------------------------------------------------------------------------
 
-/// The beats a version's click track and grid are drawn on, and which are downbeats:
+/// The beats a version's grid is drawn on, and which are downbeats:
 /// the detected beats in the original, and where they were put in the straightened.
 pub fn version_beats<'a>(
     version: Version,
@@ -505,42 +449,6 @@ pub fn version_beats<'a>(
         (Version::Straightened, Some(s)) => (&s.grid.target_beats, &a.is_downbeat),
         _ => (&a.beats, &a.is_downbeat),
     }
-}
-
-/// A copy of `audio` with a short blip on every beat, higher on downbeats: tempo-lock's
-/// click track (30 ms of sine, 1760 Hz on a downbeat and 1175 Hz on the others).
-pub fn with_clicks(audio: &TrackAudio, beats: &[f64], downbeats: &[bool]) -> TrackAudio {
-    let mut out = TrackAudio {
-        samples: audio.samples.clone(),
-        sample_rate: audio.sample_rate,
-    };
-    let sr = audio.sample_rate as f64;
-    let len = (0.03 * sr) as usize;
-    let frames = audio.frames();
-    for (i, &b) in beats.iter().enumerate() {
-        let freq = if downbeats.get(i).copied().unwrap_or(false) {
-            1760.0
-        } else {
-            1175.0
-        };
-        let start = (b * sr).round();
-        if start < 0.0 {
-            continue;
-        }
-        for k in 0..len {
-            let f = start as usize + k;
-            if f >= frames {
-                break;
-            }
-            let t = k as f64 / sr;
-            // A 1 ms rise, then down by ~60 dB over the rest.
-            let env = (t / 0.001).min(1.0) * (-(t / 0.03) * 7.0).exp();
-            let v = (0.5 * env * (std::f64::consts::TAU * freq * t).sin()) as f32;
-            out.samples[2 * f] += v;
-            out.samples[2 * f + 1] += v;
-        }
-    }
-    out
 }
 
 // ---- the tool --------------------------------------------------------------------------
@@ -593,8 +501,9 @@ struct Session {
     measured: Option<Arc<TempoAnalysis>>,
 }
 
-/// What the tool has for its track, for a view opened part way through.
+/// What the tool has for its track (the tests look).
 #[derive(Clone, Debug, Default)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct Current {
     pub track: Option<TrackId>,
     pub chart: Option<Arc<Chart>>,
@@ -654,10 +563,11 @@ impl TempoLock {
             TempoLockCmd::Straighten(opts) => self.straighten(opts),
             TempoLockCmd::Cancel => self.shared.cancel(),
             TempoLockCmd::SaveToLibrary(root) => self.save(root),
-            TempoLockCmd::Listen(_) => {}
+            TempoLockCmd::Listen { .. } => {}
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn current(&self) -> Current {
         let st = self.shared.state.lock().unwrap();
         let s = st.session.as_ref();
@@ -927,7 +837,6 @@ impl Shared {
         std::fs::create_dir_all(&dir)
             .and_then(|_| write_stereo_wav(&wav, &audio))
             .map_err(|e| format!("{}: {e}", wav.display()))?;
-        let wave = Waveform::of(&audio);
         self.progress(op, track, Stage::Analyse, DECODED);
         let duration = audio.duration();
         drop(audio);
@@ -968,7 +877,7 @@ impl Shared {
             _ => {}
         })?;
         let chart = match chart {
-            Some(Ok(c)) => Arc::new(Chart { wave, ..c }),
+            Some(Ok(c)) => Arc::new(c),
             Some(Err(e)) => return Err(format!("the worker sent an unusable chart: {e}")),
             None => return Err("the worker sent no chart".into()),
         };
@@ -1000,12 +909,7 @@ impl Shared {
             JobEvent::Update(Update::Started) => {}
             JobEvent::Result { step, data, .. } if step == "straighten" => {
                 match serde_json::from_value::<Straightened>(data) {
-                    Ok(mut r) => {
-                        // Not worth failing for: the tab just has no waveform for it.
-                        r.wave = Waveform::of_file(&r.output).unwrap_or_else(|e| {
-                            eprintln!("tempo lock: {}: {e}", r.output.display());
-                            Waveform::default()
-                        });
+                    Ok(r) => {
                         let r = Arc::new(r);
                         let event = TempoLockEvent::Straightened {
                             track,
@@ -1377,8 +1281,6 @@ for line in sys.stdin:
             chart.analysis.bpm_curve.len(),
             chart.analysis.bpm_times.len()
         );
-        // The waveform is ours, from the decode: 3 s at 2000 min/max pairs a second.
-        assert!((chart.wave.detail.len() / 2).abs_diff(3 * 2000) <= 1);
         assert_eq!(s.tool.current().chart.as_deref(), Some(&**chart));
 
         s.tool
@@ -1636,7 +1538,6 @@ for line in sys.stdin:
                 source_beats: vec![1.0, 1.6, 2.0],
                 target_beats: vec![1.0, 1.5, 2.0],
             },
-            wave: Waveform::default(),
             duration: 3.0,
             bitrate_kbps: 128,
         };
@@ -1651,26 +1552,6 @@ for line in sys.stdin:
             (median - 1.0).abs() < 1e-6 && (p95 - 4.0).abs() < 1e-6,
             "{median} {p95}"
         );
-    }
-
-    #[test]
-    fn clicks_land_on_the_beats() {
-        let audio = TrackAudio {
-            samples: vec![0.0; 2 * 44100],
-            sample_rate: 44100,
-        };
-        let out = with_clicks(&audio, &[0.25, 0.5, 2.0], &[true, false, false]);
-        let loud = |t: f64| {
-            let f = (t * 44100.0) as usize;
-            (f..f + 441)
-                .map(|i| out.samples[2 * i].abs())
-                .fold(0.0, f32::max)
-        };
-        assert!(loud(0.25) > 0.1 && loud(0.5) > 0.1);
-        assert_eq!(loud(0.1), 0.0);
-        assert_eq!(loud(0.75), 0.0);
-        // Past the end: nothing, and no panic.
-        assert_eq!(out.samples.len(), audio.samples.len());
     }
 
     #[test]

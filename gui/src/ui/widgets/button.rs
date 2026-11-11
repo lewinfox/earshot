@@ -20,8 +20,6 @@ pub enum Icon {
     Play,
     /// ❚❚
     Pause,
-    /// ■
-    Stop,
     /// A bar line, red over white, as Rekordbox marks "put the 1 here".
     Downbeat,
 }
@@ -58,13 +56,6 @@ impl Icon {
                         colour,
                     );
                 }
-            }
-            Icon::Stop => {
-                p.rect_filled(
-                    Rect::from_center_size(c, vec2(size, size) * 0.75),
-                    1,
-                    colour,
-                );
             }
             Icon::Downbeat => {
                 let (half, w) = (rect.height() * 0.32, 3.0);

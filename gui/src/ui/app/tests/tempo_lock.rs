@@ -5,7 +5,7 @@
 use egui_kittest::kittest::{NodeT, Queryable};
 
 use super::*;
-use crate::core::tempo_lock::{ListenCmd, TempoLockCmd, Version};
+use crate::core::tempo_lock::{TempoLockCmd, Version};
 use crate::core::view::Tool;
 use crate::ui::panels::tempo_lock::Note;
 
@@ -128,41 +128,50 @@ fn straighten_listen_and_save() {
     steps(&mut h, 3);
     h.get_by_label("OFF THE GRID");
 
-    // A/B: play the original with clicks, then the straightened version from the
-    // same place in the music.
-    let play = |version, at| {
-        Command::TempoLock(TempoLockCmd::Listen(ListenCmd::Play {
-            version,
-            at,
-            clicks: true,
-        }))
+    // The charted track went into Prepare's player.
+    let original = h.state().panels.tempo_lock.track.unwrap();
+    let in_player = |a: &EarshotApp| {
+        a.frame
+            .snap
+            .as_ref()
+            .and_then(|s| s.deck(DeckId::PREPARE).track_id)
     };
-    h.state_mut().dispatch(play(Version::Original, 2.0));
     settle_until(&mut h, |a| {
-        a.panels.tempo_lock.listen.loaded == Some((Version::Original, true))
+        a.panels.tempo_lock.player == Some(Version::Original)
+    });
+    assert_eq!(in_player(h.state()), Some(original));
+    // Its detected beats over the player's waveform.
+    assert!(h.state().panels.decks[DeckId::PREPARE.index()].has_overlay("tempo-lock"));
+
+    // A/B: play the original, then the straightened version from the same place in
+    // the music; it plays on.
+    let listen = |version, at| Command::TempoLock(TempoLockCmd::Listen { version, at });
+    h.state_mut().dispatch(listen(Version::Original, 2.0));
+    h.state_mut()
+        .dispatch((DeckId::PREPARE, EngineCmd::Play(Set::On)).into());
+    settle_until(&mut h, |a| {
+        let p = a.frame.snap.as_ref().unwrap().deck(DeckId::PREPARE);
+        p.playing && (p.position - 2.0).abs() < 1.0
     });
     let at = s.map_time(20.0, false);
-    h.state_mut().dispatch(play(Version::Straightened, at));
+    h.state_mut().dispatch(listen(Version::Straightened, at));
     settle_until(&mut h, |a| {
-        a.panels.tempo_lock.listen.loaded == Some((Version::Straightened, true))
+        let p = a.frame.snap.as_ref().unwrap().deck(DeckId::PREPARE);
+        a.panels.tempo_lock.player == Some(Version::Straightened)
+            && !a.panels.tempo_lock.loading
+            && p.playing
+            && (p.position - at).abs() < 1.0
     });
-    // The engine starts it there (a block or two later).
-    settle_until(&mut h, |a| {
-        let p = a.frame.snap.as_ref().unwrap().preview.position;
-        (p - at).abs() < 1.0
-    });
-    // A library preview takes the player over.
-    let other = ids(&h)[3];
+    // On its steady grid, at the BPM it was straightened to.
+    let bpm = h
+        .state()
+        .index
+        .get(in_player(h.state()).unwrap())
+        .unwrap()
+        .bpm;
+    assert_eq!(bpm, Some(s.bpm));
     h.state_mut()
-        .dispatch(Command::Preview(crate::core::command::PreviewCmd::Toggle(
-            other,
-        )));
-    steps(&mut h, 2);
-    assert_eq!(h.state().panels.tempo_lock.listen.loaded, None);
-    h.state_mut()
-        .dispatch(Command::Preview(crate::core::command::PreviewCmd::Stop(
-            other,
-        )));
+        .dispatch((DeckId::PREPARE, EngineCmd::Play(Set::Off)).into());
 
     // Save: the dropdown lists the library folder; pick it and save.
     let root = h.state().panels.library.browser.folders[0].clone();
@@ -205,12 +214,10 @@ fn straighten_listen_and_save() {
     });
 
     // Back to the original and the start, for the picture.
-    h.state_mut().dispatch(play(Version::Original, 0.0));
+    h.state_mut().dispatch(listen(Version::Original, 0.0));
     settle_until(&mut h, |a| {
-        a.panels.tempo_lock.listen.loaded == Some((Version::Original, true))
+        a.panels.tempo_lock.player == Some(Version::Original) && !a.panels.tempo_lock.loading
     });
-    h.state_mut()
-        .dispatch(TempoLockCmd::Listen(ListenCmd::Pause).into());
     steps(&mut h, 5);
     render(&mut h, "tempo-lock");
     // Tall enough to show the straightened version's charts too.

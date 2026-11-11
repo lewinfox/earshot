@@ -115,6 +115,17 @@ fn ddj400() -> Vec<Mapping> {
         .collect()
 }
 
+/// A message as it came in, for the Controller mode's Mapping tab.
+#[derive(Clone, Debug)]
+pub struct MidiMsg {
+    /// Which port, by its place in [`connect_all`]'s names.
+    pub port: usize,
+    pub bytes: Vec<u8>,
+    pub at: std::time::Instant,
+    /// What the hardcoded table did with it, if it knew it.
+    pub did: Option<Control>,
+}
+
 /// Keeps the input connections open; dropping it closes them.
 #[derive(Default)]
 pub struct Midi {
@@ -135,10 +146,11 @@ pub fn connect_all(sink: &Sink, lane: &Lane) -> Result<(Midi, Vec<String>), Stri
         }
         let input = MidiInput::new("earshot").map_err(|e| e.to_string())?;
         let (sink, lane, table) = (sink.clone(), lane.clone(), ddj400());
+        let index = names.len();
         match input.connect(
             port,
             "earshot-in",
-            move |_, bytes, _| on_message(&sink, &lane, bytes, &table),
+            move |_, bytes, _| on_message(&sink, &lane, bytes, &table, index),
             (),
         ) {
             Ok(c) => {
@@ -186,8 +198,15 @@ fn translate<'a>(bytes: &[u8], table: &'a [Mapping]) -> Option<(&'a Mapping, Opt
     Some((mp, mp.control.command(value)))
 }
 
-fn on_message(sink: &Sink, lane: &Lane, bytes: &[u8], table: &[Mapping]) {
-    let Some((_, Some(cmd))) = translate(bytes, table) else {
+fn on_message(sink: &Sink, lane: &Lane, bytes: &[u8], table: &[Mapping], port: usize) {
+    let found = translate(bytes, table);
+    sink(Event::Midi(MidiMsg {
+        port,
+        bytes: bytes.to_vec(),
+        at: std::time::Instant::now(),
+        did: found.as_ref().map(|(mp, _)| mp.control),
+    }));
+    let Some((_, Some(cmd))) = found else {
         return;
     };
     match command::direct(cmd) {

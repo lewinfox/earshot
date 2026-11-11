@@ -122,7 +122,7 @@ impl Binding {
     }
 
     fn applies(&self, mode: Mode) -> bool {
-        self.mode.is_none_or(|m| m == mode)
+        self.mode.is_none_or(|m| m == mode.keys())
     }
 
     /// Whether `other` is the same key in a mode this one works in too.
@@ -261,6 +261,7 @@ fn parse_line(line: &str) -> Result<Binding, String> {
     let mode = match *mode {
         "perform" => Some(Mode::Perform),
         "prepare" => Some(Mode::Prepare),
+        "controller" => Some(Mode::Controller),
         "any" => None,
         m => return Err(format!("unknown mode {m}")),
     };

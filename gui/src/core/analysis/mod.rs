@@ -266,12 +266,21 @@ impl Analyser {
 
     /// Make sure a track is analysed. A track just loaded onto a deck (`audio` given)
     /// goes to the deck lane, ahead of everything, taking it over from the background
-    /// if it was waiting or running there. `force` re-analyses the grid whatever there
-    /// is (in `mode`), and anything else whose result is stale.
-    pub fn queue(&self, id: i64, audio: Option<Arc<TrackAudio>>, force: bool, mode: Mode) {
-        let priority = match audio {
-            Some(_) => JobPriority::Deck,
-            None => JobPriority::Background,
+    /// if it was waiting or running there. One someone `asked` for goes next, ahead of
+    /// background work. `force` re-analyses the grid whatever there is (in `mode`),
+    /// and anything else whose result is stale.
+    pub fn queue(
+        &self,
+        id: i64,
+        audio: Option<Arc<TrackAudio>>,
+        asked: bool,
+        force: bool,
+        mode: Mode,
+    ) {
+        let priority = match (&audio, asked) {
+            (Some(_), _) => JobPriority::Deck,
+            (None, true) => JobPriority::Asked,
+            (None, false) => JobPriority::Background,
         };
         let wants: Vec<(AnalyserId, Req)> = AnalyserId::ALL
             .iter()

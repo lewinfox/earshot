@@ -17,10 +17,11 @@ use crate::ui::panels::export::ExportPanel;
 use crate::ui::panels::flow::FlowTab;
 use crate::ui::panels::stems::StemsPanel;
 use crate::ui::panels::tempo_lock::TempoLockPanel;
+use crate::ui::panels::trim::TrimPanel;
 use crate::ui::panels::{Cx, Panel, resized};
 use crate::ui::widgets::{Tab, tool_tabs};
 
-const TOOLS: [Tab<Tool>; 4] = [
+const TOOLS: [Tab<Tool>; 5] = [
     Tab {
         id: Tool::TempoLock,
         name: "Tempo lock",
@@ -30,6 +31,11 @@ const TOOLS: [Tab<Tool>; 4] = [
         id: Tool::Stems,
         name: "Stems",
         tip: "Drums, bass, vocals and other",
+    },
+    Tab {
+        id: Tool::Trim,
+        name: "Trim",
+        tip: "Keep the part of the track between two points and save it as a new file",
     },
     Tab {
         id: Tool::Flow,
@@ -129,6 +135,10 @@ fn tool(ui: &mut Ui, tool: Tool, panels: &mut Panels, cx: &mut Cx) {
         .ui(ui, cx),
         Tool::Stems => StemsPanel {
             tab: &mut panels.stems,
+        }
+        .ui(ui, cx),
+        Tool::Trim => TrimPanel {
+            tab: &mut panels.trim,
         }
         .ui(ui, cx),
         Tool::Export => ExportPanel {

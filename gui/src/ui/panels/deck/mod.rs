@@ -34,9 +34,9 @@ mod waveform;
 use design::*;
 
 pub use self::cue_pane::{CUE_PANE_W, CuePane};
-pub use self::waveform::WavePanel;
+pub use self::waveform::{WavePanel, zoomed};
 
-use self::wave::{DeckWave, Grid, Marks};
+use self::wave::{DeckWave, Grid, Layer, Marks, Overlay};
 use crate::core::bus::{Control, DeckControl};
 use crate::core::command::{Command, DeckCmd, ViewCmd};
 use crate::core::store::TrackCues;
@@ -324,11 +324,14 @@ pub struct DeckUi {
     pending: Option<PendingLoad>,
     /// A memory cue or hot cue label being typed.
     edit: Option<LabelEdit>,
+    /// Layers tools add over its waveform ([`DeckUi::set_overlay`]).
+    overlays: Vec<Overlay>,
 }
 
 impl DeckUi {
     pub fn new(id: DeckId) -> DeckUi {
         DeckUi {
+            overlays: Vec::new(),
             id,
             shown: 0.0,
             seen_generation: u64::MAX,
@@ -456,7 +459,7 @@ impl DeckUi {
         }
     }
 
-    fn marks<'a>(&self, info: &'a DeckInfo, hotcues: &'a [Option<f64>]) -> Marks<'a> {
+    fn marks<'a>(&'a self, info: &'a DeckInfo, hotcues: &'a [Option<f64>]) -> Marks<'a> {
         Marks {
             grid: info.grid.as_deref().map_or(Grid::None, Grid::Beatgrid),
             cue: Some(self.state.cue_point),
@@ -465,7 +468,23 @@ impl DeckUi {
             memories: &info.cues.memories,
             loop_range: self.state.loop_in.zip(self.state.loop_out),
             loop_active: self.state.loop_active,
+            overlays: &self.overlays,
             ..Marks::default()
+        }
+    }
+
+    /// There's a layer called `key` over the waveform.
+    #[cfg(test)]
+    pub fn has_overlay(&self, key: &str) -> bool {
+        self.overlays.iter().any(|o| o.key == key)
+    }
+
+    /// Put `layer` over the waveform as `key` (replacing the one there by that name),
+    /// or take `key`'s away.
+    pub fn set_overlay(&mut self, key: &'static str, layer: Option<Arc<dyn Layer>>) {
+        self.overlays.retain(|o| o.key != key);
+        if let Some(layer) = layer {
+            self.overlays.push(Overlay { key, layer });
         }
     }
 

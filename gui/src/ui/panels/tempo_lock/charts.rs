@@ -45,10 +45,10 @@ fn dashed(p: &egui::Painter, a: Pos2, b: Pos2, c: Color32) {
     ));
 }
 
-// ---- over the waveform -------------------------------------------------------------------
+// ---- the time axis ------------------------------------------------------------------------
 
-/// Over a version's waveform (`rect`, showing `view`): the detections thrown away as
-/// small red ticks, and a time ruler, along the bottom.
+/// Along the bottom of a tempo chart (`rect`, showing `view`): the detections thrown
+/// away as small red ticks, and a time ruler.
 pub fn ruler(p: &egui::Painter, theme: &Theme, rect: Rect, view: (f64, f64), dropped: &[f64]) {
     let (v0, v1) = view;
     for &d in dropped {
@@ -58,7 +58,8 @@ pub fn ruler(p: &egui::Painter, theme: &Theme, rect: Rect, view: (f64, f64), dro
         }
     }
     let step = nice_step((v1 - v0) / (rect.width().max(1.0) as f64 / 90.0));
-    let mut t = (v0 / step).ceil() * step;
+    // Nothing before the track's start (the view runs past it, as a player's does).
+    let mut t = (v0.max(0.0) / step).ceil() * step;
     while t < v1 {
         let x = x_of(rect, view, t);
         vline(
@@ -97,7 +98,7 @@ pub struct TempoChart<'a> {
     pub level: f64,
     /// BPM shown, bottom to top (shared with the other version's chart).
     pub range: (f64, f64),
-    /// The part of the track the waveform shows, shaded.
+    /// The part of the track shown (what Prepare's waveform shows).
     pub window: (f64, f64),
     pub playhead: Option<f64>,
     pub colour: Color32,
@@ -129,7 +130,7 @@ impl TempoChart<'_> {
         let p = ui.painter_at(rect);
         p.rect_filled(rect, CornerRadius::same(4), theme.wave_bg);
         let a = self.a;
-        let whole = (0.0, a.duration.max(1e-6));
+        let whole = (self.window.0, self.window.1.max(self.window.0 + 1e-3));
         let (lo, hi) = self.range;
         let y = |b: f64| rect.bottom() - ((b - lo) / (hi - lo)) as f32 * rect.height();
         let x = |t: f64| x_of(rect, whole, t);
@@ -168,11 +169,6 @@ impl TempoChart<'_> {
             );
             b += step;
         }
-        p.rect_filled(
-            Rect::from_x_y_ranges(x(self.window.0)..=x(self.window.1), rect.y_range()),
-            CornerRadius::ZERO,
-            theme.selection.gamma_multiply(0.15),
-        );
         let points: Vec<Pos2> = a
             .bpm_times
             .iter()

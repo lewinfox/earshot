@@ -1307,11 +1307,13 @@ dependencies = [
  "libc",
  "midir",
  "rfd",
+ "roxmltree",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.21",
+ "wmidi",
 ]
 
 [[package]]
@@ -5676,6 +5678,12 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "wmidi"
+version = "4.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b1b1e28ac6301b1c097d21c11130090f7ecc5db9d5ef4e52595ab942f8d76d5"
 
 [[package]]
 name = "writeable"

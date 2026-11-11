@@ -305,7 +305,7 @@ mapping loader (QuickJS), keyboard map file, set history feeding suggestions.
 
 ### Phase 4 — prep
 
-Grid editor, cue editor, tempo-lock straighten with A/B and click track, track
+Grid editor, cue editor, tempo-lock straighten with A/B on Prepare's player, track
 versions.
 
 ### Phase 5 — macOS

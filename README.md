@@ -89,7 +89,8 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   tracks in it and its subfolders. Right-click a top-level folder to remove it.
 - **Load** a track: double-click it (goes to a deck that isn't playing), right-click →
   *Load to deck A/B*, drag it onto a deck, or `Shift+←`/`Shift+→`. Right-click →
-  *Preview in headphones* plays it on the headphones only.
+  *Preview in headphones* plays it on the headphones only (on the main output if the
+  headphones are off, e.g. a laptop with no controller).
 - **Analysis**: loading a track with no beatgrid starts analysis in the background. It
   plays at once, and a moment later gets a *quick grid*: one steady tempo worked out
   in a fraction of a second by signal processing (ported from

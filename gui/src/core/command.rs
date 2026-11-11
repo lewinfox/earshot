@@ -52,6 +52,8 @@ pub enum Command {
     TempoLock(TempoLockCmd),
     /// The stems tool (`Stems::run`). Run by the UI, like `Library`.
     Stems(crate::core::stems::StemsCmd),
+    /// The Trim tool. Run by the UI, like `Library`.
+    Trim(crate::core::trim::TrimCmd),
     /// Metadata, ratings, tags and collection edits, which can be undone. Run by the
     /// UI (it keeps the undo history), like `Library`.
     Edit(EditCmd),
@@ -472,6 +474,12 @@ impl From<ExportCmd> for Command {
 impl From<ExternalCmd> for Command {
     fn from(c: ExternalCmd) -> Command {
         Command::External(c)
+    }
+}
+
+impl From<crate::core::trim::TrimCmd> for Command {
+    fn from(c: crate::core::trim::TrimCmd) -> Command {
+        Command::Trim(c)
     }
 }
 

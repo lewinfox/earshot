@@ -351,6 +351,7 @@ impl LibraryPane {
         let id = |name: &str| match cx.prefs.mode {
             Mode::Perform => format!("{name}-perform"),
             Mode::Prepare => format!("{name}-prepare"),
+            Mode::Controller => format!("{name}-controller"),
         };
         let stack_frame = egui::Frame::new()
             .fill(cx.theme.bg)

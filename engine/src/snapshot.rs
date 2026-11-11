@@ -94,7 +94,7 @@ pub struct MixerSnap {
     pub fx_busy: [bool; FX_UNITS],
 }
 
-/// The preview player (headphones only).
+/// The preview player (the headphones, or the main output when they are off).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct PreviewSnap {
     pub playing: bool,
