@@ -13,7 +13,7 @@ use std::time::Instant;
 use crate::beatgrid::Beatgrid;
 use crate::command::{
     ChannelParam, Command, DeckCmd, DeckId, DeckState, EngineState, HOTCUES, HotcueMode,
-    LoadedTrack, LoopState, MAX_DECKS, MasterParam, ParamId, Press, PreviewCmd, SLOTS, XfSide,
+    LoadedTrack, LoopState, MAX_DECKS, MasterParam, ParamId, Press, PreviewCmd, XfSide,
 };
 use crate::decode::TrackAudio;
 use crate::dsp::{self, Limiter, Smoothed};
@@ -840,11 +840,10 @@ pub struct Renderer {
     stats: Arc<Stats>,
     callbacks: u64,
     last_block_frames: u32,
-    /// All [`MAX_DECKS`] exist, then Prepare's player ([`DeckId::PREPARE`]), so a
-    /// [`DeckId`] can always index them. Only the first `live` decks and Prepare's
-    /// player are rendered and take commands.
-    decks: [Deck; SLOTS],
-    channels: [Channel; SLOTS],
+    /// All [`MAX_DECKS`] exist, so a [`DeckId`] can always index them. Only the first
+    /// `live` are rendered and take commands.
+    decks: [Deck; MAX_DECKS],
+    channels: [Channel; MAX_DECKS],
     live: usize,
     /// The decks effects can go on: the first `fx_decks` ([`Command::SetFxDecks`]).
     fx_decks: usize,
@@ -852,7 +851,7 @@ pub struct Renderer {
     sync_leader: Option<DeckId>,
     sample_rate: f64,
     /// Per-deck stereo scratch, master and headphone buses (interleaved stereo).
-    deck_buf: [Vec<f32>; SLOTS],
+    deck_buf: [Vec<f32>; MAX_DECKS],
     master: Vec<f32>,
     phones: Vec<f32>,
     preview_buf: Vec<f32>,
@@ -865,7 +864,7 @@ pub struct Renderer {
     preview_gain: f32,
     master_chain: MasterChain,
     /// Each channel after its fader and crossfader, where the effect units go.
-    post: [Vec<f32>; SLOTS],
+    post: [Vec<f32>; MAX_DECKS],
     /// The headphone cue bus (before the head mix).
     cue: Vec<f32>,
     /// The crossfader's left and right gains, per frame of the block.
@@ -899,12 +898,9 @@ pub struct Renderer {
     simulated_time: bool,
 }
 
-/// Prepare mode's slot, after the decks.
-const PREP: usize = MAX_DECKS;
-
-/// The slots in use: the first `live` decks, then Prepare's player.
+/// The decks in use: the first `live`.
 fn slots(live: usize) -> impl Iterator<Item = usize> {
-    (0..live).chain(std::iter::once(PREP))
+    0..live
 }
 
 /// A meter that jumps up to a block's peak and falls back slowly.
@@ -917,7 +913,7 @@ impl Renderer {
     pub(crate) fn new(ends: RendererEnds, sample_rate: u32, decks: usize) -> Self {
         let live = decks.min(MAX_DECKS);
         let sr = sample_rate as f64;
-        let id = |i: usize| DeckId::new(i).unwrap_or(DeckId::PREPARE);
+        let id = |i: usize| DeckId::new(i).expect("a deck");
         let mut r = Renderer {
             commands: ends.commands,
             garbage: ends.garbage,
@@ -930,14 +926,10 @@ impl Renderer {
             callbacks: 0,
             last_block_frames: 0,
             decks: std::array::from_fn(|i| {
-                let used = i < live || i == PREP;
+                let used = i < live;
                 Deck::new(id(i), used.then_some((sample_rate, MAX_BLOCK)))
             }),
-            channels: std::array::from_fn(|i| {
-                let mut ch = Channel::new(sr, XfSide::default_for(id(i)));
-                ch.direct = i == PREP;
-                ch
-            }),
+            channels: std::array::from_fn(|i| Channel::new(sr, XfSide::default_for(id(i)))),
             live,
             fx_decks: live,
             sync_leader: None,
@@ -1132,10 +1124,6 @@ impl Renderer {
         for d in slots(live) {
             let (ch, buf) = (&mut self.channels[d], &self.deck_buf[d][..n * 2]);
             let post = &mut self.post[d][..n * 2];
-            if ch.direct {
-                post.copy_from_slice(buf);
-                continue;
-            }
             for f in 0..n {
                 let v = ch.fader.next(k) as f32;
                 let xf = self.xf_frames[f];
@@ -1281,7 +1269,7 @@ impl Renderer {
     /// a playing synced one). `None` for the chosen leader itself.
     fn leader_for(&self, d: usize) -> Option<usize> {
         let ok = |l: usize| {
-            l != d && l < self.live && self.decks[l].track.is_some() && !self.channels[l].direct
+            l != d && l < self.live && self.decks[l].track.is_some()
         };
         if let Some(l) = self.sync_leader.map(DeckId::index) {
             if l == d {
@@ -1416,7 +1404,7 @@ impl Renderer {
 
     /// The slot behind `id`, if it's in use.
     fn live(&self, id: DeckId) -> Option<usize> {
-        (id.index() < self.live || id.is_prepare()).then_some(id.index())
+        (id.index() < self.live).then_some(id.index())
     }
 
     fn load(&mut self, d: usize, track: Arc<LoadedTrack>) {
@@ -1539,7 +1527,7 @@ impl Renderer {
             }
             DeckCmd::Sync(set) => {
                 // Prepare's player doesn't sync.
-                let on = set.apply(self.decks[d].sync) && !self.channels[d].direct;
+                let on = set.apply(self.decks[d].sync);
                 self.decks[d].sync = on;
                 // Line the beats up now if both are playing; the tempo follows in
                 // `update_speeds` (only a loaded track is needed for that).
@@ -1683,7 +1671,7 @@ impl Renderer {
     }
 
     fn restore(&mut self, mut st: Box<EngineState>) {
-        for id in DeckId::first(MAX_DECKS).chain([DeckId::PREPARE]) {
+        for id in DeckId::first(MAX_DECKS) {
             let Some(track) = st.deck_mut(id).track.take() else {
                 continue;
             };
@@ -1692,7 +1680,7 @@ impl Renderer {
                 None => self.trash(Garbage::Track(track)),
             }
         }
-        for id in DeckId::first(self.live).chain([DeckId::PREPARE]) {
+        for id in DeckId::first(self.live) {
             let (d, ds) = (id.index(), st.deck_mut(id));
             self.decks[d].restore(ds);
             self.channels[d].restore(&ds.channel);
@@ -1722,10 +1710,9 @@ impl Renderer {
 
     fn publish(&mut self) {
         let mut decks = [DeckSnap::default(); MAX_DECKS];
-        let mut prepare = DeckSnap::default();
         for d in slots(self.live) {
             let dk = &mut self.decks[d];
-            *decks.get_mut(d).unwrap_or(&mut prepare) = dk.snapshot(&self.channels[d]);
+            decks[d] = dk.snapshot(&self.channels[d]);
             let playing = dk.playing();
             if playing != dk.was_playing {
                 dk.was_playing = playing;
@@ -1741,7 +1728,6 @@ impl Renderer {
         let snap = EngineSnapshot {
             decks,
             decks_live: self.live,
-            prepare,
             mixer: MixerSnap {
                 crossfader: self.crossfader,
                 main_gain: self.master_chain.get(MasterParam::Gain),
@@ -2239,59 +2225,6 @@ mod tests {
         let s = rig.snap().decks[0];
         assert!(s.loop_active && (s.position - 20.05).abs() < 0.01, "{s:?}");
         assert_eq!(s.cue_point, 3.0);
-    }
-
-    /// Prepare mode's player sits beside all four decks: straight to the main mix
-    /// whatever the fader, crossfader and headphone cue say, and never synced.
-    #[test]
-    fn prepare_plays_beside_four_decks_and_skips_the_mixer() {
-        let mut rig = Rig::with_decks(MAX_DECKS);
-        let p = DeckId::PREPARE;
-        assert!(p.is_prepare() && DeckId::first(MAX_DECKS).all(|d| d != p));
-        let (audio, _) = demo(120.0, 120.0, 5.0, 2);
-        rig.send(Command::Load {
-            deck: p,
-            track: track(audio, None, 3),
-        });
-        rig.send(Command::Param(
-            ParamId::Channel(p, ChannelParam::Volume),
-            0.0,
-        ));
-        rig.send(Command::Deck(p, DeckCmd::Pfl(Set::On)));
-        rig.send(Command::Deck(p, DeckCmd::Sync(Set::On)));
-        rig.deck(1, DeckCmd::Pfl(Set::On)); // headphones on the (silent) cue bus
-        rig.master(MasterParam::HeadMix, 0.0); // cue bus only
-        rig.master(MasterParam::Crossfader, 1.0);
-        rig.send(Command::Deck(p, DeckCmd::Play(Set::On)));
-        let level = level(&mut rig);
-        assert!(level > 0.01, "{level}");
-        assert_eq!(peaks(&rig.out, 4)[2], 0.0, "not on the cue bus");
-        let s = rig.snap();
-        assert!(s.prepare.playing && !s.prepare.sync);
-        assert_eq!(s.prepare.generation, 3);
-        assert_eq!(s.deck(p), &s.prepare);
-        assert!(
-            s.decks.iter().all(|d| d.track_id.is_none()),
-            "no deck slot used"
-        );
-        // All four decks still play alongside it, and none follows it.
-        for d in 0..MAX_DECKS {
-            rig.load(d, 120.0, 120.0);
-            rig.deck(d, DeckCmd::Play(Set::On));
-        }
-        rig.deck(3, DeckCmd::Sync(Set::On));
-        rig.send(Command::SetSyncLeader(Some(p)));
-        rig.run(0.05);
-        let s = rig.snap();
-        assert!(s.live().iter().all(|d| d.playing));
-        assert_eq!(s.mixer.sync_leader, None);
-        assert_ne!(s.decks[3].following, Some(p));
-        // Its events carry its own id.
-        assert!(rig.events().iter().any(|e| *e
-            == EngineEvent::Started {
-                deck: p,
-                generation: 3
-            }));
     }
 
     /// Scratch deck `d` forward by `by` seconds over `secs`, reporting every block.
@@ -3185,9 +3118,6 @@ mod tests {
         state.decks[1].track = Some(loaded);
         let (audio, grid) = demo(126.0, 126.0, 60.0, 3);
         state.decks[2].track = Some(track(audio, Some(Arc::new(grid)), 1));
-        let (audio, _) = demo(124.0, 124.0, 30.0, 6);
-        state.prepare.track = Some(track(audio, None, 4));
-        state.prepare.position = 7.0;
         let mut fresh = Rig::with_decks(3);
         fresh.send(Command::Restore(Box::new(state)));
         fresh.run(0.1);
@@ -3198,8 +3128,6 @@ mod tests {
         }
         assert_eq!(after.decks[1].auto_gain, 0.5);
         assert_eq!(after.decks[0].track_id, None);
-        assert_eq!(after.prepare.generation, 4);
-        assert!((after.prepare.position - 7.0).abs() < 1e-9);
         let mixer = |m: MixerSnap| MixerSnap {
             vu_main: [0.0; 2],
             limiting: 0.0,

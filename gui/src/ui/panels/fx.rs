@@ -110,7 +110,7 @@ fn unit_row(ui: &mut Ui, shared: Option<&EngineSnapshot>, unit: usize, out: &mut
     });
 
     let target = match state.target {
-        FxTarget::Deck(d) => deck_letter(d).map_or("?".to_string(), |l| l.to_string()),
+        FxTarget::Deck(d) => deck_letter(d).to_string(),
         FxTarget::Master => "MAIN".to_string(),
     };
     let r = ui

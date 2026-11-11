@@ -40,7 +40,7 @@ impl EarshotApp {
                     // Stop showing the pending track (on failure the deck shows what
                     // it had). An older request's result changes nothing: the player
                     // didn't take it either.
-                    if deck == DeckId::PREPARE {
+                    if deck == self.prefs.target() {
                         self.tempo_lock_loaded(ticket, result.is_ok());
                     }
                     if self.panels.decks[deck.index()].finish_load(ticket) {

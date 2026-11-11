@@ -961,7 +961,7 @@ mod tests {
         let (played, cued, untouched) = (
             DeckId::new(0).unwrap(),
             DeckId::new(1).unwrap(),
-            DeckId::PREPARE,
+            DeckId::new(2).unwrap(),
         );
         for deck in [played, cued, untouched] {
             put_on(&p, deck, 11);
@@ -985,16 +985,16 @@ mod tests {
         // Silence until 12 s, then beats: the straight grid runs back to 0.25 s.
         let grid = Beatgrid::constant(120.0, 12.25, 30.0).unwrap();
         update_decks(&p, 11, Some((grid, GridSource::Analysis)), 12.26);
-        // Prepare's player goes last, so the decks have had theirs by then.
-        let after = wait(&p, |s| s.prepare.cue_point == 12.25);
-        assert_eq!(after.prepare.position, 12.25, "the playhead goes with it");
+        // Deck 3 goes last, so the others have had theirs by then.
+        let after = wait(&p, |s| s.decks[2].cue_point == 12.25);
+        assert_eq!(after.decks[2].position, 12.25, "the playhead goes with it");
         assert_eq!(after.decks[0].cue_point, before.decks[0].cue_point);
         assert_eq!(after.decks[0].position, before.decks[0].position);
         assert_eq!(after.decks[1].cue_point, 3.0);
         let inner = p.lock().unwrap();
         assert_eq!(inner.session(untouched).state.cues.main, Some(12.25));
         // Every player got the grid, touched or not.
-        assert!(inner.decks[..2].iter().all(|d| d.grid.is_some()));
+        assert!(inner.decks[..3].iter().all(|d| d.grid.is_some()));
     }
 
     #[test]

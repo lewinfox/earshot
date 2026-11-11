@@ -19,7 +19,6 @@ use crate::ui::panels::tempo_lock::DetectedBeats;
 /// sources are database rows, numbered from 1).
 const SOURCE: crate::core::sources::SourceId = 0;
 
-const PLAYER: DeckId = DeckId::PREPARE;
 
 #[derive(Default)]
 pub(super) struct Listener {
@@ -73,14 +72,17 @@ impl EarshotApp {
         };
         tab.loading = self.listener.pending.is_some();
         // Its beats over the player's waveform, while one of its versions is in.
-        let layer = tab.player.zip(tab.chart.clone()).map(|(version, chart)| {
+        // Only on Prepare's Tempo lock tab: elsewhere the deck is just a deck.
+        let shown = self.prefs.mode == crate::core::view::Mode::Prepare
+            && self.prefs.prepare.tool == crate::core::view::Tool::TempoLock;
+        let layer = tab.player.zip(tab.chart.clone()).filter(|_| shown).map(|(version, chart)| {
             Arc::new(DetectedBeats {
                 version,
                 chart,
                 straightened: tab.straightened.clone(),
             }) as Arc<dyn Layer>
         });
-        self.panels.decks[PLAYER.index()].set_overlay("tempo-lock", layer);
+        self.panels.decks[self.prefs.target().index()].set_overlay("tempo-lock", layer);
     }
 
     /// Put `version` in the player at `at` s (its own time), or just move there if
@@ -95,7 +97,7 @@ impl EarshotApp {
         };
         if self.player_track() == Some(id) {
             self.listener.pending = None;
-            self.dispatch((PLAYER, EngineCmd::Seek(at)).into());
+            self.dispatch((self.prefs.target(), EngineCmd::Seek(at)).into());
         } else {
             let playing = self.player_snap().is_some_and(|s| s.playing);
             self.listen_load(id, at, playing);
@@ -114,22 +116,22 @@ impl EarshotApp {
         }
         let p = self.listener.pending.take().unwrap();
         if ok {
-            self.dispatch((PLAYER, EngineCmd::Seek(p.at)).into());
+            self.dispatch((self.prefs.target(), EngineCmd::Seek(p.at)).into());
             if p.play {
-                self.dispatch((PLAYER, EngineCmd::Play(Set::On)).into());
+                self.dispatch((self.prefs.target(), EngineCmd::Play(Set::On)).into());
             }
         }
     }
 
     fn listen_load(&mut self, id: TrackId, at: f64, play: bool) {
-        let ticket = self.load(Some(PLAYER), id);
+        let ticket = self.load(Some(self.prefs.target()), id);
         // Not from a library list: there's no "next track" to it.
-        self.loaded_from[PLAYER.index()] = None;
+        self.loaded_from[self.prefs.target().index()] = None;
         self.listener.pending = Some(Pending { ticket, at, play });
     }
 
     fn player_snap(&self) -> Option<earshot_engine::DeckSnap> {
-        self.frame.snap.as_ref().map(|s| *s.deck(PLAYER))
+        self.frame.snap.as_ref().map(|s| *s.deck(self.prefs.target()))
     }
 
     fn player_track(&self) -> Option<TrackId> {

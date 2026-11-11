@@ -107,8 +107,6 @@ pub struct EngineSnapshot {
     /// Only the first [`EngineSnapshot::decks_live`] are in use.
     pub decks: [DeckSnap; MAX_DECKS],
     pub decks_live: usize,
-    /// Prepare mode's player ([`DeckId::PREPARE`]).
-    pub prepare: DeckSnap,
     pub mixer: MixerSnap,
     pub preview: PreviewSnap,
     pub sample_rate: u32,
@@ -119,7 +117,7 @@ pub struct EngineSnapshot {
 
 impl EngineSnapshot {
     pub fn deck(&self, deck: DeckId) -> &DeckSnap {
-        self.decks.get(deck.index()).unwrap_or(&self.prepare)
+        &self.decks[deck.index()]
     }
 
     /// The live decks.

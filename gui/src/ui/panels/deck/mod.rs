@@ -33,7 +33,7 @@ mod waveform;
 
 use design::*;
 
-pub use self::cue_pane::{CUE_PANE_W, CuePane};
+pub use self::cue_pane::CuePane;
 pub use self::waveform::{WavePanel, zoomed};
 
 use self::wave::{DeckWave, Grid, Layer, Marks, Overlay};
@@ -45,7 +45,7 @@ use crate::ui::panels::library::drag;
 use crate::ui::panels::{Cx, Panel};
 use crate::ui::theme::THEME;
 use crate::ui::util::{self, Camelot};
-use crate::ui::widgets::{HwButton, held, key_chip_sized};
+use crate::ui::widgets::key_chip_sized;
 
 /// Which side of the mixer a deck sits on. Its tempo fader goes on the outside edge
 /// and its controls run outwards from the mixer.
@@ -629,62 +629,6 @@ impl DeckUi {
         }
     }
 
-    /// Prepare mode's player: the title and overview, then CUE / play and the BPM
-    /// ring, Q, and the page the tabs pick (hot cues, loops and beat jumps, or the
-    /// grid editor), in one row, `width` ×
-    /// `height`. Its memory cues are in the cue pane beside the waveform
-    /// ([`DeckUi::cue_pane`]).
-    pub fn show_prepare(
-        &mut self,
-        ui: &mut Ui,
-        width: f32,
-        height: f32,
-        info: &DeckInfo,
-        out: &mut Vec<Command>,
-    ) {
-        let extra = (height - min_height(false)).max(0.0);
-        self.dims = Dims::for_row(row_h() + extra);
-        self.panel(
-            ui,
-            width,
-            height,
-            info,
-            out,
-            |deck, ui, info, out, inner_h| {
-                let top = ui.cursor().min.y;
-                deck.header(ui, info, out, false);
-                let used = ui.cursor().min.y - top;
-                let overview_h =
-                    (inner_h - used - deck.dims.controls_h() - ui.spacing().item_spacing.y)
-                        .max(24.0);
-                deck.overview(ui, info, out, overview_h);
-                let d = deck.dims;
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(d.px(GAP_X), d.px(GAP_Y));
-                    deck.transport(ui, out);
-                    // Quantise beside the transport, on either page (Rekordbox has it by
-                    // the jog).
-                    let s = deck.state;
-                    let r = ui
-                        .add(
-                            HwButton::new("Q", THEME.accent, vec2(d.px(Q_W), d.px(Q_H)))
-                                .font(d.px(FONT_Q))
-                                .lit(s.quantize),
-                        )
-                        .on_hover_text("Quantise: snap cues, loops and hot cues to the beat");
-                    if held(ui, &r) == Some(true) {
-                        deck.control(out, DeckControl::Quantize, 1.0);
-                    }
-                    ui.add_space(d.px(GROUP_GAP));
-                    deck.page(ui, info, out, false);
-                    // The tabs at the row's outer edge, as on the decks.
-                    let tabs = d.px(TABS_W) + ui.spacing().item_spacing.x;
-                    ui.add_space((ui.available_width() - tabs).max(d.px(GROUP_GAP)));
-                    deck.page_tabs(ui);
-                });
-            },
-        );
-    }
 
     /// The deck number, title and times; with `buttons`, also SYNC, ★, Q and KEY (when
     /// there's no tempo fader to sit over). Right-click the title: "Show in library".
@@ -1017,21 +961,7 @@ impl Panel for DeckPanel<'_> {
     }
 }
 
-/// Prepare's player controls, under its waveform in every tool, `width` × `height`.
-pub struct PreparePlayer<'a> {
-    pub deck: &'a mut DeckUi,
-    pub width: f32,
-    pub height: f32,
-}
 
-impl Panel for PreparePlayer<'_> {
-    fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        crate::ui::theme::normal_text(ui);
-        let info = cx.engine.deck(self.deck.id);
-        self.deck
-            .show_prepare(ui, self.width, self.height, info, cx.out);
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -1094,7 +1024,7 @@ mod tests {
             .with_step_dt(1.0 / 60.0)
             .build_ui_state(
                 move |ui, (deck, out): &mut (DeckUi, Vec<Command>)| deck.cue_pane(ui, &info, out),
-                (DeckUi::new(DeckId::PREPARE), vec![]),
+                (DeckUi::new(DeckId::new(0).unwrap()), vec![]),
             );
         h.run();
         let recalls = |out: &[Command]| {

@@ -9,7 +9,6 @@ use crate::core::view::Tool;
 use crate::ui::panels::deck::wave::Layer;
 use crate::ui::panels::trim::TrimPoints;
 
-const PLAYER: DeckId = DeckId::PREPARE;
 
 impl EarshotApp {
     pub(super) fn trim_cmd(&mut self, c: TrimCmd) {
@@ -107,9 +106,10 @@ impl EarshotApp {
             .frame
             .snap
             .as_ref()
-            .and_then(|s| s.deck(PLAYER).track_id);
+            .and_then(|s| s.deck(self.prefs.target()).track_id);
         let tab = &self.panels.trim;
-        let layer = (self.prefs.prepare.tool == Tool::Trim
+        let layer = (self.prefs.mode == crate::core::view::Mode::Prepare
+            && self.prefs.prepare.tool == Tool::Trim
             && track.is_some()
             && tab.track == track)
             .then(|| {
@@ -118,7 +118,7 @@ impl EarshotApp {
                     end: tab.end,
                 }) as Arc<dyn Layer>
             });
-        self.panels.decks[PLAYER.index()].set_overlay("trim", layer);
+        self.panels.decks[self.prefs.target().index()].set_overlay("trim", layer);
     }
 
     /// The file behind `track`, from the library.
@@ -136,7 +136,7 @@ impl EarshotApp {
             .frame
             .snap
             .as_ref()
-            .map(|s| s.deck(PLAYER))
+            .map(|s| s.deck(self.prefs.target()))
             .filter(|d| d.track_id == Some(track))
             .map_or(f64::INFINITY, |d| d.duration);
         Some(Source {

@@ -1,27 +1,31 @@
-//! Prepare: one player. Its waveform across the top with the cue pane on the right
-//! (as in Rekordbox), its controls under that, then the tool tabs (what we're doing
-//! to the track), each with the library on its left: `| library | tool |` (Flow adds
-//! its suggestions on the right).
+//! Prepare: the same decks as Perform across the top, then the tool tabs (what we're
+//! doing to the target track: the deck picked in the top bar), each with the library
+//! on its left: `| library | tool |` (Flow adds its suggestions on the right).
 //!
 //! To add a tool: a variant of `core::view::Tool`, an entry in [`TOOLS`] and an arm
 //! in [`tool`].
 
-use earshot_engine::DeckId;
 use egui::{Margin, Ui, vec2};
 
+use super::perform::decks_rows;
 use super::{Panels, row_frame};
 use crate::core::command::ViewCmd;
-use crate::core::view::{Region, Tool};
-use crate::ui::panels::deck::{CUE_PANE_W, CuePane, PreparePlayer, WavePanel, min_height};
+use crate::core::view::Tool;
+use crate::ui::panels::deck::CuePane;
 use crate::ui::panels::export::ExportPanel;
 use crate::ui::panels::flow::FlowTab;
 use crate::ui::panels::stems::StemsPanel;
 use crate::ui::panels::tempo_lock::TempoLockPanel;
 use crate::ui::panels::trim::TrimPanel;
-use crate::ui::panels::{Cx, Panel, resized};
+use crate::ui::panels::{Cx, Panel};
 use crate::ui::widgets::{Tab, tool_tabs};
 
-const TOOLS: [Tab<Tool>; 5] = [
+const TOOLS: [Tab<Tool>; 6] = [
+    Tab {
+        id: Tool::Cues,
+        name: "Cues",
+        tip: "The target track's memory cues and loops",
+    },
     Tab {
         id: Tool::TempoLock,
         name: "Tempo lock",
@@ -52,50 +56,9 @@ const TOOLS: [Tab<Tool>; 5] = [
 
 pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
     let current = cx.prefs.prepare.tool;
-    // The Flow editor's full screen hides the player.
+    // The Flow editor's full screen hides the decks.
     let planning = current == Tool::Flow && panels.flow.full;
-    let waves_h = cx.prefs.prepare.sizes.waves;
-    let r = egui::TopBottomPanel::top("waves-prepare")
-        .resizable(true)
-        .default_height(waves_h)
-        .height_range(60.0..=520.0)
-        .frame(row_frame(cx, Margin::same(6)))
-        .show_animated(ctx, !planning, |ui| {
-            ui.spacing_mut().item_spacing.y = 3.0;
-            let (w, height) = (ui.available_width(), ui.available_height());
-            let wave_w = (w - CUE_PANE_W - 6.0).max(w / 2.0);
-            let deck = &mut panels.decks[DeckId::PREPARE.index()];
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.allocate_ui(vec2(wave_w, height), |ui| {
-                    WavePanel {
-                        deck: &mut *deck,
-                        height,
-                    }
-                    .ui(ui, cx);
-                });
-                CuePane(deck).ui(ui, cx);
-            });
-        });
-    if let Some(r) = r {
-        resized(ctx, r.response.rect.height(), Region::Waves, waves_h, cx);
-    }
-    // The player's controls (hot cues or the grid editor, loops, beat jumps, tempo),
-    // as tall as Perform's decks.
-    let height = min_height(false);
-    egui::TopBottomPanel::top("player-prepare")
-        .exact_height(height + 8.0)
-        .frame(row_frame(cx, Margin::symmetric(6, 4)))
-        .show_animated(ctx, !planning, |ui| {
-            let deck = &mut panels.decks[DeckId::PREPARE.index()];
-            let width = ui.available_width();
-            PreparePlayer {
-                deck,
-                width,
-                height,
-            }
-            .ui(ui, cx);
-        });
+    decks_rows(ctx, panels, cx, "prepare", !planning);
     egui::TopBottomPanel::top("tools-prepare")
         .exact_height(30.0)
         .frame(row_frame(cx, Margin::symmetric(6, 4)))
@@ -128,6 +91,7 @@ fn tool(ui: &mut Ui, tool: Tool, panels: &mut Panels, cx: &mut Cx) {
     match tool {
         // Drawn by its own tab.
         Tool::Flow => {}
+        Tool::Cues => CuePane(&mut panels.decks[cx.prefs.target().index()]).ui(ui, cx),
         Tool::TempoLock => TempoLockPanel {
             tab: &mut panels.tempo_lock,
             roots: &panels.library.browser.folders,

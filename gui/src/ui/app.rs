@@ -453,39 +453,16 @@ impl EarshotApp {
             .map_or(0, |sh| sh.live().iter().filter(|d| d.playing).count())
     }
 
-    /// Switch mode. Not to Prepare while a deck plays (the set would go on under
-    /// Prepare's player): says so instead, and returns false. To Perform, Prepare's
-    /// player stops.
-    pub(super) fn set_mode(&mut self, m: Mode) -> bool {
-        if m == self.prefs.mode {
-            return true;
-        }
-        match m {
-            Mode::Prepare if self.decks_playing() > 0 => {
-                let text = "Stop the playing decks before switching to Prepare.";
-                self.notify(notice::Level::Warning, text);
-                return false;
-            }
-            Mode::Perform | Mode::Controller
-                if self
-                    .frame
-                    .snap
-                    .as_ref()
-                    .is_some_and(|sh| sh.prepare.playing) =>
-            {
-                self.dispatch((DeckId::PREPARE, EngineCmd::Play(Set::Off)).into());
-            }
-            _ => {}
-        }
+    /// Switch mode: only the tabs under the decks change.
+    pub(super) fn set_mode(&mut self, m: Mode) {
         self.prefs.mode = m;
-        true
     }
 
-    /// Closing the window in Perform while a deck plays: ask first ("Quit" closes it
+    /// Closing the window while a deck plays: ask first ("Quit" closes it
     /// again, for good).
     fn confirm_quit(&mut self, ctx: &egui::Context) {
         let asked = ctx.input(|i| i.viewport().close_requested());
-        if asked && !self.quitting && self.prefs.mode.decks() && self.decks_playing() > 0 {
+        if asked && !self.quitting && self.decks_playing() > 0 {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.asking_quit = true;
         }
@@ -742,8 +719,17 @@ impl EarshotApp {
                     *l = !*l;
                 }
             }
-            ViewCmd::FourDecks(on) => {
-                self.prefs.four_decks = on;
+            ViewCmd::Target(d) => {
+                // The tools' marks leave the old deck; they're drawn on the new one
+                // from the next frame.
+                for deck in &mut self.panels.decks {
+                    deck.set_overlay("tempo-lock", None);
+                    deck.set_overlay("trim", None);
+                }
+                self.prefs.target = d.index();
+            }
+            ViewCmd::DeckCount(n) => {
+                self.prefs.deck_count = crate::ui::prefs::deck_count(n);
                 if let Err(e) = player::set_fx_decks(&self.player, self.prefs.decks().len()) {
                     eprintln!("effect decks: {e}");
                 }
@@ -849,7 +835,6 @@ impl EarshotApp {
     /// selected track.
     fn refresh_suggestions(&mut self) {
         let decks = self.decks_now();
-        let prepare = (self.prefs.mode == Mode::Prepare).then(|| self.deck_now(DeckId::PREPARE));
         let (lib, flow) = (&mut self.panels.library, &self.panels.flow);
         // The suggestions' own selection isn't a reference for themselves.
         let selected = match lib.focused_pane {
@@ -867,7 +852,7 @@ impl EarshotApp {
             loaded: &[],
         };
         lib.suggest
-            .refresh(&view, &decks, prepare.as_ref(), selected);
+            .refresh(&view, &decks, selected);
     }
 
     /// Draw the window, collecting what it asks for.
@@ -877,11 +862,8 @@ impl EarshotApp {
             ctx.request_repaint_after(next.saturating_duration_since(Instant::now()));
         }
         let mut out: Vec<Command> = vec![];
-        // What's on the decks shown, and on Prepare's player in Prepare.
-        let mut players = self.prefs.decks();
-        if self.prefs.mode == Mode::Prepare {
-            players = vec![DeckId::PREPARE];
-        }
+        // What's on the decks shown.
+        let players = self.prefs.decks();
         let loaded: Vec<(i64, DeckId)> = {
             let p = self.player.lock().unwrap();
             players
@@ -982,14 +964,12 @@ impl eframe::App for EarshotApp {
         self.read_engine(ctx);
         self.sync_tempo_lock();
         self.sync_trim();
-        // Background analysis holds back while a deck plays in Perform mode. In Prepare,
-        // listening while an import analyses is normal, so it runs at full width.
-        let playing = self.prefs.mode.decks()
-            && self
-                .frame
-                .snap
-                .as_ref()
-                .is_some_and(|sh| sh.live().iter().any(|d| d.playing));
+        // Background analysis holds back while a deck plays, in every mode.
+        let playing = self
+            .frame
+            .snap
+            .as_ref()
+            .is_some_and(|sh| sh.live().iter().any(|d| d.playing));
         self.lib.analyser.set_playing(playing);
         self.confirm_quit(ctx);
         self.keyboard(ctx);

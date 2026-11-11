@@ -32,10 +32,22 @@ more than two decks.
 
 ## Shape
 
-One native desktop app with two modes, like Rekordbox:
+One native desktop app. The decks are always across the top: 1, 2 or 4 of them,
+the same decks in every mode, behaving the same way. A **mode** only chooses which
+tabs show below them:
 
-- **Export mode** — library, graph, search, prep, sync with other DJ software.
-- **Performance mode** — the same library panes, with decks above them.
+| Mode | Tabs below the decks |
+|---|---|
+| **Perform** | The library |
+| **Prepare** | Tempo lock, Stems, Trim, Flow, Export, each with the library beside it |
+| **Controller** | Mapping (set up and test a MIDI controller), the library |
+
+- Switching modes changes nothing that's playing or loaded.
+- Prepare is for trying tracks out for a set, so two tracks can play together to
+  work out cues and transitions.
+- Prepare's tools act on the **target track**: the track on the deck picked in the
+  top bar's target dropdown (the visible decks; deck 1 by default).
+- Background analysis follows the same rules in every mode.
 
 ```
 ┌──────────────────────────── earshot ─────────────────────────────────────┐
@@ -45,7 +57,7 @@ One native desktop app with two modes, like Rekordbox:
 │        ▼                                                                 │
 │  Rust core ───────────────────────────────────────────┐                  │
 │   control bus ◄── keyboard map / on-screen controls   │                  │
-│        ▲     ◄── MIDI (midir) + Mixxx-style mappings   │                  │
+│        ▲     ◄── MIDI (midir) + controller files       │                  │
 │        ▼                                               │ local socket     │
 │   audio engine (cpal)          DB writer ──► earshot.db│ (jobs/results)   │
 │   decks · mixer · grids        (sole writer, SQLite)   ▼                  │
@@ -95,37 +107,49 @@ The audio engine cannot run in a container, and a SQLite file shared between a h
 process and a container is unsafe on macOS (WAL needs shared memory across the VM
 boundary). The uv-managed venv gives the isolation Docker was wanted for.
 
-## The control bus
+## The control vocabulary
 
-Every action is a named control, using Mixxx's names so Mixxx controller mappings
-can be loaded later:
+Every action is a named control: `<where> <what> [number]`, e.g. `deck1 play`,
+`deck1 beat_jump 4`, `mixer crossfader`. The keyboard, on-screen controls and MIDI
+controllers all use these names, so a control means the same thing however it's
+touched.
+
+- **Where:** `deck1`–`deck4`, `mixer`, `fx1`, `fx2`, …, `library`. Decks are
+  positions: `deck1` is deck 1 in every mode.
+- **What:** Pioneer's words (from the DDJ and CDJ manuals and Rekordbox), spelled
+  out in full: `beat_jump n`, `beat_loop n`, `loop_in`, `loop_out`, `loop_exit`,
+  `cue_point_jump`, `beat_sync`, `hot_cue n`, `jog_wheel_touch`,
+  `jog_wheel_turn`. Exact names are settled as each one is built.
+- **Commands are musical; controller files are physical.** A controller file
+  names what the hand did (`jog_wheel_touch`, `jog_wheel_turn`); the core turns
+  that into musical commands, the same for every controller:
+
+  | The hand | Command |
+  |---|---|
+  | Turns the jog wheel with its top touched (vinyl mode on) | `scratch_hold`, then `scratch n` |
+  | Turns it untouched, or turns the side ring | `pitch_bend n` |
+  | Turns it with Shift held | `search n` |
+
+  The keyboard and screen send commands directly.
+
+Inputs set controls; the core acts on them; outputs read them back:
 
 ```
-[Channel1] play              [Channel1] cue_default     [Channel1] sync_enabled
-[Channel1] beatjump_forward  [Channel1] beatloop_4_toggle
-[Channel1] hotcue_1_activate [Channel1] rate            [Channel1] volume
-[Master]   crossfader        [Library]  MoveVertical    [Channel1] LoadSelectedTrack
+MIDI controller (file: message → control) ─┐
+Keyboard (keymap: key → control) ──────────┼──► controls ──► core ──► audio engine
+On-screen controls ────────────────────────┘                  └──► UI, controller lights
 ```
 
-Inputs write controls, outputs read them:
-
-```
-DDJ-400 (MIDI → mapping) ─┐
-Keyboard (key → control) ─┼──► control bus ──► audio engine
-On-screen controls ───────┘        └──► feedback: UI state, controller LEDs
-```
-
-- **Keyboard** mapping is a file of key → control. Deck shortcuts are live unless a
-  text field has focus; `Esc` always returns focus to the decks; the UI shows which
-  layer is active.
-- **MIDI**: the spike hardcodes a few DDJ-400 messages. The real thing embeds QuickJS
-  (`rquickjs`) and implements Mixxx's `engine` / `midi` scripting API against the
-  control bus, so Mixxx's XML + JS mappings load as-is. Implement only what the
-  DDJ-400 mapping calls first. Mixxx mappings are GPL-2.0+: loading a user's files
-  is fine, bundling them carries GPL obligations.
-- **Discovery controls** have no Mixxx equivalent and get their own group, e.g.
-  `[Suggest] MoveVertical`, `[Suggest] LoadToDeck`; the DDJ-400's browse encoder
-  can toggle between the library and the suggestion list.
+- **Keyboard:** `keymap.txt`, key → control. Deck keys are live unless a text field
+  has focus; `Esc` always returns focus to the decks.
+- **MIDI controllers:** one file per model, `controllers/<Maker>/<Model>.json`,
+  saying only which message is which control and how to read its value (see
+  [controllers/families.md](controllers/families.md)). The device is matched by
+  its USB vendor and product ID, written in the file. No JavaScript: what a
+  control does is the core's job, the same for every controller. Mixxx's mappings
+  are reference material for drafting these files.
+- **Discovery controls** (suggestions, Flow) get names of their own, e.g.
+  `library browse` moves through whichever list has focus.
 
 ## Beatgrids
 
@@ -300,8 +324,8 @@ cues, grids).
 
 ### Phase 3 — performance
 
-Streaming decode, sync/quantise, persisted hot cues and loops, keylock, Mixxx
-mapping loader (QuickJS), keyboard map file, set history feeding suggestions.
+Streaming decode, sync/quantise, persisted hot cues and loops, keylock,
+controller files (message → control), keyboard map file, set history feeding suggestions.
 
 ### Phase 4 — prep
 

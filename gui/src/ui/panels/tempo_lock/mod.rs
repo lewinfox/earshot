@@ -14,7 +14,6 @@ mod charts;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use earshot_engine::DeckId;
 use egui::{Color32, CornerRadius, Margin, Pos2, RichText, Sense, Stroke, Ui, vec2};
 
 use self::charts::{HistChart, TempoChart, bpm_range, fmt_time, ruler, time_at};
@@ -221,7 +220,7 @@ impl TempoLockUi {
             .engine
             .snap
             .as_ref()
-            .map(|s| s.deck(DeckId::PREPARE).tempo)
+            .map(|s| s.deck(cx.prefs.target()).tempo)
             .filter(|t| *t > 0.0)
             .unwrap_or(1.0);
         let half = cx.prefs.wave_zoom * tempo;
@@ -283,7 +282,7 @@ impl TempoLockPanel<'_> {
             && !tab.loading
         {
             tab.cursor = tab
-                .to_original(snap.deck(DeckId::PREPARE).position, v)
+                .to_original(snap.deck(cx.prefs.target()).position, v)
                 .max(0.0);
         }
         ui.spacing_mut().item_spacing = vec2(8.0, 6.0);

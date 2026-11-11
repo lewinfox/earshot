@@ -266,11 +266,10 @@ impl EarshotApp {
         &mut self.panels.flow
     }
 
-    /// Prepare's Flow tab (not while a deck plays: see `set_mode`).
+    /// Prepare's Flow tab.
     pub(super) fn show_flow_tab(&mut self) {
-        if self.set_mode(Mode::Prepare) {
-            self.prefs.prepare.tool = Tool::Flow;
-        }
+        self.set_mode(Mode::Prepare);
+        self.prefs.prepare.tool = Tool::Flow;
     }
 
     /// Ask for the collections and the Flow that was open last time.
@@ -371,10 +370,11 @@ impl EarshotApp {
 
     /// The load's ticket, as its [`Event::Loaded`] will carry.
     pub(super) fn load(&mut self, deck: Option<DeckId>, track_id: i64) -> u64 {
-        // Double-click: Prepare's player, or the first deck that isn't playing.
+        // Double-click: in Prepare, the target deck; else the first deck that isn't
+        // playing.
         let decks = &self.panels.decks;
         let deck = deck.unwrap_or_else(|| match self.prefs.mode {
-            Mode::Prepare => DeckId::PREPARE,
+            Mode::Prepare => self.prefs.target(),
             Mode::Perform | Mode::Controller => DeckId::first(self.prefs.decks().len())
                 .find(|d| !decks[d.index()].playing())
                 .unwrap_or(DeckId::new(0).expect("deck 1")),

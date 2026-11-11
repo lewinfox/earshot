@@ -134,29 +134,29 @@ fn straighten_listen_and_save() {
         a.frame
             .snap
             .as_ref()
-            .and_then(|s| s.deck(DeckId::PREPARE).track_id)
+            .and_then(|s| s.deck(DeckId::new(0).unwrap()).track_id)
     };
     settle_until(&mut h, |a| {
         a.panels.tempo_lock.player == Some(Version::Original)
     });
     assert_eq!(in_player(h.state()), Some(original));
     // Its detected beats over the player's waveform.
-    assert!(h.state().panels.decks[DeckId::PREPARE.index()].has_overlay("tempo-lock"));
+    assert!(h.state().panels.decks[DeckId::new(0).unwrap().index()].has_overlay("tempo-lock"));
 
     // A/B: play the original, then the straightened version from the same place in
     // the music; it plays on.
     let listen = |version, at| Command::TempoLock(TempoLockCmd::Listen { version, at });
     h.state_mut().dispatch(listen(Version::Original, 2.0));
     h.state_mut()
-        .dispatch((DeckId::PREPARE, EngineCmd::Play(Set::On)).into());
+        .dispatch((DeckId::new(0).unwrap(), EngineCmd::Play(Set::On)).into());
     settle_until(&mut h, |a| {
-        let p = a.frame.snap.as_ref().unwrap().deck(DeckId::PREPARE);
+        let p = a.frame.snap.as_ref().unwrap().deck(DeckId::new(0).unwrap());
         p.playing && (p.position - 2.0).abs() < 1.0
     });
     let at = s.map_time(20.0, false);
     h.state_mut().dispatch(listen(Version::Straightened, at));
     settle_until(&mut h, |a| {
-        let p = a.frame.snap.as_ref().unwrap().deck(DeckId::PREPARE);
+        let p = a.frame.snap.as_ref().unwrap().deck(DeckId::new(0).unwrap());
         a.panels.tempo_lock.player == Some(Version::Straightened)
             && !a.panels.tempo_lock.loading
             && p.playing
@@ -171,7 +171,7 @@ fn straighten_listen_and_save() {
         .bpm;
     assert_eq!(bpm, Some(s.bpm));
     h.state_mut()
-        .dispatch((DeckId::PREPARE, EngineCmd::Play(Set::Off)).into());
+        .dispatch((DeckId::new(0).unwrap(), EngineCmd::Play(Set::Off)).into());
 
     // Save: the dropdown lists the library folder; pick it and save.
     let root = h.state().panels.library.browser.folders[0].clone();

@@ -76,12 +76,11 @@ impl SuggestUi {
         &mut self,
         v: &CoreView,
         decks: &[DeckNow],
-        prepare: Option<&DeckNow>,
         selected: Option<TrackId>,
     ) {
         let Some(r) = v
             .history
-            .reference(v.lib, self.source, decks, prepare, selected)
+            .reference(v.lib, self.source, decks, selected)
         else {
             self.reference = None;
             self.list.clear();
@@ -282,7 +281,5 @@ const DECK_SOURCES: [(&str, &str); 4] = [
 ];
 
 fn letter(d: usize) -> String {
-    DeckId::new(d)
-        .and_then(deck_letter)
-        .map_or_else(|| "?".into(), |l| l.to_string())
+    DeckId::new(d).map_or_else(|| "?".into(), |d| deck_letter(d).to_string())
 }

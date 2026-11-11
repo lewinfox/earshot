@@ -60,7 +60,6 @@ pub fn describe(snap: &EngineSnapshot) -> String {
     let decks: Vec<String> = snap
         .live()
         .iter()
-        .chain(std::iter::once(&snap.prepare))
         .enumerate()
         .filter(|(_, d)| d.track_id.is_some())
         .map(|(i, d)| {

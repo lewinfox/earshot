@@ -109,7 +109,7 @@ impl DeckUi {
     /// SYNC, and beside it the sync leader's star.
     pub(super) fn sync_buttons(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
         let s = self.state;
-        let following = match s.following.and_then(deck_letter) {
+        let following = match s.following.map(deck_letter) {
             Some(l) if s.sync => format!("\nFollowing deck {l}"),
             _ => String::new(),
         };

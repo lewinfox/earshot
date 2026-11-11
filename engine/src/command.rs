@@ -22,24 +22,12 @@ pub const EQ_LOW: usize = 0;
 pub const EQ_MID: usize = 1;
 pub const EQ_HIGH: usize = 2;
 
-/// Deck slots inside the engine: the decks, then Prepare mode's player.
-pub(crate) const SLOTS: usize = MAX_DECKS + 1;
-
-/// A deck, or Prepare mode's player ([`DeckId::PREPARE`]). Checked when it's made, so
-/// indexing with it can never go out of bounds on the audio thread.
+/// A deck. Checked when it's made, so indexing with it can never go out of bounds on
+/// the audio thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DeckId(u8);
 
 impl DeckId {
-    /// Prepare mode's player: a full deck (cues, loops, grid, keylock) that isn't one
-    /// of the [`MAX_DECKS`]. It plays straight to the main mix, past the fader,
-    /// crossfader and headphone cue, and never syncs or leads.
-    pub const PREPARE: DeckId = DeckId(MAX_DECKS as u8);
-
-    pub const fn is_prepare(self) -> bool {
-        self.0 as usize == MAX_DECKS
-    }
-
     pub const fn new(index: usize) -> Option<DeckId> {
         if index < MAX_DECKS {
             Some(DeckId(index as u8))
@@ -48,7 +36,7 @@ impl DeckId {
         }
     }
 
-    /// 0.. for decks; [`MAX_DECKS`] for [`DeckId::PREPARE`].
+    /// 0, 1, … below [`MAX_DECKS`].
     pub const fn index(self) -> usize {
         self.0 as usize
     }
@@ -356,8 +344,6 @@ impl Default for MixerState {
 #[derive(Clone, Default)]
 pub struct EngineState {
     pub decks: [DeckState; MAX_DECKS],
-    /// Prepare mode's player.
-    pub prepare: DeckState,
     pub mixer: MixerState,
     pub sync_leader: Option<DeckId>,
     pub hotcue_mode: HotcueMode,
@@ -439,9 +425,6 @@ pub enum Command {
 
 impl EngineState {
     pub fn deck_mut(&mut self, id: DeckId) -> &mut DeckState {
-        match self.decks.get_mut(id.index()) {
-            Some(d) => d,
-            None => &mut self.prepare,
-        }
+        &mut self.decks[id.index()]
     }
 }

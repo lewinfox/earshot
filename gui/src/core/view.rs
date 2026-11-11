@@ -33,11 +33,6 @@ pub enum Mode {
 }
 
 impl Mode {
-    /// It shows Perform's decks (and plays a set on them).
-    pub fn decks(self) -> bool {
-        matches!(self, Mode::Perform | Mode::Controller)
-    }
-
     /// The mode whose keymap bindings it uses: Controller uses Perform's.
     pub fn keys(self) -> Mode {
         match self {
@@ -107,8 +102,10 @@ pub enum Tool {
     Export,
     /// Split the player's track into stems, and play them with a level and mute each.
     Stems,
-    /// Cut the player's track down to the part between two points; save it as a new file.
+    /// Cut the target track down to the part between two points; save it as a new file.
     Trim,
+    /// The target track's memory cues and loops, in order through it.
+    Cues,
 }
 
 /// The windows over the app. They stack: the last one opened is on top.
@@ -164,8 +161,10 @@ pub enum ViewCmd {
     /// Move the selection in the focused list (negative is up) and load the track it
     /// lands on onto this deck: the previous or next track.
     LoadAdjacent(DeckId, i32),
-    /// Four decks in Perform (false: two).
-    FourDecks(bool),
+    /// Show 1, 2 or 4 decks.
+    DeckCount(usize),
+    /// Prepare's target: the deck its tools act on.
+    Target(DeckId),
     /// Four decks: the left hand (0) between decks 1 and 3, or the right (1) between
     /// 2 and 4.
     SwitchLayer(usize),

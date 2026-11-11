@@ -9,6 +9,14 @@ use super::panels::library::table::Tables;
 use crate::core::bus::Control;
 use crate::core::view::{Aside, Mode, Source, StemMode, Tool};
 
+/// 1, 2 or 4 (anything else saved becomes 2).
+pub fn deck_count(n: usize) -> usize {
+    match n {
+        1 | 2 | 4 => n,
+        _ => 2,
+    }
+}
+
 /// Where they're kept in eframe's storage.
 pub const KEY: &str = "earshot.ui";
 
@@ -24,8 +32,11 @@ pub struct UiPrefs {
     pub wave_zoom: f64,
     /// The text size, as a multiple of normal (see [`crate::ui::theme::fs`]).
     pub ui_scale: f32,
-    /// Four decks in Perform instead of two. The engine always runs four.
-    pub four_decks: bool,
+    /// How many decks show, in every mode: 1, 2 or 4. The engine always runs four.
+    pub deck_count: usize,
+    /// Prepare's target: the deck (by index) whose track its tools act on. Read
+    /// [`UiPrefs::target`], which keeps it to a deck that's showing.
+    pub target: usize,
     /// Each kind of track list's columns, widths and sort.
     pub tables: Tables,
     /// Perform's mixer, between the decks (the top bar's Mixer switch), while no
@@ -73,7 +84,8 @@ impl Default for UiPrefs {
             controller_view: Layout::default(),
             wave_zoom: 4.0,
             ui_scale: 1.0,
-            four_decks: false,
+            deck_count: 2,
+            target: 0,
             tables: Tables::default(),
             show_mixer: true,
             auto_hide_mixer: true,
@@ -87,15 +99,31 @@ impl Default for UiPrefs {
 }
 
 impl UiPrefs {
-    /// The decks Perform shows: two or four.
+    /// The decks showing: 1, 2 or 4.
     pub fn decks(&self) -> Vec<DeckId> {
-        DeckId::first(if self.four_decks { 4 } else { 2 }).collect()
+        DeckId::first(deck_count(self.deck_count)).collect()
+    }
+
+    /// Four decks show: each hand switches between two.
+    pub fn four_decks(&self) -> bool {
+        deck_count(self.deck_count) == 4
+    }
+
+    /// Prepare's target deck: the one its tools act on (deck 1 if the chosen one is
+    /// hidden).
+    pub fn target(&self) -> DeckId {
+        let i = if self.target < deck_count(self.deck_count) {
+            self.target
+        } else {
+            0
+        };
+        DeckId::new(i).expect("a deck")
     }
 
     /// The deck the left (`side` 0) or right (1) hand plays: 1 or 3, 2 or 4 in
     /// four-deck mode, else 1 or 2.
     pub fn active_deck(&self, side: usize) -> DeckId {
-        let layer = self.four_decks && self.layers[side.min(1)];
+        let layer = self.four_decks() && self.layers[side.min(1)];
         DeckId::new(side.min(1) + if layer { 2 } else { 0 }).expect("a deck")
     }
 
@@ -108,7 +136,7 @@ impl UiPrefs {
     /// that hand plays now. Anything else as it is.
     pub fn layered(&self, control: Control) -> Control {
         match control {
-            Control::Deck(d, c) if self.mode.decks() && d.index() < 2 => {
+            Control::Deck(d, c) if d.index() < 2 => {
                 Control::Deck(self.active_deck(d.index()), c)
             }
             other => other,

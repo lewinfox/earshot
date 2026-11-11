@@ -29,15 +29,11 @@ use super::{external, outside};
 /// How many decks the engine runs: all it can. Perform shows two or four of them.
 pub const DECKS: usize = MAX_DECKS;
 
-/// The engine's id for session `index` (a deck below [`DECKS`], or [`MAX_DECKS`] for
-/// Prepare's player).
+/// The engine's id for session `index` (a deck below [`DECKS`]).
 pub fn deck_id(index: usize) -> Result<DeckId, String> {
-    match index {
-        MAX_DECKS => Ok(DeckId::PREPARE),
-        _ => DeckId::new(index)
-            .filter(|_| index < DECKS)
-            .ok_or_else(|| format!("no deck {index}")),
-    }
+    DeckId::new(index)
+        .filter(|_| index < DECKS)
+        .ok_or_else(|| format!("no deck {index}"))
 }
 
 pub struct Inner {
@@ -161,9 +157,9 @@ impl Inner {
     }
 }
 
-/// Slot `i`'s player in a snapshot (the decks, then Prepare's).
+/// Slot `i`'s deck in a snapshot.
 fn slot_snap(snap: &EngineSnapshot, i: usize) -> &earshot_engine::DeckSnap {
-    snap.decks.get(i).unwrap_or(&snap.prepare)
+    &snap.decks[i]
 }
 
 pub type Player = Arc<Mutex<Inner>>;
@@ -1080,7 +1076,7 @@ mod tests {
         let p = running();
         let a = DeckId::new(0).unwrap();
         let b = DeckId::new(1).unwrap();
-        let prep = DeckId::PREPARE;
+        let prep = DeckId::new(2).unwrap();
         put_on(&p, a, 11);
         put_on(&p, prep, 12);
         {
@@ -1122,7 +1118,7 @@ mod tests {
         let before = wait(&p, |s| {
             s.decks[0].loop_active
                 && s.decks[0].hotcues[2].is_some()
-                && s.prepare.cue_point == 7.0
+                && s.decks[2].cue_point == 7.0
                 && s.mixer.sync_leader == Some(b)
         });
         // The sessions heard about the cues and the loop from the engine's events.
@@ -1143,7 +1139,7 @@ mod tests {
 
         start_engine(&p, &null()).unwrap();
         let after = wait(&p, |s| {
-            s.decks[0].track_id == Some(11) && s.prepare.track_id == Some(12)
+            s.decks[0].track_id == Some(11) && s.decks[2].track_id == Some(12)
         });
         let (was, now) = (&before.decks[0], &after.decks[0]);
         assert_eq!(now.generation, was.generation);
@@ -1160,8 +1156,8 @@ mod tests {
         assert_eq!(after.decks[1].eq[EQ_LOW], 0.0);
         assert_eq!(after.mixer.crossfader, 0.5);
         assert_eq!(after.mixer.sync_leader, Some(b));
-        assert_eq!(after.prepare.cue_point, 7.0);
-        assert_eq!(after.prepare.generation, before.prepare.generation);
+        assert_eq!(after.decks[2].cue_point, 7.0);
+        assert_eq!(after.decks[2].generation, before.decks[2].generation);
         // The crossfader sides are as they were, not reset to "thru".
         assert_eq!(now.crossfader, was.crossfader);
         assert_eq!(after.decks[1].crossfader, before.decks[1].crossfader);
@@ -1313,9 +1309,8 @@ mod tests {
     #[test]
     fn deck_ids_for_sessions() {
         assert_eq!(deck_id(0), Ok(DeckId::new(0).unwrap()));
-        assert_eq!(deck_id(MAX_DECKS), Ok(DeckId::PREPARE));
-        assert!(deck_id(MAX_DECKS + 1).is_err());
+        assert!(deck_id(MAX_DECKS).is_err());
         let inner = new_player();
-        assert_eq!(inner.lock().unwrap().decks.len(), MAX_DECKS + 1);
+        assert_eq!(inner.lock().unwrap().decks.len(), MAX_DECKS);
     }
 }

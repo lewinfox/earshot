@@ -325,12 +325,8 @@ fn count(verb: &str, n: usize) -> String {
 /// Load onto a deck or Prepare's player, or preview in the headphones.
 /// `decks`: how many decks Perform shows.
 fn load_items(ui: &mut Ui, id: TrackId, decks: usize, out: &mut Vec<Command>) {
-    let players = DeckId::first(decks).chain([DeckId::PREPARE]);
-    for deck in players {
-        let label = match deck_letter(deck) {
-            Some(l) => format!("Load to deck {l}"),
-            None => "Load to Prepare's player".to_string(),
-        };
+    for deck in DeckId::first(decks) {
+        let label = format!("Load to deck {}", deck_letter(deck));
         if ui.button(label).clicked() {
             out.push(Command::Deck(deck, DeckCmd::Load(id)));
             ui.close();

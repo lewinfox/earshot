@@ -44,9 +44,6 @@ pub const TRANSPORT_GAP: f32 = 4.0;
 pub const JOG_D: f32 = 84.0;
 pub const JOG_ROOM: f32 = 5.0;
 pub const JOG_LEFT: f32 = 6.0;
-/// Q, by the transport on Prepare's player.
-pub const Q_W: f32 = 24.0;
-pub const Q_H: f32 = 18.0;
 
 // ---- page tabs ----
 pub const TABS_W: f32 = 22.0;
@@ -66,7 +63,6 @@ pub const FONT_GRID_NOTE: f32 = 10.0;
 pub const FONT_STEM: f32 = 9.0;
 pub const FONT_CUE: f32 = 11.0;
 pub const FONT_PLAY: f32 = 12.0;
-pub const FONT_Q: f32 = 10.0;
 /// In the jog ring: the BPM ("124" and ".00"), the tempo change and range, VINYL.
 pub const FONT_BPM: f32 = 18.5;
 pub const FONT_BPM_FRAC: f32 = 11.0;

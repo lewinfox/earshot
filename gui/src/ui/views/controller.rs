@@ -25,7 +25,7 @@ const TABS: [Tab<ControllerTab>; 2] = [
 ];
 
 pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
-    decks_rows(ctx, panels, cx, "controller");
+    decks_rows(ctx, panels, cx, "controller", true);
     let current = panels.controller.tab;
     egui::TopBottomPanel::top("tabs-controller")
         .exact_height(30.0)

@@ -15,7 +15,6 @@ use crate::core::trim::{TrimCmd, TrimEvent};
 use crate::ui::theme::THEME;
 use crate::ui::widgets::Button;
 
-const PLAYER: DeckId = DeckId::PREPARE;
 /// How much before the end "Hear the end" starts.
 const LEAD_IN: f64 = 5.0;
 
@@ -79,7 +78,7 @@ pub struct TrimPanel<'a> {
 impl Panel for TrimPanel<'_> {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let tab = &mut *self.tab;
-        let snap = cx.engine.snap.as_ref().map(|s| *s.deck(PLAYER));
+        let snap = cx.engine.snap.as_ref().map(|s| *s.deck(target(cx)));
         let Some((track, s)) = snap.and_then(|s| Some((s.track_id?, s))) else {
             ui.weak("Load a track into the player to trim it.");
             return;
@@ -92,14 +91,14 @@ impl Panel for TrimPanel<'_> {
         if tab.track != Some(track) || tab.duration != s.duration {
             tab.reset(track, s.duration);
         }
-        let grid = cx.engine.deck(PLAYER).grid.clone();
+        let grid = cx.engine.deck(target(cx)).grid.clone();
         let snapped = |t: f64, on: bool| match (&grid, on) {
             (Some(g), true) => g.quantize(t).clamp(0.0, s.duration),
             _ => t,
         };
 
         ui.spacing_mut().item_spacing.y = 8.0;
-        ui.label(RichText::new(&cx.engine.deck(PLAYER).title).strong());
+        ui.label(RichText::new(&cx.engine.deck(target(cx)).title).strong());
 
         egui::Grid::new("trim-points")
             .num_columns(4)
@@ -132,7 +131,7 @@ impl Panel for TrimPanel<'_> {
                         .on_hover_text("Move the player here")
                         .clicked()
                     {
-                        cx.send((PLAYER, EngineCmd::Seek(value)));
+                        cx.send((target(cx), EngineCmd::Seek(value)));
                     }
                     ui.end_row();
                     // Start stays before end.
@@ -160,16 +159,16 @@ impl Panel for TrimPanel<'_> {
 
         ui.horizontal(|ui| {
             if ui.add(Button::new("Play from start")).clicked() {
-                cx.send((PLAYER, EngineCmd::Seek(tab.start)));
-                cx.send((PLAYER, EngineCmd::Play(Set::On)));
+                cx.send((target(cx), EngineCmd::Seek(tab.start)));
+                cx.send((target(cx), EngineCmd::Play(Set::On)));
             }
             if ui
                 .add(Button::new("Hear the end"))
                 .on_hover_text("Play the last few seconds before the end")
                 .clicked()
             {
-                cx.send((PLAYER, EngineCmd::Seek((tab.end - LEAD_IN).max(tab.start))));
-                cx.send((PLAYER, EngineCmd::Play(Set::On)));
+                cx.send((target(cx), EngineCmd::Seek((tab.end - LEAD_IN).max(tab.start))));
+                cx.send((target(cx), EngineCmd::Play(Set::On)));
             }
             if ui
                 .add(Button::subtle("Keep all"))
@@ -272,4 +271,9 @@ mod tests {
         assert_eq!(parse_clock("12.5"), Some(12.5));
         assert_eq!(parse_clock("x"), None);
     }
+}
+
+/// The deck the tool works on: Prepare's target.
+fn target(cx: &Cx) -> DeckId {
+    cx.prefs.target()
 }

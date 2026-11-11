@@ -338,9 +338,9 @@ fn prepare() {
     h.state_mut()
         .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
     h.state_mut().dispatch(LibraryCmd::Load(id).into());
-    let prep = DeckId::PREPARE.index();
+    let prep = DeckId::new(0).unwrap().index();
     settle_until(&mut h, |a| a.panels.decks[prep].wave.is_some());
-    let deck = DeckId::PREPARE;
+    let deck = DeckId::new(0).unwrap();
     h.state_mut()
         .dispatch(Command::Deck(deck, DeckCmd::SeekFraction(0.25)));
     steps(&mut h, 5);
@@ -384,9 +384,9 @@ fn start_prepare(test: &str, n: usize) -> H {
     h.state_mut()
         .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
     h.state_mut().dispatch(LibraryCmd::Load(id).into());
-    let prep = DeckId::PREPARE.index();
+    let prep = DeckId::new(0).unwrap().index();
     settle_until(&mut h, |a| {
-        a.panels.decks[prep].wave.is_some() && a.frame.deck(DeckId::PREPARE).grid.is_some()
+        a.panels.decks[prep].wave.is_some() && a.frame.deck(DeckId::new(0).unwrap()).grid.is_some()
     });
     h
 }
@@ -413,7 +413,7 @@ fn press(h: &mut H, modifiers: egui::Modifiers, key: Key) {
 fn first_beat(a: &EarshotApp) -> f64 {
     let inner = a.player.lock().unwrap();
     inner
-        .session(DeckId::PREPARE)
+        .session(DeckId::new(0).unwrap())
         .grid
         .as_ref()
         .expect("a grid")
@@ -422,14 +422,14 @@ fn first_beat(a: &EarshotApp) -> f64 {
 
 /// The track on Prepare's player.
 fn prepared(a: &EarshotApp) -> Option<i64> {
-    a.player.lock().unwrap().session(DeckId::PREPARE).track_id
+    a.player.lock().unwrap().session(DeckId::new(0).unwrap()).track_id
 }
 
 /// Ctrl+← / → nudge Prepare's grid too (not a beat jump).
 #[test]
 fn ctrl_arrows_nudge_the_grid() {
     let mut h = start_prepare("nudge-ctrl", 1);
-    let pos = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().prepare.position;
+    let pos = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().decks[0].position;
     steps(&mut h, 20);
     let (before, at) = (first_beat(h.state()), pos(h.state()));
     press(&mut h, egui::Modifiers::COMMAND, Key::ArrowRight);
@@ -444,7 +444,7 @@ fn ctrl_arrows_nudge_the_grid() {
 fn shift_arrows_nudge_the_grid() {
     let mut h = start_prepare("nudge", 1);
     let id = prepared(h.state()).unwrap();
-    let pos = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().prepare.position;
+    let pos = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().decks[0].position;
     // The player settles on its first cue once the track is in.
     steps(&mut h, 20);
     let (before, at) = (first_beat(h.state()), pos(h.state()));
@@ -461,14 +461,14 @@ fn shift_arrows_nudge_the_grid() {
     );
     // What's drawn has it, it stays, and it's saved: loading the track again keeps it.
     steps(&mut h, 60);
-    let drawn = |a: &EarshotApp| a.frame.deck(DeckId::PREPARE).grid.as_ref().unwrap().times()[0];
+    let drawn = |a: &EarshotApp| a.frame.deck(DeckId::new(0).unwrap()).grid.as_ref().unwrap().times()[0];
     assert!((drawn(h.state()) - (before + 0.010)).abs() < 1e-6);
     let other = ids(&h)[0];
     h.state_mut()
-        .dispatch(Command::Deck(DeckId::PREPARE, DeckCmd::Load(other)));
+        .dispatch(Command::Deck(DeckId::new(0).unwrap(), DeckCmd::Load(other)));
     settle_until(&mut h, |a| prepared(a) == Some(other));
     h.state_mut()
-        .dispatch(Command::Deck(DeckId::PREPARE, DeckCmd::Load(id)));
+        .dispatch(Command::Deck(DeckId::new(0).unwrap(), DeckCmd::Load(id)));
     settle_until(&mut h, |a| prepared(a) == Some(id));
     steps(&mut h, 30);
     assert!(
@@ -484,8 +484,8 @@ fn shift_arrows_nudge_the_grid() {
 fn prepare_keys() {
     let mut h = start_prepare("prepare-keys", 1);
     let id = prepared(h.state()).unwrap();
-    let snap = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().prepare;
-    let grid = h.state().frame.deck(DeckId::PREPARE).grid.clone().unwrap();
+    let snap = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().decks[0];
+    let grid = h.state().frame.deck(DeckId::new(0).unwrap()).grid.clone().unwrap();
     let beats = |a: &EarshotApp| grid.beat_at(snap(a).position);
     // A jump lands on a beat 4 on (from just before the first, the 1 after it).
     let start = beats(h.state());
@@ -524,8 +524,8 @@ fn prepare_keys() {
 fn hot_cues_are_kept_per_track() {
     let mut h = start_prepare("hot-cues", 1);
     let (id, other) = (prepared(h.state()).unwrap(), ids(&h)[0]);
-    let deck = DeckId::PREPARE;
-    let snap = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().prepare;
+    let deck = DeckId::new(0).unwrap();
+    let snap = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().decks[0];
     h.state_mut().dispatch((deck, EngineCmd::Seek(3.0)).into());
     settle_until(&mut h, |a| (snap(a).position - 3.0).abs() < 0.01);
     for press in [earshot_engine::Press::Down, earshot_engine::Press::Up] {
@@ -549,8 +549,8 @@ fn hot_cues_are_kept_per_track() {
 fn the_main_cue_is_kept_per_track() {
     let mut h = start_prepare("main-cue", 1);
     let (id, other) = (prepared(h.state()).unwrap(), ids(&h)[0]);
-    let deck = DeckId::PREPARE;
-    let snap = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().prepare;
+    let deck = DeckId::new(0).unwrap();
+    let snap = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().decks[0];
     h.state_mut().dispatch((deck, EngineCmd::Seek(7.0)).into());
     settle_until(&mut h, |a| (snap(a).position - 7.0).abs() < 0.01);
     for press in [earshot_engine::Press::Down, earshot_engine::Press::Up] {
@@ -589,9 +589,9 @@ fn ctrl_arrows_load_the_next_track() {
     };
     assert_eq!(list.len(), TRACKS.len());
     h.state_mut()
-        .dispatch(ViewCmd::LoadSelected(DeckId::PREPARE).into());
+        .dispatch(ViewCmd::LoadSelected(DeckId::new(0).unwrap()).into());
     // Every load in, so an older one can't land after the next.
-    let prep = DeckId::PREPARE.index();
+    let prep = DeckId::new(0).unwrap().index();
     settle_until(&mut h, |a| {
         prepared(a) == Some(list[0]) && a.panels.decks[prep].pending().is_none()
     });
@@ -614,7 +614,7 @@ fn ctrl_arrows_load_the_next_track() {
 #[test]
 fn only_the_newest_load_lands() {
     let mut h = start_prepare("newest-load", 0);
-    let prep = DeckId::PREPARE;
+    let prep = DeckId::new(0).unwrap();
     let ids = ids(&h);
     let shown = |a: &EarshotApp| a.panels.decks[prep.index()].pending().map(|p| p.track_id);
 
@@ -645,8 +645,8 @@ fn only_the_newest_load_lands() {
 #[test]
 fn c_puts_the_playhead_on_the_cue() {
     let mut h = start_prepare("set-cue", 1);
-    let deck = DeckId::PREPARE;
-    let snap = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().prepare;
+    let deck = DeckId::new(0).unwrap();
+    let snap = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().decks[0];
     if !snap(h.state()).quantize {
         h.state_mut()
             .dispatch((deck, EngineCmd::Quantize(earshot_engine::Set::On)).into());
@@ -672,11 +672,11 @@ fn four_decks() {
     use egui_kittest::kittest::Queryable;
     let mut h = start("four-decks");
     let fx_decks = |h: &H| h.state().player.lock().unwrap().fx_decks;
-    assert!(!h.state().prefs.four_decks);
+    assert!(!h.state().prefs.four_decks());
     assert_eq!(fx_decks(&h), 2);
     h.get_by_label("4 decks").click();
     steps(&mut h, 3);
-    assert!(h.state().prefs.four_decks);
+    assert!(h.state().prefs.four_decks());
     assert_eq!(h.state().prefs.decks().len(), 4);
     // Effects can go on all four.
     assert_eq!(fx_decks(&h), 4);
@@ -696,7 +696,7 @@ fn four_decks() {
     // Not back to two while deck 3 plays out of sight.
     h.get_by_label("2 decks").click();
     steps(&mut h, 3);
-    assert!(h.state().prefs.four_decks);
+    assert!(h.state().prefs.four_decks());
     // Times a frame with four decks shown and playing.
     for d in DeckId::first(4) {
         h.state_mut()
@@ -735,7 +735,7 @@ fn four_decks() {
     });
     h.get_by_label("2 decks").click();
     steps(&mut h, 3);
-    assert!(!h.state().prefs.four_decks);
+    assert!(!h.state().prefs.four_decks());
 }
 
 /// Layout commands land in the preferences, per mode.
@@ -852,7 +852,7 @@ fn l_and_r_switch_the_hands_between_decks() {
     let mut h = start("layers");
     h.state_mut()
         .dispatch(ViewCmd::SetMode(Mode::Perform).into());
-    h.state_mut().dispatch(ViewCmd::FourDecks(true).into());
+    h.state_mut().dispatch(ViewCmd::DeckCount(4).into());
     let id = ids(&h)[0];
     for d in [0, 2] {
         let deck = DeckId::new(d).unwrap();
@@ -887,7 +887,7 @@ fn l_and_r_switch_the_hands_between_decks() {
     settle_until(&mut h, |a| playing(a, 2));
     assert!(!playing(h.state(), 0));
     // Back to two decks: the left hand is on deck 1 again.
-    h.state_mut().dispatch(ViewCmd::FourDecks(false).into());
+    h.state_mut().dispatch(ViewCmd::DeckCount(2).into());
     steps(&mut h, 3);
     assert_eq!(h.state().prefs.active_deck(0), DeckId::new(0).unwrap());
 }
@@ -1101,7 +1101,7 @@ fn edits_undo_and_redo() {
     settle_until(&mut h, |a| cards(a) == 2);
 
     // A grid edit on Prepare's player; undo puts the analysed grid back on it too.
-    let deck = DeckId::PREPARE;
+    let deck = DeckId::new(0).unwrap();
     h.state_mut()
         .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
     h.state_mut().dispatch(LibraryCmd::Load(ids[1]).into());
@@ -1348,16 +1348,16 @@ fn add_to_flow_from_the_track_menu() {
     assert!(!c.linear, "two starting cards: not linked");
 }
 
-/// The FEATURES.md bug: in Prepare, the suggestions' Master is Prepare's player while
-/// it plays. Then the suggestions take focus: browsing and "load selected" use them.
+/// In Prepare, the suggestions' Master is the deck that plays, as in Perform. Then the
+/// suggestions take focus: browsing and "load selected" use them.
 #[test]
-fn master_in_prepare_is_the_player() {
+fn master_in_prepare_is_the_playing_deck() {
     let mut h = start("prepare-master");
     let id = ids(&h)[1];
     h.state_mut()
         .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
     h.state_mut().dispatch(LibraryCmd::Load(id).into());
-    let prep = DeckId::PREPARE;
+    let prep = DeckId::new(0).unwrap();
     settle_until(&mut h, |a| a.panels.decks[prep.index()].wave.is_some());
     h.state_mut().dispatch(Command::from((
         prep,
@@ -1380,7 +1380,8 @@ fn master_in_prepare_is_the_player() {
         app.panels.library.focused_track(&app.panels.flow),
         Some(pick)
     );
-    let a = DeckId::new(0).unwrap();
+    // Onto the other deck: deck 1 is playing.
+    let a = DeckId::new(1).unwrap();
     app.dispatch(ViewCmd::LoadSelected(a).into());
     settle_until(&mut h, |app| app.panels.decks[a.index()].wave.is_some());
     assert_eq!(
@@ -1447,14 +1448,14 @@ fn deck_options_survive_a_restart() {
         .dispatch((deck1, EngineCmd::Keylock(earshot_engine::Set::On)).into());
     h.state_mut().dispatch(
         (
-            DeckId::PREPARE,
+            DeckId::new(0).unwrap(),
             EngineCmd::Quantize(earshot_engine::Set::Off),
         )
             .into(),
     );
     let want = |o: &[DeckOptions]| {
         o.first().is_some_and(|d| d.keylock)
-            && o.get(DeckId::PREPARE.index()).is_some_and(|d| !d.quantize)
+            && o.get(DeckId::new(0).unwrap().index()).is_some_and(|d| !d.quantize)
     };
     settle_until(&mut h, |a| {
         settings::read::<Vec<DeckOptions>>(&a.lib.store.reader, settings::DECK_OPTIONS)
@@ -1477,7 +1478,7 @@ fn deck_options_survive_a_restart() {
         a.frame
             .snap
             .as_ref()
-            .is_some_and(|s| s.deck(deck1).keylock && !s.deck(DeckId::PREPARE).quantize)
+            .is_some_and(|s| s.deck(deck1).keylock && !s.deck(DeckId::new(0).unwrap()).quantize)
     });
 }
 
@@ -1627,8 +1628,8 @@ fn cue_first_beat_setting() {
     h.state_mut()
         .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
     h.state_mut().dispatch(LibraryCmd::Load(id).into());
-    settle_until(&mut h, |a| a.frame.deck(DeckId::PREPARE).grid.is_some());
-    let snap = h.state().frame.snap.as_ref().unwrap().prepare;
+    settle_until(&mut h, |a| a.frame.deck(DeckId::new(0).unwrap()).grid.is_some());
+    let snap = h.state().frame.snap.as_ref().unwrap().decks[0];
     assert_eq!(snap.cue_point, 0.0);
 }
 
@@ -2084,7 +2085,7 @@ fn everything_fits_at_the_narrowest_window() {
         (Mode::Prepare, false),
     ] {
         h.state_mut().dispatch(ViewCmd::SetMode(mode).into());
-        h.state_mut().dispatch(ViewCmd::FourDecks(four).into());
+        h.state_mut().dispatch(ViewCmd::DeckCount(if four { 4 } else { 2 }).into());
         steps(&mut h, 30);
         // Every widget with a place on screen (text runs are left out: a
         // right-aligned label's is reported further right than it's drawn).
@@ -2152,11 +2153,10 @@ fn show_in_library_goes_back_to_where_it_came_from() {
     settle_until(&mut h, |a| shown_in(a, &Scope::All, Source::AllTracks));
 }
 
-/// Prepare isn't opened while a deck plays (the bottom bar says why); going back to
-/// Perform stops Prepare's player; closing the window while a deck plays asks first.
+/// Every mode has the same decks: switching modes while a deck plays leaves it
+/// playing. Closing the window while a deck plays asks first, in any mode.
 #[test]
-fn mode_switches_and_quitting_mind_whats_playing() {
-    use egui_kittest::kittest::Queryable;
+fn mode_switches_leave_the_decks_and_quitting_asks() {
     let mut h = start_with("mode-switch", stand_in);
     let id = ids(&h)[0];
     let deck = h.state().prefs.decks()[0];
@@ -2168,13 +2168,14 @@ fn mode_switches_and_quitting_mind_whats_playing() {
     h.state_mut().dispatch(play(deck, true));
     settle_until(&mut h, |a| playing(a, deck));
 
-    h.state_mut()
-        .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
-    steps(&mut h, 2);
-    assert_eq!(h.state().prefs.mode, Mode::Perform);
-    h.get_by_label_contains("Stop the playing decks before switching to Prepare.");
+    for mode in [Mode::Prepare, Mode::Controller, Mode::Perform, Mode::Prepare] {
+        h.state_mut().dispatch(ViewCmd::SetMode(mode).into());
+        steps(&mut h, 3);
+        assert_eq!(h.state().prefs.mode, mode);
+        assert!(playing(h.state(), deck), "still playing in {mode:?}");
+    }
 
-    // Closing the window: asked, and Cancel keeps it open.
+    // Closing the window (here in Prepare): asked, and Cancel keeps it open.
     h.input_mut()
         .viewports
         .entry(egui::ViewportId::ROOT)
@@ -2186,35 +2187,33 @@ fn mode_switches_and_quitting_mind_whats_playing() {
     h.get_by_label("Cancel").click();
     steps(&mut h, 2);
     assert!(h.query_by_label("Do you really want to quit?").is_none());
-
-    h.state_mut().dispatch(play(deck, false));
-    settle_until(&mut h, |a| !playing(a, deck));
-    h.state_mut()
-        .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
-    assert_eq!(h.state().prefs.mode, Mode::Prepare);
-    let prepare = DeckId::PREPARE;
-    h.state_mut().load(Some(prepare), id);
-    settle_until(&mut h, |a| a.panels.decks[prepare.index()].wave.is_some());
-    h.state_mut().dispatch(play(prepare, true));
-    settle_until(&mut h, |a| playing(a, prepare));
-    h.state_mut()
-        .dispatch(ViewCmd::SetMode(Mode::Perform).into());
-    assert_eq!(h.state().prefs.mode, Mode::Perform);
-    settle_until(&mut h, |a| !playing(a, prepare));
 }
 
-/// A track dropped anywhere on Prepare's player panel loads, as on a Perform deck
-/// (not just on its waveform).
+/// Prepare's tools follow the target deck, picked in the top bar: deck 1 to begin
+/// with, and back to deck 1 when the deck count hides the one picked.
 #[test]
-fn a_track_drops_onto_prepares_player_panel() {
-    let mut h = start_prepare("prepare-drop", 0);
-    let other = ids(&h)[1];
-    h.state_mut()
-        .dispatch(ViewCmd::Source(Some(Source::AllTracks)).into());
+fn the_target_deck_is_picked_in_prepare() {
+    let mut h = start("prepare-target");
+    h.state_mut().dispatch(ViewCmd::SetMode(Mode::Prepare).into());
     steps(&mut h, 3);
-    let (from, to) = (at(&h, &title(&h, other)).center(), at(&h, "Q").center());
-    drag(&mut h, from, to, |_| {});
-    settle_until(&mut h, |a| prepared(a) == Some(other));
+    let deck = |i| DeckId::new(i).unwrap();
+    assert_eq!(h.state().prefs.target(), deck(0));
+    h.state_mut().dispatch(ViewCmd::Target(deck(1)).into());
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.target(), deck(1));
+    // A double-click load in Prepare goes to the target.
+    let id = ids(&h)[2];
+    h.state_mut().load(None, id);
+    settle_until(&mut h, |a| a.panels.decks[1].wave.is_some());
+    assert_eq!(
+        h.state().player.lock().unwrap().session(deck(1)).track_id,
+        Some(id)
+    );
+    // One deck: deck 2 is hidden, so the tools are on deck 1 again.
+    h.state_mut().dispatch(ViewCmd::DeckCount(1).into());
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.decks().len(), 1);
+    assert_eq!(h.state().prefs.target(), deck(0));
 }
 
 /// Controller mode: Perform's decks, then the Mapping and Library tabs. MIDI messages
@@ -2237,5 +2236,5 @@ fn controller_mode_has_the_decks_and_its_tabs() {
     h.get_all_by_label("Library").next().unwrap().click();
     steps(&mut h, 5);
     assert!(h.query_all_by_label("Copy report").count() == 0);
-    assert!(h.state().prefs.mode.decks());
+    assert_eq!(h.state().prefs.mode, Mode::Controller);
 }

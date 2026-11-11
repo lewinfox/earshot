@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use earshot_engine::OutputInfo;
+use earshot_engine::{DeckId, OutputInfo};
 use egui::{RichText, Ui};
 
 use super::{Cx, Panel};
@@ -144,7 +144,10 @@ impl Panel for TopBar<'_> {
             if mode != cx.prefs.mode {
                 cx.send(ViewCmd::SetMode(mode));
             }
-            if mode.decks() {
+            if mode == Mode::Prepare {
+                target(ui, cx);
+            }
+            {
                 deck_count(ui, cx);
                 layers(ui, cx);
                 panes(ui, cx);
@@ -413,7 +416,7 @@ fn centred_fx(ui: &mut Ui, cx: &mut Cx) {
 /// `[1] | [2]` in the decks' colours. The left switches between 1 and 3, the right
 /// between 2 and 4. A controller has its own buttons.
 fn layers(ui: &mut Ui, cx: &mut Cx) {
-    if !cx.prefs.four_decks || cx.prefs.controller() {
+    if !cx.prefs.four_decks() || cx.prefs.controller() {
         return;
     }
     ui.scope(|ui| {
@@ -446,22 +449,47 @@ fn layers(ui: &mut Ui, cx: &mut Cx) {
 }
 
 fn deck_count(ui: &mut Ui, cx: &mut Cx) {
-    let four = cx.prefs.four_decks;
-    let hidden_playing = cx
-        .engine
-        .snap
-        .as_ref()
-        .is_some_and(|s| s.live().iter().skip(2).any(|d| d.playing));
+    let now = cx.prefs.decks().len();
+    // Fewer decks can't hide one that's playing.
+    let playing_past = |n: usize| {
+        cx.engine
+            .snap
+            .as_ref()
+            .is_some_and(|s| s.live().iter().skip(n).any(|d| d.playing))
+    };
     let counts = [
-        Seg::new(false, "2 decks")
+        Seg::new(1, "1 deck")
+            .tip("One deck")
+            .enabled(!playing_past(1))
+            .disabled_tip("Stop the other decks first"),
+        Seg::new(2, "2 decks")
             .tip("Two decks")
-            .enabled(!hidden_playing)
+            .enabled(!playing_past(2))
             .disabled_tip("Stop decks 3 and 4 first"),
-        Seg::new(true, "4 decks").tip("Four decks, smaller"),
+        Seg::new(4, "4 decks").tip("Four decks, smaller"),
     ];
-    if let Some(four) = segmented(ui, four, &counts) {
-        cx.send(ViewCmd::FourDecks(four));
+    if let Some(n) = segmented(ui, now, &counts) {
+        cx.send(ViewCmd::DeckCount(n));
     }
+}
+
+/// Prepare's target: which showing deck its tools work on.
+fn target(ui: &mut Ui, cx: &mut Cx) {
+    let current = cx.prefs.target();
+    let name = |d: DeckId| format!("Deck {}", d.index() + 1);
+    ui.label(RichText::new("Tools on").color(cx.theme.muted));
+    egui::ComboBox::from_id_salt("target-deck")
+        .selected_text(name(current))
+        .width(70.0)
+        .show_ui(ui, |ui| {
+            for d in cx.prefs.decks() {
+                if ui.selectable_label(d == current, name(d)).clicked() && d != current {
+                    cx.send(ViewCmd::Target(d));
+                }
+            }
+        })
+        .response
+        .on_hover_text("The deck whose track Prepare's tools (tempo lock, stems, trim) work on");
 }
 
 /// A job's line: spinner (or "queued"), what it's doing, and its bar when counted.

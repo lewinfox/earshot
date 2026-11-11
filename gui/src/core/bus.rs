@@ -756,11 +756,7 @@ enum MixxxGroup {
 
 impl MixxxGroup {
     fn name(self, deck: DeckId) -> String {
-        let channel = if deck.is_prepare() {
-            "[PreviewDeck1]".to_string()
-        } else {
-            format!("[Channel{}]", deck.index() + 1)
-        };
+        let channel = format!("[Channel{}]", deck.index() + 1);
         match self {
             MixxxGroup::Channel => channel,
             MixxxGroup::Eq => format!("[EqualizerRack1_{channel}_Effect1]"),
@@ -783,16 +779,12 @@ impl MixxxGroup {
         } else {
             (MixxxGroup::Channel, group)
         };
-        let deck = if channel == "[PreviewDeck1]" {
-            DeckId::PREPARE
-        } else {
-            let n: usize = channel
-                .strip_prefix("[Channel")?
-                .strip_suffix(']')?
-                .parse()
-                .ok()?;
-            DeckId::new(n.checked_sub(1)?)?
-        };
+        let n: usize = channel
+            .strip_prefix("[Channel")?
+            .strip_suffix(']')?
+            .parse()
+            .ok()?;
+        let deck = DeckId::new(n.checked_sub(1)?)?;
         Some((kind, deck))
     }
 }
@@ -874,10 +866,9 @@ impl Control {
             Control::Deck(_, DeckControl::LoadStep(n)) => {
                 format!("load the {} track", if n < 0 { "previous" } else { "next" })
             }
-            Control::Deck(deck, DeckControl::LoadSelected) => match deck_letter(deck) {
-                Some(l) => format!("load to deck {l}"),
-                None => "load the selected track".into(),
-            },
+            Control::Deck(deck, DeckControl::LoadSelected) => {
+                format!("load to deck {}", deck_letter(deck))
+            }
             _ => self.spec().help.into(),
         }
     }
@@ -960,9 +951,9 @@ impl Control {
     }
 }
 
-/// "A", "B", … for decks; `None` for Prepare's player.
-pub fn deck_letter(deck: DeckId) -> Option<char> {
-    (!deck.is_prepare()).then(|| (b'A' + deck.index() as u8) as char)
+/// "A", "B", … for decks 1, 2, ….
+pub fn deck_letter(deck: DeckId) -> char {
+    (b'A' + deck.index() as u8) as char
 }
 
 #[cfg(test)]
@@ -1035,9 +1026,9 @@ mod tests {
             Some(0.75)
         );
         assert_eq!(Control::Master(MasterParam::HeadMix).get(&snap), Some(0.5));
-        snap.prepare.keylock = true;
+        snap.decks[0].keylock = true;
         assert_eq!(
-            Control::Deck(DeckId::PREPARE, DeckControl::Keylock).get(&snap),
+            Control::Deck(DeckId::new(0).unwrap(), DeckControl::Keylock).get(&snap),
             Some(1.0)
         );
     }
@@ -1096,8 +1087,7 @@ mod tests {
 
     #[test]
     fn mixxx_names_round_trip() {
-        let decks = DeckId::first(MAX_DECKS).chain([DeckId::PREPARE]);
-        for d in decks {
+        for d in DeckId::first(MAX_DECKS) {
             for c in DeckControl::ALL
                 .iter()
                 .chain(&[DeckControl::Hotcue(7), DeckControl::BeatLoop(0.5)])
@@ -1119,9 +1109,10 @@ mod tests {
             Some(Control::Deck(deck(1), DeckControl::Eq(EQ_LOW)))
         );
         assert_eq!(
-            Control::from_mixxx("[PreviewDeck1]", "beatloop_16_toggle"),
-            Some(Control::Deck(DeckId::PREPARE, DeckControl::BeatLoop(16.0)))
+            Control::from_mixxx("[Channel1]", "beatloop_16_toggle"),
+            Some(Control::Deck(deck(0), DeckControl::BeatLoop(16.0)))
         );
+        assert_eq!(Control::from_mixxx("[PreviewDeck1]", "play"), None);
         assert_eq!(
             Control::from_mixxx("[Library]", "MoveVertical"),
             Some(Control::Library(LibraryControl::Browse))

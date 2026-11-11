@@ -71,6 +71,9 @@ pub struct Binding {
     pub control: Control,
     /// The number after the control, if any.
     pub arg: Option<f64>,
+    /// On Prepare's target deck (the file's `target`), whichever deck that is when the
+    /// key is pressed. `control` names deck 1 until then.
+    pub on_target: bool,
 }
 
 impl Binding {
@@ -228,10 +231,8 @@ impl Keymap {
                 continue;
             }
             let (title, deck) = match b.control {
-                Control::Deck(d, _) => match deck_letter(d) {
-                    Some(l) => (format!("Deck {l}"), Some(d)),
-                    None => ("Player".to_string(), Some(d)),
-                },
+                Control::Deck(..) if b.on_target => ("Target deck".to_string(), None),
+                Control::Deck(d, _) => (format!("Deck {}", deck_letter(d)), Some(d)),
                 Control::Master(_) => ("Mixer".to_string(), None),
                 Control::Fx(..) => ("Effects".to_string(), None),
                 Control::Library(LibraryControl::Undo | LibraryControl::Redo) => {
@@ -285,6 +286,9 @@ fn parse_line(line: &str) -> Result<Binding, String> {
         _ => return Err("too many words".into()),
     };
     let unknown = || format!("no control {control} on {target}");
+    // `prepare` is what the file called the target before Prepare had decks.
+    let on_target = matches!(*target, "target" | "prepare");
+    let target = if on_target { &"deck1" } else { target };
     let control = match *target {
         "library" => Control::Library(
             LibraryControl::ALL
@@ -320,14 +324,11 @@ fn parse_line(line: &str) -> Result<Binding, String> {
             )
         }
         t => {
-            let deck = match t {
-                "prepare" => DeckId::PREPARE,
-                _ => t
-                    .strip_prefix("deck")
-                    .and_then(|n| n.parse::<usize>().ok())
-                    .and_then(|n| DeckId::new(n.checked_sub(1)?))
-                    .ok_or_else(|| format!("unknown target {t}"))?,
-            };
+            let deck = t
+                .strip_prefix("deck")
+                .and_then(|n| n.parse::<usize>().ok())
+                .and_then(|n| DeckId::new(n.checked_sub(1)?))
+                .ok_or_else(|| format!("unknown target {t}"))?;
             Control::Deck(deck, DeckControl::parse(control, arg).ok_or_else(unknown)?)
         }
     };
@@ -339,6 +340,7 @@ fn parse_line(line: &str) -> Result<Binding, String> {
         ctrl,
         control,
         arg,
+        on_target,
     })
 }
 
@@ -468,7 +470,7 @@ mod tests {
     #[test]
     fn prepare_keys() {
         use Mode::Prepare;
-        let p = DeckId::PREPARE;
+        let p = DeckId::new(0).unwrap();
         assert!(matches!(
             press(Prepare, "Space", false),
             Some(Command::Deck(d, DeckCmd::Engine(EngineCmd::Play(Set::Toggle)))) if d == p
@@ -581,7 +583,7 @@ mod tests {
         assert!(!a.iter().any(|r| r.1.starts_with("clear")), "in the note");
         let help = km.help(Mode::Prepare);
         let player = &help[0].rows;
-        assert_eq!(help[0].title, "Player");
+        assert_eq!(help[0].title, "Target deck");
         assert!(player.contains(&("6".into(), "loop 1 bar".into())));
         assert!(player.contains(&("9".into(), "loop 8 bars".into())));
         assert!(player.contains(&("Shift →".into(), "nudge the grid 10 ms later".into())));

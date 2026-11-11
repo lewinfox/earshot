@@ -245,10 +245,7 @@ fn summary(map: &Mapping, hits: &[Hit], strays: usize) -> String {
 fn name(c: Control) -> String {
     let what = c.describe(None);
     match c {
-        Control::Deck(d, _) => match deck_letter(d) {
-            Some(l) => format!("deck {l}: {what}"),
-            None => what,
-        },
+        Control::Deck(d, _) => format!("deck {}: {what}", deck_letter(d)),
         _ => what,
     }
 }
