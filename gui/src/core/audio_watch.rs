@@ -89,15 +89,20 @@ pub fn describe(snap: &EngineSnapshot) -> String {
 }
 
 /// Start watching. `report` gets how long it's been quiet and what the decks were
-/// doing, on its own thread.
-pub fn start(player: Player, report: impl Fn(Duration, String) + Send + 'static) {
+/// doing, on its own thread, which ends once the player is gone (the app closed).
+pub fn start(player: &Player, report: impl Fn(Duration, String) + Send + 'static) {
+    let player = std::sync::Arc::downgrade(player);
     std::thread::Builder::new()
         .name("earshot-audio-watch".into())
         .spawn(move || {
             let mut watch = Watch::default();
             loop {
                 std::thread::sleep(TICK);
+                let Some(player) = player.upgrade() else {
+                    return;
+                };
                 let snap = player.lock().unwrap().device_snapshot();
+                drop(player);
                 if let Some(quiet) = watch.tick(Instant::now(), snap.as_ref().map(|s| s.callbacks))
                     && let Some(s) = &snap
                 {

@@ -375,23 +375,10 @@ fn cue_loop_call() {
     let pos = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().deck(deck).position;
     let memories = |a: &EarshotApp| a.cues.get(&id).map_or(0, |c| c.memories.len());
     let duration = h.state().frame.snap.as_ref().unwrap().deck(deck).duration;
-    // The track's cues are in from the Store (they put the playhead on the cue when
-    // they arrive, so seeking before then can be undone).
-    settle_until(&mut h, |a| a.cues.contains_key(&id));
-    steps(&mut h, 5);
     // Memory cues at a quarter and half way.
     for (n, at) in [(1, 0.25), (2, 0.5)] {
-        // Seek, and again if something just after loading (a busy machine's late
-        // news) put the playhead back.
-        let there = |a: &EarshotApp| (pos(a) - at * duration).abs() < 0.1;
-        for _ in 0..20 {
-            h.state_mut().dispatch(Command::Deck(deck, DeckCmd::SeekFraction(at)));
-            steps(&mut h, 20);
-            if there(h.state()) {
-                break;
-            }
-        }
-        assert!(there(h.state()), "the seek landed");
+        h.state_mut().dispatch(Command::Deck(deck, DeckCmd::SeekFraction(at)));
+        settle_until(&mut h, |a| (pos(a) - at * duration).abs() < 0.1);
         h.state_mut().dispatch(Command::Deck(deck, DeckCmd::SetCue));
         settle_until(&mut h, |a| {
             (a.frame.snap.as_ref().unwrap().deck(deck).cue_point - at * duration).abs() < 0.5
@@ -432,6 +419,47 @@ fn cue_loop_call() {
     settle_until(&mut h, |a| (len(a) - before).abs() < 0.01);
 }
 
+/// SHIFT + RELOOP/EXIT makes the nearest memory loop the active loop; the deck then
+/// starts it by itself when playback gets there. Pressed again, it stops being.
+#[test]
+fn active_loop() {
+    use crate::core::bus::{Control, DeckControl};
+    let mut h = start_prepare("active-loop", 1);
+    let deck = DeckId::new(0).unwrap();
+    let id = ids(&h)[1];
+    let snap = |a: &EarshotApp| *a.frame.snap.as_ref().unwrap().deck(deck);
+    let toggle = |h: &mut H| {
+        let cmd = Control::Deck(deck, DeckControl::LoopActiveToggle).command(1.0).unwrap();
+        h.state_mut().dispatch(cmd);
+    };
+    let active = |a: &EarshotApp| {
+        a.cues.get(&id).and_then(|c| c.memories.iter().find(|m| m.active).map(|m| m.id))
+    };
+    // A 4-beat loop a quarter of the way in, saved, and left.
+    let duration = snap(h.state()).duration;
+    h.state_mut().dispatch(Command::Deck(deck, DeckCmd::SeekFraction(0.25)));
+    settle_until(&mut h, |a| (snap(a).position - 0.25 * duration).abs() < 0.1);
+    h.state_mut().dispatch((deck, EngineCmd::BeatLoop(4.0)).into());
+    settle_until(&mut h, |a| snap(a).loop_active);
+    let (start, end) = (snap(h.state()).loop_in.unwrap(), snap(h.state()).loop_out.unwrap());
+    h.state_mut().dispatch(Command::Deck(deck, DeckCmd::SaveMemory));
+    settle_until(&mut h, |a| a.cues.get(&id).is_some_and(|c| c.memories.len() == 1));
+    h.state_mut().dispatch((deck, EngineCmd::Reloop(earshot_engine::Set::Off)).into());
+    settle_until(&mut h, |a| !snap(a).loop_active);
+    // Made active: the engine has it.
+    toggle(&mut h);
+    settle_until(&mut h, |a| active(a).is_some());
+    settle_until(&mut h, |a| snap(a).active_loop == Some((start, end)));
+    // Played onto from before it: it turns on.
+    h.state_mut().dispatch(Command::Deck(deck, DeckCmd::Engine(EngineCmd::Seek(start - 0.3))));
+    h.state_mut().dispatch((deck, EngineCmd::Play(earshot_engine::Set::On)).into());
+    settle_until(&mut h, |a| snap(a).loop_active && snap(a).loop_in == Some(start));
+    // Pressed again (the loop playing is the one): no longer active.
+    toggle(&mut h);
+    settle_until(&mut h, |a| active(a).is_none());
+    settle_until(&mut h, |a| snap(a).active_loop.is_none());
+}
+
 /// Prepare's Flow tab with two cards and the "+" suggestions open.
 #[test]
 fn flow() {
@@ -458,8 +486,14 @@ fn start_prepare(test: &str, n: usize) -> H {
         .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
     h.state_mut().dispatch(LibraryCmd::Load(id).into());
     let prep = DeckId::new(0).unwrap().index();
+    // The app's waveform and grid, and the engine's own news that it has the track
+    // (the app fills its side in before the engine has taken the load).
     settle_until(&mut h, |a| {
-        a.panels.decks[prep].wave.is_some() && a.frame.deck(DeckId::new(0).unwrap()).grid.is_some()
+        let deck = DeckId::new(0).unwrap();
+        let engine = a.frame.snap.as_ref().map(|s| s.deck(deck));
+        a.panels.decks[prep].wave.is_some()
+            && a.frame.deck(deck).grid.is_some()
+            && engine.is_some_and(|d| d.track_id == Some(id) && d.duration > 0.0)
     });
     h
 }
@@ -851,10 +885,28 @@ fn the_effect_unit_is_in_the_top_bar() {
         .into_iter()
         .find(|k| *k != kind(h.state()))
         .unwrap();
-    h.get_by_value(kind(h.state()).name()).click();
+    // The effect's dropdown is the first (the release's is after it).
+    h.query_all_by_value(kind(h.state()).name()).next().unwrap().click();
     steps(&mut h, 3);
     h.get_by_label(next.name()).click();
     settle_until(&mut h, |a| kind(a) == next);
+    // On, then released: off, and the release echo rings.
+    let unit = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().mixer.fx[0];
+    h.get_by_label("ON").click();
+    settle_until(&mut h, |a| unit(a).enabled);
+    h.get_by_label("REL").click();
+    settle_until(&mut h, |a| !unit(a).enabled);
+    // Two taps half a second apart: 120 BPM, shown on the button; AUTO undoes it.
+    let t0 = std::time::Instant::now();
+    for at in [t0, t0 + std::time::Duration::from_millis(500)] {
+        h.state_mut()
+            .dispatch(Command::App(crate::core::command::AppCmd::FxTap { unit: 0, at }));
+    }
+    settle_until(&mut h, |a| unit(a).tap_bpm == Some(120.0));
+    steps(&mut h, 3);
+    assert!(h.query_by_label("TAP 120").is_some());
+    h.get_by_label("AUTO").click();
+    settle_until(&mut h, |a| unit(a).tap_bpm.is_none());
 }
 
 /// However the mixer and effects are switched, both decks stay inside the window:
@@ -1398,6 +1450,133 @@ fn folders_in_each_section() {
     }
     steps(&mut h, 3);
     render(&mut h, "folders");
+}
+
+/// The browse knob reaches every pane: Next goes from the sources into a tree, into
+/// a folder, into a crate's tracks; Prev comes back out (closing the folder) to the
+/// sources, where turning picks another source. Whatever it's on shows at once.
+#[test]
+fn browsing_with_the_knob() {
+    use crate::ui::panels::library::Level;
+    let mut h = start("browse-knob");
+    let ids = ids(&h);
+    h.state_mut().dispatch(
+        CollectionCmd::CreateFolder {
+            section: Section::Crates,
+            parent: None,
+        }
+        .into(),
+    );
+    settle_until(&mut h, |a| a.collections.children(None).len() == 1);
+    let folder = h.state().collections.children(None)[0].id;
+    let inner = make(&mut h, CollectionKind::Crate, "Inner", ids[..2].to_vec());
+    h.state_mut().dispatch(CollectionCmd::Move(inner, Some(folder)).into());
+    settle_until(&mut h, |a| a.collections.get(inner).unwrap().parent == Some(folder));
+    make(&mut h, CollectionKind::Crate, "Top", ids[2..3].to_vec());
+    use crate::ui::panels::library::TreeKey;
+    let lib = |h: &H| {
+        let l = &h.state().panels.library;
+        let id = match &l.tree_cursor {
+            Some(TreeKey::Collection(id)) => Some(*id),
+            _ => None,
+        };
+        (l.level, id)
+    };
+    let showing = |h: &H| h.state().panels.library.browser.scope().clone();
+    let nav = |h: &mut H, cmd: ViewCmd| {
+        h.state_mut().dispatch(cmd.into());
+        steps(h, 3);
+    };
+    nav(&mut h, ViewCmd::Source(Some(Source::Crates)));
+    assert_eq!(lib(&h).0, Level::Sources);
+    // Into the tree: on its first row, shown.
+    nav(&mut h, ViewCmd::PaneStep(1));
+    let rows = {
+        let a = h.state();
+        a.panels.library.collections.visible(&a.collections, Section::Crates)
+    };
+    assert_eq!(lib(&h), (Level::Tree, Some(rows[0].0)));
+    // Turn to the folder, and go into it: on the crate inside, its tracks listed.
+    let at = rows.iter().position(|(id, _)| *id == folder).unwrap() as i32;
+    nav(&mut h, ViewCmd::Browse(at));
+    assert_eq!(lib(&h), (Level::Tree, Some(folder)));
+    nav(&mut h, ViewCmd::PaneStep(1));
+    assert_eq!(lib(&h), (Level::Tree, Some(inner)));
+    assert_eq!(showing(&h), Scope::Collection(inner));
+    render(&mut h, "browse-knob");
+    // Into its tracks, on the first: the knob moves on through them.
+    nav(&mut h, ViewCmd::PaneStep(1));
+    assert_eq!(lib(&h).0, Level::List);
+    let focused = |h: &H| h.state().panels.library.browser.focused();
+    let first = h.state().panels.library.browser.shown()[0];
+    assert_eq!(focused(&h), Some(first));
+    nav(&mut h, ViewCmd::Browse(1));
+    assert_eq!(focused(&h), Some(h.state().panels.library.browser.shown()[1]));
+    // Back out: the crate, then its folder (closed), then the sources.
+    nav(&mut h, ViewCmd::PaneStep(-1));
+    assert_eq!(lib(&h), (Level::Tree, Some(inner)));
+    nav(&mut h, ViewCmd::PaneStep(-1));
+    assert_eq!(lib(&h), (Level::Tree, Some(folder)));
+    let a = h.state();
+    let rows = a.panels.library.collections.visible(&a.collections, Section::Crates);
+    assert!(rows.iter().all(|(id, _)| *id != inner), "the folder closed");
+    nav(&mut h, ViewCmd::PaneStep(-1));
+    assert_eq!(lib(&h).0, Level::Sources);
+    // Turning there picks the next source, at once.
+    nav(&mut h, ViewCmd::Browse(1));
+    assert_eq!(h.state().prefs.layout().source, Some(Source::Flows));
+    nav(&mut h, ViewCmd::Browse(-2));
+    assert_eq!(h.state().prefs.layout().source, Some(Source::Playlists));
+    // Manage goes no further than itself: Next stays, Prev comes back.
+    nav(&mut h, ViewCmd::Source(Some(Source::Manage)));
+    nav(&mut h, ViewCmd::PaneStep(1));
+    assert_eq!(lib(&h).0, Level::Inside);
+    nav(&mut h, ViewCmd::Browse(1));
+    assert_eq!(h.state().prefs.layout().source, Some(Source::Manage));
+    nav(&mut h, ViewCmd::PaneStep(-1));
+    assert_eq!(lib(&h).0, Level::Sources);
+    // All tracks: into its lists (all of them, then by analysis), not its tracks.
+    use crate::ui::panels::library::browser::AllRow;
+    nav(&mut h, ViewCmd::Source(Some(Source::AllTracks)));
+    nav(&mut h, ViewCmd::PaneStep(1));
+    let all = |h: &H| h.state().panels.library.tree_cursor.clone();
+    assert_eq!(lib(&h).0, Level::Tree);
+    assert_eq!(all(&h), Some(TreeKey::All(AllRow::All)));
+    nav(&mut h, ViewCmd::Browse(1));
+    assert!(matches!(all(&h), Some(TreeKey::All(AllRow::Status(_)))));
+    nav(&mut h, ViewCmd::PaneStep(1));
+    assert_eq!(lib(&h).0, Level::List);
+    nav(&mut h, ViewCmd::PaneStep(-1));
+    assert!(matches!(all(&h), Some(TreeKey::All(AllRow::Status(_)))));
+}
+
+/// Related tracks opens the suggestions with the knob on them; VIEW hides the decks.
+#[test]
+fn related_tracks_and_a_bigger_library() {
+    let mut h = start("related");
+    h.state_mut().dispatch(ViewCmd::Aside(None).into());
+    steps(&mut h, 2);
+    let cmd = |name: &str| crate::core::bus::Control::parse(name, None).unwrap().0.command(1.0).unwrap();
+    h.state_mut().dispatch(cmd("library_related_tracks_toggle"));
+    steps(&mut h, 3);
+    assert_eq!(
+        h.state().prefs.layout().aside,
+        Some(crate::core::view::Aside::Suggestions)
+    );
+    assert_eq!(h.state().panels.library.focused_pane, Pane::Suggest);
+    // Again: closed, the knob back on the track list.
+    h.state_mut().dispatch(cmd("library_related_tracks_toggle"));
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.layout().aside, None);
+    assert_eq!(h.state().panels.library.focused_pane, Pane::Library);
+    let decks = |h: &H| h.query_all_by_label("SYNC").count();
+    assert_eq!(decks(&h), 2);
+    h.state_mut().dispatch(cmd("ui_library_maximize_toggle"));
+    steps(&mut h, 10);
+    assert_eq!(decks(&h), 0, "the decks are hidden");
+    h.state_mut().dispatch(cmd("ui_library_maximize_toggle"));
+    steps(&mut h, 10);
+    assert_eq!(decks(&h), 2);
 }
 
 /// "Add to Flow ▸ <Flow>" in the track menu adds a card that follows nothing.
@@ -2070,6 +2249,31 @@ fn library_tracks_in_the_table() {
         ViewCmd::Source(Some(crate::core::view::Source::Program(SourceKind::Mixxx))).into(),
     );
     steps(&mut h, 3);
+    // The browse knob steps through Mixxx's tree as through earshot's: its All
+    // tracks, then its playlist, listed as the knob lands on it.
+    {
+        use crate::ui::panels::library::TreeKey;
+        let nav = |h: &mut H, cmd: ViewCmd| {
+            h.state_mut().dispatch(cmd.into());
+            steps(h, 3);
+        };
+        nav(&mut h, ViewCmd::PaneStep(1));
+        let cursor = |h: &H| h.state().panels.library.tree_cursor.clone();
+        assert_eq!(cursor(&h), Some(TreeKey::Node((source.id, None))));
+        nav(&mut h, ViewCmd::Browse(1));
+        assert_eq!(cursor(&h), Some(TreeKey::Node((source.id, Some(vec![0])))));
+        assert_eq!(
+            h.state().panels.library.external.open_list(),
+            Some((source.id, Some(vec![0])))
+        );
+        // Into the playlist: on its (one) track, which is what "load" loads.
+        nav(&mut h, ViewCmd::PaneStep(1));
+        assert_eq!(h.state().panels.library.external.focused(), Some(outside));
+        let flow = &h.state().panels.flow;
+        assert_eq!(h.state().panels.library.focused_track(flow), Some(outside));
+        nav(&mut h, ViewCmd::PaneStep(-1));
+        nav(&mut h, ViewCmd::PaneStep(-1));
+    }
     h.get_by_label("All tracks (2)").click();
     steps(&mut h, 3);
     h.get_by_label("Only in Mixxx");

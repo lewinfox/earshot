@@ -27,12 +27,23 @@ pub enum Input {
     Note,
     /// A 7-bit absolute CC, across the control's travel.
     Cc,
+    /// A 14-bit controller, as MIDI 1.0 names it: this message is the MSB (the
+    /// coarse half), and the control with this number on the same channel the LSB
+    /// (the fine half), which follows it. Set by hand; MIDI's convention is the
+    /// coarse control + 32. The value goes when the LSB comes.
+    Cc14(u8),
     /// A relative encoder: 1..63 = +n steps, 65..127 = -(128 - v) steps.
     Relative,
     /// A jog wheel's turn, centred on 64 (65 = one tick forward, 63 one back), with
     /// this many ticks to a turn. The value is seconds of track: a turn is as far as
     /// a record goes in one turn at 33⅓ rpm, 1.8 s.
     Jog(u32),
+}
+
+/// Where a 14-bit control whose coarse half is `key` usually sends its fine half:
+/// MIDI's convention, the control + 32 (a CC 0-31), else the next one.
+pub fn usual_fine(key: (u8, u8)) -> u8 {
+    if key.1 < 32 { key.1 + 32 } else { key.1.saturating_add(1).min(127) }
 }
 
 /// Seconds of a record that pass in one turn at 33⅓ rpm.
@@ -51,6 +62,11 @@ struct Mapping {
 fn ddj400_names() -> Vec<(u8, u8, String, String, Input)> {
     let mut v = vec![];
     let mut m = |status, data1, group: &str, key: &str, input| {
+        // A 14-bit control's fine half: the coarse one + 32, on this unit.
+        let input = match input {
+            Input::Cc14(_) => Input::Cc14(data1 + 32),
+            i => i,
+        };
         v.push((status, data1, group.to_string(), key.to_string(), input))
     };
     // The controller has two decks, on MIDI channels 1 and 2.
@@ -66,8 +82,15 @@ fn ddj400_names() -> Vec<(u8, u8, String, String, Input)> {
         m(note, 0x4D, &g, "reloop_toggle", Input::Note);
         // Tempo slider: as Mixxx's mapping reads it, a raw 0 is the slowest end (the
         // top of the fader is minus on Pioneer gear).
-        m(cc, 0x00, &g, "rate", Input::Cc);
-        m(cc, 0x13, &g, "volume", Input::Cc);
+        // 14-bit: each sends its fine half on its control + 32.
+        m(cc, 0x00, &g, "rate", Input::Cc14(0));
+        m(cc, 0x13, &g, "volume", Input::Cc14(0));
+        m(cc, 0x04, &g, "pregain", Input::Cc14(0));
+        let eq = format!("[EqualizerRack1_{g}_Effect1]");
+        m(cc, 0x07, &eq, "parameter3", Input::Cc14(0));
+        m(cc, 0x0B, &eq, "parameter2", Input::Cc14(0));
+        m(cc, 0x0F, &eq, "parameter1", Input::Cc14(0));
+        m(0xB6, 0x17 + d, &format!("[QuickEffectRack1_{g}]"), "super1", Input::Cc14(0));
         // The jog wheel (Mixxx's mapping, 720 ticks a turn): its top touched, the top
         // turned while touched (scratch in vinyl mode), the top turned untouched (still
         // spinning) and the side turned (both bend).
@@ -95,9 +118,14 @@ fn ddj400_names() -> Vec<(u8, u8, String, String, Input)> {
         }
         m(0x96, 0x46 + d, &g, "LoadSelectedTrack", Input::Note);
     }
-    m(0xB6, 0x1F, "[Master]", "crossfader", Input::Cc);
+    m(0xB6, 0x1F, "[Master]", "crossfader", Input::Cc14(0));
+    m(0xB6, 0x0C, "[Master]", "headMix", Input::Cc14(0));
+    m(0xB6, 0x0D, "[Master]", "headGain", Input::Cc14(0));
+    m(0xB4, 0x02, "[EffectRack1_EffectUnit1]", "mix", Input::Cc14(0));
     m(0xB6, 0x40, "[Library]", "MoveVertical", Input::Relative);
-    m(0x96, 0x41, "[Library]", "TogglePane", Input::Note);
+    // BROWSE pressed, and with Shift.
+    m(0x96, 0x41, "[Library]", "MoveFocusForward", Input::Note);
+    m(0x96, 0x42, "[Library]", "MoveFocusBackward", Input::Note);
     v
 }
 
@@ -105,9 +133,26 @@ fn ddj400_names() -> Vec<(u8, u8, String, String, Input)> {
 /// own notes), and its Shift buttons, in earshot's names. From Mixxx's DDJ-400
 /// mapping: pads 1-8 on notes 0x60-0x67 (loops) and 0x20-0x27 (jumps), deck 1 on
 /// 0x97, deck 2 on 0x99; on each deck's channel, Shift on 0x3F and CUE/LOOP CALL on
-/// 0x51 / 0x53 (with Shift: 0x3E / 0x3D).
+/// 0x51 / 0x53 (with Shift: 0x3E / 0x3D), Shift + RELOOP/EXIT on 0x50, BEAT SYNC
+/// held on 0x5C and LOOP IN held (4-beat loop) on 0x14 (both seen from the unit). The BEAT FX section, on 0x94: CH SELECT
+/// 1 / 2 / MASTER on 0x10 / 0x11 / 0x14, ON/OFF on 0x47 (with Shift, Release FX:
+/// 0x43), BEAT ◀ ▶ on 0x4A / 0x4B and BEAT FX SELECT on 0x63 (with Shift, the previous
+/// effect: 0x64).
 fn ddj400_pads() -> Vec<(u8, u8, String, Option<f64>)> {
     let mut v = vec![];
+    for (data1, name) in [
+        (0x10, "fx_1_channel_deck_1"),
+        (0x11, "fx_1_channel_deck_2"),
+        (0x14, "fx_1_channel_master"),
+        (0x47, "fx_1_on"),
+        (0x43, "fx_1_release"),
+        (0x4A, "fx_1_beats_halve"),
+        (0x4B, "fx_1_beats_double"),
+        (0x63, "fx_1_effect_next"),
+        (0x64, "fx_1_effect_prev"),
+    ] {
+        v.push((0x94, data1, name.to_string(), None));
+    }
     for (d, status) in [(1, 0x90u8), (2, 0x91)] {
         v.push((status, 0x3F, format!("deck_{d}_shift"), None));
         // CUE/LOOP CALL ◀ ▶, and with Shift: delete / save a memory cue.
@@ -115,6 +160,11 @@ fn ddj400_pads() -> Vec<(u8, u8, String, Option<f64>)> {
         v.push((status, 0x53, format!("deck_{d}_cue_jump_to_next"), None));
         v.push((status, 0x3E, format!("deck_{d}_cue_delete"), None));
         v.push((status, 0x3D, format!("deck_{d}_cue_save_as_memory"), None));
+        // SHIFT + RELOOP/EXIT: active loop.
+        v.push((status, 0x50, format!("deck_{d}_loop_active_toggle"), None));
+        // BEAT SYNC held: sync master. LOOP IN held: a 4-beat loop.
+        v.push((status, 0x5C, format!("deck_{d}_sync_set_master"), None));
+        v.push((status, 0x14, format!("deck_{d}_beat_loop"), Some(4.0)));
     }
     for (d, status) in [(1, 0x97u8), (2, 0x99)] {
         for (i, beats) in [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0].into_iter().enumerate() {
@@ -190,6 +240,8 @@ struct Session {
     seeded: bool,
     /// Counts changes, so whoever keeps a copy (the draft file) knows when to.
     version: u64,
+    /// Each 14-bit control's coarse half, as last sent, waiting for its fine half.
+    coarse: std::collections::HashMap<(u8, u8), u8>,
 }
 
 /// A mapping: the command each message runs, by message key.
@@ -200,10 +252,30 @@ impl Learned {
         self.0.lock().unwrap().map.get(&key).copied()
     }
 
+    /// Map `key`. A 14-bit control's fine half is part of it, so it can't run a
+    /// command of its own.
     pub fn set(&self, key: (u8, u8), l: Learn) {
         let mut s = self.0.lock().unwrap();
+        if let Input::Cc14(fine) = l.input {
+            s.map.remove(&(key.0, fine));
+        }
         s.map.insert(key, l);
         s.version += 1;
+    }
+
+    /// The 14-bit control whose fine half is `key`: its coarse half's key and
+    /// binding.
+    pub fn coarse_for(&self, key: (u8, u8)) -> Option<((u8, u8), Learn)> {
+        let s = self.0.lock().unwrap();
+        s.map
+            .iter()
+            .find(|(k, l)| k.0 == key.0 && l.input == Input::Cc14(key.1))
+            .map(|(k, l)| (*k, *l))
+    }
+
+    /// Whether `key` is the fine half of a mapped 14-bit control.
+    pub fn is_fine_half(&self, key: (u8, u8)) -> bool {
+        self.coarse_for(key).is_some()
     }
 
     pub fn remove(&self, key: (u8, u8)) {
@@ -263,10 +335,14 @@ impl Learned {
                 if let Some(w) = word.or_else(|| l.arg.map(|a| a.to_string())) {
                     o.insert("value".into(), json!(w));
                 }
+                if let Input::Cc14(fine) = l.input {
+                    o.insert("fine".into(), json!(format!("{status:02X} {fine:02X}")));
+                }
                 if l.input != default_input(status) {
                     let (input, ticks) = match l.input {
                         Input::Note => ("button", None),
                         Input::Cc => ("absolute", None),
+                        Input::Cc14(_) => ("cc14", None),
                         Input::Relative => ("relative", None),
                         Input::Jog(t) => ("jog", Some(t)),
                     };
@@ -299,6 +375,8 @@ pub fn from_json(text: &str) -> Result<(String, Map), String> {
         value: Option<String>,
         input: Option<String>,
         ticks: Option<u32>,
+        /// A 14-bit control's fine half's message.
+        fine: Option<String>,
     }
     let file: File = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let mut map = Map::new();
@@ -319,6 +397,23 @@ pub fn from_json(text: &str) -> Result<(String, Map), String> {
             None => default_input(k.0),
             Some("button") => Input::Note,
             Some("absolute") => Input::Cc,
+            Some("cc14") => {
+                let fine = match line.fine.as_deref() {
+                    None => usual_fine(k),
+                    Some(f) => {
+                        let b: Vec<u8> = f
+                            .split_whitespace()
+                            .map(|b| u8::from_str_radix(b, 16))
+                            .collect::<Result<_, _>>()
+                            .map_err(|_| at("the fine message isn't two hex bytes".into()))?;
+                        match b[..] {
+                            [s, d] if s == status => d,
+                            _ => return Err(at("the fine message isn't on the same channel".into())),
+                        }
+                    }
+                };
+                Input::Cc14(fine)
+            }
             Some("relative") => Input::Relative,
             Some("jog") => Input::Jog(line.ticks.unwrap_or(720)),
             Some(x) => return Err(at(format!("no input kind {x}"))),
@@ -358,7 +453,8 @@ fn default_input(status: u8) -> Input {
 }
 
 /// How a newly mapped message reads: as a button for a note, steps for a control
-/// that takes steps, and a knob or fader for the rest.
+/// that takes steps, and a knob or fader for the rest. (A 14-bit controller is
+/// set by hand.)
 pub fn guess_input(key: (u8, u8), control: Control) -> Input {
     match (default_input(key.0), control.spec().kind) {
         (Input::Note, _) => Input::Note,
@@ -436,17 +532,26 @@ fn translate(bytes: &[u8], learned: &Learned) -> Option<(Control, Option<Command
     let key = key(bytes)?;
     // A note-off is a note-on with velocity 0.
     let data2 = if bytes[0] & 0xF0 == 0x80 { 0 } else { bytes[2] };
-    let l = learned.get(key)?;
+    let travel = |l: &Learn, t: f64| match l.control.spec().kind {
+        Kind::Continuous(range) => range.from_pos(t),
+        _ => t,
+    };
+    let Some(l) = learned.get(key) else {
+        // The fine half of a 14-bit control: with the coarse half sent before it.
+        let (coarse, l) = learned.coarse_for(key)?;
+        let high = learned.0.lock().unwrap().coarse.get(&coarse).copied()?;
+        let t = ((high as u32) << 7 | data2 as u32) as f64 / 16383.0;
+        return Some((l.control, l.control.command(travel(&l, t))));
+    };
     let value = match l.input {
+        Input::Cc14(_) => {
+            // Kept for the fine half, which sends the value.
+            learned.0.lock().unwrap().coarse.insert(key, data2);
+            return Some((l.control, None));
+        }
         Input::Note if data2 > 0 => l.control.press_value(l.arg),
         Input::Note => 0.0,
-        Input::Cc => {
-            let travel = data2 as f64 / 127.0;
-            match l.control.spec().kind {
-                Kind::Continuous(range) => range.from_pos(travel),
-                _ => travel,
-            }
-        }
+        Input::Cc => travel(&l, data2 as f64 / 127.0),
         Input::Relative if data2 < 64 => data2 as f64,
         Input::Relative => data2 as f64 - 128.0,
         Input::Jog(ticks) => (data2 as f64 - 64.0) * SECS_PER_TURN / ticks as f64,
@@ -501,6 +606,15 @@ mod tests {
 
     fn cmd(bytes: impl AsRef<[u8]>) -> Option<Command> {
         translate(bytes.as_ref(), &ddj())?.1
+    }
+
+    /// A 14-bit control on `status` / `n` moved to `coarse`, `fine`: its two
+    /// messages, and what the second sent.
+    fn cmd14(status: u8, n: u8, coarse: u8, fine: u8) -> Option<Command> {
+        let learned = ddj();
+        let first = translate(&[status, n, coarse], &learned)?;
+        assert!(first.1.is_none(), "the coarse half waits for the fine one");
+        translate(&[status, n + 32, fine], &learned)?.1
     }
 
     /// A DDJ-400 starts from the built-in table, once; any binding can be changed,
@@ -649,20 +763,83 @@ mod tests {
         assert!(shift.1.is_none());
     }
 
+    /// The BEAT FX section: CH SELECT puts the effect where it points (moving off a
+    /// position does nothing), ON/OFF toggles, Shift + ON/OFF releases.
+    #[test]
+    fn beat_fx() {
+        use earshot_engine::{FxCmd, FxTarget};
+        let fx = |bytes| match cmd(bytes) {
+            Some(Command::Fx(0, c)) => Some(c),
+            _ => None,
+        };
+        assert_eq!(fx([0x94, 0x10, 0x7F]), Some(FxCmd::Target(FxTarget::Deck(deck(0)))));
+        assert_eq!(fx([0x94, 0x11, 0x7F]), Some(FxCmd::Target(FxTarget::Deck(deck(1)))));
+        assert_eq!(fx([0x94, 0x14, 0x7F]), Some(FxCmd::Target(FxTarget::Master)));
+        assert_eq!(fx([0x94, 0x10, 0x00]), None);
+        assert!(matches!(fx([0x94, 0x47, 0x7F]), Some(FxCmd::Enabled(_))));
+        assert_eq!(fx([0x94, 0x43, 0x7F]), Some(FxCmd::Release));
+        assert!(matches!(
+            cmd([0x90, 0x5C, 0x7F]),
+            Some(Command::Mixer(crate::core::command::MixerCmd::SyncLeader(Some(d)))) if d == deck(0)
+        ));
+        assert!(matches!(
+            cmd([0x90, 0x14, 0x7F]),
+            Some(Command::Deck(d, DeckCmd::Engine(EngineCmd::BeatLoop(b)))) if d == deck(0) && b == 4.0
+        ));
+        assert!(matches!(
+            cmd([0x91, 0x50, 0x7F]),
+            Some(Command::Deck(d, DeckCmd::ToggleActiveLoop)) if d == deck(1)
+        ));
+        assert_eq!(fx([0x94, 0x4A, 0x7F]), Some(FxCmd::BeatsStep(-1)));
+        assert_eq!(fx([0x94, 0x63, 0x7F]), Some(FxCmd::NextKind));
+        assert_eq!(fx([0x94, 0x64, 0x7F]), Some(FxCmd::PrevKind));
+        assert!(matches!(cmd14(0xB4, 0x02, 0x7F, 0x7F), Some(Command::Fx(0, FxCmd::Level(l))) if l == 1.0));
+    }
+
     #[test]
     fn faders_cover_their_range() {
         assert!(matches!(
-            cmd([0xB0, 0x13, 127]),
+            cmd14(0xB0, 0x13, 127, 127),
             Some(Command::Param(ParamId::Channel(_, ChannelParam::Volume), v)) if v == 1.0
         ));
         assert!(matches!(
-            cmd([0xB6, 0x1F, 0]),
+            cmd14(0xB6, 0x1F, 0, 0),
             Some(Command::Param(ParamId::Master(MasterParam::Crossfader), v)) if v == -1.0
         ));
         assert!(matches!(
-            cmd([0xB1, 0x00, 127]),
+            cmd14(0xB1, 0x00, 127, 127),
             Some(Command::Deck(d, DeckCmd::Engine(EngineCmd::TempoFader(v)))) if v == 1.0 && d == deck(1)
         ));
+    }
+
+    /// A 14-bit knob's two halves make one fine value; the fine half alone, with no
+    /// coarse half yet, does nothing, and has no row of its own.
+    #[test]
+    fn fourteen_bit_knobs() {
+        use crate::core::bus::DeckControl;
+        let filter = |c: Option<Command>| match c {
+            Some(Command::Param(ParamId::Channel(_, ChannelParam::Filter), v)) => v,
+            other => panic!("{other:?}"),
+        };
+        // Coarse 64, fine 0: half way (the filter's middle, 0).
+        let mid = filter(cmd14(0xB6, 0x17, 64, 0));
+        assert!(mid.abs() < 1e-3, "{mid}");
+        // One fine step on: a hair more, not a jump.
+        let a = filter(cmd14(0xB6, 0x17, 64, 1));
+        assert!(a > mid && a - mid < 1e-3, "{a}");
+        let learned = ddj();
+        assert!(translate(&[0xB6, 0x37, 5], &learned).and_then(|t| t.1).is_none());
+        assert!(learned.is_fine_half((0xB6, 0x37)));
+        // Setting the coarse half to 14-bit takes over a binding on the fine half.
+        let l = Learned::default();
+        let c = Control::Deck(deck(0), DeckControl::Filter);
+        l.set((0xB6, 0x37), Learn { control: c, arg: None, input: Input::Cc });
+        l.set((0xB6, 0x17), Learn { control: c, arg: None, input: Input::Cc14(0x37) });
+        assert!(l.get((0xB6, 0x37)).is_none());
+        let json = l.to_json("x");
+        assert!(json.contains("\"cc14\"") && json.contains("\"fine\": \"B6 37\""), "{json}");
+        let (_, back) = from_json(&json).unwrap();
+        assert_eq!(back[&(0xB6, 0x17)].input, Input::Cc14(0x37));
     }
 
     #[test]
@@ -694,7 +871,7 @@ mod tests {
     fn engine_commands_go_direct_and_the_rest_to_the_ui() {
         let play = cmd([0x90, 0x0B, 0x7F]).unwrap();
         assert!(command::direct(play).is_ok());
-        let volume = cmd([0xB0, 0x13, 64]).unwrap();
+        let volume = cmd14(0xB0, 0x13, 64, 0).unwrap();
         assert!(command::direct(volume).is_ok());
         // Browsing and loading need the library: the UI does those.
         let browse = cmd([0xB6, 0x40, 0x7E]).unwrap();

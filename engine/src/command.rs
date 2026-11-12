@@ -161,6 +161,9 @@ pub enum DeckCmd {
         start: f64,
         end: f64,
     },
+    /// The track's active loop (`start..end`, seconds), or none: playing onto its
+    /// start, with no loop on, turns it on (Pioneer's active loop). Cleared by a load.
+    ActiveLoop(Option<(f64, f64)>),
     /// A stem's level (`stem` indexes [`crate::stems::NAMES`]), 0..1. Levels go back to
     /// 1 when a track loads.
     StemLevel {
@@ -191,13 +194,13 @@ pub enum ChannelParam {
 pub enum MasterParam {
     /// -1 (left) .. 1 (right).
     Crossfader,
-    /// Main output level, linear, 0..5.
+    /// Master output level, linear, 0..5.
     Gain,
     /// -1 (left) .. 1 (right).
     Balance,
     /// Headphone level, linear, 0..5.
     HeadGain,
-    /// What the headphones hear: 0 the cue bus only .. 1 the main mix only (0.5 an
+    /// What the headphones hear: 0 the cue bus only .. 1 the master mix only (0.5 an
     /// even mix, the default).
     HeadMix,
 }
@@ -318,7 +321,7 @@ impl Default for DeckState {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MixerState {
     pub crossfader: f64,
-    pub main_gain: f64,
+    pub master_gain: f64,
     pub balance: f64,
     pub head_gain: f64,
     pub head_mix: f64,
@@ -329,7 +332,7 @@ impl Default for MixerState {
     fn default() -> MixerState {
         MixerState {
             crossfader: 0.0,
-            main_gain: 1.0,
+            master_gain: 1.0,
             balance: 0.0,
             head_gain: 1.0,
             head_mix: 0.5,
@@ -410,7 +413,7 @@ pub enum Command {
     /// What hot cues do on a stopped deck, on every player.
     SetHotcueMode(HotcueMode),
     /// Effects go only on the first this many decks (the ones the app shows); a unit
-    /// on another goes back to its default, or the main mix.
+    /// on another goes back to its default, or the master mix.
     SetFxDecks(usize),
     SetRouting(Routing),
     Preview(PreviewCmd),

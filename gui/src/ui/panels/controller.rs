@@ -83,6 +83,9 @@ pub struct ControllerUi {
     last: Option<(u8, u8)>,
     /// The row to scroll the list to on the next frame.
     scroll_to: Option<(u8, u8)>,
+    /// The Mapping table's sort: a column (by its place) and whether it's reversed.
+    /// `None`: by message.
+    sort: Option<(usize, bool)>,
     /// What's typed in a command list's search box.
     search: String,
     /// A number being typed, and its row.
@@ -180,6 +183,8 @@ impl ControllerUi {
         keys.extend(self.seen.keys());
         keys.sort();
         keys.dedup();
+        // A 14-bit control's fine half is in its coarse half's row.
+        keys.retain(|k| !self.learned.is_fine_half(*k));
         keys
     }
 
@@ -336,9 +341,10 @@ fn named_key(status: u8, midino: u8) -> String {
 }
 
 /// How a message's value reads, as the list names it.
-const READINGS: [(Input, &str); 4] = [
+const READINGS: [(Input, &str); 5] = [
     (Input::Note, "button"),
     (Input::Cc, "knob / fader"),
+    (Input::Cc14(0), "14-bit controller (MSB + LSB)"),
     (Input::Relative, "steps (1 = +1, 127 = -1)"),
     (Input::Jog(720), "jog wheel (64 = still)"),
 ];
@@ -347,8 +353,9 @@ fn reading_name(i: Input) -> &'static str {
     match i {
         Input::Note => READINGS[0].1,
         Input::Cc => READINGS[1].1,
-        Input::Relative => READINGS[2].1,
-        Input::Jog(_) => READINGS[3].1,
+        Input::Cc14(_) => READINGS[2].1,
+        Input::Relative => READINGS[3].1,
+        Input::Jog(_) => READINGS[4].1,
     }
 }
 
@@ -485,8 +492,52 @@ fn save(t: &ControllerUi, ctx: &egui::Context) {
     });
 }
 
+/// The Mapping table's columns.
+const MAPPING_COLUMNS: [&str; 6] =
+    ["message", "value", "pressed", "earshot_command", "number", "reads as"];
+
+/// The rows in the order the table is sorted by. Rows with nothing in the column go
+/// last either way; ties stay in message order.
+fn sorted(t: &ControllerUi, mut keys: Vec<(u8, u8)>) -> Vec<(u8, u8)> {
+    let Some((col, reversed)) = t.sort else {
+        return keys;
+    };
+    #[derive(PartialEq, PartialOrd)]
+    enum Cell {
+        Num(f64),
+        Text(String),
+    }
+    let cell = |k: &(u8, u8)| -> Option<Cell> {
+        let seen = t.seen.get(k);
+        let l = t.learned.get(*k);
+        match col {
+            0 => Some(Cell::Num((k.0 as u32 * 256 + k.1 as u32) as f64)),
+            1 => seen.map(|s| Cell::Num(s.value as f64)),
+            2 => seen.map(|s| Cell::Num(s.count as f64)),
+            3 => l.map(|l| Cell::Text(l.control.name().0)),
+            4 => l
+                .filter(|l| l.control.takes_number())
+                .map(|l| match l.arg {
+                    Some(a) => Cell::Num(a),
+                    None => Cell::Text(word(&l)),
+                }),
+            _ => l.map(|l| Cell::Text(reading_name(l.input).to_string())),
+        }
+    };
+    keys.sort_by(|a, b| match (cell(a), cell(b)) {
+        (Some(x), Some(y)) => {
+            let o = x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal);
+            if reversed { o.reverse() } else { o }
+        }
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    keys
+}
+
 fn mapping_table(ui: &mut Ui, t: &mut ControllerUi, cx: &mut Cx) {
-    let keys = t.keys();
+    let keys = sorted(t, t.keys());
     if keys.is_empty() {
         ui.label(RichText::new("Nothing yet.").color(cx.theme.muted));
         return;
@@ -512,9 +563,28 @@ fn mapping_table(ui: &mut Ui, t: &mut ControllerUi, cx: &mut Cx) {
     }
     table
         .header(18.0, |mut h| {
-            for name in ["message", "value", "pressed", "earshot_command", "number", "reads as"] {
+            // Click a heading to sort by it; again to reverse.
+            for (i, name) in MAPPING_COLUMNS.into_iter().enumerate() {
                 h.col(|ui| {
-                    ui.label(RichText::new(name).color(cx.theme.muted));
+                    let arrow = match t.sort {
+                        Some((c, false)) if c == i => " ⏶",
+                        Some((c, true)) if c == i => " ⏷",
+                        _ => "",
+                    };
+                    let r = ui
+                        .add(
+                            egui::Label::new(
+                                RichText::new(format!("{name}{arrow}")).color(cx.theme.muted),
+                            )
+                            .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text("Sort by this; click again to reverse");
+                    if r.clicked() {
+                        t.sort = match t.sort {
+                            Some((c, false)) if c == i => Some((i, true)),
+                            _ => Some((i, false)),
+                        };
+                    }
                 });
             }
         })
@@ -552,13 +622,40 @@ fn mapping_table(ui: &mut Ui, t: &mut ControllerUi, cx: &mut Cx) {
                             for (input, name) in READINGS {
                                 let on = reading_name(l.input) == name;
                                 if ui.selectable_label(on, name).clicked() && !on {
+                                    // A 14-bit controller starts with MIDI's usual fine half.
+                                    let input = match input {
+                                        Input::Cc14(_) => Input::Cc14(midi::usual_fine(key)),
+                                        i => i,
+                                    };
                                     t.learned.set(key, Learn { input, ..l });
                                 }
                             }
                         });
+                    if let Input::Cc14(fine) = l.input {
+                        fine_picker(ui, t, key, fine, &l);
+                    }
                 });
             });
         });
+}
+
+/// A 14-bit controller's fine half: which message on the same channel it is.
+fn fine_picker(ui: &mut Ui, t: &mut ControllerUi, key: (u8, u8), fine: u8, l: &Learn) {
+    ui.label("fine:");
+    egui::ComboBox::from_id_salt(("fine", key))
+        .selected_text(RichText::new(format!("{:02X} {fine:02X}", key.0)).monospace())
+        .width(70.0)
+        .height(300.0)
+        .show_ui(ui, |ui| {
+            for d in (0..128u8).filter(|d| *d != key.1) {
+                let label = RichText::new(format!("{:02X} {d:02X}", key.0)).monospace();
+                if ui.selectable_label(d == fine, label).clicked() && d != fine {
+                    t.learned.set(key, Learn { input: Input::Cc14(d), ..*l });
+                }
+            }
+        })
+        .response
+        .on_hover_text("The message that sends this control's fine half (MIDI's usual: +32)");
 }
 
 /// The row's command: a list to pick from, with a search box at the top. Picking one
@@ -802,6 +899,50 @@ mod tests {
 
     /// Shift + pad: the list goes to Shift, then the pad, and stays on the pad when
     /// Shift (then the pad) is let go.
+    /// A 14-bit controller is set by hand, on any fine half: that message's row
+    /// goes, and nothing pairs on its own.
+    #[test]
+    fn a_14_bit_controller_is_set_by_hand() {
+        let mut t = ControllerUi::default();
+        t.map_to((0xB6, 0x17), "deck_1_filter");
+        t.map_to((0xB6, 0x37), "deck_1_filter");
+        t.on_midi(msg(&[0xB6, 0x17, 64]));
+        t.on_midi(msg(&[0xB6, 0x37, 3]));
+        assert_eq!(t.learned.get((0xB6, 0x17)).unwrap().input, Input::Cc);
+        assert!(t.keys().contains(&(0xB6, 0x37)), "not paired on its own");
+        // Set by hand, on the unit's own fine half.
+        let l = t.learned.get((0xB6, 0x17)).unwrap();
+        t.learned.set((0xB6, 0x17), Learn { input: Input::Cc14(0x40), ..l });
+        assert!(!t.keys().contains(&(0xB6, 0x40)));
+        assert!(t.keys().contains(&(0xB6, 0x37)), "the +32 one isn't it");
+    }
+
+    /// The Mapping table sorts by any column, either way; rows with nothing there
+    /// go last.
+    #[test]
+    fn the_mapping_sorts_by_any_column() {
+        let mut t = ControllerUi::default();
+        for (bytes, n) in [([0x90, 0x01, 0x7F], 3), ([0x90, 0x02, 0x7F], 1)] {
+            for _ in 0..n {
+                t.on_midi(msg(&bytes));
+            }
+        }
+        t.map_to((0x90, 0x02), "deck_1_play");
+        t.map_to((0x91, 0x05), "deck_2_cue");
+        let rows = |t: &ControllerUi| sorted(t, t.keys());
+        assert_eq!(rows(&t), [(0x90, 0x01), (0x90, 0x02), (0x91, 0x05)]);
+        // By times pressed, most first: the one never pressed last.
+        t.sort = Some((2, true));
+        assert_eq!(rows(&t), [(0x90, 0x01), (0x90, 0x02), (0x91, 0x05)]);
+        t.sort = Some((2, false));
+        assert_eq!(rows(&t), [(0x90, 0x02), (0x90, 0x01), (0x91, 0x05)]);
+        // By command name: deck_1_play, deck_2_cue, then the unmapped one.
+        t.sort = Some((3, false));
+        assert_eq!(rows(&t), [(0x90, 0x02), (0x91, 0x05), (0x90, 0x01)]);
+        t.sort = Some((3, true));
+        assert_eq!(rows(&t), [(0x91, 0x05), (0x90, 0x02), (0x90, 0x01)]);
+    }
+
     #[test]
     fn letting_go_doesnt_move_the_list() {
         let mut t = ControllerUi::default();

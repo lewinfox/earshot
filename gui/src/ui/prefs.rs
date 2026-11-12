@@ -45,6 +45,10 @@ pub struct UiPrefs {
     pub show_mixer: bool,
     /// Hide the mixer while a controller is connected (it has its own).
     pub auto_hide_mixer: bool,
+    /// The decks hidden for a bigger library (`ui_library_maximize_toggle`); not kept
+    /// between runs.
+    #[serde(skip)]
+    pub library_maximized: bool,
     /// What the decks' stem buttons do.
     pub stem_mode: StemMode,
     /// In four-deck mode, which deck each hand plays: the left on deck 1 or 3
@@ -90,6 +94,7 @@ impl Default for UiPrefs {
             tables: Tables::default(),
             show_mixer: true,
             auto_hide_mixer: true,
+            library_maximized: false,
             stem_mode: StemMode::default(),
             controller: false,
             pretend_controller: false,

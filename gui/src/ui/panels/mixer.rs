@@ -1,7 +1,7 @@
 //! The mixer between the decks, laid out like Mixxx's: each channel has gain, high /
 //! mid / low EQ and filter knobs, a headphone cue button, a fader with a level
-//! meter and its crossfader side (L, THRU or R) under the fader; the main meters and
-//! the crossfader sit in the middle, main and headphone knobs in a row across the
+//! meter and its crossfader side (L, THRU or R) under the fader; the master meters and
+//! the crossfader sit in the middle, master and headphone knobs in a row across the
 //! top. The faders and meters stretch to fill the height it's given. Channels
 //! on the crossfader's left side (decks 1 and 3) sit left of the middle, the others
 //! mirrored on the right. Two channels or four, as many as decks are shown.
@@ -22,16 +22,16 @@ use crate::ui::panels::{Cx, Panel};
 use crate::ui::theme::THEME;
 use crate::ui::widgets::{Fader, HwButton, Knob, Meter, Range, held};
 
-// Layout, in points from the channels' top left (under the main and headphone
+// Layout, in points from the channels' top left (under the master and headphone
 // knobs' row). Columns from the left: deck A's knobs, its gain / cue / fader, its
-// meter, the main meters, then deck B mirrored.
+// meter, the master meters, then deck B mirrored.
 const KNOB_COL: f32 = 34.0;
 const FADER_COL: f32 = 30.0;
 const VU_W: f32 = 7.0;
 const CENTRE_W: f32 = 30.0;
 pub(super) const ROW: f32 = 40.0;
 pub(super) const KNOB: f32 = 24.0;
-/// The main and headphone knobs' row, over the channels, and the gap under it.
+/// The master and headphone knobs' row, over the channels, and the gap under it.
 const MASTER_H: f32 = ROW + 2.0;
 /// Headphone cue buttons, under the gain knobs.
 const PFL_TOP: f32 = ROW + 2.0;
@@ -219,7 +219,7 @@ pub fn show(
         );
     }
 
-    // Main meters, left and right, between the channels.
+    // Master meters, left and right, between the channels.
     for side in 0..2 {
         let level = shared.map_or(0.0, |s| s.mixer.vu_main[side]);
         ui.put(
@@ -232,9 +232,9 @@ pub fn show(
             Meter::new(level, vec2(VU_W - 1.0, fader_bottom - FADER_TOP)),
         );
     }
-    // "MAIN", or a red "LIMIT" while (and a moment after) the limiter turns the
+    // "MASTER", or a red "LIMIT" while (and a moment after) the limiter turns the
     // master down by more than a little.
-    let main_label = at(main_x, PFL_TOP, CENTRE_W, PFL_H);
+    let master_label = at(main_x, PFL_TOP, CENTRE_W, PFL_H);
     let now = ui.input(|i| i.time);
     let held = egui::Id::new("earshot-limit-held");
     if shared.is_some_and(|s| s.mixer.limiting > 0.5) {
@@ -244,14 +244,14 @@ pub fn show(
         .ctx()
         .data(|d| d.get_temp::<f64>(held))
         .is_some_and(|t| now - t < 1.0);
-    let r = ui.interact(main_label, ui.id().with("main-label"), Sense::hover());
+    let r = ui.interact(master_label, ui.id().with("master-label"), Sense::hover());
     r.on_hover_text(
         "The master limiter keeps the output under full scale; LIMIT lights while it's working",
     );
     ui.painter().text(
-        main_label.center(),
+        master_label.center(),
         egui::Align2::CENTER_CENTER,
-        if limiting { "LIMIT" } else { "MAIN" },
+        if limiting { "LIMIT" } else { "MASTER" },
         egui::FontId::proportional(9.0),
         if limiting { THEME.bad } else { THEME.muted },
     );
@@ -265,9 +265,9 @@ pub fn show(
         )
     });
 
-    // Main and headphone knobs in a row across the top, spread over the width.
+    // Master and headphone knobs in a row across the top, spread over the width.
     let masters = [
-        (MasterParam::Gain, "MAIN"),
+        (MasterParam::Gain, "MASTER"),
         (MasterParam::Balance, "BAL"),
         (MasterParam::HeadGain, "HEAD"),
         (MasterParam::HeadMix, "MIX"),

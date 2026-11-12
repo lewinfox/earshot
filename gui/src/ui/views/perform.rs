@@ -53,10 +53,12 @@ pub fn decks_rows(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx, mode: &
     let gaps = STACK_GAP * (per_side - 1.0);
     let height = (min_height(compact) * per_side + gaps).max(mixer::HEIGHT + 12.0);
     let deck_h = (height - gaps) / per_side;
+    // The decks make way for a bigger library (the waveforms stay).
+    let decks_shown = shown && !cx.prefs.library_maximized;
     egui::TopBottomPanel::top(format!("decks-{mode}"))
         .exact_height(height + 8.0)
         .frame(row_frame(cx, Margin::symmetric(6, 4)))
-        .show_animated(ctx, shown, |ui| {
+        .show_animated(ctx, decks_shown, |ui| {
             // Decks on the crossfader's left, the mixer, then the rest.
             let side = |d: &DeckId| {
                 if mixer::on_left(*d) {

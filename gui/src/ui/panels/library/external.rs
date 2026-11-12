@@ -66,8 +66,17 @@ struct Dialog {
     copy_to: Option<String>,
 }
 
+/// A row of a library's tree, for the browse knob: the library, and a playlist or
+/// folder in it (`None`: its All tracks).
+pub type NodeKey = (SourceId, Option<NodePath>);
+
 #[derive(Default)]
 pub struct ExternalUi {
+    /// The browse knob's highlight in a library's tree, and whether it just moved.
+    pub nav_cursor: Option<NodeKey>,
+    pub nav_scroll: bool,
+    /// The folders open in the trees.
+    open_nodes: std::collections::HashSet<(SourceId, NodePath)>,
     /// Every source, as the Store has them (the libraries are drawn from these).
     sources: Vec<Source>,
     /// Looked in the usual places yet (done the first time the pane shows).
@@ -90,6 +99,10 @@ pub struct ExternalUi {
     sel: Selection,
     /// A track to select and scroll to once the list has it ([`Self::reveal`]).
     reveal: Option<TrackId>,
+    /// The row to scroll to on the next frame (the knob moved).
+    scroll_to: Option<usize>,
+    /// Focus the first track once the list has rows ([`Self::focus_top`]).
+    want_top: bool,
     /// The USB sticks plugged in, and the stick views' state (`sticks.rs`).
     drives: Vec<Drive>,
     stick: sticks::StickUi,
@@ -117,6 +130,65 @@ impl ExternalUi {
         let listed = |id| self.listed(id);
         if self.open.as_ref().is_some_and(|o| !listed(o.0)) {
             self.open = None;
+        }
+    }
+
+    /// The library a program's or library's pane shows (`None`: not set up, or a
+    /// stick's, which can hold several).
+    pub fn pane_library(&self, pane: PaneSource) -> Option<SourceId> {
+        match pane {
+            PaneSource::Program(kind) => self
+                .entries()
+                .into_iter()
+                .find(|(k, _)| *k == kind)
+                .and_then(|(_, s)| s.map(|s| s.id)),
+            PaneSource::Library(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// A library's tree top to bottom (not inside closed folders): each row, its
+    /// folder, and whether it's a folder. Empty until it has been read.
+    pub fn nav_rows(&self, id: SourceId) -> Vec<(NodeKey, Option<NodeKey>, bool)> {
+        fn walk(
+            ui: &ExternalUi,
+            id: SourceId,
+            nodes: &[Node],
+            parent: Option<NodePath>,
+            out: &mut Vec<(NodeKey, Option<NodeKey>, bool)>,
+        ) {
+            for (i, n) in nodes.iter().enumerate() {
+                let mut path = parent.clone().unwrap_or_default();
+                path.push(i);
+                let folder = n.kind == NodeKind::Folder;
+                out.push(((id, Some(path.clone())), parent.clone().map(|p| (id, Some(p))), folder));
+                if folder && ui.open_nodes.contains(&(id, path.clone())) {
+                    walk(ui, id, &n.children, Some(path), out);
+                }
+            }
+        }
+        let Some(Status::Ready(lib)) = self.status.get(&id) else {
+            return vec![];
+        };
+        let mut out = vec![((id, None), None, false)];
+        walk(self, id, &lib.playlists, None, &mut out);
+        out
+    }
+
+    /// Open or close a folder in a library's tree.
+    pub fn set_node_open(&mut self, id: SourceId, path: NodePath, open: bool) {
+        if open {
+            self.open_nodes.insert((id, path));
+        } else {
+            self.open_nodes.remove(&(id, path));
+        }
+    }
+
+    /// List a library's tracks, or a node's, in the middle (as clicking it does).
+    pub fn open_node(&mut self, key: &NodeKey, out: &mut Vec<Command>) {
+        if let Some(source) = self.source(key.0).cloned() {
+            self.show(&source, key.1.clone(), out);
+            self.nav_cursor = Some(key.clone());
         }
     }
 
@@ -350,8 +422,15 @@ impl ExternalUi {
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
         );
+        super::outline(
+            ui,
+            &r,
+            self.nav_cursor == Some((source.id, None)),
+            self.nav_scroll,
+        );
         if r.clicked() {
             self.show(source, None, out);
+            self.nav_cursor = Some((source.id, None));
         }
         r.context_menu(|ui| {
             self.import_item(ui, source, Target::Library);
@@ -406,9 +485,10 @@ impl ExternalUi {
             return;
         }
         let id = ui.make_persistent_id(("external", source.id, &path));
-        let header =
-            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
-                .show_header(ui, |ui| self.node_label(ui, source, n, &path, out));
+        let mut state =
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+        state.set_open(self.open_nodes.contains(&(source.id, path.clone())));
+        let header = state.show_header(ui, |ui| self.node_label(ui, source, n, &path, out));
         header.body(|ui| {
             for (i, c) in n.children.iter().enumerate() {
                 let mut p = path.clone();
@@ -416,6 +496,10 @@ impl ExternalUi {
                 self.node(ui, source, c, p, out);
             }
         });
+        // Its arrow clicked: keep what it says.
+        if let Some(s) = egui::collapsing_header::CollapsingState::load(ui.ctx(), id) {
+            self.set_node_open(source.id, path.clone(), s.is_open());
+        }
     }
 
     fn node_label(
@@ -440,8 +524,15 @@ impl ExternalUi {
             path: path.clone(),
             name: n.name.clone(),
         });
+        super::outline(
+            ui,
+            &r,
+            self.nav_cursor == Some((source.id, Some(path.clone()))),
+            self.nav_scroll,
+        );
         if r.clicked() {
             self.show(source, Some(path.clone()), out);
+            self.nav_cursor = Some((source.id, Some(path.clone())));
         }
         r.context_menu(|ui| {
             self.import_item(ui, source, Target::Node(path.clone()));
@@ -498,11 +589,20 @@ impl ExternalUi {
         out.push(ExternalCmd::Read(source.clone()).into());
     }
 
-    /// List a library's tracks, or a node's, in the middle.
-    /// The list's focused track.
-    #[cfg(test)]
+    /// The list's focused track: what "load selected" loads from it.
     pub fn focused(&self) -> Option<TrackId> {
         self.sel.focused()
+    }
+
+    /// Move the list's focus (the keyboard, the browse knob).
+    pub fn move_focus(&mut self, delta: i32) {
+        let rows = self.rows.as_ref().map(|(_, r)| r.clone()).unwrap_or_default();
+        self.scroll_to = self.sel.move_focus(delta, &rows);
+    }
+
+    /// Put the focus on the list's first track, once it has one.
+    pub fn focus_top(&mut self) {
+        self.want_top = true;
     }
 
     /// What the list shows: a library, and a node in it (`None`: all its tracks).
@@ -620,7 +720,12 @@ impl ExternalUi {
             .map(|(_, r)| r.clone())
             .unwrap_or_default();
         // A track to show: select it and scroll there, clearing filters that hide it.
-        let mut scroll_to = None;
+        let mut scroll_to = self.scroll_to.take();
+        if self.want_top && !rows.is_empty() {
+            self.want_top = false;
+            self.sel = Selection::default();
+            scroll_to = self.sel.move_focus(0, &rows);
+        }
         if let Some(t) = self.reveal {
             if let Some(i) = rows.iter().position(|&r| r == t) {
                 self.sel.select_only(t);

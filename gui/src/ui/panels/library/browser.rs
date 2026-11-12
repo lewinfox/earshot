@@ -39,8 +39,28 @@ pub enum Scope {
     History(Option<i64>),
 }
 
+/// A row of All tracks' left pane, for the browse knob.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AllRow {
+    All,
+    /// Only the tracks with this analysis status.
+    Status(Status),
+    Duplicates,
+    /// The History: a folder of sessions.
+    History,
+    Session(i64),
+}
+
+/// The order All tracks' pane lists the statuses in.
+const STATUSES: [Status; 4] = [Status::None, Status::Busy, Status::Attention, Status::Done];
+
 #[derive(Default)]
 pub struct LibraryUi {
+    /// The browse knob's highlight in All tracks' pane, and whether it just moved.
+    pub nav_cursor: Option<AllRow>,
+    pub nav_scroll: bool,
+    /// Focus the first track once the list has rows ([`Self::focus_top`]).
+    want_top: bool,
     /// The library folders (Explorer roots).
     pub folders: Vec<String>,
     scope: Scope,
@@ -137,6 +157,46 @@ impl LibraryUi {
         self.rev += 1;
     }
 
+    /// All tracks' pane's rows top to bottom, each with its folder (a session's is
+    /// the History, open while it shows).
+    pub fn nav_rows(&self) -> Vec<(AllRow, Option<AllRow>)> {
+        let mut rows = vec![(AllRow::All, None)];
+        rows.extend(STATUSES.map(|s| (AllRow::Status(s), None)));
+        rows.push((AllRow::Duplicates, None));
+        rows.push((AllRow::History, None));
+        if self.in_history() {
+            for s in self.sessions.iter().flatten() {
+                rows.push((AllRow::Session(s.id), Some(AllRow::History)));
+            }
+        }
+        rows
+    }
+
+    /// Show what a row of All tracks' pane lists, as clicking it does.
+    pub fn show_row(&mut self, row: &AllRow, table: &mut TableState, out: &mut Vec<Command>) {
+        match row {
+            AllRow::All => {
+                self.set_scope(Scope::All);
+                table.filters.retain(|(c, _)| *c != ColumnId::Status);
+            }
+            AllRow::Status(s) => {
+                self.set_scope(Scope::All);
+                *table.filter_mut(ColumnId::Status) = Filter::Status([*s].into());
+            }
+            AllRow::Duplicates => {
+                self.set_scope(Scope::Duplicates);
+                // Found afresh each time.
+                out.push(LibraryCmd::FindDuplicates.into());
+            }
+            AllRow::History => {
+                self.set_scope(Scope::History(None));
+                // Listed afresh each time.
+                out.push(LibraryCmd::ListSessions.into());
+            }
+            AllRow::Session(id) => self.set_scope(Scope::History(Some(*id))),
+        }
+    }
+
     /// The History is showing.
     pub fn in_history(&self) -> bool {
         matches!(self.scope, Scope::History(_))
@@ -159,6 +219,12 @@ impl LibraryUi {
 
     pub fn move_focus(&mut self, delta: i32) {
         self.scroll_to = self.sel.move_focus(delta, &self.shown);
+    }
+
+    /// Put the focus on the list's first track, once it has one (the list may be
+    /// worked out again first).
+    pub fn focus_top(&mut self) {
+        self.want_top = true;
     }
 
     fn set_search(&mut self) {
@@ -368,16 +434,14 @@ impl LibraryUi {
             _ => None,
         };
         let all = self.scope == Scope::All;
-        if ui
-            .selectable_label(
-                all && only.is_none(),
-                format!("All tracks  ({})", v.lib.tracks().len()),
-            )
-            .clicked()
-        {
-            self.set_scope(Scope::All);
-            table.filters.retain(|(c, _)| *c != ColumnId::Status);
-            clicked = true;
+        let mut picked = None;
+        let r = ui.selectable_label(
+            all && only.is_none(),
+            format!("All tracks  ({})", v.lib.tracks().len()),
+        );
+        self.outline(ui, &r, &AllRow::All);
+        if r.clicked() {
+            picked = Some(AllRow::All);
         }
         ui.add_space(4.0);
         ui.label(
@@ -385,20 +449,18 @@ impl LibraryUi {
                 .size(fs(10.0))
                 .color(THEME.muted),
         );
-        for s in [Status::None, Status::Busy, Status::Attention, Status::Done] {
+        for s in STATUSES {
             let text = format!("{}  ({})", s.label(), count[s as usize]);
-            if ui
+            let r = ui
                 .selectable_label(all && only == Some(s), text)
                 .on_hover_text(format!(
                     "Only tracks whose status is \"{}\" (in a search: status:{})",
                     s.label(),
                     s.name()
-                ))
-                .clicked()
-            {
-                self.set_scope(Scope::All);
-                *table.filter_mut(ColumnId::Status) = Filter::Status([s].into());
-                clicked = true;
+                ));
+            self.outline(ui, &r, &AllRow::Status(s));
+            if r.clicked() {
+                picked = Some(AllRow::Status(s));
             }
         }
         ui.add_space(4.0);
@@ -407,30 +469,34 @@ impl LibraryUi {
             (Some(g), true) => format!("Duplicates  ({})", g.len()),
             _ => "Duplicates".to_string(),
         };
-        if ui
+        let r = ui
             .selectable_label(self.scope == Scope::Duplicates, dups)
-            .on_hover_text("Tracks whose audio is the same as another's")
-            .clicked()
-        {
-            self.set_scope(Scope::Duplicates);
-            // Found afresh each time.
-            out.push(LibraryCmd::FindDuplicates.into());
-            clicked = true;
+            .on_hover_text("Tracks whose audio is the same as another's");
+        self.outline(ui, &r, &AllRow::Duplicates);
+        if r.clicked() {
+            picked = Some(AllRow::Duplicates);
         }
-        if ui
+        let r = ui
             .selectable_label(self.in_history(), "History")
-            .on_hover_text("What was played, one run of the app at a time")
-            .clicked()
-        {
-            self.set_scope(Scope::History(None));
-            // Listed afresh each time.
-            out.push(LibraryCmd::ListSessions.into());
-            clicked = true;
+            .on_hover_text("What was played, one run of the app at a time");
+        self.outline(ui, &r, &AllRow::History);
+        if r.clicked() {
+            picked = Some(AllRow::History);
         }
         if self.in_history() {
             clicked |= self.sessions_list(ui);
         }
+        if let Some(row) = picked {
+            self.show_row(&row, table, out);
+            self.nav_cursor = Some(row);
+            clicked = true;
+        }
         clicked
+    }
+
+    /// The browse knob's highlight, if it's on `row`.
+    fn outline(&self, ui: &Ui, r: &egui::Response, row: &AllRow) {
+        super::outline(ui, r, self.nav_cursor.as_ref() == Some(row), self.nav_scroll);
     }
 
     /// The sessions under "History", newest first: when each started, and how many
@@ -449,17 +515,23 @@ impl LibraryUi {
             ui.horizontal(|ui| {
                 ui.add_space(ui.spacing().indent);
                 let text = format!("{}  ({})", s.label, s.tracks.len());
-                if ui
+                let r = ui
                     .selectable_label(shown == Some(s.id), text)
-                    .on_hover_text(plays(s.tracks.len()))
-                    .clicked()
-                {
+                    .on_hover_text(plays(s.tracks.len()));
+                super::outline(
+                    ui,
+                    &r,
+                    self.nav_cursor == Some(AllRow::Session(s.id)),
+                    self.nav_scroll,
+                );
+                if r.clicked() {
                     picked = Some(s.id);
                 }
             });
         }
         if let Some(id) = picked {
             self.set_scope(Scope::History(Some(id)));
+            self.nav_cursor = Some(AllRow::Session(id));
         }
         picked.is_some()
     }
@@ -648,6 +720,12 @@ impl LibraryUi {
         }
         .show(ui, v, media, out);
         self.shown = shown;
+        if self.want_top && !self.shown.is_empty() {
+            self.want_top = false;
+            self.sel = Selection::default();
+            self.scroll_to = self.sel.move_focus(0, &self.shown);
+            ui.ctx().request_repaint();
+        }
         if let (Some((from, to)), Some(playlist)) = (res.moved, viewing) {
             out.push(CollectionCmd::MoveEntries { playlist, from, to }.into());
         }

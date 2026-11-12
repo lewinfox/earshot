@@ -425,6 +425,8 @@ pub struct Memory {
     pub label: Option<String>,
     /// 0xRRGGBB; `None` shows the default for a cue or a loop.
     pub color: Option<u32>,
+    /// The track's active loop: it turns itself on when played onto.
+    pub active: bool,
 }
 
 /// What the UI shows of a track's cues besides the hot cue times (those go to the
@@ -482,7 +484,7 @@ pub fn hot_labels(c: &Connection, track: i64) -> Result<[Option<String>; HOTCUES
 /// A track's memory cues and loops, in order through the track.
 pub fn memories(c: &Connection, track: i64) -> Result<Vec<Memory>> {
     let mut st = c.prepare_cached(
-        "SELECT id, start_s, end_s, label, color FROM cues
+        "SELECT id, start_s, end_s, label, color, active FROM cues
          WHERE track_id = ?1 AND kind IN (?2, ?3)
          ORDER BY start_s, end_s",
     )?;
@@ -495,6 +497,7 @@ pub fn memories(c: &Connection, track: i64) -> Result<Vec<Memory>> {
                 end: r.get(2)?,
                 label: r.get(3)?,
                 color: r.get(4)?,
+                active: r.get(5)?,
             })
         },
     )?;

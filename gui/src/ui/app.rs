@@ -22,7 +22,7 @@ use super::panels::deck::{DeckInfo, PendingLoad};
 use super::panels::flow::FlowUi;
 use super::panels::library::browser::Scope;
 use super::panels::library::tracks::take_wanted_art;
-use super::panels::library::{LibraryPane, LoadedFrom, drag};
+use super::panels::library::{LibraryPane, Level, LoadedFrom, Nav, drag};
 use super::panels::status::{AnalysisSummary, Meter, StatusLine, TopBar};
 use super::panels::{CoreView, Cx, EngineFrame, Panel, PreviewState};
 use super::prefs::{self, UiPrefs};
@@ -101,6 +101,10 @@ pub struct EarshotApp {
     sources: Vec<crate::core::sources::Source>,
     /// The USB sticks plugged in (`core::drives`), and which earshot is using.
     drives: Vec<crate::core::drives::Drive>,
+    /// Each effect unit's TAP presses.
+    fx_taps: [crate::core::tap::Taps; earshot_engine::FX_UNITS],
+    /// Ends the drive watcher's thread when the app goes.
+    _drives_stop: crate::core::drives::StopOnDrop,
     uses: crate::core::drives::Uses,
     /// Stick libraries asked to become sources, so they're asked for once.
     sticks_added: std::collections::HashSet<(crate::core::sources::SourceKind, std::path::PathBuf)>,
@@ -216,9 +220,10 @@ impl EarshotApp {
         let audio = start_audio(&player, &settings.audio, services.null_audio);
         let monitor = player.lock().unwrap().monitor();
 
+        let drives_stop = crate::core::drives::StopOnDrop::default();
         {
             let sink = sink.clone();
-            audio_watch::start(player.clone(), move |quiet, decks| {
+            audio_watch::start(&player, move |quiet, decks| {
                 sink(Event::Command(Command::Audio(AudioCmd::Stalled {
                     quiet,
                     decks,
@@ -227,7 +232,9 @@ impl EarshotApp {
         }
         {
             let sink = sink.clone();
-            crate::core::drives::watch(move |d| sink(Event::Drives(d)));
+            crate::core::drives::watch(drives_stop.0.clone(), move |d| {
+                sink(Event::Drives(d))
+            });
         }
         let analyser =
             Analyser::start(sink.clone(), player.clone(), store.clone(), services.worker);
@@ -303,6 +310,8 @@ impl EarshotApp {
             edits: edit::History::default(),
             sources: vec![],
             drives: vec![],
+            _drives_stop: drives_stop,
+            fx_taps: Default::default(),
             uses: Default::default(),
             sticks_added: Default::default(),
             cues: HashMap::new(),
@@ -496,6 +505,54 @@ impl EarshotApp {
         })
     }
 
+    /// The memory loop SHIFT + RELOOP/EXIT acts on: the one playing (just called),
+    /// else the one nearest the playhead (none: inside it).
+    fn loop_to_activate(&self, deck: DeckId) -> Option<store::Memory> {
+        let called = self.called_memory(deck);
+        let at = self.frame.snap.as_ref()?.deck(deck).position;
+        let loops = self.memories(deck).into_iter().filter(|m| m.end.is_some());
+        let away = |m: &store::Memory| {
+            let end = m.end.unwrap_or(m.start);
+            if at < m.start {
+                m.start - at
+            } else {
+                (at - end).max(0.0)
+            }
+        };
+        let loops: Vec<store::Memory> = loops.collect();
+        loops
+            .iter()
+            .find(|m| Some(m.id) == called)
+            .or_else(|| loops.iter().min_by(|a, b| away(a).total_cmp(&away(b))))
+            .cloned()
+    }
+
+    /// Give each deck its track's active loop, when the engine has another (a load
+    /// clears it there, and the loop may have been changed or saved since).
+    fn send_active_loops(&mut self) {
+        let Some(snap) = self.frame.snap.as_ref() else {
+            return;
+        };
+        let mut out = vec![];
+        for (i, d) in snap.live().iter().enumerate() {
+            let Some(deck) = DeckId::new(i) else { continue };
+            let want = d
+                .track_id
+                .and_then(|t| self.cues.get(&t))
+                .and_then(|c| c.memories.iter().find(|m| m.active))
+                .and_then(|m| Some((m.start, m.end?)));
+            if want != d.active_loop {
+                out.push(Command::Deck(
+                    deck,
+                    DeckCmd::Engine(earshot_engine::DeckCmd::ActiveLoop(want)),
+                ));
+            }
+        }
+        for c in out {
+            self.dispatch(c);
+        }
+    }
+
     /// Switch mode: only the tabs under the decks change. Refused (with a note in the
     /// bottom bar) when leaving Perform while a deck plays; any other switch pauses the
     /// playing decks, leaving their tracks loaded where they were. True if it switched.
@@ -580,6 +637,11 @@ impl EarshotApp {
         match cmd {
             Command::View(v) => self.view_cmd(v),
             Command::App(AppCmd::ReconnectMidi) => self.connect_midi(),
+            Command::App(AppCmd::FxTap { unit, at }) => {
+                if let Some(bpm) = self.fx_taps.get_mut(unit).and_then(|t| t.tap(at)) {
+                    self.dispatch(Command::Fx(unit, earshot_engine::FxCmd::TapBpm(bpm)));
+                }
+            }
             Command::App(AppCmd::CancelJob(id)) => self.jobs.cancel(id),
             Command::App(AppCmd::StopAnalysis) => {
                 self.lib.analyser.stop_background();
@@ -662,6 +724,11 @@ impl EarshotApp {
                     self.dispatch(Command::Deck(deck, DeckCmd::DeleteMemory(id)));
                 }
             }
+            Command::Deck(deck, DeckCmd::ToggleActiveLoop) => {
+                if let Some(m) = self.loop_to_activate(deck) {
+                    self.dispatch(Command::Deck(deck, DeckCmd::SetLoopActive(m.id, !m.active)));
+                }
+            }
             Command::Library(c) => self.library_cmd(c),
             Command::External(c) => self.external_cmd(c),
             Command::Export(c) => self.export_cmd(c),
@@ -730,14 +797,31 @@ impl EarshotApp {
     fn view_cmd(&mut self, cmd: ViewCmd) {
         let (lib, flow) = (&mut self.panels.library, &self.panels.flow);
         match cmd {
-            ViewCmd::Browse(n) => lib.browse(n),
-            ViewCmd::TogglePane => {
-                lib.focused_pane = match lib.focused_pane {
-                    Pane::Library | Pane::Flow => Pane::Suggest,
-                    Pane::Suggest => Pane::Library,
-                };
+            // On a list, straight away; elsewhere when the library is next drawn (it
+            // knows the sources and trees then).
+            ViewCmd::Browse(n) if lib.level == Level::List => lib.browse(n),
+            ViewCmd::Browse(n) => lib.nav.push(Nav::Turn(n)),
+            ViewCmd::PaneStep(by) => lib.nav.push(if by > 0 { Nav::Next } else { Nav::Prev }),
+            ViewCmd::FocusPane(p) => lib.focus(p),
+            ViewCmd::RelatedTracks => {
+                use crate::core::view::Aside;
+                let lib = &mut self.panels.library;
+                let layout = self.prefs.layout_mut();
+                if layout.aside == Some(Aside::Suggestions) {
+                    // Open: close it, and the knob goes back to the track list.
+                    layout.aside = None;
+                    if lib.focused_pane == Pane::Suggest {
+                        lib.focus(Pane::Library);
+                    }
+                } else {
+                    layout.aside = Some(Aside::Suggestions);
+                    lib.focus(Pane::Suggest);
+                    lib.suggest.focus_top();
+                }
             }
-            ViewCmd::FocusPane(p) => lib.focused_pane = p,
+            ViewCmd::ToggleLibraryMaximized => {
+                self.prefs.library_maximized = !self.prefs.library_maximized;
+            }
             ViewCmd::FocusSearch => lib.browser.search_focus = true,
             ViewCmd::LoadSelected(deck) => {
                 if let Some(id) = lib.focused_track(flow) {
@@ -817,7 +901,10 @@ impl EarshotApp {
                     self.tempo_lock.run(TempoLockCmd::Analyse(id));
                 }
             }
-            ViewCmd::Source(s) => self.prefs.layout_mut().source = s,
+            ViewCmd::Source(s) => {
+                self.prefs.layout_mut().source = s;
+                self.panels.library.level = Level::Sources;
+            }
             ViewCmd::Aside(a) => self.prefs.layout_mut().aside = a,
             ViewCmd::Tool(t) => self.prefs.layout_mut().tool = t,
             ViewCmd::ToggleModal(m) => {
@@ -1044,6 +1131,7 @@ impl eframe::App for EarshotApp {
         self.read_engine(ctx);
         self.sync_tempo_lock();
         self.sync_trim();
+        self.send_active_loops();
         // Background analysis holds back while a deck plays, in every mode.
         let playing = self
             .frame

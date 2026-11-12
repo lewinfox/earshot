@@ -1009,6 +1009,7 @@ mod tests {
             end: None,
             label: Some("Old".into()),
             color: None,
+            active: false,
         };
         let info = info(
             "Track",

@@ -18,10 +18,10 @@ use std::time::Instant;
 
 use earshot_engine::{
     ChannelParam, DeckCmd as EngineCmd, DeckId, DeckSnap, EQ_HIGH, EQ_LOW, EQ_MID, EngineSnapshot,
-    FX_UNITS, FxCmd, HOTCUES, MAX_DECKS, MasterParam, ParamId, Press, Set,
+    FX_UNITS, FxCmd, FxTarget, HOTCUES, MAX_DECKS, MasterParam, ParamId, Press, Set,
 };
 
-use super::command::{Command, DeckCmd, ViewCmd};
+use super::command::{AppCmd, Command, DeckCmd, MixerCmd, ViewCmd};
 use super::view::PadMode;
 use super::player::GridOp;
 
@@ -168,8 +168,8 @@ pub const CROSSFADER: Range = Range {
     centre: Some(0.0),
     format: fmt_balance,
 };
-pub const MAIN_GAIN: Range = Range {
-    name: "Main level",
+pub const MASTER_GAIN: Range = Range {
+    name: "Master level",
     min: 0.0,
     max: 5.0,
     default: 1.0,
@@ -182,7 +182,7 @@ pub const BALANCE: Range = Range {
 };
 pub const HEAD_GAIN: Range = Range {
     name: "Headphone level",
-    ..MAIN_GAIN
+    ..MASTER_GAIN
 };
 pub const HEAD_MIX: Range = Range {
     name: "Headphone mix",
@@ -190,7 +190,7 @@ pub const HEAD_MIX: Range = Range {
     max: 1.0,
     default: 0.5,
     centre: Some(0.5),
-    format: |v| format!("{:.0} % cue, {:.0} % main", (1.0 - v) * 100.0, v * 100.0),
+    format: |v| format!("{:.0} % cue, {:.0} % master", (1.0 - v) * 100.0, v * 100.0),
 };
 /// The tempo fader, -1..1 across the deck's tempo range (minus at the top).
 pub const TEMPO: Range = Range {
@@ -292,6 +292,46 @@ pub enum Control {
     /// An effect unit (0-based, below `FX_UNITS`).
     Fx(usize, FxControl),
     Library(LibraryControl),
+    /// What's on screen.
+    Ui(UiControl),
+}
+
+/// A control over what's on screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum UiControl {
+    /// Hide the decks so the library gets their room (the waveforms stay), or bring
+    /// them back: Mixxx's maximised library, Pioneer's VIEW.
+    LibraryMaximize,
+}
+
+impl UiControl {
+    pub const ALL: [UiControl; 1] = [UiControl::LibraryMaximize];
+
+    pub fn spec(self) -> ControlSpec {
+        match self {
+            UiControl::LibraryMaximize => spec(
+                "library_maximize_toggle",
+                "hide the decks for a bigger library, or show them",
+                Kind::Button,
+            ),
+        }
+    }
+
+    pub fn command(self, value: f64) -> Option<Command> {
+        match self {
+            UiControl::LibraryMaximize if value > 0.0 => {
+                Some(Command::View(ViewCmd::ToggleLibraryMaximized))
+            }
+            UiControl::LibraryMaximize => None,
+        }
+    }
+
+    /// Mixxx's `[Skin]` key.
+    fn mixxx(self) -> &'static str {
+        match self {
+            UiControl::LibraryMaximize => "show_maximized_library",
+        }
+    }
 }
 
 /// A control on an effect unit.
@@ -302,20 +342,40 @@ pub enum FxControl {
     /// Halve or double the effect's length in beats.
     BeatsDown,
     BeatsUp,
-    /// The next effect.
+    /// The next effect, or the one before.
     Next,
-    /// Put the unit on the next deck, or the main mix.
+    Prev,
+    /// Put the unit on the next deck, or the master mix.
     Target,
+    /// Put the unit on this deck (0-based), or on the master mix: Pioneer's CH SELECT
+    /// switch.
+    TargetDeck(u8),
+    TargetMaster,
+    /// Turn the effect off and play the release effect (Pioneer's Release FX).
+    Release,
+    /// Follow the target's tempo (BPM auto mode), or run on a tempo tapped in on this
+    /// button (BPM tap mode).
+    TempoAuto,
+    TempoTap,
 }
 
 impl FxControl {
-    pub const ALL: [FxControl; 6] = [
+    pub const ALL: [FxControl; 15] = [
         FxControl::On,
+        FxControl::Release,
         FxControl::Level,
         FxControl::BeatsDown,
         FxControl::BeatsUp,
         FxControl::Next,
+        FxControl::Prev,
         FxControl::Target,
+        FxControl::TargetDeck(0),
+        FxControl::TargetDeck(1),
+        FxControl::TargetDeck(2),
+        FxControl::TargetDeck(3),
+        FxControl::TargetMaster,
+        FxControl::TempoAuto,
+        FxControl::TempoTap,
     ];
 
     pub fn spec(self) -> ControlSpec {
@@ -326,7 +386,16 @@ impl FxControl {
             BeatsDown => spec("beats_halve", "halve the effect's length", Kind::Button),
             BeatsUp => spec("beats_double", "double the effect's length", Kind::Button),
             Next => spec("effect_next", "next effect", Kind::Button),
-            Target => spec("channel_next", "effect on the next deck / main", Kind::Button),
+            Prev => spec("effect_prev", "previous effect", Kind::Button),
+            Target => spec("channel_next", "effect on the next deck / master", Kind::Button),
+            TargetDeck(0) => spec("channel_deck_1", "effect on deck 1", Kind::Button),
+            TargetDeck(1) => spec("channel_deck_2", "effect on deck 2", Kind::Button),
+            TargetDeck(2) => spec("channel_deck_3", "effect on deck 3", Kind::Button),
+            TargetDeck(_) => spec("channel_deck_4", "effect on deck 4", Kind::Button),
+            TargetMaster => spec("channel_master", "effect on the master mix", Kind::Button),
+            Release => spec("release", "effect off, with the release effect", Kind::Button),
+            TempoAuto => spec("tempo_auto", "effect follows the track's tempo", Kind::Button),
+            TempoTap => spec("tempo_tap", "tap the effect's tempo", Kind::Button),
         }
     }
 
@@ -340,7 +409,17 @@ impl FxControl {
             FxControl::BeatsDown => fx(FxCmd::BeatsStep(-1)),
             FxControl::BeatsUp => fx(FxCmd::BeatsStep(1)),
             FxControl::Next => fx(FxCmd::NextKind),
+            FxControl::Prev => fx(FxCmd::PrevKind),
             FxControl::Target => fx(FxCmd::NextTarget),
+            FxControl::TargetDeck(d) => fx(FxCmd::Target(FxTarget::Deck(DeckId::new(d as usize)?))),
+            FxControl::TargetMaster => fx(FxCmd::Target(FxTarget::Master)),
+            FxControl::Release => fx(FxCmd::Release),
+            FxControl::TempoAuto => fx(FxCmd::TempoAuto),
+            // Timed here: on the MIDI thread, as the message comes in.
+            FxControl::TempoTap => Some(Command::App(AppCmd::FxTap {
+                unit,
+                at: std::time::Instant::now(),
+            })),
         }
     }
 
@@ -351,9 +430,19 @@ impl FxControl {
             FxControl::On => "enabled",
             FxControl::Level => "mix",
             FxControl::Next => "next_chain",
+            FxControl::Prev => "prev_chain",
             FxControl::BeatsDown => "beats_down",
             FxControl::BeatsUp => "beats_up",
             FxControl::Target => "next_target",
+            // Mixxx sets group_[ChannelN]_enable per channel; these are earshot's own.
+            FxControl::TargetDeck(0) => "target_deck_1",
+            FxControl::TargetDeck(1) => "target_deck_2",
+            FxControl::TargetDeck(2) => "target_deck_3",
+            FxControl::TargetDeck(_) => "target_deck_4",
+            FxControl::TargetMaster => "target_master",
+            FxControl::Release => "release",
+            FxControl::TempoAuto => "tempo_auto",
+            FxControl::TempoTap => "tempo_tap",
         }
     }
 }
@@ -366,6 +455,8 @@ pub enum DeckControl {
     /// The cue point at the playhead (snapped when quantising).
     SetCue,
     Sync,
+    /// Make this deck the sync master (the one synced decks follow).
+    SyncSetMaster,
     Quantize,
     Keylock,
     /// Headphone cue.
@@ -387,6 +478,9 @@ pub enum DeckControl {
     LoopOut,
     /// Leave the loop, or go back into the last one.
     Reloop,
+    /// SHIFT + RELOOP/EXIT: make the memory loop just called (or the nearest) the
+    /// track's active loop, which turns itself on when played onto; or stop it being.
+    LoopActiveToggle,
     /// Halve or double the loop, or the next loop's size when not looping.
     LoopHalve,
     LoopDouble,
@@ -440,10 +534,14 @@ pub enum DeckControl {
 pub enum LibraryControl {
     /// Move the selection by the value (negative is up).
     Browse,
-    /// Library ↔ suggestions.
-    TogglePane,
+    /// Focus the next pane (library or Flow → suggestions → …), or the one before.
+    PaneNext,
+    PanePrev,
     /// Put the cursor in the search box.
     Search,
+    /// Open the suggestions (tracks related to what's playing) on their top track,
+    /// or close them.
+    RelatedTracks,
     /// Take back the last edit (metadata, collections, grids, the Flow).
     Undo,
     Redo,
@@ -458,6 +556,7 @@ impl DeckControl {
             Cue => spec("cue", "cue", Button),
             SetCue => spec("cue_set", "set the cue point here", Button),
             Sync => spec("beat_sync", "beat sync", Toggle),
+            SyncSetMaster => spec("sync_set_master", "make this deck the sync master", Button),
             Quantize => spec("quantize", "quantise", Toggle),
             Keylock => spec("key_lock", "key lock", Toggle),
             Pfl => spec("headphone_cue", "headphone cue", Toggle),
@@ -471,6 +570,11 @@ impl DeckControl {
             LoopIn => spec("loop_in", "loop in", Button),
             LoopOut => spec("loop_out", "loop out", Button),
             Reloop => spec("loop_exit", "leave the loop / reloop", Button),
+            LoopActiveToggle => spec(
+                "loop_active_toggle",
+                "make the nearest memory loop the active loop, or not",
+                Button,
+            ),
             LoopHalve => spec("loop_halve", "halve the loop", Button),
             LoopDouble => spec("loop_double", "double the loop", Button),
             NudgeDown => spec("pitch_bend_down", "slow down while held", Button),
@@ -523,13 +627,14 @@ impl DeckControl {
 
     /// Every deck control, with sample parameters for the parametrised ones (for
     /// looking names up and for tests).
-    pub const ALL: [DeckControl; 48] = {
+    pub const ALL: [DeckControl; 50] = {
         use DeckControl::*;
         [
             Play,
             Cue,
             SetCue,
             Sync,
+            SyncSetMaster,
             Quantize,
             Keylock,
             Pfl,
@@ -543,6 +648,7 @@ impl DeckControl {
             LoopIn,
             LoopOut,
             Reloop,
+            LoopActiveToggle,
             LoopHalve,
             LoopDouble,
             NudgeDown,
@@ -690,6 +796,7 @@ impl DeckControl {
         match self {
             Play if pressed => engine(EngineCmd::Play(Set::Toggle)),
             Sync if pressed => engine(EngineCmd::Sync(Set::Toggle)),
+            SyncSetMaster => pressed.then_some(Command::Mixer(MixerCmd::SyncLeader(Some(deck)))),
             Quantize if pressed => engine(EngineCmd::Quantize(Set::Toggle)),
             Keylock if pressed => engine(EngineCmd::Keylock(Set::Toggle)),
             Vinyl if pressed => engine(EngineCmd::Vinyl(Set::Toggle)),
@@ -707,6 +814,7 @@ impl DeckControl {
             LoopIn if pressed => engine(EngineCmd::LoopIn),
             LoopOut if pressed => engine(EngineCmd::LoopOut),
             Reloop if pressed => engine(EngineCmd::Reloop(Set::Toggle)),
+            LoopActiveToggle => on_press(DeckCmd::ToggleActiveLoop),
             LoopHalve => on_press(DeckCmd::ScaleLoop(0.5)),
             LoopDouble => on_press(DeckCmd::ScaleLoop(2.0)),
             NudgeDown => engine(EngineCmd::Nudge(if pressed { -NUDGE } else { 0.0 })),
@@ -749,6 +857,7 @@ impl DeckControl {
             Cue => key("cue_default"),
             SetCue => key("cue_set"),
             Sync => key("sync_enabled"),
+            SyncSetMaster => key("sync_leader"),
             Quantize => key("quantize"),
             Keylock => key("keylock"),
             Pfl => key("pfl"),
@@ -782,7 +891,8 @@ impl DeckControl {
             JogTouch => key("jog_touch"),
             JogTurn => key("jog_turn"),
             JogBend => key("jog_bend"),
-            SaveMemory | CueJumpPrev | CueJumpNext | CueDelete | GridNudge(_) | LoadStep(_)
+            SaveMemory | CueJumpPrev | CueJumpNext | CueDelete | LoopActiveToggle
+            | GridNudge(_) | LoadStep(_)
             | SetPadMode(_) | Shift => None,
         }
     }
@@ -792,19 +902,27 @@ impl LibraryControl {
     pub fn spec(self) -> ControlSpec {
         match self {
             LibraryControl::Browse => spec("browse", "move through the list", Kind::Relative),
-            LibraryControl::TogglePane => {
-                spec("pane_toggle", "library / suggestions", Kind::Button)
-            }
+            LibraryControl::PaneNext => spec("pane_next", "next pane", Kind::Button),
+            LibraryControl::PanePrev => spec("pane_prev", "previous pane", Kind::Button),
             LibraryControl::Search => spec("search", "search", Kind::Button),
+            LibraryControl::RelatedTracks => {
+                spec(
+                    "related_tracks_toggle",
+                    "open the suggestions on their top track, or close them",
+                    Kind::Button,
+                )
+            }
             LibraryControl::Undo => spec("undo", "undo", Kind::Button),
             LibraryControl::Redo => spec("redo", "redo", Kind::Button),
         }
     }
 
-    pub const ALL: [LibraryControl; 5] = [
+    pub const ALL: [LibraryControl; 7] = [
         LibraryControl::Browse,
-        LibraryControl::TogglePane,
+        LibraryControl::PaneNext,
+        LibraryControl::PanePrev,
         LibraryControl::Search,
+        LibraryControl::RelatedTracks,
         LibraryControl::Undo,
         LibraryControl::Redo,
     ];
@@ -813,8 +931,10 @@ impl LibraryControl {
         let view = |v| Some(Command::View(v));
         match self {
             LibraryControl::Browse if value != 0.0 => view(ViewCmd::Browse(value.round() as i32)),
-            LibraryControl::TogglePane if value > 0.0 => view(ViewCmd::TogglePane),
+            LibraryControl::PaneNext if value > 0.0 => view(ViewCmd::PaneStep(1)),
+            LibraryControl::PanePrev if value > 0.0 => view(ViewCmd::PaneStep(-1)),
             LibraryControl::Search if value > 0.0 => view(ViewCmd::FocusSearch),
+            LibraryControl::RelatedTracks if value > 0.0 => view(ViewCmd::RelatedTracks),
             LibraryControl::Undo if value > 0.0 => Some(Command::Undo),
             LibraryControl::Redo if value > 0.0 => Some(Command::Redo),
             _ => None,
@@ -826,8 +946,8 @@ fn master_spec(p: MasterParam) -> ControlSpec {
     let c = |name, help, range| spec(name, help, Kind::Continuous(range));
     match p {
         MasterParam::Crossfader => c("crossfader", "crossfader", CROSSFADER),
-        MasterParam::Gain => c("main_level", "main level", MAIN_GAIN),
-        MasterParam::Balance => c("main_balance", "balance", BALANCE),
+        MasterParam::Gain => c("master_level", "master level", MASTER_GAIN),
+        MasterParam::Balance => c("master_balance", "master balance", BALANCE),
         MasterParam::HeadGain => c("headphone_level", "headphone level", HEAD_GAIN),
         MasterParam::HeadMix => c("headphone_mix", "headphone mix", HEAD_MIX),
     }
@@ -894,6 +1014,7 @@ impl Control {
             Control::Master(p) => master_spec(p),
             Control::Fx(_, c) => c.spec(),
             Control::Library(c) => c.spec(),
+            Control::Ui(c) => c.spec(),
         }
     }
 
@@ -911,7 +1032,7 @@ impl Control {
             Control::Deck(deck, c) => c.get(snap.deck(deck)),
             Control::Master(p) => Some(match p {
                 MasterParam::Crossfader => m.crossfader,
-                MasterParam::Gain => m.main_gain,
+                MasterParam::Gain => m.master_gain,
                 MasterParam::Balance => m.balance,
                 MasterParam::HeadGain => m.head_gain,
                 MasterParam::HeadMix => m.head_mix,
@@ -924,7 +1045,7 @@ impl Control {
                     _ => None,
                 }
             }
-            Control::Library(_) => None,
+            Control::Library(_) | Control::Ui(_) => None,
         }
     }
 
@@ -936,6 +1057,7 @@ impl Control {
             Control::Fx(u, c) if u < FX_UNITS => c.command(u, value),
             Control::Fx(..) => None,
             Control::Library(c) => c.command(value),
+            Control::Ui(c) => c.command(value),
         }
     }
 
@@ -951,6 +1073,7 @@ impl Control {
             Control::Master(p) => (format!("mixer_{}", master_spec(p).name), None),
             Control::Fx(u, c) => (format!("fx_{}_{}", u + 1, c.spec().name), None),
             Control::Library(c) => (format!("library_{}", c.spec().name), None),
+            Control::Ui(c) => (format!("ui_{}", c.spec().name), None),
         }
     }
 
@@ -987,6 +1110,12 @@ impl Control {
                 .map(|(p, _)| *p)
                 .find(|p| master_spec(*p).name == thing)
                 .map(Control::Master)
+        } else if let Some(thing) = name.strip_prefix("ui_") {
+            size_only_on_decks()?;
+            UiControl::ALL
+                .into_iter()
+                .find(|c| c.spec().name == thing)
+                .map(Control::Ui)
         } else if let Some(thing) = name.strip_prefix("library_") {
             size_only_on_decks()?;
             LibraryControl::ALL
@@ -1090,13 +1219,21 @@ impl Control {
             Control::Library(LibraryControl::Browse) => {
                 Some(("[Library]".into(), "MoveVertical".into()))
             }
-            Control::Library(LibraryControl::TogglePane) => {
-                Some(("[Library]".into(), "TogglePane".into()))
+            Control::Library(LibraryControl::PaneNext) => {
+                Some(("[Library]".into(), "MoveFocusForward".into()))
+            }
+            Control::Library(LibraryControl::PanePrev) => {
+                Some(("[Library]".into(), "MoveFocusBackward".into()))
             }
             Control::Library(LibraryControl::Search) => None,
             // Mixxx has no undo; these names are earshot's own, for MIDI mappings.
             Control::Library(LibraryControl::Undo) => Some(("[Library]".into(), "Undo".into())),
             Control::Library(LibraryControl::Redo) => Some(("[Library]".into(), "Redo".into())),
+            // Mixxx has no such list; earshot's own name.
+            Control::Library(LibraryControl::RelatedTracks) => {
+                Some(("[Library]".into(), "RelatedTracks".into()))
+            }
+            Control::Ui(c) => Some(("[Skin]".into(), c.mixxx().into())),
         }
     }
 
@@ -1117,6 +1254,9 @@ impl Control {
                 .filter(|u| *u < FX_UNITS)?;
             let c = FxControl::ALL.into_iter().find(|c| c.mixxx() == key)?;
             return Some(Control::Fx(u, c));
+        }
+        if group == "[Skin]" {
+            return UiControl::ALL.into_iter().find(|c| c.mixxx() == key).map(Control::Ui);
         }
         if group == "[Library]" {
             return LibraryControl::ALL
@@ -1172,6 +1312,7 @@ pub fn command_names() -> Vec<String> {
         all.extend(FxControl::ALL.iter().map(|c| Control::Fx(u, *c)));
     }
     all.extend(LibraryControl::ALL.iter().map(|c| Control::Library(*c)));
+    all.extend(UiControl::ALL.iter().map(|c| Control::Ui(*c)));
     let mut names: Vec<String> = vec![];
     for c in all {
         let name = c.name().0;
@@ -1263,6 +1404,10 @@ pub fn commands_markdown() -> String {
     table(
         "Library: `library_`",
         LibraryControl::ALL.iter().map(|&c| row(Control::Library(c), None)).collect(),
+    );
+    table(
+        "What's on screen: `ui_`",
+        UiControl::ALL.iter().map(|&c| row(Control::Ui(c), None)).collect(),
     );
     out
 }
@@ -1487,6 +1632,7 @@ mod tests {
         all.extend(MASTER.iter().map(|(p, _)| Control::Master(*p)));
         all.extend(FxControl::ALL.iter().map(|c| Control::Fx(0, *c)));
         all.extend(LibraryControl::ALL.iter().map(|c| Control::Library(*c)));
+        all.extend(UiControl::ALL.iter().map(|c| Control::Ui(*c)));
         for c in all {
             let (name, word) = c.name();
             let (back, _) = Control::parse(&name, word.as_deref()).unwrap();

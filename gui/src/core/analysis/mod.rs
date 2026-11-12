@@ -24,7 +24,7 @@ pub mod registry;
 
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use earshot_engine::Command;
@@ -128,6 +128,17 @@ struct Shared {
     deck: WorkerClient,
     /// One per background lane.
     background: Vec<WorkerClient>,
+    /// The analyser was dropped: lanes end after their current track (and with
+    /// them the workers).
+    stopping: AtomicBool,
+}
+
+impl Drop for Analyser {
+    fn drop(&mut self) {
+        self.shared.stopping.store(true, Ordering::Relaxed);
+        let _q = self.shared.queue.lock().unwrap();
+        self.shared.ready.notify_all();
+    }
 }
 
 impl Analyser {
@@ -176,6 +187,7 @@ impl Analyser {
             sink,
             deck,
             background,
+            stopping: AtomicBool::new(false),
         });
         let lanes = std::iter::once(Lane::Deck).chain((0..cores).map(Lane::Background));
         for (n, lane) in lanes.enumerate() {
@@ -426,6 +438,9 @@ impl Shared {
             let batch = {
                 let mut q = self.queue.lock().unwrap();
                 loop {
+                    if self.stopping.load(Ordering::Relaxed) {
+                        return;
+                    }
                     if let Some(b) = q.take(lane) {
                         break b;
                     }
@@ -604,9 +619,7 @@ impl Shared {
 
         // Beatgrid: in the worker.
         // Deleted when this goes out of scope, however the job ends.
-        let wav = TempWav(
-            std::env::temp_dir().join(format!("{TEMP_PREFIX}{}-{id}.wav", std::process::id())),
-        );
+        let wav = TempWav::new(id);
         write_mono_wav(&wav.0, &audio)
             .map_err(|e| fail(format!("writing {}: {e}", wav.0.display())))?;
         progress(WORKER_START, "waiting for the analyser");
@@ -834,12 +847,24 @@ fn update_decks(
 }
 
 /// 32-bit float mono WAV, the average of both channels.
-/// How the WAVs written for the worker are named: `<prefix><pid>-<track>.wav`.
+/// How the WAVs written for the worker are named: `<prefix><pid>-<n>-<track>.wav`,
+/// `n` counting up in this process (tests run several apps in one).
 const TEMP_PREFIX: &str = "earshot-analyse-";
 
 /// A WAV written for the worker, deleted when dropped (the job finished, failed or
 /// panicked).
 struct TempWav(PathBuf);
+
+impl TempWav {
+    fn new(track: i64) -> TempWav {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        TempWav(std::env::temp_dir().join(format!(
+            "{TEMP_PREFIX}{}-{n}-{track}.wav",
+            std::process::id()
+        )))
+    }
+}
 
 impl Drop for TempWav {
     fn drop(&mut self) {

@@ -555,7 +555,11 @@ pub fn overview(
         painter.rect_filled(
             Rect::from_x_y_ranges(x_of(a)..=x_of(b).max(x_of(a) + 2.0), rect.y_range()),
             0.0,
-            THEME.loop_shade_overview,
+            if marks.loop_active {
+                THEME.loop_shade_overview
+            } else {
+                THEME.loop_shade_overview_idle
+            },
         );
     }
     painter.rect_filled(

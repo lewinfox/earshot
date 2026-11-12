@@ -454,6 +454,7 @@ impl Deck {
         t.set_duration(track.audio.duration());
         t.playing = false;
         t.loop_ = LoopState::default();
+        t.active_loop = None;
         t.jump(cue, JumpReason::Load);
         self.player.speed = 1.0;
         self.player.scratch.cancel();
@@ -591,6 +592,9 @@ impl Deck {
                     self.event_loop(out);
                 }
             }
+            DeckCmd::ActiveLoop(l) => {
+                self.player.transport.active_loop = l.filter(|(s, e)| e > s);
+            }
             DeckCmd::BeatJump(beats) => {
                 let target = self.time_at(self.beat_at(self.pos()) + beats);
                 let l = self.player.transport.loop_;
@@ -617,8 +621,11 @@ impl Deck {
                     } else {
                         let end = self.time_at(self.beat_at(lin) + beats);
                         self.loop_().end = Some(end);
-                        if self.pos() >= end {
-                            self.jump(lin, JumpReason::Loop);
+                        // Past the new end: to the same place in the shorter loop, so
+                        // it plays on to the end of it, still on the beat.
+                        let pos = self.pos();
+                        if pos >= end {
+                            self.jump(lin + (pos - lin) % (end - lin), JumpReason::Loop);
                         }
                     }
                 } else if l.active {
@@ -812,6 +819,7 @@ impl Deck {
             loop_in: l.start,
             loop_out: l.end,
             loop_active: l.active,
+            active_loop: self.player.transport.active_loop,
             cue_point: self.cue_point,
             cue_by_hand: self.cue_by_hand,
             hotcues: self.hotcues,
@@ -875,6 +883,8 @@ pub struct Renderer {
     /// there's nothing to follow.
     fx_spb: [f64; FX_UNITS],
     fx_free_beat: [f64; FX_UNITS],
+    /// Each unit's beat while tapped, from 0 at the last tap.
+    fx_tap_beat: [f64; FX_UNITS],
     crossfader: f64,
     /// Left and right crossfader gains, eased.
     xf_gain: [Smoothed; 2],
@@ -950,6 +960,7 @@ impl Renderer {
             fx: std::array::from_fn(|u| FxUnit::new(sr, FxUnitState::default_for(u))),
             fx_spb: [60.0 / FALLBACK_BPM; FX_UNITS],
             fx_free_beat: [0.0; FX_UNITS],
+            fx_tap_beat: [0.0; FX_UNITS],
             crossfader: 0.0,
             xf_gain: [Smoothed::new(0.0); 2],
             head_gain: Smoothed::new(1.0),
@@ -1154,7 +1165,7 @@ impl Renderer {
             }
         }
 
-        // The main mix, then effects on it, then the headphones.
+        // The master mix, then effects on it, then the headphones.
         for f in 0..n {
             let mut m = [0f32; 2];
             for d in slots(live) {
@@ -1171,11 +1182,11 @@ impl Renderer {
         }
         for f in 0..n {
             let head = self.head_gain.next(k) as f32;
-            // Head mix: how much of the main mix the headphones hear, against the cue bus.
+            // Head mix: how much of the master mix the headphones hear, against the cue bus.
             let mix = self.head_mix.next(k).clamp(0.0, 1.0) as f32;
             for c in 0..2 {
                 let m = self.master[2 * f + c];
-                // With nothing cued the cue bus carries the main mix.
+                // With nothing cued the cue bus carries the master mix.
                 let cue = if any_pfl {
                     0.8 * self.cue[2 * f + c]
                 } else {
@@ -1203,7 +1214,7 @@ impl Renderer {
             }
         }
 
-        // Main level and balance, metered before the limiter so over 0 dB shows when
+        // Master level and balance, metered before the limiter so over 0 dB shows when
         // it's working.
         let master = &mut self.master[..n * 2];
         self.master_chain.process(master);
@@ -1222,7 +1233,7 @@ impl Renderer {
         self.limiters[1].process(&mut self.phones[..n * 2]);
     }
 
-    /// The deck effects on the main mix follow: the sync leader if it's playing, else
+    /// The deck effects on the master mix follow: the sync leader if it's playing, else
     /// the first playing deck, else the first loaded one.
     fn master_deck(&self) -> Option<usize> {
         let loaded = |d: &usize| self.decks[*d].track.is_some();
@@ -1243,6 +1254,13 @@ impl Renderer {
             FxTarget::Deck(_) => return None,
             FxTarget::Master => self.master_deck(),
         };
+        // Tapped: a steady clock at the tapped tempo, its beats counted from the tap.
+        if let Some(bpm) = self.fx[u].state().tap_bpm {
+            let clock = BeatClock::steady(bpm, self.fx_tap_beat[u], sr);
+            self.fx_tap_beat[u] = (clock.beat_end + n as f64 * clock.beats_per_frame) % 64.0;
+            self.fx_spb[u] = clock.secs_per_beat;
+            return Some(clock);
+        }
         let Some(d) = deck.filter(|d| self.decks[*d].track.is_some()) else {
             // Nothing to follow: a steady fallback tempo.
             let clock = BeatClock::steady(FALLBACK_BPM, self.fx_free_beat[u], sr);
@@ -1607,7 +1625,7 @@ impl Renderer {
         }
     }
 
-    /// Whether an effect can go on `t`: the main mix, or one of the first
+    /// Whether an effect can go on `t`: the master mix, or one of the first
     /// [`Self::fx_decks`] decks (not Prepare's player).
     fn fx_target_ok(&self, t: FxTarget) -> bool {
         match t {
@@ -1628,6 +1646,11 @@ impl Renderer {
                 FxCmd::NextTarget => {
                     let next = fx.state().target.next(fx_decks);
                     fx.apply(FxCmd::Target(next));
+                }
+                FxCmd::TapBpm(_) => {
+                    // The tap is a beat.
+                    self.fx_tap_beat[unit] = 0.0;
+                    fx.apply(cmd);
                 }
                 cmd => fx.apply(cmd),
             }
@@ -1687,7 +1710,7 @@ impl Renderer {
         }
         let m = st.mixer;
         self.set_crossfader(m.crossfader);
-        self.master_chain.set(MasterParam::Gain, m.main_gain);
+        self.master_chain.set(MasterParam::Gain, m.master_gain);
         self.master_chain.set(MasterParam::Balance, m.balance);
         self.set_param(ParamId::Master(MasterParam::HeadGain), m.head_gain);
         self.set_param(ParamId::Master(MasterParam::HeadMix), m.head_mix);
@@ -1730,7 +1753,7 @@ impl Renderer {
             decks_live: self.live,
             mixer: MixerSnap {
                 crossfader: self.crossfader,
-                main_gain: self.master_chain.get(MasterParam::Gain),
+                master_gain: self.master_chain.get(MasterParam::Gain),
                 balance: self.master_chain.get(MasterParam::Balance),
                 head_gain: self.head_gain.target,
                 head_mix: self.head_mix.target,
@@ -1906,6 +1929,35 @@ mod tests {
         rig
     }
 
+    /// Tapped, a unit runs on the tapped tempo, its beat starting at the tap, whatever
+    /// the deck's tempo; AUTO goes back to the deck's.
+    #[test]
+    fn a_tapped_tempo_replaces_the_decks() {
+        use crate::fx::{FxCmd, FxKind};
+        let mut rig = fx_rig(FxKind::Trans);
+        rig.run(0.5);
+        let spb = |rig: &mut Rig| rig.r.fx_clock(0, 256).unwrap().secs_per_beat;
+        // The test track has no grid: the deck runs at the fallback tempo.
+        assert!((spb(&mut rig) - 60.0 / crate::fx::FALLBACK_BPM).abs() < 1e-9);
+        rig.send(Command::Fx {
+            unit: 0,
+            cmd: FxCmd::TapBpm(90.0),
+        });
+        rig.run(0.01);
+        assert_eq!(rig.snap().mixer.fx[0].tap_bpm, Some(90.0));
+        let clock = rig.r.fx_clock(0, 256).unwrap();
+        assert!((clock.secs_per_beat - 60.0 / 90.0).abs() < 1e-9);
+        // About 10 ms after the tap: just past a beat.
+        assert!(clock.beat_end > 0.0 && clock.beat_end < 0.05, "{clock:?}");
+        rig.send(Command::Fx {
+            unit: 0,
+            cmd: FxCmd::TempoAuto,
+        });
+        rig.run(0.01);
+        assert_eq!(rig.snap().mixer.fx[0].tap_bpm, None);
+        assert!((spb(&mut rig) - 60.0 / crate::fx::FALLBACK_BPM).abs() < 1e-9);
+    }
+
     #[test]
     fn an_echo_rings_on_after_the_fader_comes_down() {
         use crate::fx::{FxCmd, FxKind};
@@ -1930,7 +1982,7 @@ mod tests {
         assert!(rig.snap().mixer.fx[0].enabled);
     }
 
-    /// With two decks shown, an effect goes on A, B or the main mix only, and a unit on
+    /// With two decks shown, an effect goes on A, B or the master mix only, and a unit on
     /// a hidden deck goes back to its own.
     #[test]
     fn effects_go_only_on_the_decks_shown() {
@@ -2225,6 +2277,69 @@ mod tests {
         let s = rig.snap().decks[0];
         assert!(s.loop_active && (s.position - 20.05).abs() < 0.01, "{s:?}");
         assert_eq!(s.cue_point, 3.0);
+    }
+
+    /// Shortening a loop with the playhead past the new end keeps its place in the
+    /// beat: it goes to the same point in the shorter loop and plays on to its end,
+    /// not back to the start. By a loop size (a pad) and by halving.
+    #[test]
+    fn shortening_a_loop_keeps_the_playhead_in_step() {
+        for halve in [false, true] {
+            let mut rig = Rig::new();
+            let grid = rig.load(0, 120.0, 120.0);
+            rig.deck(0, DeckCmd::Seek(10.0));
+            rig.deck(0, DeckCmd::BeatLoop(8.0));
+            let lin = rig.snap().decks[0].loop_in.unwrap_or(10.0);
+            let lin = grid.time_at(grid.beat_at(lin).round());
+            rig.run(0.05);
+            let lin = rig.snap().decks[0].loop_in.unwrap_or(lin);
+            // 3.25 beats in (half a second a beat), then cut to 2 beats.
+            rig.deck(0, DeckCmd::Seek(lin + 1.625));
+            rig.run(0.01);
+            let before = rig.pos(0);
+            if halve {
+                rig.deck(0, DeckCmd::LoopScale(0.25));
+            } else {
+                rig.deck(0, DeckCmd::BeatLoop(2.0));
+            }
+            rig.run(0.01);
+            let s = rig.snap().decks[0];
+            assert!((s.loop_out.unwrap() - (lin + 1.0)).abs() < 1e-6, "{s:?}");
+            // 1.25 beats in: 0.625 s past the start.
+            let want = lin + (before - lin) % 1.0;
+            assert!((s.position - want).abs() < 0.02, "halve {halve}: {} vs {want}", s.position);
+        }
+    }
+
+    /// An active loop turns itself on when playback reaches its start, not when the
+    /// playhead is put inside it, and not again once exited until played onto again.
+    #[test]
+    fn active_loop_turns_on_when_reached() {
+        let mut rig = Rig::new();
+        rig.load(0, 120.0, 120.0);
+        rig.deck(0, DeckCmd::ActiveLoop(Some((11.0, 12.0))));
+        rig.deck(0, DeckCmd::Seek(10.0));
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.run(0.5);
+        assert!(!rig.snap().decks[0].loop_active, "not there yet");
+        rig.run(2.0);
+        let s = rig.snap().decks[0];
+        assert!(s.loop_active && s.loop_in == Some(11.0) && s.loop_out == Some(12.0));
+        assert!(s.position >= 11.0 && s.position < 12.0);
+        assert_eq!(s.active_loop, Some((11.0, 12.0)));
+        // Exited: it plays on past the end.
+        rig.deck(0, DeckCmd::Reloop(Set::Off));
+        rig.run(1.5);
+        assert!(!rig.snap().decks[0].loop_active);
+        assert!(rig.pos(0) > 12.0);
+        // Put inside it: nothing.
+        rig.deck(0, DeckCmd::Seek(11.5));
+        rig.run(0.2);
+        assert!(!rig.snap().decks[0].loop_active);
+        // A load clears it.
+        rig.load(0, 120.0, 120.0);
+        rig.run(0.05);
+        assert_eq!(rig.snap().decks[0].active_loop, None);
     }
 
     /// Scratch deck `d` forward by `by` seconds over `secs`, reporting every block.
@@ -2743,7 +2858,7 @@ mod tests {
     }
 
     #[test]
-    fn main_gain_balance_and_head_mix() {
+    fn master_gain_balance_and_head_mix() {
         let mut rig = Rig::new();
         rig.load(0, 120.0, 120.0);
         rig.deck(0, DeckCmd::Play(Set::On));
@@ -2754,7 +2869,7 @@ mod tests {
         let p = peaks(&rig.out, 4);
         assert!(p[0] == 0.0 && p[1] > 0.01, "balance: {p:?}");
         assert_eq!(p[2], 0.0, "headphones hear only the (silent) cue bus");
-        // Head mix fully to main: the headphones hear the main mix.
+        // Head mix fully to main: the headphones hear the master mix.
         rig.master(MasterParam::HeadMix, 1.0);
         rig.run(0.2);
         assert!(peaks(&rig.out, 4)[2] > 0.01);
@@ -2763,7 +2878,7 @@ mod tests {
         rig.run(0.2);
         let p = peaks(&rig.out, 4);
         assert!(p[0] == 0.0 && p[1] == 0.0 && p[2] > 0.01, "{p:?}");
-        assert_eq!(rig.snap().mixer.main_gain, 0.0);
+        assert_eq!(rig.snap().mixer.master_gain, 0.0);
     }
 
     #[test]

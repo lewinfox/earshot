@@ -191,7 +191,12 @@ pub enum Pane {
 pub enum ViewCmd {
     /// Move the selection in the focused list (negative is up).
     Browse(i32),
-    TogglePane,
+    /// Browse: into what's highlighted (1), or back out (-1).
+    PaneStep(i32),
+    /// Open the suggestions with the browse knob on their top track, or close them.
+    RelatedTracks,
+    /// Hide the decks for a bigger library, or show them again.
+    ToggleLibraryMaximized,
     /// A list was clicked: it takes the keyboard.
     FocusPane(Pane),
     FocusSearch,

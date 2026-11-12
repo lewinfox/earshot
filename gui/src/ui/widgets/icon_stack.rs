@@ -61,16 +61,18 @@ pub fn icon_stack<T: Copy + PartialEq>(
     open: Option<T>,
     opens: Opens,
 ) -> Option<Option<T>> {
-    icon_stack_with_menu(ui, items, open, opens, |_, _| {})
+    icon_stack_with_menu(ui, items, open, opens, false, |_, _| {})
 }
 
 /// [`icon_stack`], where right-clicking an item with [`StackItem::menu`] opens a
-/// menu `menu` fills in.
+/// menu `menu` fills in. `cursor`: outline the open item, as the browse knob's
+/// highlight.
 pub fn icon_stack_with_menu<T: Copy + PartialEq>(
     ui: &mut Ui,
     items: &[StackItem<T>],
     open: Option<T>,
     opens: Opens,
+    cursor: bool,
     mut menu: impl FnMut(&mut Ui, T),
 ) -> Option<Option<T>> {
     let mut picked = None;
@@ -121,6 +123,9 @@ pub fn icon_stack_with_menu<T: Copy + PartialEq>(
                     }
                 };
                 p.rect_filled(bar, 1, THEME.accent);
+                if cursor {
+                    p.rect_stroke(rect, 4, THEME.cursor_stroke(), StrokeKind::Outside);
+                }
             }
             let colour = match (it.enabled, on) {
                 (false, _) => THEME.line,

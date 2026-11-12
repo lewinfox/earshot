@@ -8,6 +8,14 @@
 //! selection: the keyboard and the controller's browse knob move through it, "load
 //! selected" loads from it, and the suggestions' *Selected* follows it.
 //!
+//! The browse knob reaches every pane, left to right ([`Level`]): the sources (the
+//! icon stack), the source's tree (its folders, playlists, crates and Flows), the
+//! track list, then the suggestions. Turning it moves the highlight within one;
+//! Next (pressing it) goes into what's highlighted (a source's tree, a folder's
+//! contents, a playlist's tracks) and Prev comes back out (closing the folder).
+//! Whatever is highlighted shows straight away. A Flow, Manage and the other
+//! libraries' panes are as far as it goes: there only Prev does anything.
+//!
 //! Shared pieces for other panels: [`table::TrackTable`] (any list of tracks),
 //! [`drag::DragPayload`] (dragging tracks and collections, with a ghost),
 //! [`tracks::track_menu`] (the one right-click menu).
@@ -28,15 +36,15 @@ pub mod tracks;
 
 use egui::{RichText, Ui};
 
-use self::browser::{LibraryUi, Scope};
+use self::browser::{AllRow, LibraryUi, Scope};
 use self::collections::{CollectionsUi, TreeCtx};
-use self::external::{ExternalUi, Middle};
+use self::external::{ExternalUi, Middle, NodeKey};
 use self::suggest::SuggestUi;
 use self::table::{TableView, Tables};
 use self::tracks::Media;
 use super::flow::FlowUi;
 use super::{Cx, Panel, resized};
-use crate::core::collections::{CollectionCmd, Section};
+use crate::core::collections::{CollectionCmd, CollectionId, CollectionKind, Collections, Section};
 use crate::core::command::{Command, ViewCmd};
 use crate::core::external::NodePath;
 use crate::core::outside::is_outside;
@@ -80,6 +88,75 @@ pub enum LoadedFrom {
     },
 }
 
+/// Where the browse knob is (see the module's notes).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Level {
+    /// The left icon stack.
+    Sources,
+    /// The source's tree, on [`LibraryPane::tree_cursor`].
+    Tree,
+    /// A list: [`LibraryPane::focused_pane`].
+    #[default]
+    List,
+    /// Inside something it can't step through (a Flow, Manage, another library's
+    /// pane): only Prev.
+    Inside,
+}
+
+/// A row of a source's tree.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TreeKey {
+    /// A playlist, crate, Flow or folder of them.
+    Collection(CollectionId),
+    /// One of All tracks' lists.
+    All(AllRow),
+    /// Another library's All tracks, playlist or folder.
+    Node(NodeKey),
+}
+
+/// What Next does on a tree row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Into {
+    /// Opens it, onto its first row.
+    Folder,
+    /// Into its track list.
+    List,
+    /// Into it, with only Prev to come back (a Flow).
+    Inside,
+}
+
+#[derive(Clone, Debug)]
+struct TreeRow {
+    key: TreeKey,
+    parent: Option<TreeKey>,
+    into: Into,
+}
+
+/// The browse knob's highlight round a row: an outline, brought into view when it
+/// has just moved.
+pub(super) fn outline(ui: &Ui, r: &egui::Response, on: bool, scroll: bool) {
+    if on {
+        ui.painter().rect_stroke(
+            r.rect.expand(1.0),
+            3.0,
+            crate::ui::theme::THEME.cursor_stroke(),
+            egui::StrokeKind::Outside,
+        );
+        if scroll {
+            r.scroll_to_me(None);
+        }
+    }
+}
+
+/// A move of the browse knob, done when the library is next drawn (it has the
+/// sources and trees then).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Nav {
+    Turn(i32),
+    Next,
+    Prev,
+}
+
 pub struct LibraryPane {
     /// The track list and the Explorer tree.
     pub browser: LibraryUi,
@@ -93,6 +170,16 @@ pub struct LibraryPane {
     pub tables: Tables,
     /// The list with focus.
     pub focused_pane: Pane,
+    /// Where the browse knob is.
+    pub level: Level,
+    /// The tree row highlighted at [`Level::Tree`].
+    pub tree_cursor: Option<TreeKey>,
+    /// Moves waiting for the next draw.
+    pub nav: Vec<Nav>,
+    /// The knob just moved: bring its highlight into view.
+    scroll: bool,
+    /// The source open when last drawn.
+    source: Option<Source>,
 }
 
 impl LibraryPane {
@@ -105,13 +192,245 @@ impl LibraryPane {
             media: Media::default(),
             tables,
             focused_pane: Pane::Library,
+            level: Level::List,
+            tree_cursor: None,
+            nav: vec![],
+            scroll: false,
+            source: None,
         }
+    }
+
+    /// The middle lists another library's tracks (not earshot's list).
+    fn external_list(&self) -> bool {
+        self.source.and_then(|s| self.external.middle(s)) == Some(Middle::Tracks)
+    }
+
+    /// Into a list, onto its first track.
+    fn into_list(&mut self, pane: Pane) {
+        self.focus(pane);
+        match pane {
+            Pane::Suggest => self.suggest.focus_top(),
+            _ if self.external_list() => self.external.focus_top(),
+            _ => self.browser.focus_top(),
+        }
+    }
+
+    /// A list was picked (clicked, or reached by the knob): it has the knob.
+    pub fn focus(&mut self, pane: Pane) {
+        self.focused_pane = pane;
+        self.level = Level::List;
+    }
+
+    /// The open source's tree for the knob, top to bottom: each row, its folder, and
+    /// what Next does on it. Empty when there's no tree (Manage, a stick, a library
+    /// not read yet).
+    fn tree_rows(&self, source: Source, collections: &Collections) -> Vec<TreeRow> {
+        if let Some(section) = source.section() {
+            return self
+                .collections
+                .visible(collections, section)
+                .into_iter()
+                .filter_map(|(id, parent)| {
+                    let into = match collections.get(id)?.kind {
+                        CollectionKind::Folder => Into::Folder,
+                        CollectionKind::Flow => Into::Inside,
+                        _ => Into::List,
+                    };
+                    Some(TreeRow {
+                        key: TreeKey::Collection(id),
+                        parent: parent.map(TreeKey::Collection),
+                        into,
+                    })
+                })
+                .collect();
+        }
+        match source {
+            Source::AllTracks => self
+                .browser
+                .nav_rows()
+                .into_iter()
+                .map(|(row, parent)| TreeRow {
+                    into: if row == AllRow::History {
+                        Into::Folder
+                    } else {
+                        Into::List
+                    },
+                    key: TreeKey::All(row),
+                    parent: parent.map(TreeKey::All),
+                })
+                .collect(),
+            Source::Program(_) | Source::Library(_) => self
+                .external
+                .pane_library(source)
+                .map_or(vec![], |id| self.external.nav_rows(id))
+                .into_iter()
+                .map(|(key, parent, folder)| TreeRow {
+                    key: TreeKey::Node(key),
+                    parent: parent.map(TreeKey::Node),
+                    into: if folder { Into::Folder } else { Into::List },
+                })
+                .collect(),
+            _ => vec![],
+        }
+    }
+
+    /// Show what a tree row lists, as clicking it does.
+    fn show_row(&mut self, key: &TreeKey, cx: &mut Cx) {
+        match key {
+            TreeKey::Collection(id) => {
+                let flow = cx
+                    .core
+                    .collections
+                    .get(*id)
+                    .is_some_and(|c| c.kind == CollectionKind::Flow);
+                cx.send(Command::Collection(if flow && cx.prefs.flow_tab() {
+                    CollectionCmd::Open(*id)
+                } else {
+                    CollectionCmd::Show(*id)
+                }));
+            }
+            TreeKey::All(row) => {
+                let table = self.tables.get_mut(TableView::Library);
+                self.browser.show_row(row, table, cx.out);
+                self.browser.nav_cursor = Some(row.clone());
+            }
+            TreeKey::Node(node) => self.external.open_node(node, cx.out),
+        }
+    }
+
+    /// Open or close a folder row.
+    fn set_folder_open(&mut self, key: &TreeKey, open: bool) {
+        match key {
+            TreeKey::Collection(id) => self.collections.set_open(*id, open),
+            TreeKey::Node((id, Some(path))) => self.external.set_node_open(*id, path.clone(), open),
+            // The History's sessions show while it's listed.
+            TreeKey::All(_) | TreeKey::Node(_) => {}
+        }
+    }
+
+    /// Put the knob on a tree row and show it.
+    fn tree_to(&mut self, key: TreeKey, cx: &mut Cx) {
+        self.level = Level::Tree;
+        self.show_row(&key, cx);
+        self.tree_cursor = Some(key);
+    }
+
+    /// Do the knob's moves. `items`: the left icon stack.
+    fn navigate(&mut self, items: &[StackItem<Source>], cx: &mut Cx) {
+        let navs = std::mem::take(&mut self.nav);
+        self.scroll = !navs.is_empty();
+        for nav in navs {
+            let source = cx.prefs.layout().source;
+            let rows = source.map_or(vec![], |s| self.tree_rows(s, cx.core.collections));
+            let at = self
+                .tree_cursor
+                .as_ref()
+                .and_then(|c| rows.iter().position(|r| &r.key == c));
+            match (self.level, nav) {
+                (Level::List, Nav::Turn(n)) => self.browse(n),
+                (Level::Sources, Nav::Turn(n)) => {
+                    let ids: Vec<Source> =
+                        items.iter().filter(|i| i.enabled).map(|i| i.id).collect();
+                    let at = source.and_then(|s| ids.iter().position(|i| *i == s));
+                    let to = match at {
+                        Some(i) => (i as i32 + n).clamp(0, ids.len() as i32 - 1) as usize,
+                        None => 0,
+                    };
+                    if let Some(s) = ids.get(to) {
+                        cx.send(ViewCmd::Source(Some(*s)));
+                        self.tree_cursor = None;
+                    }
+                }
+                (Level::Sources, Nav::Next) => {
+                    if let Some(first) = rows.first() {
+                        self.tree_to(first.key.clone(), cx);
+                    } else if !matches!(source, None | Some(Source::Program(_) | Source::Library(_))) {
+                        // Manage, a stick: nothing to step through. (A library not read
+                        // yet: nothing until it has its tree.)
+                        self.level = Level::Inside;
+                    }
+                }
+                (Level::Sources, Nav::Prev) => {}
+                (Level::Tree, Nav::Turn(n)) => {
+                    let to = match at {
+                        Some(i) => (i as i32 + n).clamp(0, rows.len() as i32 - 1) as usize,
+                        None => 0,
+                    };
+                    if let Some(r) = rows.get(to) {
+                        self.tree_to(r.key.clone(), cx);
+                    }
+                }
+                (Level::Tree, Nav::Next) => {
+                    let Some(i) = at else { continue };
+                    let row = rows[i].clone();
+                    match row.into {
+                        Into::Folder => {
+                            self.set_folder_open(&row.key, true);
+                            self.show_row(&row.key, cx);
+                            // Its first row, now it's open.
+                            let rows = self.tree_rows(source.unwrap(), cx.core.collections);
+                            let first = rows
+                                .iter()
+                                .find(|r| r.parent.as_ref() == Some(&row.key))
+                                .map(|r| r.key.clone());
+                            if let Some(k) = first {
+                                self.tree_to(k, cx);
+                            }
+                        }
+                        Into::Inside => self.level = Level::Inside,
+                        Into::List => self.into_list(Pane::Library),
+                    }
+                }
+                (Level::Tree, Nav::Prev) => match at.and_then(|i| rows[i].parent.clone()) {
+                    Some(folder) => {
+                        self.set_folder_open(&folder, false);
+                        self.tree_to(folder, cx);
+                    }
+                    None => self.level = Level::Sources,
+                },
+                (Level::List, Nav::Next) => {
+                    let suggestions = cx.prefs.flow_tab()
+                        || cx.prefs.layout().aside == Some(Aside::Suggestions);
+                    if self.focused_pane != Pane::Suggest && suggestions {
+                        self.into_list(Pane::Suggest);
+                    }
+                }
+                (Level::List, Nav::Prev) => match self.focused_pane {
+                    Pane::Suggest => self.focus(Pane::Library),
+                    Pane::Library | Pane::Flow => self.back_out(at.is_some()),
+                },
+                (Level::Inside, Nav::Prev) => self.back_out(at.is_some()),
+                (Level::Inside, _) => {}
+            }
+        }
+        // The sub-panes draw the highlight.
+        let on = |k: &TreeKey| self.level == Level::Tree && self.tree_cursor.as_ref() == Some(k);
+        self.browser.nav_cursor = match &self.tree_cursor {
+            Some(k @ TreeKey::All(row)) if on(k) => Some(row.clone()),
+            _ => None,
+        };
+        self.external.nav_cursor = match &self.tree_cursor {
+            Some(k @ TreeKey::Node(node)) if on(k) => Some(node.clone()),
+            _ => None,
+        };
+        self.browser.nav_scroll = self.scroll;
+        self.external.nav_scroll = self.scroll;
+    }
+
+    /// Out of a list or a Flow: to the tree row it came from, or the sources.
+    fn back_out(&mut self, tree: bool) {
+        self.level = if tree {
+            Level::Tree
+        } else {
+            Level::Sources
+        };
     }
 
     /// The focused list's focused track: what "load selected" loads and the
     /// suggestions' *Selected* is. `flow`: the Flow canvas, for its selected card.
     pub fn focused_track(&self, flow: &FlowUi) -> Option<TrackId> {
         match self.focused_pane {
+            Pane::Library if self.external_list() => self.external.focused(),
             Pane::Library => self.browser.focused(),
             Pane::Suggest => self.suggest.focused(),
             Pane::Flow => flow.selected_track().or(self.browser.focused()),
@@ -167,7 +486,7 @@ impl LibraryPane {
                 if !self.external.pane_gone(pane) && self.external.reveal(library, node, track, out)
                 {
                     *source = Some(pane);
-                    self.focused_pane = Pane::Library;
+                    self.focus(Pane::Library);
                     return None;
                 }
                 let what = match pane {
@@ -186,7 +505,7 @@ impl LibraryPane {
         };
         self.browser.set_scope(scope);
         self.browser.reveal(track);
-        self.focused_pane = Pane::Library;
+        self.focus(Pane::Library);
         *source = pane;
         note
     }
@@ -194,6 +513,7 @@ impl LibraryPane {
     /// Move the focused list's selection (the keyboard, the browse knob).
     pub fn browse(&mut self, delta: i32) {
         match self.focused_pane {
+            Pane::Library if self.external_list() => self.external.move_focus(delta),
             Pane::Library | Pane::Flow => self.browser.move_focus(delta),
             Pane::Suggest => self.suggest.move_focus(delta),
         }
@@ -216,6 +536,11 @@ impl LibraryPane {
             let tree = TreeCtx {
                 collections: cx.core.collections,
                 open,
+                cursor: match (&self.tree_cursor, self.level) {
+                    (Some(TreeKey::Collection(id)), Level::Tree) => Some(*id),
+                    _ => None,
+                },
+                scroll: self.scroll,
                 search: &search,
                 sticks: cx.core.drives,
                 sends: &sends,
@@ -236,7 +561,13 @@ impl LibraryPane {
         match source {
             Source::AllTracks => {
                 let table = self.tables.get_mut(TableView::Library);
-                self.browser.all_tracks(ui, &cx.core, table, cx.out);
+                if self.browser.all_tracks(ui, &cx.core, table, cx.out)
+                    && let Some(row) = self.browser.nav_cursor.clone()
+                {
+                    // Clicked: the knob is there.
+                    self.level = Level::Tree;
+                    self.tree_cursor = Some(TreeKey::All(row));
+                }
             }
             Source::Manage => self.manage(ui, cx),
             Source::Program(_) | Source::Library(_) | Source::Stick(_) => {
@@ -244,7 +575,13 @@ impl LibraryPane {
                     cx.send(ViewCmd::Source(None));
                     return;
                 }
+                let before = self.external.nav_cursor.clone();
                 self.external.pane(ui, source, &cx.core, cx.out);
+                // A row clicked: the knob is there.
+                if let Some(node) = self.external.nav_cursor.clone().filter(|n| Some(n) != before.as_ref()) {
+                    self.level = Level::Tree;
+                    self.tree_cursor = Some(TreeKey::Node(node));
+                }
             }
             Source::Playlists | Source::Crates | Source::Flows => {
                 unreachable!("sections are drawn above")
@@ -344,6 +681,7 @@ impl LibraryPane {
     /// Flow editor has its own).
     pub fn show(&mut self, ui: &mut Ui, cx: &mut Cx, asides: bool) {
         let layout = cx.prefs.layout().clone();
+        self.source = layout.source;
         // The import and add-to-stick windows, wherever their drop was.
         self.external.set_music(&self.browser.folders);
         self.external.windows(ui.ctx(), &cx.core, cx.out);
@@ -353,6 +691,9 @@ impl LibraryPane {
             Mode::Prepare => format!("{name}-prepare"),
             Mode::Controller => format!("{name}-controller"),
         };
+        let mut items: Vec<StackItem<Source>> = VIEWS.into_iter().collect();
+        items.extend(self.external.stack_items(&cx.core));
+        self.navigate(&items, cx);
         let stack_frame = egui::Frame::new()
             .fill(cx.theme.bg)
             .inner_margin(egui::Margin::symmetric(3, 6));
@@ -361,15 +702,20 @@ impl LibraryPane {
             .exact_width(WIDTH + 6.0)
             .frame(stack_frame)
             .show_inside(ui, |ui| {
-                let mut items: Vec<StackItem<Source>> = VIEWS.into_iter().collect();
-                items.extend(self.external.stack_items(&cx.core));
                 let (external, core, out) = (&mut self.external, &cx.core, &mut *cx.out);
-                let picked =
-                    icon_stack_with_menu(ui, &items, layout.source, Opens::Right, |ui, s| {
+                let cursor = self.level == Level::Sources;
+                let picked = icon_stack_with_menu(
+                    ui,
+                    &items,
+                    layout.source,
+                    Opens::Right,
+                    cursor,
+                    |ui, s| {
                         if let Source::Stick(id) = s {
                             external.stick_menu(ui, id, core, out);
                         }
-                    });
+                    },
+                );
                 if let Some(s) = picked {
                     cx.send(ViewCmd::Source(s));
                 }

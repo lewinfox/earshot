@@ -236,6 +236,7 @@ impl Keymap {
                     ("Edit".to_string(), None)
                 }
                 Control::Library(_) => ("Library".to_string(), None),
+                Control::Ui(_) => ("Screen".to_string(), None),
             };
             let row = (b.label(), b.describe());
             match sections.iter_mut().find(|s| s.title == title) {
@@ -538,7 +539,7 @@ mod tests {
         let km = Keymap::built_in();
         let help = km.help(Mode::Perform);
         let titles: Vec<&str> = help.iter().map(|s| s.title.as_str()).collect();
-        assert_eq!(titles, ["Deck A", "Deck B", "Effects", "Library", "Edit"]);
+        assert_eq!(titles, ["Deck A", "Deck B", "Effects", "Screen", "Library", "Edit"]);
         let a = &help[0].rows;
         assert!(a.contains(&("S".into(), "play / pause".into())));
         assert!(a.contains(&("4".into(), "hot cue D".into())));

@@ -64,6 +64,9 @@ perform  Shift+G      fx_1_channel_next
 perform  C            fx_1_beats_halve
 perform  V            fx_1_beats_double
 
+# The decks out of the way for a bigger library (as in Rekordbox and Mixxx).
+perform  Space        ui_library_maximize_toggle
+
 # ---- Prepare: Rekordbox's keys, on the target deck -------------------------------------
 prepare  Space        target_play
 prepare  Left         target_beat_jump -size
@@ -85,7 +88,8 @@ prepare  Ctrl+Down    target_load_step 1
 # ---- Library (every mode) ---------------------------------------------------------------
 any      Up           library_browse -1
 any      Down         library_browse 1
-any      Tab          library_pane_toggle
+any      Tab          library_pane_next
+any      Shift+Tab    library_pane_prev
 any      /            library_search
 
 # ---- Edits (every mode; not while typing in a text field) ------------------------------

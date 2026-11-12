@@ -37,6 +37,7 @@ pub mod sources;
 pub mod stems;
 pub mod store;
 pub mod suggest;
+pub mod tap;
 pub mod tempo_lock;
 pub mod track;
 pub mod trim;

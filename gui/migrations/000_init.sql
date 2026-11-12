@@ -217,6 +217,7 @@ CREATE TABLE cues (
   end_s     REAL,
   label     TEXT,
   color     INTEGER,
+  active    INTEGER NOT NULL DEFAULT 0,  -- a loop that turns itself on when played onto (one per track)
   source    TEXT NOT NULL DEFAULT 'user',
   UNIQUE (track_id, kind, slot)
 ) STRICT;

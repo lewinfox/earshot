@@ -231,7 +231,7 @@ impl DeckSession {
 pub fn observe_mixer(m: &MixerSnap) -> MixerState {
     MixerState {
         crossfader: m.crossfader,
-        main_gain: m.main_gain,
+        master_gain: m.master_gain,
         balance: m.balance,
         head_gain: m.head_gain,
         head_mix: m.head_mix,

@@ -98,6 +98,11 @@ pub enum DeckCmd {
     DeleteCalledMemory,
     /// Forget one of the loaded track's memory cues.
     DeleteMemory(i64),
+    /// Make one of the loaded track's memory loops its active loop, or not.
+    SetLoopActive(i64, bool),
+    /// SHIFT + RELOOP/EXIT: switch the active loop on or off for the memory loop just
+    /// called (the one playing), or else the one nearest the playhead. The UI finds it.
+    ToggleActiveLoop,
     /// Name one of the loaded track's memory cues (`None` clears it).
     SetMemoryLabel(i64, Option<String>),
     /// Colour one of the loaded track's memory cues (0xRRGGBB; `None`: the default).
@@ -140,6 +145,12 @@ pub use super::view::ViewCmd;
 pub enum AppCmd {
     /// Close and reopen every MIDI input, e.g. after plugging the controller in.
     ReconnectMidi,
+    /// A tap on effect unit `unit`'s TAP button, at `at` (when the message came in):
+    /// from the second tap on, the unit runs on the tapped tempo.
+    FxTap {
+        unit: usize,
+        at: std::time::Instant,
+    },
     /// Forget the analysis failures counted so far.
     DismissFailures,
     /// Stop all background analysis (a deck's track carries on).
@@ -337,12 +348,20 @@ pub fn dispatch(player: &Player, store: &Store, cmd: Command) -> Result<Option<C
                 store.send(StoreCmd::SetMemoryColor { track, id, color });
             }
         }
+        DeckCmd::SetLoopActive(id, active) => {
+            if let Some(track) = track {
+                store.send(StoreCmd::SetLoopActive { track, id, active });
+            }
+        }
         DeckCmd::SetHotcueLabel(slot, label) => {
             if let Some(track) = track {
                 store.send(StoreCmd::SetHotcueLabel { track, slot, label });
             }
         }
-        DeckCmd::Load(_) | DeckCmd::CallMemory { .. } | DeckCmd::DeleteCalledMemory => {
+        DeckCmd::Load(_)
+        | DeckCmd::CallMemory { .. }
+        | DeckCmd::DeleteCalledMemory
+        | DeckCmd::ToggleActiveLoop => {
             return Ok(Some(Command::Deck(deck, cmd)));
         }
         DeckCmd::Engine(_) | DeckCmd::Grid(_) => unreachable!("handled above"),

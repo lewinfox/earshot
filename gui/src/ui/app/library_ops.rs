@@ -105,6 +105,9 @@ impl EarshotApp {
             CollectionCmd::Show(id) => {
                 if self.collections.get(id).is_some() {
                     lib.browser.set_scope(Scope::Collection(id));
+                    // Picked in the tree: the browse knob is there.
+                    lib.level = crate::ui::panels::library::Level::Tree;
+                    lib.tree_cursor = Some(crate::ui::panels::library::TreeKey::Collection(id));
                 }
             }
             CollectionCmd::Create {
