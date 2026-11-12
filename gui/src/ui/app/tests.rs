@@ -1,7 +1,18 @@
-//! The whole app, started on the null audio output, a database in a temporary
-//! folder, a stand-in analysis worker and a few generated tracks. Each test drives
-//! it through commands; with `EARSHOT_SHOT=/tmp/shot.png` set, each also renders the
-//! window off-screen and writes it next to that path (`/tmp/shot-perform.png`, …).
+//! The whole app, started on a database in a temporary folder, a stand-in analysis
+//! worker and a few generated tracks. Each test drives it through commands; with
+//! `EARSHOT_SHOT=/tmp/shot.png` set, each also renders the window off-screen and
+//! writes it next to that path (`/tmp/shot-perform.png`, …).
+//!
+//! Nothing in the app runs on its own here, so no test waits for anything or depends
+//! on timing (`core::background`): the Store writes where it's asked, the stand-in
+//! worker answers at once, and what the app would do on other threads (loads, scans,
+//! analysis) waits until the test runs it. Audio is rendered only when the test
+//! advances it. A test takes the app from one state to the next itself:
+//!
+//! - [`settle`] runs everything that's waiting, and whatever that starts, until
+//!   nothing is left ([`settle_until`] then checks the state it should have reached);
+//! - [`play`] renders so many seconds of audio;
+//! - [`steps`] draws so many frames.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -9,6 +20,7 @@ use std::time::Duration;
 use egui::vec2;
 
 use super::*;
+use crate::core::background;
 use crate::core::worker_client::WorkerConfig;
 use crate::core::worker_client::testing::{stand_in, stand_in_old_grid};
 
@@ -27,8 +39,8 @@ pub(super) fn scratch(name: &str) -> PathBuf {
 pub(super) fn scratch_dir(name: &str) -> PathBuf {
     static SWEPT: std::sync::Once = std::sync::Once::new();
     let root = std::env::temp_dir().join("earshot-app-tests");
-    // A folder is left behind by every run (the harness outlives the test body), at
-    // ~2 GB a run: the first test of a run clears out earlier runs' folders. One
+    // A folder is left behind by every run (the harness outlives the test body):
+    // the first test of a run clears out earlier runs' folders. One
     // untouched for an hour is from a run that's over.
     SWEPT.call_once(|| sweep(&root, std::time::Duration::from_secs(3600)));
     root.join(std::process::id().to_string()).join(name)
@@ -99,6 +111,39 @@ const TRACKS: [(&str, f64); 4] = [
     ("Low Orbit", 128.0),
 ];
 
+/// The fixture library's files, made once a run and shared by every test: each
+/// test's music folder has links to them ([`link_tracks`]), not copies, so a run
+/// doesn't write them out again for every test. They're read-only: a test that
+/// would change a track's file must replace its link with a copy first.
+fn fixture_tracks() -> &'static Path {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = scratch_dir("fixture-tracks");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (title, bpm) in TRACKS {
+            let path = dir.join(format!("{title}.wav"));
+            write_track(&path, bpm, 24.0);
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_readonly(true);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+        dir
+    })
+}
+
+/// Put the fixture library's tracks in `music`: as hard links to the shared files
+/// ([`fixture_tracks`]), or as copies where the folder can't link to them.
+fn link_tracks(music: &Path) {
+    for (title, _) in TRACKS {
+        let name = format!("{title}.wav");
+        let (from, to) = (fixture_tracks().join(&name), music.join(&name));
+        if std::fs::hard_link(&from, &to).is_err() {
+            std::fs::copy(&from, &to).unwrap();
+        }
+    }
+}
+
 /// Where `EARSHOT_SHOT` asks for this test's picture, if it does.
 fn shot_path(test: &str) -> Option<PathBuf> {
     let p = PathBuf::from(std::env::var_os("EARSHOT_SHOT")?);
@@ -126,45 +171,100 @@ pub(super) fn start(test: &str) -> H {
 /// Start the app on the fixture library with this analysis worker, and scan it.
 pub(super) fn start_with(test: &str, worker: fn(Role, usize) -> WorkerConfig) -> H {
     let dir = scratch(test);
-    for (title, bpm) in TRACKS {
-        write_track(&dir.join("music").join(format!("{title}.wav")), bpm, 24.0);
-    }
+    link_tracks(&dir.join("music"));
     let services = Services {
         db: dir.join(store::FILE_NAME),
         null_audio: true,
         worker,
         midi: false,
     };
-    let mut b = egui_kittest::Harness::builder().with_size(vec2(1700.0, 1000.0));
-    if shot_path(test).is_some() {
-        b = b.wgpu();
-    }
-    let mut h = b.build_eframe(move |cc| EarshotApp::new(cc, services).expect("app"));
+    let mut h = build(test, services);
     h.state_mut()
         .dispatch(LibraryCmd::AddRoots(vec![dir.join("music")]).into());
     settle_until(&mut h, |a| a.index.tracks().len() == TRACKS.len());
     h
 }
 
-/// Step frames (in real time: the work happens on other threads) until `ok` holds.
-#[track_caller]
-pub(super) fn settle_until(h: &mut H, ok: impl Fn(&EarshotApp) -> bool) {
-    // A minute: the tests run side by side, each with its own analysis workers.
-    let end = Instant::now() + Duration::from_secs(60);
-    while Instant::now() < end {
-        h.step();
-        if ok(h.state()) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
+/// The app with these services, with nothing running on its own (this thread steps
+/// its background work from here on).
+pub(super) fn build(test: &str, services: Services) -> H {
+    background::step_this_thread();
+    let mut b = egui_kittest::Harness::builder()
+        .with_size(vec2(1700.0, 1000.0))
+        .with_step_dt(FRAME);
+    if shot_path(test).is_some() {
+        b = b.wgpu();
     }
-    panic!("timed out");
+    b.build_eframe(move |cc| EarshotApp::new(cc, services).expect("app"))
 }
 
+/// Frames in a block of audio, as the app's default buffer has them.
+const BLOCK: usize = 256;
+
+/// How long the app takes each frame drawn to have lasted, seconds: what it times
+/// by frames (animations, saving a view that has held still) takes that many
+/// frames here, however long they really take.
+const FRAME: f32 = 0.25;
+
+/// One round of the app: the background work that's waiting (and whatever it
+/// starts), then `frames` of audio, then a frame drawn (which takes in what both
+/// did). True if the app has more to do: it did background work, or the frame left
+/// some waiting, or events it hasn't seen, or commands the engine hasn't taken.
+fn round(h: &mut H, frames: usize) -> bool {
+    let ran = background::run_pending();
+    if let Some(e) = h.state().player.lock().unwrap().engine.as_mut() {
+        e.advance(frames);
+    }
+    h.step();
+    let app = h.state();
+    // (The channel can't be looked into: what's in it is taken out and put back.)
+    let waiting: Vec<Event> = app.rx.try_iter().collect();
+    let events = !waiting.is_empty();
+    for e in waiting {
+        (app.sink)(e);
+    }
+    let engine = app.player.lock().unwrap();
+    let commands = engine.engine.as_ref().is_some_and(|e| e.pending_commands() > 0);
+    ran > 0 || background::pending() > 0 || events || commands
+}
+
+/// Run everything the app has waiting until nothing is left: background work, the
+/// events it sends, the commands the engine is to take (a block of audio a round),
+/// and a frame after each. Fails if that never ends.
+#[track_caller]
+pub(super) fn settle(h: &mut H) {
+    let mut quiet = 0;
+    for _ in 0..10_000 {
+        // Two quiet rounds: the first may be the frame that shows the last change.
+        quiet = if round(h, BLOCK) { 0 } else { quiet + 1 };
+        if quiet == 2 {
+            return;
+        }
+    }
+    panic!("the app never settles: it always has more to do");
+}
+
+/// [`settle`], then `ok` must hold: the state the test's last step leads to.
+#[track_caller]
+pub(super) fn settle_until(h: &mut H, ok: impl Fn(&EarshotApp) -> bool) {
+    settle(h);
+    assert!(ok(h.state()), "not so, with everything pending done");
+}
+
+/// Draw `n` frames (a block of audio each, as [`settle`] does).
 pub(super) fn steps(h: &mut H, n: usize) {
     for _ in 0..n {
-        h.step();
-        std::thread::sleep(Duration::from_millis(16));
+        round(h, BLOCK);
+    }
+}
+
+/// Render `seconds` of audio, drawing a frame every few blocks.
+pub(super) fn play(h: &mut H, seconds: f64) {
+    let mut left = (seconds * 44_100.0).ceil() as usize;
+    while left > 0 {
+        let n = left.min(4 * BLOCK);
+        round(h, n);
+        left -= n;
     }
 }
 
@@ -258,17 +358,9 @@ fn duplicates() {
     h.get_by_label("Duplicates").click();
     steps(&mut h, 2);
     assert_eq!(*h.state().panels.library.browser.scope(), Scope::Duplicates);
-    // The copy's audio hash is worked out in the background, then it's found.
+    // The copy's audio hash was worked out after the scan, so it's found.
     let groups = |a: &EarshotApp| a.panels.library.browser.duplicates().map(<[_]>::len);
-    for _ in 0..600 {
-        if groups(h.state()) == Some(1) {
-            break;
-        }
-        if h.state().panels.library.browser.duplicates().is_some() {
-            h.state_mut().dispatch(LibraryCmd::FindDuplicates.into());
-        }
-        steps(&mut h, 5);
-    }
+    settle(&mut h);
     assert_eq!(groups(h.state()), Some(1));
     let group = h.state().panels.library.browser.duplicates().unwrap()[0].clone();
     steps(&mut h, 3);
@@ -354,7 +446,7 @@ fn prepare() {
     steps(&mut h, 5);
     render(&mut h, "prepare");
     // Nothing moving: no more frames asked for once it settles.
-    steps(&mut h, (SETTLE.as_millis() / 16) as usize + 10);
+    steps(&mut h, (SETTLE.as_secs_f32() / FRAME).ceil() as usize + 1);
     assert!(!h.state().moving());
     assert!(h.state().settle_until.is_none());
 }
@@ -453,7 +545,8 @@ fn active_loop() {
     // Played onto from before it: it turns on.
     h.state_mut().dispatch(Command::Deck(deck, DeckCmd::Engine(EngineCmd::Seek(start - 0.3))));
     h.state_mut().dispatch((deck, EngineCmd::Play(earshot_engine::Set::On)).into());
-    settle_until(&mut h, |a| snap(a).loop_active && snap(a).loop_in == Some(start));
+    play(&mut h, 0.5);
+    assert!(snap(h.state()).loop_active && snap(h.state()).loop_in == Some(start));
     // Pressed again (the loop playing is the one): no longer active.
     toggle(&mut h);
     settle_until(&mut h, |a| active(a).is_none());
@@ -1168,17 +1261,9 @@ fn stale_tracks_are_counted_and_analysed_again() {
     render(&mut h, "settings-stale");
     h.state_mut().dispatch(AppCmd::QueueStale.into());
     settle_until(&mut h, |a| a.stale == Stale::Queued(1));
-    // Up to date once its new result is saved.
-    for _ in 0..600 {
-        if h.state().stale == Stale::Count(0) {
-            return;
-        }
-        if h.state().stale != Stale::Counting {
-            h.state_mut().dispatch(AppCmd::CountStale.into());
-        }
-        steps(&mut h, 5);
-    }
-    panic!("still stale: {:?}", h.state().stale);
+    // Up to date now its new result is saved (the settling above ran the analysis).
+    h.state_mut().dispatch(AppCmd::CountStale.into());
+    settle_until(&mut h, |a| a.stale == Stale::Count(0));
 }
 
 /// Edits from the shell: metadata, the Flow canvas and a grid, each undone and
@@ -1723,9 +1808,7 @@ fn deck_options_survive_a_restart() {
         worker: stand_in,
         midi: false,
     };
-    let mut h = egui_kittest::Harness::builder()
-        .with_size(vec2(1700.0, 1000.0))
-        .build_eframe(move |cc| EarshotApp::new(cc, services).expect("app"));
+    let mut h = build("deck-options", services);
     settle_until(&mut h, |a| {
         a.frame
             .snap
@@ -1960,10 +2043,18 @@ fn the_status_line_shows_whats_running() {
         }
         .into(),
     );
-    settle_until(&mut h, |a| {
-        a.jobs.list().iter().any(|j| j.progress.is_some())
-    });
-    steps(&mut h, 1);
+    // Every track is waiting, and stays so until the test runs the analysis: the
+    // first is said to have got half way.
+    (h.state().sink)(Event::Analysis(crate::core::analysis::AnalysisEvent {
+        track_id: ids[0],
+        state: Some(AnalysisState::Running {
+            progress: 0.5,
+            stage: "finding the tempo",
+        }),
+    }));
+    h.step();
+    assert!(h.state().jobs.list().iter().any(|j| j.progress.is_some()));
+    h.step();
     let jobs = h.state().jobs.list();
     assert!(jobs[0].title.starts_with("Analysing "), "{jobs:?}");
     h.get_by_label_contains(&jobs[0].title);
@@ -1971,7 +2062,8 @@ fn the_status_line_shows_whats_running() {
     assert!(jobs.iter().all(|j| j.counted || j.title == "Analysis"));
     h.get_by_label(&format!("{n} job{}", if n == 1 { "" } else { "s" }))
         .click();
-    steps(&mut h, 2);
+    h.step();
+    h.step();
     h.get_by_label("Stop analysis");
     render(&mut h, "status_line");
     settle_until(&mut h, |a| a.analysis.busy.is_empty());

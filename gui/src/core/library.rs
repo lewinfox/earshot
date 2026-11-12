@@ -7,6 +7,7 @@ use earshot_engine::decode;
 use earshot_engine::media::Location;
 
 use super::analysis::Analyser;
+use super::background::{self, Mailbox};
 use super::hash;
 use super::store::{Reader, ScannedFile, Store, StoreCmd, StoreError, path_bytes};
 use super::{Event, Sink};
@@ -229,35 +230,27 @@ fn scanned(path: &Path, size: i64, mtime_ns: i64) -> ScannedFile {
     }
 }
 
-/// A background thread that works out the audio hash of files that don't have one
+/// Nudges the hasher ([`start_hasher`]) to look for files to hash.
+pub type Hasher = Mailbox<()>;
+
+/// A background worker that works out the audio hash of files that don't have one
 /// stamped in their tags, one at a time at idle priority, and gives each to the
 /// Store (which matches moved files up with their tracks). Nudge it after a scan.
-/// Its queue is just "files with no hash", so it picks up where it left off.
-pub fn start_hasher(store: Store) -> std::sync::mpsc::Sender<()> {
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
-    std::thread::Builder::new()
-        .name("earshot-hash".into())
-        .spawn(move || {
-            idle_priority();
-            while rx.recv().is_ok() {
-                while rx.try_recv().is_ok() {} // one pass covers every nudge so far
-                let files = match store.reader.files_without_hash() {
-                    Ok(f) => f,
-                    Err(e) => {
-                        eprintln!("hashing: {e}");
-                        continue;
-                    }
-                };
-                for (file, path) in files {
-                    match hash::content_hash(&path.as_path().into()) {
-                        Ok(hash) => store.send(StoreCmd::SetContentHash { file, hash }),
-                        Err(e) => eprintln!("hashing {}: {e}", path.display()),
-                    }
-                }
+/// Its queue is just "files with no hash", so it picks up where it left off (and a
+/// nudge that arrived while it was busy finds nothing left to do).
+pub fn start_hasher(store: Store) -> Hasher {
+    background::serve("earshot-hash", idle_priority, move |()| {
+        let files = match store.reader.files_without_hash() {
+            Ok(f) => f,
+            Err(e) => return eprintln!("hashing: {e}"),
+        };
+        for (file, path) in files {
+            match hash::content_hash(&path.as_path().into()) {
+                Ok(hash) => store.send(StoreCmd::SetContentHash { file, hash }),
+                Err(e) => eprintln!("hashing {}: {e}", path.display()),
             }
-        })
-        .expect("hash thread");
-    tx
+        }
+    })
 }
 
 /// Linux's idle CPU and disk classes for the calling thread: hashing reads whole
@@ -278,20 +271,13 @@ fn idle_priority() {
 /// Cover art is scaled to this many pixels square.
 pub const ART_SIZE: u32 = 96;
 
-/// A background thread that reads tracks' embedded covers, one at a time, and sends
+/// A background worker that reads tracks' embedded covers, one at a time, and sends
 /// each as an `Event::Art` (`None` when the file has none). Send it track ids.
-pub fn start_art_loader(reader: Reader, sink: Sink) -> std::sync::mpsc::Sender<i64> {
-    let (tx, rx) = std::sync::mpsc::channel::<i64>();
-    std::thread::Builder::new()
-        .name("art".into())
-        .spawn(move || {
-            for id in rx {
-                let art = reader.track_location(id).ok().and_then(|at| cover(&at));
-                sink(Event::Art(id, art));
-            }
-        })
-        .expect("art thread");
-    tx
+pub fn start_art_loader(reader: Reader, sink: Sink) -> Mailbox<i64> {
+    background::serve("art", || {}, move |id| {
+        let art = reader.track_location(id).ok().and_then(|at| cover(&at));
+        sink(Event::Art(id, art));
+    })
 }
 
 /// The file's cover, cropped to a square and scaled down.

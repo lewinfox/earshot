@@ -18,7 +18,7 @@ impl EarshotApp {
             start,
         });
         let (player, store) = (self.player.clone(), self.lib.store.clone());
-        std::thread::spawn(move || {
+        crate::core::background::spawn("earshot-preview", move || {
             if let Err(e) = player::preview(&player, &store, id, start as f64) {
                 eprintln!("preview: {e}");
             }

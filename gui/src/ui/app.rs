@@ -86,9 +86,9 @@ pub struct EarshotApp {
     midi: Midi,
     midi_ports: Vec<String>,
     /// Send track ids here to load their cover art.
-    art_loader: std::sync::mpsc::Sender<i64>,
+    art_loader: crate::core::background::Mailbox<i64>,
     /// Nudge after a scan: works out audio hashes the files' tags didn't have.
-    hasher: std::sync::mpsc::Sender<()>,
+    hasher: library::Hasher,
     /// The tempo lock tool, and its tab's A/B player.
     tempo_lock: TempoLock,
     listener: tempo_lock::Listener,
@@ -145,8 +145,8 @@ pub struct EarshotApp {
     panels: Panels,
     /// The engine as read at the start of this frame.
     frame: EngineFrame,
-    /// Keep repainting until then (see [`SETTLE`]).
-    settle_until: Option<Instant>,
+    /// Keep repainting until then, in frame time (see [`SETTLE`]).
+    settle_until: Option<f64>,
     /// The engine has the players' saved keylock and quantise (see
     /// [`EarshotApp::save_deck_options`]).
     deck_options_restored: bool,
@@ -164,7 +164,9 @@ fn start_audio(
     controller: &mut controller_audio::Hold,
 ) -> Result<OutputInfo, String> {
     let mut opts = player::output_options(settings);
-    opts.null |= null;
+    // A thread that steps its background work (a test's) steps its audio too.
+    opts.stepped = crate::core::background::stepped();
+    opts.null |= null || opts.stepped;
     if !opts.null
         && let Some(device) = controller.prepare()
     {
@@ -262,7 +264,11 @@ impl EarshotApp {
         let monitor = player.lock().unwrap().monitor();
 
         let drives_stop = crate::core::drives::StopOnDrop::default();
-        {
+        // The two that watch the world by the clock (the sound card, the USB sticks)
+        // aren't started where nothing is to run on its own: a test says what they
+        // would have.
+        let watching = !crate::core::background::stepped();
+        if watching {
             let sink = sink.clone();
             audio_watch::start(&player, move |quiet, decks| {
                 sink(Event::Command(Command::Audio(AudioCmd::Stalled {
@@ -271,7 +277,7 @@ impl EarshotApp {
                 })))
             });
         }
-        {
+        if watching {
             let sink = sink.clone();
             crate::core::drives::watch(drives_stop.0.clone(), move |d| {
                 sink(Event::Drives(d))
@@ -767,7 +773,7 @@ impl EarshotApp {
                 self.stale = Stale::Counting;
                 let (lib, sink) = (self.lib.clone(), self.sink.clone());
                 let queued = matches!(c, AppCmd::QueueStale);
-                std::thread::spawn(move || {
+                crate::core::background::spawn("earshot-stale", move || {
                     let result = if queued {
                         lib.analyser.queue_stale()
                     } else {
@@ -1238,7 +1244,7 @@ impl eframe::App for EarshotApp {
             let media = &mut self.panels.library.media;
             if !media.art.contains_key(&id) {
                 media.art.insert(id, None);
-                let _ = self.art_loader.send(id);
+                self.art_loader.send(id);
             }
         }
         self.save_flow();

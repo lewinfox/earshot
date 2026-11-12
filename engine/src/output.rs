@@ -28,6 +28,9 @@ pub struct OutputOptions {
     /// The headphones on a device of their own (like [`OutputOptions::device`]).
     /// Only under PipeWire ([`can_split`]); `None`: on the master's device.
     pub phones_device: Option<String>,
+    /// No output at all: audio is rendered only when [`crate::Engine::advance`] asks
+    /// for it, so many frames at a time (tests that mustn't depend on timing).
+    pub stepped: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -441,11 +444,28 @@ where
         .map_err(|e| e.to_string())
 }
 
+/// The rate the null and stepped outputs run at.
+pub(crate) const NULL_RATE: u32 = 44_100;
+
+/// What a stepped engine says its output is ([`OutputOptions::stepped`]).
+pub(crate) fn stepped_info(frames: u32) -> OutputInfo {
+    OutputInfo {
+        device: "stepped (no audio device)".into(),
+        sample_rate: NULL_RATE,
+        channels: 4,
+        buffer_frames: Some(frames),
+        sample_format: "F32".into(),
+        null: true,
+        phones: None,
+        phones_error: None,
+    }
+}
+
 fn start_null(
     frames: u32,
     make_renderer: impl FnOnce(u32) -> Renderer + Send + 'static,
 ) -> (OutputHandle, OutputInfo) {
-    const RATE: u32 = 44_100;
+    const RATE: u32 = NULL_RATE;
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let thread = thread::Builder::new()
         .name("earshot-null-audio".into())

@@ -2,7 +2,9 @@
 //!
 //! - [`Store`] owns the only writing connection, on its own thread. Others send it
 //!   [`StoreCmd`]s (the UI: never waits) or [`Store::call`] it (background threads
-//!   that need the answer). What changed comes back as [`StoreEvent`]s.
+//!   that need the answer). What changed comes back as [`StoreEvent`]s. (Opened from
+//!   a thread that steps its background work, `core::background`, it has no thread:
+//!   each command is carried out at once, where it's sent.)
 //! - [`Reader`] is a small pool of read-only connections for loaders and other
 //!   background threads. WAL mode lets them read while the writer writes.
 //! - The UI thread never runs SQL.
@@ -30,6 +32,7 @@ pub use read::{
 };
 pub use write::{AnalysisSave, GridSave, ScannedFile, Writer, grid_bpm};
 
+use super::background;
 use super::collections::{Collection, CollectionKind, FlowGraph, NodeId, Section};
 use super::edit::{Edit, EditCmd};
 use super::embeddings::Embeddings;
@@ -453,10 +456,20 @@ pub type EventSink = Arc<dyn Fn(StoreEvent) + Send + Sync>;
 
 type Job = Box<dyn FnOnce(&mut Writer) + Send>;
 
+/// Where the writing connection is.
+#[derive(Clone)]
+enum WriterAt {
+    /// On its own thread, which takes jobs in the order they're sent.
+    Thread(Sender<Job>),
+    /// Here: a job runs at once on the thread that asks (and its events are sent
+    /// before the call returns). For tests that step their background work.
+    Inline(Arc<Mutex<Writer>>),
+}
+
 /// The handle to the writer thread, plus a read pool. Cheap to clone.
 #[derive(Clone)]
 pub struct Store {
-    tx: Sender<Job>,
+    writer: WriterAt,
     pub reader: Reader,
     next_collection: Arc<AtomicI64>,
     embeddings: Arc<RwLock<Embeddings>>,
@@ -476,25 +489,30 @@ impl Store {
             [],
             |r| r.get(0),
         )?;
-        let (tx, rx) = channel::<Job>();
         let mut writer = Writer::new(conn);
         let embeddings = writer.embeddings();
-        std::thread::Builder::new()
-            .name("earshot-store".into())
-            .spawn(move || {
-                for job in rx {
-                    job(&mut writer);
-                    for e in writer.take_events() {
-                        sink(e);
+        let writer = if background::stepped() {
+            WriterAt::Inline(Arc::new(Mutex::new(writer)))
+        } else {
+            let (tx, rx) = channel::<Job>();
+            std::thread::Builder::new()
+                .name("earshot-store".into())
+                .spawn(move || {
+                    for job in rx {
+                        job(&mut writer);
+                        for e in writer.take_events() {
+                            sink(e);
+                        }
                     }
-                }
-            })
-            .map_err(|e| StoreError::Io {
-                path: path.into(),
-                source: e,
-            })?;
+                })
+                .map_err(|e| StoreError::Io {
+                    path: path.into(),
+                    source: e,
+                })?;
+            WriterAt::Thread(tx)
+        };
         Ok(Store {
-            tx,
+            writer,
             reader: Reader::new(path),
             next_collection: Arc::new(AtomicI64::new(next)),
             embeddings,
@@ -511,6 +529,26 @@ impl Store {
         &self.embeddings
     }
 
+    /// Give the writer a job: queued for its thread, or run here and now. False if
+    /// the writer's thread has stopped.
+    fn run(&self, job: Job) -> bool {
+        match &self.writer {
+            WriterAt::Thread(tx) => tx.send(job).is_ok(),
+            WriterAt::Inline(writer) => {
+                let events = {
+                    let mut w = writer.lock().unwrap();
+                    job(&mut w);
+                    w.take_events()
+                };
+                // (Sent with the writer free again, as from its thread.)
+                for e in events {
+                    (self.sink)(e);
+                }
+                true
+            }
+        }
+    }
+
     /// Queue a command. Never blocks; errors come back as [`StoreEvent::Error`].
     pub fn send(&self, cmd: StoreCmd) {
         // An outside track's: kept in memory (its cue edits) or dropped, never saved.
@@ -520,7 +558,7 @@ impl Store {
             }
             return;
         }
-        let _ = self.tx.send(Box::new(move |w: &mut Writer| {
+        self.run(Box::new(move |w: &mut Writer| {
             if let Err(e) = w.apply(cmd) {
                 w.emit(StoreEvent::Error(e));
             }
@@ -539,11 +577,12 @@ impl Store {
         f: impl FnOnce(&mut Writer) -> Result<R> + Send + 'static,
     ) -> Result<R> {
         let (tx, rx) = channel();
-        self.tx
-            .send(Box::new(move |w: &mut Writer| {
-                let _ = tx.send(f(w));
-            }))
-            .map_err(|_| StoreError::Closed)?;
+        let sent = self.run(Box::new(move |w: &mut Writer| {
+            let _ = tx.send(f(w));
+        }));
+        if !sent {
+            return Err(StoreError::Closed);
+        }
         rx.recv().map_err(|_| StoreError::Closed)?
     }
 
@@ -571,9 +610,11 @@ impl Store {
             return;
         }
         let reader = self.reader.clone();
-        std::thread::spawn(move || match reader.with(|c| read::cues(c, track)) {
-            Ok(cues) => sink(StoreEvent::Cues { track, cues }),
-            Err(e) => sink(StoreEvent::Error(e)),
+        background::spawn("earshot-read-cues", move || {
+            match reader.with(|c| read::cues(c, track)) {
+                Ok(cues) => sink(StoreEvent::Cues { track, cues }),
+                Err(e) => sink(StoreEvent::Error(e)),
+            }
         });
     }
 
@@ -581,21 +622,23 @@ impl Store {
     /// send it as [`StoreEvent::MetaSources`].
     pub fn request_meta(&self, ids: Vec<i64>, sink: EventSink) {
         let reader = self.reader.clone();
-        std::thread::spawn(move || match reader.with(|c| read::meta_sources(c, &ids)) {
-            Ok(m) => sink(StoreEvent::MetaSources(m)),
-            Err(e) => sink(StoreEvent::Error(e)),
+        background::spawn("earshot-read-meta", move || {
+            match reader.with(|c| read::meta_sources(c, &ids)) {
+                Ok(m) => sink(StoreEvent::MetaSources(m)),
+                Err(e) => sink(StoreEvent::Error(e)),
+            }
         });
     }
 
     /// Load waveform thumbnails on a reader thread and send them as an event.
     pub fn request_previews(&self, ids: Option<Vec<i64>>, sink: EventSink) {
         let reader = self.reader.clone();
-        std::thread::spawn(
-            move || match reader.with(|c| read::previews(c, ids.as_deref())) {
+        background::spawn("earshot-read-previews", move || {
+            match reader.with(|c| read::previews(c, ids.as_deref())) {
                 Ok(p) => sink(StoreEvent::Previews(p)),
                 Err(e) => sink(StoreEvent::Error(e)),
-            },
-        );
+            }
+        });
     }
 }
 

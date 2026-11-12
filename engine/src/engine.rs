@@ -913,6 +913,8 @@ pub struct Renderer {
     /// The clock minus seconds since `epoch`, as of the last callback, smoothed:
     /// callbacks come a little unevenly.
     clock_offset: Option<f64>,
+    /// Rendered only when asked, not as time passes ([`Renderer::set_stepped`]).
+    stepped: bool,
     /// Tests render faster than real time: they set this to have callbacks come at the
     /// times they would in real time ([`Renderer::moment`]).
     #[cfg(test)]
@@ -984,6 +986,7 @@ impl Renderer {
             frames: 0,
             epoch: Instant::now(),
             clock_offset: None,
+            stepped: false,
             #[cfg(test)]
             simulated_time: false,
         };
@@ -1078,8 +1081,18 @@ impl Renderer {
         });
     }
 
+    /// Audio is rendered only when asked for, however much time passes between
+    /// blocks: the engine's clock has nothing to do with the real one, so a hand's
+    /// move counts as made when the block that hears of it starts.
+    pub(crate) fn set_stepped(&mut self) {
+        self.stepped = true;
+    }
+
     /// Where moment `at` falls on the engine's clock.
     fn clock_at(&self, at: Instant) -> f64 {
+        if self.stepped {
+            return self.clock();
+        }
         let secs = at.saturating_duration_since(self.epoch).as_secs_f64();
         secs + self.clock_offset.unwrap_or(0.0)
     }

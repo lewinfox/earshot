@@ -29,7 +29,6 @@
 
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use earshot_engine::decode;
@@ -37,7 +36,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::analysis::write_stereo_wav;
-use super::library;
+use super::background;
+use super::library::{self, Hasher};
 use super::store::Store;
 use super::track::TrackId;
 use super::worker_client::{
@@ -466,7 +466,7 @@ struct Shared {
     /// `<data dir>/tempo-lock`: the tool's own.
     dir: PathBuf,
     /// Nudged after a file is saved to the library, so its audio hash is worked out.
-    hasher: Option<Sender<()>>,
+    hasher: Option<Hasher>,
     state: Mutex<State>,
 }
 
@@ -527,7 +527,7 @@ impl TempoLock {
         store: Store,
         sink: TempoLockSink,
         data_dir: &Path,
-        hasher: Option<Sender<()>>,
+        hasher: Option<Hasher>,
     ) -> TempoLock {
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
         let config = WorkerConfig::python(Role::Background, cores);
@@ -539,7 +539,7 @@ impl TempoLock {
         store: Store,
         sink: TempoLockSink,
         data_dir: &Path,
-        hasher: Option<Sender<()>>,
+        hasher: Option<Hasher>,
     ) -> TempoLock {
         let dir = data_dir.join("tempo-lock");
         // Leftovers from the last run: decodes, and MP3s that were never saved.
@@ -703,10 +703,7 @@ impl TempoLock {
 }
 
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
-    std::thread::Builder::new()
-        .name(name.into())
-        .spawn(f)
-        .expect("spawn tempo lock thread");
+    background::spawn(name, f);
 }
 
 impl Shared {
@@ -990,7 +987,7 @@ impl Shared {
         let path = copy_without_clobbering(output, root)?;
         library::scan_file(&self.store, &path).map_err(|e| e.to_string())?;
         if let Some(h) = &self.hasher {
-            let _ = h.send(());
+            h.send(());
         }
         Ok(path)
     }
@@ -1130,6 +1127,7 @@ for line in sys.stdin:
             keep_alive: false,
             expect: vec![],
             max_memory: None,
+            stand_in: None,
         }
     }
 

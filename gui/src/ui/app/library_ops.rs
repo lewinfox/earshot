@@ -62,7 +62,7 @@ impl EarshotApp {
             LibraryCmd::ListSessions => self.lib.store.send(StoreCmd::ListSessions),
             LibraryCmd::FindDuplicates => {
                 let (reader, sink) = (self.lib.store.reader.clone(), self.sink.clone());
-                std::thread::spawn(move || {
+                crate::core::background::spawn("earshot-library", move || {
                     sink(Event::Duplicates(
                         reader.duplicates().map_err(|e| e.to_string()),
                     ));
@@ -307,10 +307,10 @@ impl EarshotApp {
         let Some(id) = open else {
             return;
         };
-        let busy = ctx.input(|i| i.pointer.any_down());
-        if let Some(camera) = self.panels.flow.camera_to_save(busy) {
+        let (busy, now) = ctx.input(|i| (i.pointer.any_down(), i.time));
+        if let Some(camera) = self.panels.flow.camera_to_save(busy, now) {
             self.lib.store.send(StoreCmd::SaveFlowCamera { id, camera });
-        } else if let Some(wait) = self.panels.flow.camera_wait() {
+        } else if let Some(wait) = self.panels.flow.camera_wait(now) {
             // No frames come while nothing moves: wake up to save it.
             ctx.request_repaint_after(wait);
         }
@@ -363,11 +363,11 @@ impl EarshotApp {
             self.hasher.clone(),
         );
         let job = self.jobs.start("Scanning the music folders");
-        std::thread::spawn(move || {
+        crate::core::background::spawn("earshot-library", move || {
             let result = library::scan_library(&store);
             drop(job);
             sink(Event::Scanned(result));
-            let _ = hasher.send(());
+            hasher.send(());
         });
     }
 
@@ -395,7 +395,7 @@ impl EarshotApp {
             self.index.get(track_id),
         ));
         let (player, lib, sink) = (self.player.clone(), self.lib.clone(), self.sink.clone());
-        std::thread::spawn(move || {
+        crate::core::background::spawn("earshot-library", move || {
             // A panic still finishes the load (as a failure), so the player doesn't sit
             // on "loading" ignoring its controls.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

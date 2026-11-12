@@ -26,8 +26,11 @@ src/ui/     egui. app.rs is the shell: it starts the services, reads the engine 
 What's left to do is in `TODO.md`.
 
 Tests: `cargo test -p earshot-gui`. The app-level tests (`ui/app/tests.rs`) start the
-whole app on the null audio output, a temporary database, a stand-in analysis worker
-and a few generated tracks. To also render the window off-screen (with frame-build
+whole app on a temporary database, a stand-in analysis worker and a few generated
+tracks. Nothing in it runs on its own there, so no test waits or depends on timing:
+the Store writes where it's asked, the stand-in answers at once, what the app would
+do on other threads waits until the test runs it (`settle`), and audio is rendered
+only when the test asks (`play`); see `core/background.rs`. To also render the window off-screen (with frame-build
 timing), give them a path; each test writes its own picture beside it
 (`/tmp/shot-perform.png`, `/tmp/shot-prepare.png`, `/tmp/shot-flow.png`):
 

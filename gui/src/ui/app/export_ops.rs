@@ -114,7 +114,7 @@ impl EarshotApp {
                     .find(|d| d.holds(&x.target.path))
                     .map_or_else(|| x.target.kind.label().to_string(), |d| d.label.clone());
                 let job = self.jobs.start(format!("Exporting to {to}"));
-                std::thread::spawn(move || {
+                crate::core::background::spawn("earshot-export", move || {
                     let progress = |m: String| {
                         job.report(&m);
                         send(ExportEvent::Progress(m))
