@@ -51,6 +51,9 @@ pub fn deadline_for(audio_seconds: f64) -> Duration {
 pub enum JobPriority {
     /// A track just loaded onto a deck.
     Deck,
+    /// Analysis someone asked for (a track menu's Analyse): after deck loads, ahead
+    /// of everything else, first asked first served.
+    Asked,
     #[allow(dead_code)] // previews are queued as background jobs for now
     Preview,
     Background,
@@ -59,7 +62,8 @@ pub enum JobPriority {
 impl JobPriority {
     pub fn wire(self) -> &'static str {
         match self {
-            JobPriority::Deck => "deck",
+            // The worker's queue doesn't tell these apart (each lane has its own).
+            JobPriority::Deck | JobPriority::Asked => "deck",
             JobPriority::Preview => "preview",
             JobPriority::Background => "background",
         }

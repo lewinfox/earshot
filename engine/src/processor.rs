@@ -268,7 +268,7 @@ impl MainOut {
         ParamSpec {
             name: "gain",
             min: 0.0,
-            max: 5.0,
+            max: 1.0,
             default: 1.0,
         },
         ParamSpec {
@@ -313,9 +313,6 @@ pub struct Channel {
     pub fader: Smoothed,
     pub pfl: bool,
     pub crossfader: XfSide,
-    /// Straight to the main mix: no fader, crossfader or headphone cue (Prepare
-    /// mode's player).
-    pub direct: bool,
     /// Level meter (peak after the chain, before the fader), linear.
     pub vu: f32,
 }
@@ -335,7 +332,6 @@ impl Channel {
             fader: Smoothed::new(1.0),
             pfl: false,
             crossfader,
-            direct: false,
             vu: 0.0,
         }
     }

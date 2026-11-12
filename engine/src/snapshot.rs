@@ -50,6 +50,8 @@ pub struct DeckSnap {
     pub loop_in: Option<f64>,
     pub loop_out: Option<f64>,
     pub loop_active: bool,
+    /// The active loop the deck has been given ([`crate::DeckCmd::ActiveLoop`]).
+    pub active_loop: Option<(f64, f64)>,
     pub cue_point: f64,
     /// The cue point was set by hand (the Cue button, or `SetCue`) since the track was
     /// loaded, rather than where the load or [`crate::Command::InitialCue`] put it.
@@ -78,11 +80,13 @@ pub struct DeckSnap {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct MixerSnap {
     pub crossfader: f64,
-    pub main_gain: f64,
+    pub master_gain: f64,
     pub balance: f64,
     pub head_gain: f64,
     pub head_mix: f64,
-    /// Main output meters, left and right (peak).
+    /// Master cue is on ([`crate::MasterParam::MasterCue`]).
+    pub master_cue: bool,
+    /// Master output meters, left and right (peak).
     pub vu_main: [f64; 2],
     /// How much the master limiter turned down in the last block, dB (0 = not at all).
     pub limiting: f64,
@@ -94,7 +98,7 @@ pub struct MixerSnap {
     pub fx_busy: [bool; FX_UNITS],
 }
 
-/// The preview player (headphones only).
+/// The preview player (the headphones, or the main output when they are off).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct PreviewSnap {
     pub playing: bool,
@@ -107,8 +111,6 @@ pub struct EngineSnapshot {
     /// Only the first [`EngineSnapshot::decks_live`] are in use.
     pub decks: [DeckSnap; MAX_DECKS],
     pub decks_live: usize,
-    /// Prepare mode's player ([`DeckId::PREPARE`]).
-    pub prepare: DeckSnap,
     pub mixer: MixerSnap,
     pub preview: PreviewSnap,
     pub sample_rate: u32,
@@ -119,7 +121,7 @@ pub struct EngineSnapshot {
 
 impl EngineSnapshot {
     pub fn deck(&self, deck: DeckId) -> &DeckSnap {
-        self.decks.get(deck.index()).unwrap_or(&self.prepare)
+        &self.decks[deck.index()]
     }
 
     /// The live decks.
@@ -133,10 +135,11 @@ impl EngineSnapshot {
         let mut st = EngineState {
             mixer: MixerState {
                 crossfader: self.mixer.crossfader,
-                main_gain: self.mixer.main_gain,
+                master_gain: self.mixer.master_gain,
                 balance: self.mixer.balance,
                 head_gain: self.mixer.head_gain,
                 head_mix: self.mixer.head_mix,
+                master_cue: self.mixer.master_cue,
                 fx: self.mixer.fx,
             },
             sync_leader: self.mixer.sync_leader,

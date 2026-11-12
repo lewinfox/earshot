@@ -247,6 +247,9 @@ impl Writer {
             StoreCmd::SetMemoryColor { track, id, color } => {
                 self.set_memory_color(track, id, color)
             }
+            StoreCmd::SetLoopActive { track, id, active } => {
+                self.set_loop_active(track, id, active)
+            }
             StoreCmd::ListCollections => self.emit_collections(),
             StoreCmd::LoadFlow(id) => {
                 let f = read::flow(&self.conn, id)?;
@@ -673,6 +676,23 @@ impl Writer {
                 CueKind::Loop.as_i64()
             ],
         )?;
+        self.emit_cues(track)
+    }
+
+    /// Make memory loop `id` the track's one active loop, or not.
+    pub fn set_loop_active(&mut self, track: i64, id: i64, active: bool) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        if active {
+            tx.execute(
+                "UPDATE cues SET active = 0 WHERE track_id = ?1",
+                params![track],
+            )?;
+        }
+        tx.execute(
+            "UPDATE cues SET active = ?3 WHERE id = ?1 AND track_id = ?2 AND kind = ?4",
+            params![id, track, active, CueKind::Loop.as_i64()],
+        )?;
+        tx.commit()?;
         self.emit_cues(track)
     }
 

@@ -1,18 +1,21 @@
 //! A view per mode, each laid out from panels. The shell draws the top bar, the
 //! MIDI log and the windows; the mode's view draws the rest of the window.
 
+pub mod controller;
 pub mod perform;
 pub mod prepare;
 
 use egui::Margin;
 
 use super::panels::Cx;
+use super::panels::controller::ControllerUi;
 use super::panels::deck::DeckUi;
 use super::panels::export::ExportUi;
 use super::panels::flow::FlowUi;
 use super::panels::library::LibraryPane;
 use super::panels::stems::StemsUi;
 use super::panels::tempo_lock::TempoLockUi;
+use super::panels::trim::TrimUi;
 use crate::core::session::{self, SLOTS};
 use crate::core::view::Mode;
 
@@ -29,6 +32,10 @@ pub struct Panels {
     pub export: ExportUi,
     /// Prepare's Stems tab.
     pub stems: StemsUi,
+    /// Prepare's Trim tab.
+    pub trim: TrimUi,
+    /// Controller mode's tabs.
+    pub controller: ControllerUi,
 }
 
 impl Panels {
@@ -40,6 +47,8 @@ impl Panels {
             flow: FlowUi::default(),
             export: ExportUi::default(),
             stems: StemsUi::default(),
+            trim: TrimUi::default(),
+            controller: ControllerUi::default(),
         }
     }
 }
@@ -49,6 +58,7 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
     match cx.prefs.mode {
         Mode::Perform => perform::show(ctx, panels, cx),
         Mode::Prepare => prepare::show(ctx, panels, cx),
+        Mode::Controller => controller::show(ctx, panels, cx),
     }
 }
 

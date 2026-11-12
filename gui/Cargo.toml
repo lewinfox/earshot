@@ -13,6 +13,7 @@ fontdb = { version = "0.23.0", default-features = false, features = ["fs", "memm
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 midir = "0.11.0"
 rfd = "0.17.2"
+wmidi = "4.0.11"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -21,6 +22,10 @@ thiserror = "2.0.21"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2.190"
+# A controller's own sound card: which ALSA card its MIDI port is on, and asking
+# PipeWire to let go of it (the ReserveDevice1 D-Bus name).
+alsa = "0.11.0"
+zbus = "5.19.0"
 
 [dev-dependencies]
 egui_kittest = { version = "0.33.3", features = ["wgpu", "eframe", "snapshot"] }

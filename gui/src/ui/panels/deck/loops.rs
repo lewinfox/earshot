@@ -6,7 +6,7 @@ use egui::{Ui, vec2};
 use super::design::*;
 use super::{DeckInfo, DeckUi};
 use crate::core::bus::{DeckControl, JUMP_STEPS};
-use crate::core::command::Command;
+use crate::core::command::{Command, DeckCmd};
 use crate::ui::theme::THEME;
 use crate::ui::widgets::{HwButton, held};
 
@@ -129,9 +129,10 @@ impl DeckUi {
         let d = self.dims;
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                for (label, control, tip) in [
-                    (format!("◀ {n}"), DeckControl::JumpBack, "Jump back"),
-                    (format!("{n} ▶"), DeckControl::JumpForward, "Jump forward"),
+                // The jump itself, by the size picked below: `beat_jump -8`, `beat_jump 8`.
+                for (label, sign, tip) in [
+                    (format!("◀ {n}"), -1.0, "Jump back"),
+                    (format!("{n} ▶"), 1.0, "Jump forward"),
                 ] {
                     let r = ui
                         .add(
@@ -139,12 +140,13 @@ impl DeckUi {
                                 .font(d.px(FONT_JUMP)),
                         )
                         .on_hover_text(format!("{tip} {n} beats"));
-                    if let Some(d) = held(ui, &r) {
-                        self.control(out, control, d as u8 as f64);
+                    if held(ui, &r) == Some(true) {
+                        self.control(out, DeckControl::BeatJump, sign * info.jump_size);
                     }
                 }
             });
-            // The step: click to pick 1-32 beats.
+            // The size: click to pick 1-32 beats. The deck remembers it; it's not a
+            // command.
             let r = ui
                 .add(
                     HwButton::new(
@@ -159,7 +161,7 @@ impl DeckUi {
                 for beats in JUMP_STEPS {
                     let label = format!("{beats} beat{}", if beats == 1.0 { "" } else { "s" });
                     if ui.radio(info.jump_size == beats, label).clicked() {
-                        self.control(out, DeckControl::JumpSize, beats);
+                        self.send(out, DeckCmd::SetJumpSize(beats));
                         ui.close();
                     }
                 }

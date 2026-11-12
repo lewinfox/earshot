@@ -90,7 +90,7 @@ impl DeckUi {
                     let r = ui
                         .add(HwButton::new(s.range.label(), THEME.text, vec2(24.0, 18.0)).font(8.0))
                         .on_hover_text("Tempo range: ±6, ±10, ±16 % or WIDE (0 to 256 % speed)");
-                    if r.clicked() {
+                    if held(ui, &r) == Some(true) {
                         self.control(out, DeckControl::TempoRangeNext, 1.0);
                     }
                     r.context_menu(|ui| {
@@ -109,7 +109,7 @@ impl DeckUi {
     /// SYNC, and beside it the sync leader's star.
     pub(super) fn sync_buttons(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
         let s = self.state;
-        let following = match s.following.and_then(deck_letter) {
+        let following = match s.following.map(deck_letter) {
             Some(l) if s.sync => format!("\nFollowing deck {l}"),
             _ => String::new(),
         };
@@ -145,7 +145,7 @@ impl DeckUi {
                 } else {
                     "Make this deck the sync leader: synced decks follow it"
                 });
-            if r.clicked() {
+            if held(ui, &r) == Some(true) {
                 out.push(Command::Mixer(MixerCmd::SyncLeader(lead)));
             }
         });

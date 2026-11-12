@@ -17,15 +17,23 @@ use crate::ui::panels::{Cx, Panel, resized};
 const STACK_GAP: f32 = 4.0;
 
 pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
+    decks_rows(ctx, panels, cx, "perform", true);
+    library(ctx, panels, cx);
+}
+
+/// The waveforms' row and the decks' row (with the mixer): the same in every mode.
+/// `mode` keeps each mode's panel ids apart; `shown` false slides them away (the
+/// Flow editor's full screen).
+pub fn decks_rows(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx, mode: &str, shown: bool) {
     let decks = cx.prefs.decks();
     let compact = decks.len() > 2;
-    let waves_h = cx.prefs.perform.sizes.waves;
-    let r = egui::TopBottomPanel::top("waves-perform")
+    let waves_h = cx.prefs.layout().sizes.waves;
+    let r = egui::TopBottomPanel::top(format!("waves-{mode}"))
         .resizable(true)
         .default_height(waves_h)
         .height_range(60.0..=520.0)
         .frame(row_frame(cx, Margin::same(6)))
-        .show(ctx, |ui| {
+        .show_animated(ctx, shown, |ui| {
             ui.spacing_mut().item_spacing.y = 3.0;
             let n = decks.len() as f32;
             let height = (ui.available_height() - 3.0 * (n - 1.0)) / n;
@@ -34,7 +42,9 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
                 WavePanel { deck, height }.ui(ui, cx);
             }
         });
-    resized(ctx, r.response.rect.height(), Region::Waves, waves_h, cx);
+    if let Some(r) = r {
+        resized(ctx, r.response.rect.height(), Region::Waves, waves_h, cx);
+    }
     // One height for the row, the decks' or the mixer's, whichever needs more: the
     // mixer fills it, and each side's decks share it (their controls grow to fill).
     // Worked out here, so nothing can be stretched by a height egui remembered from
@@ -43,10 +53,12 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
     let gaps = STACK_GAP * (per_side - 1.0);
     let height = (min_height(compact) * per_side + gaps).max(mixer::HEIGHT + 12.0);
     let deck_h = (height - gaps) / per_side;
-    egui::TopBottomPanel::top("decks-perform")
+    // The decks make way for a bigger library (the waveforms stay).
+    let decks_shown = shown && !cx.prefs.library_maximized;
+    egui::TopBottomPanel::top(format!("decks-{mode}"))
         .exact_height(height + 8.0)
         .frame(row_frame(cx, Margin::symmetric(6, 4)))
-        .show(ctx, |ui| {
+        .show_animated(ctx, decks_shown, |ui| {
             // Decks on the crossfader's left, the mixer, then the rest.
             let side = |d: &DeckId| {
                 if mixer::on_left(*d) {
@@ -98,5 +110,4 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
                 strip.cell(|ui| column(ui, Side::Right, panels, cx));
             });
         });
-    library(ctx, panels, cx);
 }

@@ -6,9 +6,9 @@
 //! Keys are kept as names here (core doesn't know egui); the UI turns them into its
 //! keys once, when it loads the map.
 
-use earshot_engine::{DeckId, MasterParam};
+use earshot_engine::DeckId;
 
-use super::bus::{Control, DeckControl, FxControl, Kind, LibraryControl, deck_letter};
+use super::bus::{Control, DeckControl, Kind, LibraryControl, deck_letter};
 use super::command::Command;
 
 /// The built-in keymap.
@@ -71,15 +71,15 @@ pub struct Binding {
     pub control: Control,
     /// The number after the control, if any.
     pub arg: Option<f64>,
+    /// On Prepare's target deck (the file's `target`), whichever deck that is when the
+    /// key is pressed. `control` names deck 1 until then.
+    pub on_target: bool,
 }
 
 impl Binding {
     /// The value a press sends: the number, unless that's the control's parameter.
     fn value(&self) -> f64 {
-        match self.control {
-            Control::Deck(_, c) if c.parametrised() => 1.0,
-            _ => self.arg.unwrap_or(1.0),
-        }
+        self.control.press_value(self.arg)
     }
 
     /// What pressing the key sends.
@@ -122,7 +122,7 @@ impl Binding {
     }
 
     fn applies(&self, mode: Mode) -> bool {
-        self.mode.is_none_or(|m| m == mode)
+        self.mode.is_none_or(|m| m == mode.keys())
     }
 
     /// Whether `other` is the same key in a mode this one works in too.
@@ -228,16 +228,15 @@ impl Keymap {
                 continue;
             }
             let (title, deck) = match b.control {
-                Control::Deck(d, _) => match deck_letter(d) {
-                    Some(l) => (format!("Deck {l}"), Some(d)),
-                    None => ("Player".to_string(), Some(d)),
-                },
+                Control::Deck(..) if b.on_target => ("Target deck".to_string(), None),
+                Control::Deck(d, _) => (format!("Deck {}", deck_letter(d)), Some(d)),
                 Control::Master(_) => ("Mixer".to_string(), None),
                 Control::Fx(..) => ("Effects".to_string(), None),
                 Control::Library(LibraryControl::Undo | LibraryControl::Redo) => {
                     ("Edit".to_string(), None)
                 }
                 Control::Library(_) => ("Library".to_string(), None),
+                Control::Ui(_) => ("Screen".to_string(), None),
             };
             let row = (b.label(), b.describe());
             match sections.iter_mut().find(|s| s.title == title) {
@@ -255,12 +254,13 @@ impl Keymap {
 
 fn parse_line(line: &str) -> Result<Binding, String> {
     let words: Vec<&str> = line.split_whitespace().collect();
-    let [mode, key, target, control, rest @ ..] = words.as_slice() else {
-        return Err("expected <mode> <key> <target> <control> [<number>]".into());
+    let [mode, key, command, rest @ ..] = words.as_slice() else {
+        return Err("expected <mode> <key> <command> [<number>]".into());
     };
     let mode = match *mode {
         "perform" => Some(Mode::Perform),
         "prepare" => Some(Mode::Prepare),
+        "controller" => Some(Mode::Controller),
         "any" => None,
         m => return Err(format!("unknown mode {m}")),
     };
@@ -275,61 +275,23 @@ fn parse_line(line: &str) -> Result<Binding, String> {
             break;
         }
     }
-    let arg = match rest {
+    let word = match rest {
         [] => None,
-        [n] => Some(
-            n.parse::<f64>()
-                .map_err(|_| format!("{n} isn't a number"))?,
-        ),
+        [w] => Some(*w),
         _ => return Err("too many words".into()),
     };
-    let unknown = || format!("no control {control} on {target}");
-    let control = match *target {
-        "library" => Control::Library(
-            LibraryControl::ALL
-                .into_iter()
-                .find(|c| c.spec().name == *control)
-                .ok_or_else(unknown)?,
-        ),
-        "mixer" => Control::Master(
-            [
-                MasterParam::Crossfader,
-                MasterParam::Gain,
-                MasterParam::Balance,
-                MasterParam::HeadGain,
-                MasterParam::HeadMix,
-            ]
-            .into_iter()
-            .find(|p| Control::Master(*p).spec().name == *control)
-            .ok_or_else(unknown)?,
-        ),
-        t if t.starts_with("fx") => {
-            let unit = t[2..]
-                .parse::<usize>()
-                .ok()
-                .and_then(|n| n.checked_sub(1))
-                .filter(|u| *u < earshot_engine::FX_UNITS)
-                .ok_or_else(|| format!("unknown target {t}"))?;
-            Control::Fx(
-                unit,
-                FxControl::ALL
-                    .into_iter()
-                    .find(|c| c.spec().name == *control)
-                    .ok_or_else(unknown)?,
-            )
-        }
-        t => {
-            let deck = match t {
-                "prepare" => DeckId::PREPARE,
-                _ => t
-                    .strip_prefix("deck")
-                    .and_then(|n| n.parse::<usize>().ok())
-                    .and_then(|n| DeckId::new(n.checked_sub(1)?))
-                    .ok_or_else(|| format!("unknown target {t}"))?,
-            };
-            Control::Deck(deck, DeckControl::parse(control, arg).ok_or_else(unknown)?)
-        }
+    // `target_…`: Prepare's target deck, whichever that is when the key is pressed.
+    let (name, on_target) = match command.strip_prefix("target_") {
+        Some(thing) => (format!("deck_1_{thing}"), true),
+        None => (command.to_string(), false),
     };
+    let (control, arg) = Control::parse(&name, word).map_err(|e| {
+        if on_target {
+            e.replace(&name, command)
+        } else {
+            e
+        }
+    })?;
     Ok(Binding {
         mode,
         key: key.to_string(),
@@ -338,6 +300,7 @@ fn parse_line(line: &str) -> Result<Binding, String> {
         ctrl,
         control,
         arg,
+        on_target,
     })
 }
 
@@ -368,13 +331,13 @@ mod tests {
         assert_eq!(origin, Origin::BuiltIn);
         assert_eq!(k.bindings.len(), Keymap::built_in().bindings.len());
 
-        std::fs::write(&path, "perform  P  deck1  play\n").unwrap();
+        std::fs::write(&path, "perform  P  deck_1_play\n").unwrap();
         let (k, origin) = load_user(&path, spell);
         assert_eq!(origin, Origin::File);
         assert_eq!(k.bindings.len(), 1);
         assert!(k.find(Mode::Perform, "P", false).is_some());
 
-        std::fs::write(&path, "perform  P  deck1  play\nperform  Q  deck9  play\n").unwrap();
+        std::fs::write(&path, "perform  P  deck_1_play\nperform  Q  deck_9_play\n").unwrap();
         let (k, origin) = load_user(&path, spell);
         let Origin::Broken(e) = origin else {
             panic!("{origin:?}")
@@ -392,14 +355,14 @@ mod tests {
         assert!(km.find(Mode::Perform, "Comma", false).is_some());
         assert!(km.find(Mode::Perform, ";", false).is_none());
         // Two spellings of one key are still one key.
-        let twice = Keymap::parse("perform ; deck1 play\nperform Semicolon deck2 play").unwrap();
+        let twice = Keymap::parse("perform ; deck_1_play\nperform Semicolon deck_2_play").unwrap();
         assert!(
             twice
                 .spell_keys(ui_name)
                 .unwrap_err()
                 .contains("bound twice")
         );
-        let bad = Keymap::parse("perform Hyper deck1 play").unwrap();
+        let bad = Keymap::parse("perform Hyper deck_1_play").unwrap();
         assert!(
             bad.spell_keys(ui_name)
                 .unwrap_err()
@@ -421,6 +384,10 @@ mod tests {
         assert!(matches!(
             press(Perform, "W", false),
             Some(Command::Deck(d, DeckCmd::Jump { forward: true })) if d == deck(0)
+        ));
+        assert!(matches!(
+            press(Perform, "Q", false),
+            Some(Command::Deck(d, DeckCmd::Jump { forward: false })) if d == deck(0)
         ));
         assert!(matches!(
             press(Perform, "E", false),
@@ -467,7 +434,7 @@ mod tests {
     #[test]
     fn prepare_keys() {
         use Mode::Prepare;
-        let p = DeckId::PREPARE;
+        let p = DeckId::new(0).unwrap();
         assert!(matches!(
             press(Prepare, "Space", false),
             Some(Command::Deck(d, DeckCmd::Engine(EngineCmd::Play(Set::Toggle)))) if d == p
@@ -560,7 +527,7 @@ mod tests {
         let edit = help.iter().find(|s| s.title == "Edit").unwrap();
         assert!(edit.rows.contains(&("Ctrl Shift Z".into(), "redo".into())));
         assert!(
-            Keymap::parse("any Shift+Ctrl+Z library redo")
+            Keymap::parse("any Shift+Ctrl+Z library_redo")
                 .unwrap()
                 .bindings[0]
                 .ctrl
@@ -572,15 +539,15 @@ mod tests {
         let km = Keymap::built_in();
         let help = km.help(Mode::Perform);
         let titles: Vec<&str> = help.iter().map(|s| s.title.as_str()).collect();
-        assert_eq!(titles, ["Deck A", "Deck B", "Effects", "Library", "Edit"]);
+        assert_eq!(titles, ["Deck A", "Deck B", "Effects", "Screen", "Library", "Edit"]);
         let a = &help[0].rows;
         assert!(a.contains(&("S".into(), "play / pause".into())));
-        assert!(a.contains(&("4".into(), "hot cue 4".into())));
+        assert!(a.contains(&("4".into(), "hot cue D".into())));
         assert!(a.contains(&("Shift ←".into(), "load to deck A".into())));
         assert!(!a.iter().any(|r| r.1.starts_with("clear")), "in the note");
         let help = km.help(Mode::Prepare);
         let player = &help[0].rows;
-        assert_eq!(help[0].title, "Player");
+        assert_eq!(help[0].title, "Target deck");
         assert!(player.contains(&("6".into(), "loop 1 bar".into())));
         assert!(player.contains(&("9".into(), "loop 8 bars".into())));
         assert!(player.contains(&("Shift →".into(), "nudge the grid 10 ms later".into())));
@@ -595,19 +562,31 @@ mod tests {
     #[test]
     fn bad_lines_say_where() {
         for (text, wants) in [
-            ("perform A deck1", "expected"),
-            ("sometimes A deck1 play", "unknown mode"),
-            ("perform A deck9 play", "unknown target"),
-            ("perform A deck1 dance", "no control dance"),
-            ("perform A deck1 hotcue", "no control hotcue"),
-            ("perform A deck1 beatloop x", "isn't a number"),
-            ("perform A deck1 play\nany A library search", "bound twice"),
+            ("perform A", "expected"),
+            ("sometimes A deck_1_play", "unknown mode"),
+            ("perform A deck_9_play", "no command deck_9_play"),
+            ("perform A deck_1_dance", "no command deck_1_dance"),
+            ("perform A target_dance", "no command target_dance"),
+            ("perform A deck_1_beat_loop", "no command deck_1_beat_loop"),
+            ("perform A deck_1_beat_loop x", "isn't a number"),
+            ("perform A deck_1_play\nany A library_search", "bound twice"),
         ] {
             let e = Keymap::parse(text).unwrap_err();
             assert!(e.contains(wants), "{text}: {e}");
             assert!(e.starts_with("keymap line"), "{e}");
         }
         // The same key in two modes is fine.
-        assert!(Keymap::parse("perform C deck1 play\nprepare C prepare set_cue").is_ok());
+        assert!(Keymap::parse("perform C deck_1_play\nprepare C target_cue_set").is_ok());
+        // A beat jump by a number, or by the deck's configured size.
+        let km = Keymap::parse("any A deck_2_beat_jump -4\nany B target_beat_jump -size").unwrap();
+        assert!(matches!(
+            km.bindings[0].press(),
+            Some(Command::Deck(d, DeckCmd::Engine(EngineCmd::BeatJump(b)))) if d == deck(1) && b == -4.0
+        ));
+        assert!(matches!(
+            km.bindings[1].press(),
+            Some(Command::Deck(_, DeckCmd::Jump { forward: false }))
+        ));
+        assert!(km.bindings[1].on_target);
     }
 }

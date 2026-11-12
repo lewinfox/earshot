@@ -14,6 +14,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -285,8 +286,9 @@ pub fn list() -> Vec<Drive> {
 /// Watch the drives on a thread of its own; `changed` hears the whole list each
 /// time it differs (and once at the start). On Linux the thread sleeps until the
 /// kernel says the mount table changed (`/proc/self/mounts` is readable as
-/// "priority" data then), or for [`IDLE`]; elsewhere it looks every 2 s.
-pub fn watch(changed: impl Fn(Vec<Drive>) + Send + 'static) {
+/// "priority" data then), or for [`IDLE`]; elsewhere it looks every 2 s. The thread
+/// ends within a second of `stop` being set.
+pub fn watch(stop: Arc<AtomicBool>, changed: impl Fn(Vec<Drive>) + Send + 'static) {
     std::thread::Builder::new()
         .name("earshot-drives".into())
         .spawn(move || {
@@ -305,13 +307,23 @@ pub fn watch(changed: impl Fn(Vec<Drive>) + Send + 'static) {
                 }
                 match &mounts {
                     Some(f) => {
-                        let mut p = libc::pollfd {
-                            fd: f.as_raw_fd(),
-                            events: libc::POLLPRI | libc::POLLERR,
-                            revents: 0,
-                        };
-                        // SAFETY: one valid pollfd.
-                        unsafe { libc::poll(&mut p, 1, IDLE.as_millis() as i32) };
+                        // A second at a time, to notice `stop`.
+                        let until = std::time::Instant::now() + IDLE;
+                        loop {
+                            if stop.load(Ordering::Relaxed) {
+                                return;
+                            }
+                            let mut p = libc::pollfd {
+                                fd: f.as_raw_fd(),
+                                events: libc::POLLPRI | libc::POLLERR,
+                                revents: 0,
+                            };
+                            // SAFETY: one valid pollfd.
+                            let ready = unsafe { libc::poll(&mut p, 1, 1000) };
+                            if ready != 0 || std::time::Instant::now() >= until {
+                                break;
+                            }
+                        }
                         // Reading this same open file to the end clears the news
                         // (`list` reads its own copy).
                         use std::io::{Read, Seek};
@@ -319,11 +331,28 @@ pub fn watch(changed: impl Fn(Vec<Drive>) + Send + 'static) {
                         let _ = f.seek(io::SeekFrom::Start(0));
                         let _ = f.read_to_end(&mut vec![]);
                     }
-                    None => std::thread::sleep(Duration::from_secs(2)),
+                    None => {
+                        std::thread::sleep(Duration::from_secs(1));
+                        if stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_secs(1));
+                    }
                 }
             }
         })
         .expect("start the drive watcher");
+}
+
+/// Sets its flag when dropped: hand the flag to [`watch`] to end its thread when the
+/// owner goes.
+#[derive(Default)]
+pub struct StopOnDrop(pub Arc<AtomicBool>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Write everything cached for the filesystem at `at` to the drive.

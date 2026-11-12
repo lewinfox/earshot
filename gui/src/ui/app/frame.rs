@@ -45,7 +45,7 @@ impl EarshotApp {
             self.panels.decks[id.index()].stem_mode = self.prefs.stem_mode;
             self.panels.decks[id.index()].controller = self.prefs.controller();
             self.panels.decks[id.index()].active =
-                self.prefs.four_decks && self.prefs.active_decks().contains(&id);
+                self.prefs.four_decks() && self.prefs.active_decks().contains(&id);
             self.panels.decks[id.index()].tick(ctx, sh, &info);
             self.frame.decks[id.index()] = Some(info);
         }
@@ -56,7 +56,7 @@ impl EarshotApp {
     /// decoding), a waveform being scrubbed, a track loading or being analysed.
     pub(super) fn moving(&self) -> bool {
         let playing = self.frame.snap.as_ref().is_some_and(|s| {
-            s.live().iter().any(|d| d.playing) || s.prepare.playing || s.preview.playing
+            s.live().iter().any(|d| d.playing) || s.preview.playing
         });
         playing
             || self

@@ -134,6 +134,9 @@ pub struct Theme {
     pub loop_shade: Color32,
     pub loop_shade_idle: Color32,
     pub loop_shade_overview: Color32,
+    /// A loop that's there but not playing (exited), on the overview: grey, as in
+    /// Rekordbox.
+    pub loop_shade_overview_idle: Color32,
     /// Over what's been played on the overview.
     pub played_shade: Color32,
 
@@ -233,6 +236,7 @@ pub const THEME: Theme = Theme {
     loop_shade: Color32::from_rgba_unmultiplied_const(255, 180, 40, 50),
     loop_shade_idle: Color32::from_rgba_premultiplied(18, 18, 18, 18),
     loop_shade_overview: Color32::from_rgba_unmultiplied_const(255, 180, 40, 80),
+    loop_shade_overview_idle: Color32::from_rgba_unmultiplied_const(200, 200, 200, 45),
     played_shade: Color32::from_black_alpha(115),
 
     face: rgb8(0x2a, 0x2c, 0x34),
@@ -293,6 +297,11 @@ impl Theme {
             s.spacing.item_spacing = item;
             s.spacing.button_padding = padding;
         });
+    }
+
+    /// The browse knob's highlight: an outline round what it's on.
+    pub fn cursor_stroke(&self) -> egui::Stroke {
+        egui::Stroke::new(2.0_f32, self.accent)
     }
 
     /// A deck's colour; Prepare's player has the accent.

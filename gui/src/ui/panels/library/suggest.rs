@@ -57,11 +57,27 @@ pub struct SuggestUi {
     rows: Vec<TrackId>,
     sel: Selection,
     scroll_to: Option<usize>,
+    /// Focus the top track once the list has one (`library_related_tracks_toggle`).
+    want_top: bool,
 }
 
 impl SuggestUi {
     pub fn focused(&self) -> Option<TrackId> {
         self.sel.focused()
+    }
+
+    /// Put the focus on the top track (once the list has one).
+    pub fn focus_top(&mut self) {
+        self.want_top = true;
+        self.take_top();
+    }
+
+    fn take_top(&mut self) {
+        if self.want_top && !self.rows.is_empty() {
+            self.want_top = false;
+            self.sel = Selection::default();
+            self.move_focus(0);
+        }
     }
 
     pub fn move_focus(&mut self, delta: i32) {
@@ -76,12 +92,11 @@ impl SuggestUi {
         &mut self,
         v: &CoreView,
         decks: &[DeckNow],
-        prepare: Option<&DeckNow>,
         selected: Option<TrackId>,
     ) {
         let Some(r) = v
             .history
-            .reference(v.lib, self.source, decks, prepare, selected)
+            .reference(v.lib, self.source, decks, selected)
         else {
             self.reference = None;
             self.list.clear();
@@ -240,6 +255,7 @@ impl SuggestUi {
         ui.add_space(2.0);
 
         self.rows = self.rows(v, table);
+        self.take_top();
         self.sel.retain(&self.rows);
         let scores: HashMap<TrackId, Scored> =
             self.list.iter().map(|s| (s.id, s.clone())).collect();
@@ -282,7 +298,5 @@ const DECK_SOURCES: [(&str, &str); 4] = [
 ];
 
 fn letter(d: usize) -> String {
-    DeckId::new(d)
-        .and_then(deck_letter)
-        .map_or_else(|| "?".into(), |l| l.to_string())
+    DeckId::new(d).map_or_else(|| "?".into(), |d| deck_letter(d).to_string())
 }

@@ -14,7 +14,6 @@ use crate::core::stems::{Stage, Status, StemWaves, StemsCmd, StemsEvent};
 use crate::core::track::TrackId;
 use crate::ui::widgets::Button;
 
-const PLAYER: DeckId = DeckId::PREPARE;
 const ROW_H: f32 = 64.0;
 const CONTROLS_W: f32 = 230.0;
 /// Seconds either side of the playhead: the closest and widest zoom.
@@ -53,13 +52,13 @@ impl Panel for StemsPanel<'_> {
         if tab.half <= 0.0 {
             tab.half = 6.0;
         }
-        let snap = cx.engine.snap.as_ref().map(|s| *s.deck(PLAYER));
+        let snap = cx.engine.snap.as_ref().map(|s| *s.deck(target(cx)));
         let Some(track) = snap.and_then(|s| s.track_id) else {
             ui.weak("No track loaded.");
             return;
         };
         let snap = snap.unwrap();
-        let info = cx.engine.deck(PLAYER);
+        let info = cx.engine.deck(target(cx));
         let (stem_waves, grid) = (info.stem_waves.clone(), info.grid.clone());
 
         match (&stem_waves, snap.stems) {
@@ -100,14 +99,14 @@ impl Panel for StemsPanel<'_> {
             if ui.add(Button::subtle("All on").small()).clicked() {
                 for s in 0..COUNT {
                     cx.send((
-                        PLAYER,
+                        target(cx),
                         EngineCmd::StemMute {
                             stem: s as u8,
                             set: Set::Off,
                         },
                     ));
                     cx.send((
-                        PLAYER,
+                        target(cx),
                         EngineCmd::StemLevel {
                             stem: s as u8,
                             level: 1.0,
@@ -132,7 +131,7 @@ impl Panel for StemsPanel<'_> {
                             let muted = snap.stem_mute[s];
                             if ui.selectable_label(muted, "Mute").clicked() {
                                 cx.send((
-                                    PLAYER,
+                                    target(cx),
                                     EngineCmd::StemMute {
                                         stem: s as u8,
                                         set: Set::Toggle,
@@ -142,7 +141,7 @@ impl Panel for StemsPanel<'_> {
                             if ui.button("Solo").clicked() {
                                 for o in 0..COUNT {
                                     let set = Set::from_bool(o != s);
-                                    cx.send((PLAYER, EngineCmd::StemMute { stem: o as u8, set }));
+                                    cx.send((target(cx), EngineCmd::StemMute { stem: o as u8, set }));
                                 }
                             }
                         });
@@ -157,7 +156,7 @@ impl Panel for StemsPanel<'_> {
                             .changed()
                         {
                             cx.send((
-                                PLAYER,
+                                target(cx),
                                 EngineCmd::StemLevel {
                                     stem: s as u8,
                                     level,
@@ -198,7 +197,7 @@ impl Panel for StemsPanel<'_> {
                 {
                     let t = view.0
                         + (p.x - rect.left()) as f64 / rect.width() as f64 * (view.1 - view.0);
-                    cx.send((PLAYER, EngineCmd::Seek(t.max(0.0))));
+                    cx.send((target(cx), EngineCmd::Seek(t.max(0.0))));
                 }
             });
             ui.add_space(2.0);
@@ -246,4 +245,9 @@ fn calculate(ui: &mut Ui, tab: &mut StemsUi, track: TrackId, job: Option<Status>
             }
         }
     }
+}
+
+/// The deck the tool works on: Prepare's target.
+fn target(cx: &Cx) -> DeckId {
+    cx.prefs.target()
 }

@@ -18,18 +18,17 @@ use earshot_engine::{
     MixerState, PreviewSnap, XfSide,
 };
 
-/// The players the engine has: [`MAX_DECKS`] decks, then Prepare's player, so a
-/// [`DeckId`]'s index picks its session.
-pub const SLOTS: usize = MAX_DECKS + 1;
+/// The decks the engine has, so a [`DeckId`]'s index picks its session.
+pub const SLOTS: usize = MAX_DECKS;
 
-/// Every player the app uses: the first `decks` decks, then Prepare's.
+/// The first `decks` decks.
 pub fn players(decks: usize) -> impl Iterator<Item = DeckId> {
-    DeckId::first(decks).chain([DeckId::PREPARE])
+    DeckId::first(decks)
 }
 
-/// The player in slot `index` (below [`SLOTS`]).
+/// The deck in slot `index` (below [`SLOTS`]).
 pub fn slot(index: usize) -> DeckId {
-    DeckId::new(index).unwrap_or(DeckId::PREPARE)
+    DeckId::new(index).expect("a deck slot")
 }
 
 #[derive(Clone)]
@@ -232,10 +231,11 @@ impl DeckSession {
 pub fn observe_mixer(m: &MixerSnap) -> MixerState {
     MixerState {
         crossfader: m.crossfader,
-        main_gain: m.main_gain,
+        master_gain: m.master_gain,
         balance: m.balance,
         head_gain: m.head_gain,
         head_mix: m.head_mix,
+        master_cue: m.master_cue,
         fx: m.fx,
     }
 }

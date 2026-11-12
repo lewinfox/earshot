@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::collections::Section;
 use super::sources::{SourceId, SourceKind};
+use super::track::TrackId;
 
 /// What a deck's stem button does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,8 +26,61 @@ pub enum Mode {
     /// The decks and the mixer, for playing a set.
     #[default]
     Perform,
-    /// One player across the top for setting cues, fixing grids and building playlists.
+    /// The same decks, over tools for setting cues, fixing grids and building playlists.
     Prepare,
+    /// Perform's decks over the library and a controller's mapping, for setting up and
+    /// testing a MIDI controller.
+    Controller,
+}
+
+impl Mode {
+    /// As the top bar names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Perform => "Perform",
+            Mode::Prepare => "Prepare",
+            Mode::Controller => "Controller",
+        }
+    }
+
+    /// The mode whose keymap bindings it uses: Controller uses Perform's.
+    pub fn keys(self) -> Mode {
+        match self {
+            Mode::Controller => Mode::Perform,
+            m => m,
+        }
+    }
+}
+
+/// What a controller's performance pads do, picked with its pad mode buttons. The
+/// deck's pads page shows what each pad does in it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PadMode {
+    #[default]
+    HotCue,
+    BeatLoop,
+    BeatJump,
+    Sampler,
+    Keyboard,
+    PadFx1,
+    PadFx2,
+    KeyShift,
+}
+
+impl PadMode {
+    /// As the controller prints it.
+    pub fn label(self) -> &'static str {
+        match self {
+            PadMode::HotCue => "Hot cue",
+            PadMode::BeatLoop => "Beat loop",
+            PadMode::BeatJump => "Beat jump",
+            PadMode::Sampler => "Sampler",
+            PadMode::Keyboard => "Keyboard",
+            PadMode::PadFx1 => "Pad FX 1",
+            PadMode::PadFx2 => "Pad FX 2",
+            PadMode::KeyShift => "Key shift",
+        }
+    }
 }
 
 /// What the library's left icon stack shows: where to look for music. The first
@@ -89,6 +143,10 @@ pub enum Tool {
     Export,
     /// Split the player's track into stems, and play them with a level and mute each.
     Stems,
+    /// Cut the target track down to the part between two points; save it as a new file.
+    Trim,
+    /// The target track's memory cues and loops, in order through it.
+    Cues,
 }
 
 /// The windows over the app. They stack: the last one opened is on top.
@@ -133,7 +191,12 @@ pub enum Pane {
 pub enum ViewCmd {
     /// Move the selection in the focused list (negative is up).
     Browse(i32),
-    TogglePane,
+    /// Browse: into what's highlighted (1), or back out (-1).
+    PaneStep(i32),
+    /// Open the suggestions with the browse knob on their top track, or close them.
+    RelatedTracks,
+    /// Hide the decks for a bigger library, or show them again.
+    ToggleLibraryMaximized,
     /// A list was clicked: it takes the keyboard.
     FocusPane(Pane),
     FocusSearch,
@@ -144,12 +207,19 @@ pub enum ViewCmd {
     /// Move the selection in the focused list (negative is up) and load the track it
     /// lands on onto this deck: the previous or next track.
     LoadAdjacent(DeckId, i32),
-    /// Four decks in Perform (false: two).
-    FourDecks(bool),
+    /// Show 1, 2 or 4 decks.
+    DeckCount(usize),
+    /// Prepare's target: the deck its tools act on.
+    Target(DeckId),
+    /// The controller's pads on this deck are in this mode now.
+    PadMode(DeckId, PadMode),
     /// Four decks: the left hand (0) between decks 1 and 3, or the right (1) between
     /// 2 and 4.
     SwitchLayer(usize),
     SetMode(Mode),
+    /// Open the track in Prepare's Tempo lock tab and chart it (the track menu's
+    /// "Normalise tempo"). Nothing happens if the switch to Prepare is refused.
+    NormaliseTempo(TrackId),
     /// Show a source in the library's left pane (`None` closes the pane).
     Source(Option<Source>),
     /// Open a pane on the library's right (`None` closes it).

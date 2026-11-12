@@ -294,6 +294,13 @@ pub enum StoreCmd {
         id: i64,
         color: Option<u32>,
     },
+    /// Make a memory loop the track's active loop (the one it had stops being), or
+    /// stop it being. Answered with [`StoreEvent::Cues`].
+    SetLoopActive {
+        track: i64,
+        id: i64,
+        active: bool,
+    },
     /// A new play session (one run of the app): the plays saved from now on are
     /// its. An earlier session left open (the app didn't get to end it) is closed at
     /// its last play.

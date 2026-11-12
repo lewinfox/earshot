@@ -36,6 +36,9 @@ pub struct Transport {
     pos: f64,
     pub playing: bool,
     pub loop_: LoopState,
+    /// The track's active loop (`start..end`, seconds): playing forward onto its
+    /// start, with no loop on, turns it on.
+    pub active_loop: Option<(f64, f64)>,
     duration: f64,
     /// How far before 0 the playhead may go.
     lead_in: f64,
@@ -47,6 +50,7 @@ impl Transport {
             pos: 0.0,
             playing: false,
             loop_: LoopState::default(),
+            active_loop: None,
             duration: 0.0,
             lead_in,
         }
@@ -75,7 +79,20 @@ impl Transport {
     /// this reached the end of the track (the transport stops there).
     #[inline]
     fn advance(&mut self, step: f64) -> bool {
+        let from = self.pos;
         self.pos += step;
+        if let Some((start, end)) = self.active_loop
+            && !self.loop_.active
+            && from <= start
+            && self.pos > start
+            && end > start
+        {
+            self.loop_ = LoopState {
+                start: Some(start),
+                end: Some(end),
+                active: true,
+            };
+        }
         if let Some((start, end)) = self.loop_.bounds()
             && self.pos >= end
         {

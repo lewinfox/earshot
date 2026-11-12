@@ -13,9 +13,7 @@ use crate::core::edit::{EditCmd, Field, Value};
 use crate::core::external::ExternalCmd;
 use crate::core::index::LibraryCmd;
 use crate::core::outside::is_outside;
-use crate::core::tempo_lock::TempoLockCmd;
 use crate::core::track::{AnalysisState, Track, TrackId};
-use crate::core::view::{Mode, Tool};
 use crate::ui::panels::CoreView;
 use crate::ui::panels::deck::wave;
 use crate::ui::theme::{THEME, fs};
@@ -258,11 +256,7 @@ pub fn track_menu(ui: &mut Ui, sel: &[TrackId], v: &CoreView, at: MenuAt, out: &
             .on_hover_text("Open it in Prepare's Tempo lock tab, to straighten its tempo")
             .clicked()
     {
-        out.extend([
-            ViewCmd::SetMode(Mode::Prepare).into(),
-            ViewCmd::Tool(Tool::TempoLock).into(),
-            TempoLockCmd::Analyse(first).into(),
-        ]);
+        out.push(ViewCmd::NormaliseTempo(first).into());
         ui.close();
     }
 }
@@ -325,12 +319,8 @@ fn count(verb: &str, n: usize) -> String {
 /// Load onto a deck or Prepare's player, or preview in the headphones.
 /// `decks`: how many decks Perform shows.
 fn load_items(ui: &mut Ui, id: TrackId, decks: usize, out: &mut Vec<Command>) {
-    let players = DeckId::first(decks).chain([DeckId::PREPARE]);
-    for deck in players {
-        let label = match deck_letter(deck) {
-            Some(l) => format!("Load to deck {l}"),
-            None => "Load to Prepare's player".to_string(),
-        };
+    for deck in DeckId::first(decks) {
+        let label = format!("Load to deck {}", deck_letter(deck));
         if ui.button(label).clicked() {
             out.push(Command::Deck(deck, DeckCmd::Load(id)));
             ui.close();
@@ -441,7 +431,14 @@ fn title_case(s: &str) -> String {
 fn analyse_items(ui: &mut Ui, sel: &[TrackId], v: &CoreView, out: &mut Vec<Command>) {
     let n = sel.len();
     let mut push = |ui: &mut Ui, tracks: Vec<TrackId>, dynamic| {
-        out.push(LibraryCmd::Analyse { tracks, dynamic }.into());
+        out.push(
+            LibraryCmd::Analyse {
+                tracks,
+                dynamic,
+                asked: true,
+            }
+            .into(),
+        );
         ui.close();
     };
     if let [first] = *sel {

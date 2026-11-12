@@ -1,6 +1,7 @@
 //! The keyboard, through the keymap.
 
 use super::*;
+use crate::core::bus::Control;
 
 impl EarshotApp {
     /// Keys do what the keymap says. Deck keys work unless a text field has focus;
@@ -48,9 +49,13 @@ impl EarshotApp {
             if repeat && !b.repeats() {
                 continue;
             }
-            // Deck 1's and 2's keys go to the decks the hands play (1 or 3, 2 or 4).
+            // Deck 1's and 2's keys go to the decks the hands play (1 or 3, 2 or 4);
+            // `target` keys to Prepare's target deck.
             let mut b = b.clone();
-            b.control = self.prefs.layered(b.control);
+            b.control = match b.control {
+                Control::Deck(_, c) if b.on_target => Control::Deck(self.prefs.target(), c),
+                c => self.prefs.layered(c),
+            };
             let (press, release) = (b.press(), b.release());
             if let Some(release) = release {
                 self.held_keys.insert(key, release);

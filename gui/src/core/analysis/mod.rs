@@ -24,7 +24,7 @@ pub mod registry;
 
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use earshot_engine::Command;
@@ -128,6 +128,17 @@ struct Shared {
     deck: WorkerClient,
     /// One per background lane.
     background: Vec<WorkerClient>,
+    /// The analyser was dropped: lanes end after their current track (and with
+    /// them the workers).
+    stopping: AtomicBool,
+}
+
+impl Drop for Analyser {
+    fn drop(&mut self) {
+        self.shared.stopping.store(true, Ordering::Relaxed);
+        let _q = self.shared.queue.lock().unwrap();
+        self.shared.ready.notify_all();
+    }
 }
 
 impl Analyser {
@@ -176,6 +187,7 @@ impl Analyser {
             sink,
             deck,
             background,
+            stopping: AtomicBool::new(false),
         });
         let lanes = std::iter::once(Lane::Deck).chain((0..cores).map(Lane::Background));
         for (n, lane) in lanes.enumerate() {
@@ -266,12 +278,21 @@ impl Analyser {
 
     /// Make sure a track is analysed. A track just loaded onto a deck (`audio` given)
     /// goes to the deck lane, ahead of everything, taking it over from the background
-    /// if it was waiting or running there. `force` re-analyses the grid whatever there
-    /// is (in `mode`), and anything else whose result is stale.
-    pub fn queue(&self, id: i64, audio: Option<Arc<TrackAudio>>, force: bool, mode: Mode) {
-        let priority = match audio {
-            Some(_) => JobPriority::Deck,
-            None => JobPriority::Background,
+    /// if it was waiting or running there. One someone `asked` for goes next, ahead of
+    /// background work. `force` re-analyses the grid whatever there is (in `mode`),
+    /// and anything else whose result is stale.
+    pub fn queue(
+        &self,
+        id: i64,
+        audio: Option<Arc<TrackAudio>>,
+        asked: bool,
+        force: bool,
+        mode: Mode,
+    ) {
+        let priority = match (&audio, asked) {
+            (Some(_), _) => JobPriority::Deck,
+            (None, true) => JobPriority::Asked,
+            (None, false) => JobPriority::Background,
         };
         let wants: Vec<(AnalyserId, Req)> = AnalyserId::ALL
             .iter()
@@ -417,6 +438,9 @@ impl Shared {
             let batch = {
                 let mut q = self.queue.lock().unwrap();
                 loop {
+                    if self.stopping.load(Ordering::Relaxed) {
+                        return;
+                    }
                     if let Some(b) = q.take(lane) {
                         break b;
                     }
@@ -595,9 +619,7 @@ impl Shared {
 
         // Beatgrid: in the worker.
         // Deleted when this goes out of scope, however the job ends.
-        let wav = TempWav(
-            std::env::temp_dir().join(format!("{TEMP_PREFIX}{}-{id}.wav", std::process::id())),
-        );
+        let wav = TempWav::new(id);
         write_mono_wav(&wav.0, &audio)
             .map_err(|e| fail(format!("writing {}: {e}", wav.0.display())))?;
         progress(WORKER_START, "waiting for the analyser");
@@ -825,12 +847,24 @@ fn update_decks(
 }
 
 /// 32-bit float mono WAV, the average of both channels.
-/// How the WAVs written for the worker are named: `<prefix><pid>-<track>.wav`.
+/// How the WAVs written for the worker are named: `<prefix><pid>-<n>-<track>.wav`,
+/// `n` counting up in this process (tests run several apps in one).
 const TEMP_PREFIX: &str = "earshot-analyse-";
 
 /// A WAV written for the worker, deleted when dropped (the job finished, failed or
 /// panicked).
 struct TempWav(PathBuf);
+
+impl TempWav {
+    fn new(track: i64) -> TempWav {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        TempWav(std::env::temp_dir().join(format!(
+            "{TEMP_PREFIX}{}-{n}-{track}.wav",
+            std::process::id()
+        )))
+    }
+}
 
 impl Drop for TempWav {
     fn drop(&mut self) {
@@ -952,7 +986,7 @@ mod tests {
         let (played, cued, untouched) = (
             DeckId::new(0).unwrap(),
             DeckId::new(1).unwrap(),
-            DeckId::PREPARE,
+            DeckId::new(2).unwrap(),
         );
         for deck in [played, cued, untouched] {
             put_on(&p, deck, 11);
@@ -976,16 +1010,16 @@ mod tests {
         // Silence until 12 s, then beats: the straight grid runs back to 0.25 s.
         let grid = Beatgrid::constant(120.0, 12.25, 30.0).unwrap();
         update_decks(&p, 11, Some((grid, GridSource::Analysis)), 12.26);
-        // Prepare's player goes last, so the decks have had theirs by then.
-        let after = wait(&p, |s| s.prepare.cue_point == 12.25);
-        assert_eq!(after.prepare.position, 12.25, "the playhead goes with it");
+        // Deck 3 goes last, so the others have had theirs by then.
+        let after = wait(&p, |s| s.decks[2].cue_point == 12.25);
+        assert_eq!(after.decks[2].position, 12.25, "the playhead goes with it");
         assert_eq!(after.decks[0].cue_point, before.decks[0].cue_point);
         assert_eq!(after.decks[0].position, before.decks[0].position);
         assert_eq!(after.decks[1].cue_point, 3.0);
         let inner = p.lock().unwrap();
         assert_eq!(inner.session(untouched).state.cues.main, Some(12.25));
         // Every player got the grid, touched or not.
-        assert!(inner.decks[..2].iter().all(|d| d.grid.is_some()));
+        assert!(inner.decks[..3].iter().all(|d| d.grid.is_some()));
     }
 
     #[test]

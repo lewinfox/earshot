@@ -24,6 +24,8 @@ pub struct CollectionsUi {
     renaming: Option<(CollectionId, String)>,
     /// Focus the rename box on the next frame.
     focus: bool,
+    /// Folders closed (by their arrow or the browse knob); the rest are open.
+    closed: std::collections::HashSet<CollectionId>,
 }
 
 /// What the tree needs from the rest of the window.
@@ -31,6 +33,10 @@ pub struct TreeCtx<'a> {
     pub collections: &'a Collections,
     /// The one showing (on the canvas or as the track list), highlighted.
     pub open: Option<CollectionId>,
+    /// The browse knob's highlight, outlined; `scroll`: it just moved, so bring it
+    /// into view.
+    pub cursor: Option<CollectionId>,
+    pub scroll: bool,
     /// The library's search, which a new smart playlist starts from.
     pub search: &'a str,
     /// The USB sticks plugged in, for "Send to", and what was sent where.
@@ -39,6 +45,41 @@ pub struct TreeCtx<'a> {
 }
 
 impl CollectionsUi {
+    /// Open or close a folder.
+    pub fn set_open(&mut self, folder: CollectionId, open: bool) {
+        if open {
+            self.closed.remove(&folder);
+        } else {
+            self.closed.insert(folder);
+        }
+    }
+
+    /// The section's rows as the tree shows them, top to bottom (not inside closed
+    /// folders), each with its folder.
+    pub fn visible(
+        &self,
+        cs: &Collections,
+        section: Section,
+    ) -> Vec<(CollectionId, Option<CollectionId>)> {
+        fn walk(
+            ui: &CollectionsUi,
+            cs: &Collections,
+            section: Section,
+            folder: Option<CollectionId>,
+            out: &mut Vec<(CollectionId, Option<CollectionId>)>,
+        ) {
+            for c in cs.children_in(section, folder) {
+                out.push((c.id, folder));
+                if c.kind == CollectionKind::Folder && !ui.closed.contains(&c.id) {
+                    walk(ui, cs, section, Some(c.id), out);
+                }
+            }
+        }
+        let mut out = vec![];
+        walk(self, cs, section, None, &mut out);
+        out
+    }
+
     /// Edit an item's name in place (e.g. just after creating it).
     pub fn start_rename(&mut self, c: &Collection) {
         self.renaming = Some((c.id, c.name.clone()));
@@ -105,15 +146,20 @@ impl CollectionsUi {
         for c in cx.collections.children_in(section, folder) {
             if c.kind == CollectionKind::Folder {
                 let id = ui.make_persistent_id(("collection-folder", c.id));
-                let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
                     ui.ctx(),
                     id,
                     true,
                 );
+                state.set_open(!self.closed.contains(&c.id));
                 let (_, header, _) = state
                     .show_header(ui, |ui| self.folder_label(ui, section, c, cx, out))
                     .body(|ui| self.contents(ui, section, Some(c.id), cx, out));
                 drop_target(ui, &header.response, Some(c), cx, out);
+                // Its arrow clicked: keep what it says.
+                if let Some(s) = egui::collapsing_header::CollapsingState::load(ui.ctx(), id) {
+                    self.set_open(c.id, s.is_open());
+                }
             } else {
                 let r = ui.horizontal(|ui| {
                     ui.add_space(ui.spacing().indent - 14.0);
@@ -140,6 +186,7 @@ impl CollectionsUi {
             .selectable_label(cx.open == Some(f.id), RichText::new(&f.name).strong())
             .interact(Sense::click_and_drag())
             .on_hover_text("Click to list every track in it; drag onto another folder to move");
+        super::outline(ui, &r, cx.cursor == Some(f.id), cx.scroll);
         r.dnd_set_drag_payload(DragPayload::Collection(f.id));
         if r.clicked() {
             out.push(CollectionCmd::Show(f.id));
@@ -199,6 +246,7 @@ impl CollectionsUi {
             .selectable_label(cx.open == Some(c.id), &c.name)
             .interact(Sense::click_and_drag())
             .on_hover_text(tip);
+        super::outline(ui, &r, cx.cursor == Some(c.id), cx.scroll);
         r.dnd_set_drag_payload(DragPayload::Collection(c.id));
         if r.clicked() {
             out.push(CollectionCmd::Show(c.id));

@@ -11,8 +11,14 @@ use crate::core::store::FlowCamera;
 impl EarshotApp {
     pub(super) fn library_cmd(&mut self, c: LibraryCmd) {
         match c {
-            LibraryCmd::Load(track) => self.load(None, track),
-            LibraryCmd::Analyse { tracks, dynamic } => self.analyse(tracks, dynamic),
+            LibraryCmd::Load(track) => {
+                self.load(None, track);
+            }
+            LibraryCmd::Analyse {
+                tracks,
+                dynamic,
+                asked,
+            } => self.analyse(tracks, dynamic, asked),
             LibraryCmd::PickRoots => {
                 // The picker blocks, so on its own thread; what's picked comes back as
                 // a command.
@@ -99,6 +105,9 @@ impl EarshotApp {
             CollectionCmd::Show(id) => {
                 if self.collections.get(id).is_some() {
                     lib.browser.set_scope(Scope::Collection(id));
+                    // Picked in the tree: the browse knob is there.
+                    lib.level = crate::ui::panels::library::Level::Tree;
+                    lib.tree_cursor = Some(crate::ui::panels::library::TreeKey::Collection(id));
                 }
             }
             CollectionCmd::Create {
@@ -260,11 +269,10 @@ impl EarshotApp {
         &mut self.panels.flow
     }
 
-    /// Prepare's Flow tab (not while a deck plays: see `set_mode`).
+    /// Prepare's Flow tab.
     pub(super) fn show_flow_tab(&mut self) {
-        if self.set_mode(Mode::Prepare) {
-            self.prefs.prepare.tool = Tool::Flow;
-        }
+        self.set_mode(Mode::Prepare);
+        self.prefs.prepare.tool = Tool::Flow;
     }
 
     /// Ask for the collections and the Flow that was open last time.
@@ -363,12 +371,14 @@ impl EarshotApp {
         });
     }
 
-    pub(super) fn load(&mut self, deck: Option<DeckId>, track_id: i64) {
-        // Double-click: Prepare's player, or the first deck that isn't playing.
+    /// The load's ticket, as its [`Event::Loaded`] will carry.
+    pub(super) fn load(&mut self, deck: Option<DeckId>, track_id: i64) -> u64 {
+        // Double-click: in Prepare, the target deck; else the first deck that isn't
+        // playing.
         let decks = &self.panels.decks;
         let deck = deck.unwrap_or_else(|| match self.prefs.mode {
-            Mode::Prepare => DeckId::PREPARE,
-            Mode::Perform => DeckId::first(self.prefs.decks().len())
+            Mode::Prepare => self.prefs.target(),
+            Mode::Perform | Mode::Controller => DeckId::first(self.prefs.decks().len())
                 .find(|d| !decks[d.index()].playing())
                 .unwrap_or(DeckId::new(0).expect("deck 1")),
         });
@@ -398,16 +408,17 @@ impl EarshotApp {
                 result,
             });
         });
+        ticket
     }
 
-    pub(super) fn analyse(&self, ids: Vec<i64>, dynamic: bool) {
+    pub(super) fn analyse(&self, ids: Vec<i64>, dynamic: bool, asked: bool) {
         let mode = if dynamic {
             AnalysisMode::Dynamic
         } else {
             AnalysisMode::Static
         };
         for id in ids {
-            self.lib.analyser.queue(id, None, true, mode);
+            self.lib.analyser.queue(id, None, asked, true, mode);
         }
     }
 }

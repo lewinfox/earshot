@@ -1,8 +1,8 @@
 //! Beat effects: two effect units, each running one effect (Echo or Trans) in time
-//! with the deck it's on (or with the master tempo on the main mix).
+//! with the deck it's on (or with the master tempo on the master mix).
 //!
 //! A unit sits after its channel's fader and crossfader, so an echo's repeats go on
-//! after the fader comes down (an "echo out"); on the main mix it runs after the
+//! after the fader comes down (an "echo out"); on the master mix it runs after the
 //! channels are summed, before the main level and limiter.
 //!
 //! Each block, the renderer hands a unit a [`BeatClock`]: where the target is in its
@@ -56,6 +56,9 @@ const SWITCH_SECS: f64 = 0.005;
 /// Tempo used when there's nothing to follow (no grid, nothing playing).
 pub const FALLBACK_BPM: f64 = 120.0;
 
+/// The tempos a unit can be tapped to (BPM).
+pub const TAP_BPM: std::ops::RangeInclusive<f64> = 40.0..=300.0;
+
 /// Which effect a unit runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum FxKind {
@@ -77,12 +80,32 @@ impl FxKind {
     }
 }
 
+/// What a unit plays as it's released ([`FxCmd::Release`]): the effect goes off and
+/// this rings out in its place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum FxRelease {
+    /// The moment of the release is caught in the echo (for the unit's beat length)
+    /// and repeats on, fading, while the track plays on dry.
+    #[default]
+    Echo,
+}
+
+impl FxRelease {
+    pub const ALL: [FxRelease; 1] = [FxRelease::Echo];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            FxRelease::Echo => "Echo",
+        }
+    }
+}
+
 /// What a unit is applied to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FxTarget {
     /// One deck's channel, after its fader and crossfader.
     Deck(DeckId),
-    /// The main mix.
+    /// The master mix.
     Master,
 }
 
@@ -96,6 +119,11 @@ pub struct FxUnitState {
     /// 0..1: how loud the repeats are (Echo), how deep the cuts go (Trans).
     pub level: f64,
     pub target: FxTarget,
+    /// What rings out when it's released.
+    pub release: FxRelease,
+    /// The tempo tapped in (Pioneer's BPM tap mode): the unit runs on it instead of
+    /// following its target. `None`: it follows the target (BPM auto mode).
+    pub tap_bpm: Option<f64>,
 }
 
 impl FxUnitState {
@@ -107,6 +135,8 @@ impl FxUnitState {
             beats: 1.0,
             level: 0.5,
             target: DeckId::new(unit).map_or(FxTarget::Master, FxTarget::Deck),
+            release: FxRelease::Echo,
+            tap_bpm: None,
         }
     }
 }
@@ -129,11 +159,22 @@ pub enum FxCmd {
     Target(FxTarget),
     /// Halve (-1) or double (1) the length, within [`MIN_BEATS`]..[`MAX_BEATS`].
     BeatsStep(i32),
-    /// The next effect in [`FxKind::ALL`].
+    /// The next effect in [`FxKind::ALL`], or the one before.
     NextKind,
-    /// The next target: deck 1, deck 2, … the main mix, then deck 1 again. The engine
+    PrevKind,
+    /// The next target: deck 1, deck 2, … the master mix, then deck 1 again. The engine
     /// resolves it against the decks it has.
     NextTarget,
+    /// Turn the effect off and play the release effect in its place (Pioneer's
+    /// Release FX).
+    Release,
+    /// Which release effect [`FxCmd::Release`] plays.
+    ReleaseKind(FxRelease),
+    /// A tap at this tempo (BPM, clamped to [`TAP_BPM`]): the unit runs on it, with a
+    /// beat starting now, until [`FxCmd::TempoAuto`].
+    TapBpm(f64),
+    /// Follow the target's tempo again.
+    TempoAuto,
 }
 
 /// `beats` halved (`dir` -1) or doubled (1), `dir` times over, kept within
@@ -427,6 +468,8 @@ pub struct FxUnit {
     trans_c: Controls,
     echo: Echo,
     trans: Trans,
+    /// Frames left of a release's echo taking in the input.
+    releasing: usize,
 }
 
 impl FxUnit {
@@ -438,6 +481,7 @@ impl FxUnit {
             trans_c: Controls::new(state.level, sr),
             echo: Echo::new(sr),
             trans: Trans::new(sr),
+            releasing: 0,
         };
         u.set(state);
         u
@@ -453,6 +497,11 @@ impl FxUnit {
         self.apply(FxCmd::Beats(s.beats));
         self.apply(FxCmd::Level(s.level));
         self.apply(FxCmd::Target(s.target));
+        self.apply(FxCmd::ReleaseKind(s.release));
+        self.apply(match s.tap_bpm {
+            Some(b) => FxCmd::TapBpm(b),
+            None => FxCmd::TempoAuto,
+        });
         self.apply(FxCmd::Enabled(Set::from_bool(s.enabled)));
     }
 
@@ -469,8 +518,29 @@ impl FxUnit {
                 let i = FxKind::ALL.iter().position(|k| *k == s.kind).unwrap_or(0);
                 s.kind = FxKind::ALL[(i + 1) % FxKind::ALL.len()];
             }
+            FxCmd::PrevKind => {
+                let n = FxKind::ALL.len();
+                let i = FxKind::ALL.iter().position(|k| *k == s.kind).unwrap_or(0);
+                s.kind = FxKind::ALL[(i + n - 1) % n];
+            }
             // Resolved by the renderer, which knows the decks.
             FxCmd::NextTarget => {}
+            FxCmd::ReleaseKind(r) => s.release = r,
+            FxCmd::TapBpm(b) if b.is_finite() => {
+                s.tap_bpm = Some(b.clamp(*TAP_BPM.start(), *TAP_BPM.end()))
+            }
+            FxCmd::TapBpm(_) => {}
+            FxCmd::TempoAuto => s.tap_bpm = None,
+            FxCmd::Release => {
+                // Nothing to release unless it's on.
+                if s.enabled {
+                    s.enabled = false;
+                    match s.release {
+                        // Set in `process`, once the beat length is known there.
+                        FxRelease::Echo => self.releasing = usize::MAX,
+                    }
+                }
+            }
             FxCmd::Target(t) => {
                 // A tail doesn't follow the unit to another channel.
                 if t != s.target {
@@ -484,19 +554,40 @@ impl FxUnit {
         let s = self.state;
         self.echo_c.level.target = s.level;
         self.trans_c.level.target = s.level;
-        self.echo_c.on.target = (s.enabled && s.kind == FxKind::Echo) as u8 as f64;
+        self.echo_c.on.target =
+            ((s.enabled && s.kind == FxKind::Echo) || self.releasing > 0) as u8 as f64;
+        // Turned back on: the release is over.
+        if s.enabled {
+            self.releasing = 0;
+        }
         self.trans_c.on.target = (s.enabled && s.kind == FxKind::Trans) as u8 as f64;
     }
 
     /// Whether it's doing anything (on, or an echo still ringing).
     pub fn busy(&self) -> bool {
-        self.state.enabled || self.echo.running || self.trans.gain.current != 1.0
+        self.state.enabled
+            || self.releasing > 0
+            || self.echo.running
+            || self.trans.gain.current != 1.0
     }
 
     /// Run on one block of interleaved stereo, in place.
     pub fn process(&mut self, buf: &mut [f32], clock: &BeatClock) {
         let beats = self.state.beats;
         let delay = beats * clock.secs_per_beat * self.sr;
+        if self.releasing > 0 {
+            // A release takes in one echo's length of the input, then stops taking any.
+            let n = buf.len() / 2;
+            if self.releasing == usize::MAX {
+                self.releasing = delay.max(1.0) as usize;
+            }
+            self.echo_c.on.target = 1.0;
+            self.releasing = self.releasing.saturating_sub(n);
+            if self.releasing == 0 {
+                self.echo_c.on.target = (self.state.enabled && self.state.kind == FxKind::Echo)
+                    as u8 as f64;
+            }
+        }
         self.trans.process(buf, clock, beats, &mut self.trans_c);
         self.echo.process(buf, delay, &mut self.echo_c);
     }
@@ -683,6 +774,32 @@ mod tests {
         }
     }
 
+    /// A release turns the effect off and catches a beat of the track in the echo,
+    /// which rings on while the track plays on dry.
+    #[test]
+    fn release_echoes_out() {
+        for kind in FxKind::ALL {
+            let mut u = unit(kind, 1.0, 1.0);
+            let tone = |f: usize| (f as f32 * 0.05).sin() * 0.5;
+            run(&mut u, (SR * 0.5) as usize, tone);
+            u.apply(FxCmd::Release);
+            assert!(!u.state().enabled, "{kind:?} is off");
+            assert!(u.busy());
+            // The beat after the release takes in the tone; then silence in, and the
+            // echo goes on.
+            run(&mut u, (SR * 0.5) as usize, tone);
+            let tail = run(&mut u, (SR * 0.5) as usize, |_| 0.0);
+            let peak = tail.iter().fold(0f32, |m, s| m.max(s.abs()));
+            assert!(peak > 0.05, "{kind:?}'s release rang on: {peak}");
+            run(&mut u, (SR * 12.0) as usize, |_| 0.0);
+            assert!(!u.busy(), "{kind:?}'s tail ended");
+        }
+        // Off already: nothing to release.
+        let mut u = FxUnit::new(SR, FxUnitState::default());
+        u.apply(FxCmd::Release);
+        assert!(!u.busy());
+    }
+
     #[test]
     fn settings_are_clamped() {
         let mut u = FxUnit::new(SR, FxUnitState::default());
@@ -718,6 +835,8 @@ mod tests {
         assert_eq!(u.state().kind, FxKind::Trans);
         u.apply(FxCmd::NextKind);
         assert_eq!(u.state().kind, FxKind::Echo);
+        u.apply(FxCmd::PrevKind);
+        assert_eq!(u.state().kind, FxKind::Trans);
         let a = FxTarget::Deck(DeckId::new(0).unwrap());
         let b = FxTarget::Deck(DeckId::new(1).unwrap());
         assert_eq!(a.next(2), b);

@@ -40,6 +40,9 @@ impl EarshotApp {
                     // Stop showing the pending track (on failure the deck shows what
                     // it had). An older request's result changes nothing: the player
                     // didn't take it either.
+                    if deck == self.prefs.target() {
+                        self.tempo_lock_loaded(ticket, result.is_ok());
+                    }
                     if self.panels.decks[deck.index()].finish_load(ticket) {
                         match result {
                             Ok(()) => self.refresh_cues(deck),
@@ -89,7 +92,7 @@ impl EarshotApp {
                     } else {
                         let q = self
                             .analysis_queue
-                            .get_or_insert_with(|| self.jobs.queue("Analysis"));
+                            .get_or_insert_with(|| self.jobs.summary("Analysis"));
                         q.say(format!(
                             "{waiting} track{} waiting",
                             if waiting == 1 { "" } else { "s" }
@@ -109,6 +112,8 @@ impl EarshotApp {
                 Event::Command(cmd) => self.dispatch(cmd),
                 Event::TempoLock(e) => self.tempo_lock_event(e),
                 Event::Stems(e) => self.panels.stems.on_event(e),
+                Event::Trim(e) => self.trim_event(e),
+                Event::Midi(m) => self.panels.controller.on_midi(m),
             }
         }
     }

@@ -199,9 +199,11 @@ impl DjFilter {
     }
 
     /// Cut-off for knob position `v` (-1..1): low-pass from ~20 kHz down to 50 Hz,
-    /// high-pass from 20 Hz up to 10 kHz, both swept exponentially.
+    /// high-pass from 20 Hz up to 10 kHz, swept exponentially by the square of the
+    /// turn, so it eases in from the centre (a quarter turn low-passes at ~14 kHz, a
+    /// half turn at ~4.5 kHz) and moves fastest towards the end.
     pub fn cutoff(v: f64) -> f64 {
-        let a = v.abs().min(1.0);
+        let a = v.abs().min(1.0).powi(2);
         if v < 0.0 {
             20_000.0 * (50.0f64 / 20_000.0).powf(a)
         } else {
@@ -446,6 +448,15 @@ mod tests {
             "{:.2} dB",
             db(r / SINE_RMS)
         );
+    }
+
+    #[test]
+    fn the_filter_eases_in_from_the_centre() {
+        let near = |a: f64, b: f64| (a / b - 1.0).abs() < 0.05;
+        assert!(near(DjFilter::cutoff(-0.25), 13_800.0), "{}", DjFilter::cutoff(-0.25));
+        assert!(near(DjFilter::cutoff(-0.5), 4_470.0), "{}", DjFilter::cutoff(-0.5));
+        assert!(near(DjFilter::cutoff(-1.0), 50.0));
+        assert!(near(DjFilter::cutoff(1.0), 10_000.0));
     }
 
     #[test]
