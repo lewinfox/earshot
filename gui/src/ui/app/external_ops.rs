@@ -21,7 +21,7 @@ impl EarshotApp {
         match c {
             ExternalCmd::Find => {
                 let job = self.jobs.start("Looking for DJ libraries");
-                std::thread::spawn(move || {
+                crate::core::background::spawn("earshot-external", move || {
                     let _job = job;
                     send(ExternalEvent::Found {
                         at: None,
@@ -41,7 +41,7 @@ impl EarshotApp {
                 });
             }
             ExternalCmd::Detect(at) => {
-                std::thread::spawn(move || {
+                crate::core::background::spawn("earshot-external", move || {
                     let result = external::find(Some(&at));
                     send(ExternalEvent::Found {
                         at: Some(at),
@@ -61,7 +61,7 @@ impl EarshotApp {
                 });
             }
             ExternalCmd::Locate { kind, at } => {
-                std::thread::spawn(move || {
+                crate::core::background::spawn("earshot-external", move || {
                     let result = external::find(Some(&at)).and_then(|found| {
                         found
                             .into_iter()
@@ -76,7 +76,7 @@ impl EarshotApp {
             ExternalCmd::Read(source) => {
                 let roots = self.roots();
                 let job = self.jobs.start(format!("Reading {}", source.name));
-                std::thread::spawn(move || {
+                crate::core::background::spawn("earshot-external", move || {
                     let id = source.id;
                     let result = external::read(&source, &roots, false, |message| {
                         job.report(&message);
@@ -130,7 +130,7 @@ impl EarshotApp {
                     source.name, source.location
                 ));
                 let job = self.jobs.start(format!("Importing from {}", source.name));
-                std::thread::spawn(move || {
+                crate::core::background::spawn("earshot-external", move || {
                     let id = source.id;
                     let progress = |message: String| {
                         job.report(&message);
@@ -197,7 +197,7 @@ impl EarshotApp {
                         sink(Event::Command(LibraryCmd::Rescan.into()));
                     }
                     // New files need their audio hashes worked out.
-                    let _ = hasher.send(());
+                    hasher.send(());
                     send(ExternalEvent::Imported { source: id, result })
                 });
             }
@@ -246,7 +246,7 @@ impl EarshotApp {
                 let hold = self.uses.hold(&drive.path);
                 let sink = self.sink.clone();
                 let job = self.jobs.start(format!("Formatting {}", drive.label));
-                std::thread::spawn(move || {
+                crate::core::background::spawn("earshot-external", move || {
                     let result = drives::format(&drive, &label);
                     drop(job);
                     match &result {
@@ -265,7 +265,7 @@ impl EarshotApp {
             }
             ExternalCmd::Eject(drive) => {
                 let job = self.jobs.start(format!("Ejecting {}", drive.label));
-                std::thread::spawn(move || {
+                crate::core::background::spawn("earshot-external", move || {
                     let result = drives::eject(&drive);
                     drop(job);
                     send(ExternalEvent::Ejected {
@@ -283,7 +283,7 @@ impl EarshotApp {
         let hold = self.uses.hold(&drive.path);
         let sink = self.sink.clone();
         let job = self.jobs.start(format!("Copying from {}", drive.label));
-        std::thread::spawn(move || {
+        crate::core::background::spawn("earshot-external", move || {
             let send = |e| sink(Event::External(e));
             let files = drives::audio_files(&files);
             let (_, report) =
@@ -471,7 +471,7 @@ impl EarshotApp {
             self.sink.clone(),
         );
         let job = self.jobs.start("Importing tracks");
-        std::thread::spawn(move || {
+        crate::core::background::spawn("earshot-external", move || {
             let mut now: HashMap<TrackId, TrackId> = HashMap::new();
             let mut copied_any = false;
             for (source, lib, tracks) in jobs {
@@ -526,7 +526,7 @@ impl EarshotApp {
                 sink(Event::External(ExternalEvent::Relist(source.id)));
             }
             drop(holds);
-            let _ = hasher.send(());
+            hasher.send(());
             if copied_any {
                 sink(Event::Command(LibraryCmd::Rescan.into()));
             }

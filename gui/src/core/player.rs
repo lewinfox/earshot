@@ -240,6 +240,7 @@ pub fn output_options(saved: &AudioSettings) -> OutputOptions {
         ),
         null: std::env::var("EARSHOT_NULL_AUDIO").is_ok_and(|v| v == "1"),
         phones_device: saved.phones_device.clone(),
+        stepped: false,
     }
 }
 
@@ -824,45 +825,56 @@ fn estimate_grid_later(
     generation: u64,
     tags: decode::TrackTags,
     audio: Arc<TrackAudio>,
-) -> std::thread::JoinHandle<()> {
+) {
     let player = player.clone();
-    std::thread::spawn(move || {
-        let Estimate {
-            grid,
-            source,
-            first_beat,
-        } = estimated_grid(&tags, &audio);
-        let mut inner = player.lock().unwrap();
-        let slot = &inner.decks[deck.index()];
-        if slot.generation != generation || slot.grid.is_some() {
-            return;
-        }
-        let cue_saved = slot.cue_saved;
-        let grid = grid.map(Arc::new);
-        if grid.is_some()
-            && inner
-                .send(Command::SetGrid {
-                    deck,
-                    generation,
-                    grid: grid.clone(),
-                })
-                .is_err()
-        {
-            return;
-        }
-        let cue =
-            initial_cue(grid.as_deref(), first_beat).filter(|_| inner.cue_first_beat && !cue_saved);
-        let slot = &mut inner.decks[deck.index()];
-        slot.grid = grid;
-        slot.grid_source = source;
-        if let Some(at) = cue {
-            let _ = inner.send(Command::InitialCue {
+    super::background::spawn("earshot-estimate-grid", move || {
+        estimate_grid(&player, deck, generation, &tags, &audio)
+    });
+}
+
+/// [`estimate_grid_later`]'s work.
+fn estimate_grid(
+    player: &Player,
+    deck: DeckId,
+    generation: u64,
+    tags: &decode::TrackTags,
+    audio: &TrackAudio,
+) {
+    let Estimate {
+        grid,
+        source,
+        first_beat,
+    } = estimated_grid(tags, audio);
+    let mut inner = player.lock().unwrap();
+    let slot = &inner.decks[deck.index()];
+    if slot.generation != generation || slot.grid.is_some() {
+        return;
+    }
+    let cue_saved = slot.cue_saved;
+    let grid = grid.map(Arc::new);
+    if grid.is_some()
+        && inner
+            .send(Command::SetGrid {
                 deck,
                 generation,
-                at,
-            });
-        }
-    })
+                grid: grid.clone(),
+            })
+            .is_err()
+    {
+        return;
+    }
+    let cue =
+        initial_cue(grid.as_deref(), first_beat).filter(|_| inner.cue_first_beat && !cue_saved);
+    let slot = &mut inner.decks[deck.index()];
+    slot.grid = grid;
+    slot.grid_source = source;
+    if let Some(at) = cue {
+        let _ = inner.send(Command::InitialCue {
+            deck,
+            generation,
+            at,
+        });
+    }
 }
 
 /// How a deck shows a quick grid's source.
@@ -926,11 +938,10 @@ struct Estimate {
     first_beat: Option<f64>,
 }
 
-/// A null-output engine and helpers for tests that need one running.
+/// A stepped engine and helpers for tests that need one: audio is rendered when the
+/// test asks ([`testing::wait`]), so none of them depends on timing.
 #[cfg(test)]
 pub(crate) mod testing {
-    use std::time::{Duration, Instant};
-
     use earshot_engine::decode::TrackAudio;
 
     use super::*;
@@ -941,10 +952,11 @@ pub(crate) mod testing {
             buffer_frames: Some(256),
             null: true,
             phones_device: None,
+            stepped: true,
         }
     }
 
-    /// A player with audio running on the null output.
+    /// A player with a stepped engine.
     pub fn running() -> Player {
         let p = new_player();
         start_engine(&p, &null()).unwrap();
@@ -970,24 +982,25 @@ pub(crate) mod testing {
         inner.send(Command::Load { deck, track }).unwrap();
     }
 
-    /// Catch up with the engine until `ok` holds (or fail after a few seconds).
+    /// Render audio a block at a time, catching up with the engine after each, until
+    /// `ok` holds (it must within five seconds of audio).
+    #[track_caller]
     pub fn wait(p: &Player, ok: impl Fn(&EngineSnapshot) -> bool) -> EngineSnapshot {
-        let t = Instant::now();
-        loop {
-            let snap = p.lock().unwrap().catch_up().0.expect("audio running");
+        const BLOCK: usize = 256;
+        for _ in 0..5 * 44_100 / BLOCK {
+            let mut inner = p.lock().unwrap();
+            inner.engine.as_mut().expect("audio running").advance(BLOCK);
+            let snap = inner.catch_up().0.expect("audio running");
             if ok(&snap) {
                 return snap;
             }
-            assert!(t.elapsed() < Duration::from_secs(5), "timed out waiting");
-            std::thread::sleep(Duration::from_millis(5));
         }
+        panic!("not so after five seconds of audio");
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
-
     use earshot_engine::{ChannelParam, DeckCmd, EQ_LOW, LoopState, MasterParam, ParamId, Press};
 
     use super::testing::*;
@@ -1028,17 +1041,13 @@ mod tests {
                 ))
                 .unwrap();
         }
-        // Not caught up meanwhile, so the ring overflows.
-        let t = Instant::now();
-        loop {
-            let inner = p.lock().unwrap();
+        // The engine takes them all in its next block. Not caught up meanwhile, so
+        // the ring overflows.
+        {
+            let mut inner = p.lock().unwrap();
+            inner.engine.as_mut().unwrap().advance(256);
             let s = inner.snapshot().unwrap();
-            if s.decks[0].loop_active && s.decks[0].hotcues[3].is_some() {
-                break;
-            }
-            drop(inner);
-            assert!(t.elapsed() < Duration::from_secs(5), "timed out");
-            std::thread::sleep(Duration::from_millis(5));
+            assert!(s.decks[0].loop_active && s.decks[0].hotcues[3].is_some());
         }
         let (snap, changed) = p.lock().unwrap().catch_up();
         let d = snap.unwrap().decks[0];
@@ -1262,9 +1271,7 @@ mod tests {
         // Lands on the load it was worked out for.
         put_on(&p, deck, 1);
         let generation = p.lock().unwrap().generation;
-        estimate_grid_later(&p, deck, generation, tags.clone(), audio.clone())
-            .join()
-            .unwrap();
+        estimate_grid(&p, deck, generation, &tags, &audio);
         let (bpm, source) = state(&p);
         assert!((bpm.unwrap() - 126.0).abs() < 0.02);
         assert_eq!(source, QUICK_GRID_LABEL);
@@ -1274,9 +1281,7 @@ mod tests {
 
         // Not on a newer load.
         put_on(&p, deck, 2);
-        estimate_grid_later(&p, deck, generation, tags.clone(), audio.clone())
-            .join()
-            .unwrap();
+        estimate_grid(&p, deck, generation, &tags, &audio);
         assert_eq!(state(&p).0, None);
 
         // Not over a grid that came first (the analysis's).
@@ -1287,18 +1292,14 @@ mod tests {
             s.grid = Some(Arc::new(Beatgrid::constant(100.0, 0.0, 30.0).unwrap()));
             s.grid_source = "analysis".into();
         }
-        estimate_grid_later(&p, deck, generation, tags.clone(), audio.clone())
-            .join()
-            .unwrap();
+        estimate_grid(&p, deck, generation, &tags, &audio);
         assert_eq!(state(&p), (Some(100.0), "analysis".into()));
 
         // The grid lands, but a main cue saved by hand stays where it was.
         put_on(&p, deck, 3);
         let generation = p.lock().unwrap().generation;
         p.lock().unwrap().session_mut(deck).cue_saved = true;
-        estimate_grid_later(&p, deck, generation, tags, audio)
-            .join()
-            .unwrap();
+        estimate_grid(&p, deck, generation, &tags, &audio);
         assert_eq!(state(&p).1, QUICK_GRID_LABEL);
         // The grid went to the engine before any cue would have: once it's there, so
         // would the cue be.

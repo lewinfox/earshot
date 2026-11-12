@@ -71,9 +71,10 @@ impl EarshotApp {
     /// Otherwise the next frame comes with input, or an event from another thread
     /// (the sink asks for a repaint with each).
     pub(super) fn schedule_repaint(&mut self, ctx: &egui::Context) {
-        let now = Instant::now();
+        // By the frames' clock, as egui's own animations are.
+        let now = ctx.input(|i| i.time);
         if self.moving() {
-            self.settle_until = Some(now + SETTLE);
+            self.settle_until = Some(now + SETTLE.as_secs_f64());
         }
         match self.settle_until {
             Some(t) if now < t => ctx.request_repaint(),

@@ -62,12 +62,12 @@ impl EarshotApp {
                     self.hasher.clone(),
                     self.sink.clone(),
                 );
-                std::thread::spawn(move || {
+                crate::core::background::spawn("earshot-trim", move || {
                     let _job = job;
                     let done = trim::cut(&src, start, end, &to).and_then(|()| {
                         if in_library {
                             library::scan_file(&store, &to).map_err(|e| e.to_string())?;
-                            let _ = hasher.send(());
+                            hasher.send(());
                         }
                         Ok(())
                     });

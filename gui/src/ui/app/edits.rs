@@ -60,7 +60,7 @@ impl EarshotApp {
             // Players with the track need the grid switched back too, once it's saved.
             Edit::Grid { track, .. } => {
                 let player = self.player.clone();
-                std::thread::spawn(move || {
+                crate::core::background::spawn("earshot-undo", move || {
                     let done = store
                         .call(move |w| w.apply_edit(&e))
                         .map_err(|e| e.to_string())

@@ -571,10 +571,7 @@ impl Shared {
 }
 
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
-    std::thread::Builder::new()
-        .name(name.into())
-        .spawn(f)
-        .expect("spawn stems thread");
+    super::background::spawn(name, f);
 }
 
 #[cfg(test)]

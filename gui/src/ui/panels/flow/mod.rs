@@ -202,9 +202,10 @@ impl FlowUi {
     }
 
     /// Where the canvas looks, once it has held still since it moved. Counts it as
-    /// saved. `busy`: the pointer is down, so it may move again.
-    pub fn camera_to_save(&mut self, busy: bool) -> Option<[f32; 4]> {
-        self.camera.to_save(busy).map(camera::to_array)
+    /// saved. Called every frame, at frame time `now` (seconds). `busy`: the pointer
+    /// is down, so it may move again.
+    pub fn camera_to_save(&mut self, busy: bool, now: f64) -> Option<[f32; 4]> {
+        self.camera.to_save(busy, now).map(camera::to_array)
     }
 
     /// Where the canvas looks if that isn't saved yet, held still or not.
@@ -212,9 +213,10 @@ impl FlowUi {
         self.camera.take().map(camera::to_array)
     }
 
-    /// How long until [`Self::camera_to_save`] may have something.
-    pub fn camera_wait(&self) -> Option<Duration> {
-        self.camera.wait()
+    /// How long after frame time `now` until [`Self::camera_to_save`] may have
+    /// something.
+    pub fn camera_wait(&self, now: f64) -> Option<Duration> {
+        self.camera.wait(now)
     }
 
     /// The track on the selected card (for suggestions after "Selected").

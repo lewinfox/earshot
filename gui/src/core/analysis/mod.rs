@@ -35,6 +35,7 @@ use serde::Deserialize;
 
 use self::queue::{Batch, JobQueue, Lane, Req, Want};
 use self::registry::{AnalyserId, REGISTRY, RunsIn};
+use super::background;
 use super::player::Player;
 use super::store::{
     AnalysisSave, GridSave, GridSource, JobRow, ResultState, Store, StoreCmd, grid_bpm,
@@ -131,6 +132,10 @@ struct Shared {
     /// The analyser was dropped: lanes end after their current track (and with
     /// them the workers).
     stopping: AtomicBool,
+    /// No lane threads (the analyser was started from a thread that steps its
+    /// background work, `core::background`): waiting work is a piece of that work,
+    /// done by [`Shared::run_waiting`] for this player.
+    stepped: Option<(std::sync::Weak<Shared>, Player)>,
 }
 
 impl Drop for Analyser {
@@ -180,7 +185,8 @@ impl Analyser {
         let background = (0..cores)
             .map(|_| WorkerClient::start(worker(Role::Background, threads)))
             .collect();
-        let shared = Arc::new(Shared {
+        let stepped = background::stepped();
+        let shared = Arc::new_cyclic(|me| Shared {
             queue: Mutex::new(JobQueue::new(cap)),
             ready: Condvar::new(),
             store,
@@ -188,8 +194,10 @@ impl Analyser {
             deck,
             background,
             stopping: AtomicBool::new(false),
+            stepped: stepped.then(|| (me.clone(), player.clone())),
         });
-        let lanes = std::iter::once(Lane::Deck).chain((0..cores).map(Lane::Background));
+        // (Stepped: no threads, see `Shared::stepped`.)
+        let lanes = shared.lanes().filter(|_| !stepped);
         for (n, lane) in lanes.enumerate() {
             let (shared, player) = (shared.clone(), player.clone());
             std::thread::Builder::new()
@@ -222,7 +230,7 @@ impl Analyser {
     pub fn set_background_workers(&self, n: usize) -> usize {
         let n = n.clamp(1, self.shared.background.len());
         self.shared.queue.lock().unwrap().background_cap = n;
-        self.shared.ready.notify_all();
+        self.shared.wake();
         n
     }
 
@@ -242,7 +250,7 @@ impl Analyser {
         for &t in &tracks {
             s.emit(AnalysisEvent::new(t, None));
         }
-        s.ready.notify_all();
+        s.wake();
         tracks.len()
     }
 
@@ -263,7 +271,7 @@ impl Analyser {
         for &t in &dropped {
             s.emit(AnalysisEvent::new(t, None));
         }
-        s.ready.notify_all();
+        s.wake();
     }
 
     /// Tell the queue whether a deck is playing, which holds background jobs back.
@@ -272,7 +280,7 @@ impl Analyser {
         if q.playing != on {
             q.playing = on;
             drop(q);
-            self.shared.ready.notify_all();
+            self.shared.wake();
         }
     }
 
@@ -391,6 +399,38 @@ impl Shared {
         (self.sink)(Event::Analysis(ev));
     }
 
+    /// Every lane: the deck's, then the background ones.
+    fn lanes(&self) -> impl Iterator<Item = Lane> + use<> {
+        std::iter::once(Lane::Deck).chain((0..self.background.len()).map(Lane::Background))
+    }
+
+    /// A lane might now be able to take work: wake the lanes' threads, or (stepped)
+    /// have the waiting work done as a piece of background work.
+    fn wake(&self) {
+        self.ready.notify_all();
+        if let Some((me, _)) = &self.stepped
+            && let Some(me) = me.upgrade()
+        {
+            background::spawn("earshot-analysis", move || me.run_waiting());
+        }
+    }
+
+    /// Stepped: do all the work the lanes may take now, here, a track at a time.
+    fn run_waiting(&self) {
+        let Some((_, player)) = &self.stepped else {
+            return;
+        };
+        loop {
+            let taken = self
+                .lanes()
+                .find_map(|lane| Some((lane, self.queue.lock().unwrap().take(lane)?)));
+            let Some((lane, batch)) = taken else {
+                return;
+            };
+            self.work(lane, player, batch);
+        }
+    }
+
     fn worker(&self, lane: Lane) -> &WorkerClient {
         match lane {
             Lane::Deck => &self.deck,
@@ -409,7 +449,7 @@ impl Shared {
         if r.new_track || r.superseded.is_some() {
             self.emit(AnalysisEvent::new(track, Some(AnalysisState::Queued)));
         }
-        self.ready.notify_all();
+        self.wake();
     }
 
     /// Save what's queued for a track. Called with the queue locked, so the Store gets
@@ -447,38 +487,44 @@ impl Shared {
                     q = self.ready.wait(q).unwrap();
                 }
             };
-            let track = batch.track;
-            let t0 = std::time::Instant::now();
-            let result = self.run(lane, player, &batch);
-            let superseded = batch.superseded.load(Ordering::Relaxed);
-            crate::core::log::note(&format!(
-                "analysis: {lane:?} ends track {track} after {:.1} s: {}",
-                t0.elapsed().as_secs_f64(),
-                match (&result, superseded) {
-                    (_, true) => "stopped".to_string(),
-                    (Ok(()), _) => "ok".to_string(),
-                    (Err(e), _) => format!("failed: {e}"),
-                }
-            ));
-            if let Err(e) = &result
-                && !superseded
-            {
-                eprintln!("analysis of track {track}: {e}");
-            }
-            let mut q = self.queue.lock().unwrap();
-            let idle = q.finish(lane).is_some_and(|(_, idle)| idle);
-            self.save_queue(&q, track);
-            drop(q);
-            self.ready.notify_all();
-            self.emit(match result {
-                // More was asked for meanwhile (or this was taken over): still waiting.
-                _ if !idle => AnalysisEvent::new(track, Some(AnalysisState::Queued)),
-                // Stopped (`stop_background`): not a failure.
-                Err(_) if superseded => AnalysisEvent::new(track, None),
-                Ok(()) => AnalysisEvent::new(track, None),
-                Err(e) => AnalysisEvent::new(track, Some(AnalysisState::Failed(e))),
-            });
+            self.work(lane, player, batch);
         }
+    }
+
+    /// Analyse the track a lane took, and say how it went.
+    fn work(&self, lane: Lane, player: &Player, batch: Batch) {
+        let track = batch.track;
+        let t0 = std::time::Instant::now();
+        let result = self.run(lane, player, &batch);
+        let superseded = batch.superseded.load(Ordering::Relaxed);
+        crate::core::log::note(&format!(
+            "analysis: {lane:?} ends track {track} after {:.1} s: {}",
+            t0.elapsed().as_secs_f64(),
+            match (&result, superseded) {
+                (_, true) => "stopped".to_string(),
+                (Ok(()), _) => "ok".to_string(),
+                (Err(e), _) => format!("failed: {e}"),
+            }
+        ));
+        if let Err(e) = &result
+            && !superseded
+        {
+            eprintln!("analysis of track {track}: {e}");
+        }
+        let mut q = self.queue.lock().unwrap();
+        let idle = q.finish(lane).is_some_and(|(_, idle)| idle);
+        self.save_queue(&q, track);
+        drop(q);
+        // (Stepped, the lanes' loop goes on to what's waiting by itself.)
+        self.ready.notify_all();
+        self.emit(match result {
+            // More was asked for meanwhile (or this was taken over): still waiting.
+            _ if !idle => AnalysisEvent::new(track, Some(AnalysisState::Queued)),
+            // Stopped (`stop_background`): not a failure.
+            Err(_) if superseded => AnalysisEvent::new(track, None),
+            Ok(()) => AnalysisEvent::new(track, None),
+            Err(e) => AnalysisEvent::new(track, Some(AnalysisState::Failed(e))),
+        });
     }
 
     fn run(&self, lane: Lane, player: &Player, batch: &Batch) -> Result<(), String> {

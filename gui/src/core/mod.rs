@@ -6,6 +6,7 @@
 
 pub mod analysis;
 pub mod audio_watch;
+pub mod background;
 pub mod bus;
 pub mod collections;
 pub mod command;

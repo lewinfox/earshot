@@ -17,6 +17,7 @@ fn main() {
         buffer_frames: Some(256),
         null: false,
         phones_device: args.get(1).cloned(),
+        stepped: false,
     };
     let seconds: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
     let engine = Engine::start(&opts, 2).expect("engine");

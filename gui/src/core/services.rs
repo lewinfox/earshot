@@ -1,7 +1,9 @@
 //! What the app starts with: where its database is, which audio output and analysis
 //! worker to use, and whether to open MIDI. The real app uses [`Services::real`];
-//! tests start the whole app on the null output, a temporary database and a stand-in
-//! worker.
+//! tests start the whole app on a temporary database and a stand-in worker, from a
+//! thread that steps its background work (`core::background`): the Store then writes
+//! where it's asked, analysis and loads wait to be run, and audio is rendered only
+//! when the test advances it, so nothing in a test depends on timing.
 
 use std::path::PathBuf;
 

@@ -1,7 +1,8 @@
 //! Where the canvas looks, and when that's saved: a moment after it stops moving, so
 //! a pan or a zoom is one write. The shell saves it per Flow (`core::settings`).
+//! "A moment" is by the frames' clock (egui's input time), not the system's.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use egui::{Rect, pos2, vec2};
 
@@ -13,8 +14,11 @@ pub struct Camera {
     pub view: Rect,
     /// The view as last saved or loaded.
     saved: Option<Rect>,
-    /// When the view last moved, while that isn't saved.
-    moved: Option<Instant>,
+    /// The view moved since [`Camera::to_save`] last looked.
+    moved: bool,
+    /// When (frame time, seconds) the view was last seen to have moved, while that
+    /// isn't saved.
+    moved_at: Option<f64>,
     /// Fit every card in view on the next frame.
     pub fit: bool,
     /// Pan to show this (canvas points) on the next frame.
@@ -26,7 +30,8 @@ impl Default for Camera {
         Camera {
             view: Rect::from_min_size(pos2(-40.0, -40.0), vec2(1200.0, 500.0)),
             saved: None,
-            moved: None,
+            moved: false,
+            moved_at: None,
             fit: false,
             reveal: None,
         }
@@ -38,7 +43,7 @@ impl Camera {
     /// if it has any.
     pub fn load(&mut self, saved: Option<Rect>, has_cards: bool) {
         self.saved = saved;
-        self.moved = None;
+        self.forget_move();
         self.reveal = None;
         match saved {
             Some(r) => {
@@ -53,14 +58,23 @@ impl Camera {
     pub fn set(&mut self, view: Rect) {
         if view != self.view {
             self.view = view;
-            self.moved = Some(Instant::now());
+            self.moved = true;
         }
     }
 
+    fn forget_move(&mut self) {
+        self.moved = false;
+        self.moved_at = None;
+    }
+
     /// The view, once it has held still a moment since it moved and isn't what was
-    /// saved. Counts it as saved. `busy`: the pointer is down, so it may move again.
-    pub fn to_save(&mut self, busy: bool) -> Option<Rect> {
-        if busy || self.moved?.elapsed() < SETTLE {
+    /// saved. Counts it as saved. Called every frame, at frame time `now` (seconds).
+    /// `busy`: the pointer is down, so it may move again.
+    pub fn to_save(&mut self, busy: bool, now: f64) -> Option<Rect> {
+        if std::mem::take(&mut self.moved) {
+            self.moved_at = Some(now);
+        }
+        if busy || now - self.moved_at? < SETTLE.as_secs_f64() {
             return None;
         }
         self.take()
@@ -68,7 +82,7 @@ impl Camera {
 
     /// The view if it isn't what was saved, held still or not. Counts it as saved.
     pub fn take(&mut self) -> Option<Rect> {
-        self.moved = None;
+        self.forget_move();
         if self.saved == Some(self.view) {
             return None;
         }
@@ -76,9 +90,10 @@ impl Camera {
         Some(self.view)
     }
 
-    /// How long until [`Self::to_save`] may have something.
-    pub fn wait(&self) -> Option<Duration> {
-        Some(SETTLE.saturating_sub(self.moved?.elapsed()))
+    /// How long after frame time `now` until [`Self::to_save`] may have something.
+    pub fn wait(&self, now: f64) -> Option<Duration> {
+        let left = SETTLE.as_secs_f64() - (now - self.moved_at?);
+        Some(Duration::from_secs_f64(left.max(0.0)))
     }
 
     /// Fit `bounds` in view on a canvas `size` big, but no closer than 1:1 so a few
@@ -144,15 +159,15 @@ mod tests {
         let saved = c.view;
         c.load(Some(saved), true);
         assert!(!c.fit, "a saved view is used as it is");
-        assert!(c.to_save(false).is_none(), "nothing moved");
+        assert!(c.to_save(false, 1.0).is_none(), "nothing moved");
         let moved = saved.translate(vec2(10.0, 0.0));
         c.set(moved);
-        assert!(c.to_save(false).is_none(), "still settling");
-        assert!(c.wait().is_some());
-        c.moved = Some(Instant::now() - SETTLE);
-        assert!(c.to_save(true).is_none(), "not while the pointer is down");
-        assert_eq!(c.to_save(false), Some(moved));
-        assert!(c.to_save(false).is_none(), "counted as saved");
+        assert!(c.to_save(false, 2.0).is_none(), "still settling");
+        assert_eq!(c.wait(2.1), Some(SETTLE - Duration::from_millis(100)));
+        let later = 2.0 + SETTLE.as_secs_f64();
+        assert!(c.to_save(true, later).is_none(), "not while the pointer is down");
+        assert_eq!(c.to_save(false, later), Some(moved));
+        assert!(c.to_save(false, later + 1.0).is_none(), "counted as saved");
         assert!(c.take().is_none());
         c.load(None, true);
         assert!(c.fit, "nothing saved: fit the cards");

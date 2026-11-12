@@ -48,9 +48,22 @@ pub struct Engine {
     decks: usize,
     info: OutputInfo,
     gc_stop: Arc<AtomicBool>,
+    /// A stepped engine's renderer ([`OutputOptions::stepped`]).
+    stepped: Option<Stepped>,
     // Dropped last: stops the audio thread.
-    _output: output::OutputHandle,
+    _output: Option<output::OutputHandle>,
 }
+
+/// The renderer of an engine with no output, and the buffer it renders into.
+struct Stepped {
+    renderer: Renderer,
+    /// Frames in a block, as a sound card would ask for them.
+    block: usize,
+    buf: Vec<f32>,
+}
+
+/// The channels a stepped engine renders (master and headphones).
+const STEPPED_CHANNELS: usize = 4;
 
 impl Engine {
     /// Start audio with `decks` live decks (at most [`MAX_DECKS`]).
@@ -73,9 +86,22 @@ impl Engine {
             })
             .map_err(|e| e.to_string())?;
 
-        let stats = ends.stats().clone();
-        let make = move |rate| Renderer::new(ends, rate, decks);
-        let (output, info) = output::start(opts, stats, make)?;
+        let (output, info, stepped) = if opts.stepped {
+            let block = opts.buffer_frames.unwrap_or(256).max(1);
+            let mut renderer = Renderer::new(ends, output::NULL_RATE, decks);
+            renderer.set_stepped();
+            let stepped = Stepped {
+                renderer,
+                block: block as usize,
+                buf: vec![0.0; block as usize * STEPPED_CHANNELS],
+            };
+            (None, output::stepped_info(block), Some(stepped))
+        } else {
+            let stats = ends.stats().clone();
+            let make = move |rate| Renderer::new(ends, rate, decks);
+            let (output, info) = output::start(opts, stats, make)?;
+            (Some(output), info, None)
+        };
         Ok(Engine {
             commands: app.commands,
             spare: app.spare,
@@ -84,8 +110,37 @@ impl Engine {
             decks,
             info,
             gc_stop,
+            stepped,
             _output: output,
         })
+    }
+
+    /// Render `frames` of audio now, a block at a time, as a sound card would have
+    /// asked for them. Only a stepped engine ([`OutputOptions::stepped`]) does
+    /// anything: commands sent to it take effect in the next block rendered, and its
+    /// snapshot and events are as of the last one.
+    pub fn advance(&mut self, frames: usize) {
+        let Some(s) = &mut self.stepped else {
+            return;
+        };
+        let mut left = frames;
+        while left > 0 {
+            let n = left.min(s.block);
+            s.renderer
+                .process(&mut s.buf[..n * STEPPED_CHANNELS], STEPPED_CHANNELS);
+            left -= n;
+        }
+    }
+
+    /// How many commands sent with [`Engine::send`] the audio thread hasn't taken yet
+    /// (a stepped engine takes them all in its next block).
+    pub fn pending_commands(&self) -> usize {
+        self.commands.buffer().capacity() - self.commands.slots()
+    }
+
+    /// Whether audio is rendered only when [`Engine::advance`] asks.
+    pub fn is_stepped(&self) -> bool {
+        self.stepped.is_some()
     }
 
     /// Queue a command for the audio thread. Fails only if the queue is full.

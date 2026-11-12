@@ -252,7 +252,15 @@ pub struct WorkerConfig {
     /// Stop the process when it uses more memory than this (bytes), failing its
     /// jobs, before the system runs out ([`memory_cap`]). `None`: no limit.
     pub max_memory: Option<u64>,
+    /// No process: this answers each request instead, at once ([`StandIn`]).
+    pub stand_in: Option<StandIn>,
 }
+
+/// A worker that isn't a process: given a request (as the client would write it to a
+/// worker's stdin), all the messages a worker would answer it with, in order. A job
+/// has its whole answer when [`WorkerClient::submit`] returns, so waiting for it
+/// never blocks. For tests that mustn't depend on timing.
+pub type StandIn = fn(&serde_json::Value) -> Vec<serde_json::Value>;
 
 /// How much memory one worker may use: a fifth of the machine's, between 1.5 and
 /// 4 GB, or `EARSHOT_WORKER_MAX_MB`. A runaway worker (a two-hour mix, say) is
@@ -336,6 +344,7 @@ impl WorkerConfig {
             keep_alive: role == Role::Deck,
             expect: vec![],
             max_memory: Some(memory_cap()),
+            stand_in: None,
         }
     }
 }
@@ -354,6 +363,8 @@ struct Inner {
     running: Arc<AtomicBool>,
     /// Why the worker was refused for good, if it was.
     refused: Arc<Mutex<Option<String>>>,
+    /// What answers instead of a process ([`WorkerConfig::stand_in`]).
+    stand_in: Option<StandIn>,
 }
 
 impl Drop for Inner {
@@ -375,18 +386,52 @@ impl WorkerClient {
         let running = Arc::new(AtomicBool::new(false));
         let refused: Arc<Mutex<Option<String>>> = Arc::default();
         let (flag, why) = (running.clone(), refused.clone());
-        std::thread::Builder::new()
-            .name("earshot-worker-supervisor".into())
-            .spawn(move || Supervisor::new(config, supervisor_tx, flag, why).run(rx))
-            .expect("spawn worker supervisor");
+        let stand_in = config.stand_in;
+        if let Some(answer) = stand_in {
+            // No process and no supervisor: its hello is checked here.
+            *refused.lock().unwrap() = stand_in_refusal(answer, &config.expect);
+        } else {
+            std::thread::Builder::new()
+                .name("earshot-worker-supervisor".into())
+                .spawn(move || Supervisor::new(config, supervisor_tx, flag, why).run(rx))
+                .expect("spawn worker supervisor");
+        }
         WorkerClient {
             inner: Arc::new(Inner {
                 tx: Mutex::new(tx),
                 next_id: AtomicU64::new(1),
                 running,
                 refused,
+                stand_in,
             }),
         }
+    }
+
+    /// Queue a job: with the supervisor, or answered here and now by the stand-in.
+    fn start_job(&self, id: u64, req: serde_json::Value, deadline: Duration) -> Job {
+        let (tx, rx) = mpsc::channel();
+        match self.inner.stand_in {
+            Some(answer) => {
+                let _ = match self.refused() {
+                    Some(why) => tx.send(JobMsg::End(Err(why))),
+                    None => {
+                        for reply in answer(&req) {
+                            if let Some(msg) = stand_in_msg(reply) {
+                                let _ = tx.send(msg);
+                            }
+                        }
+                        Ok(())
+                    }
+                };
+            }
+            None => self.send(Ctl::Submit {
+                id,
+                req,
+                deadline,
+                tx,
+            }),
+        }
+        Job { id, rx }
     }
 
     /// Why the worker was refused for good (its analysers aren't the versions this
@@ -413,14 +458,7 @@ impl WorkerClient {
     /// Queue a job in the worker.
     pub fn submit(&self, req: &Request) -> Job {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::channel();
-        self.send(Ctl::Submit {
-            id,
-            req: req.to_json(id),
-            deadline: req.deadline,
-            tx,
-        });
-        Job { id, rx }
+        self.start_job(id, req.to_json(id), req.deadline)
     }
 
     /// Stop a job: dropped if it's still waiting, stopped at its next progress report
@@ -439,16 +477,9 @@ impl WorkerClient {
         deadline: Duration,
     ) -> Job {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::channel();
         req.insert("id".into(), id.into());
         req.insert("deadline_s".into(), deadline.as_secs_f64().into());
-        self.send(Ctl::Submit {
-            id,
-            req: req.into(),
-            deadline,
-            tx,
-        });
-        Job { id, rx }
+        self.start_job(id, req.into(), deadline)
     }
 
     /// Submit a job and wait for it.
@@ -1037,6 +1068,59 @@ impl Supervisor {
     }
 }
 
+/// Why a stand-in worker won't do, going by its answer to hello, if it won't (as
+/// the supervisor decides for a process).
+fn stand_in_refusal(answer: StandIn, expect: &[(String, u32)]) -> Option<String> {
+    let hello = json!({ "type": "hello", "protocol": PROTOCOL });
+    answer(&hello).into_iter().find_map(|reply| {
+        match serde_json::from_value::<Reply>(reply) {
+            Ok(Reply::Hello {
+                protocol,
+                analysers,
+                ..
+            }) => Some(if protocol != PROTOCOL || !analysers.contains_key("grid") {
+                Some(format!(
+                    "the analysis worker speaks protocol {protocol} with {analysers:?}; \
+                     this app needs {PROTOCOL} with a grid analyser"
+                ))
+            } else {
+                wrong_versions(expect, &analysers)
+            }),
+            _ => None,
+        }
+    })?
+}
+
+/// One of a stand-in worker's messages about a job, as the job hears it.
+fn stand_in_msg(reply: serde_json::Value) -> Option<JobMsg> {
+    Some(match serde_json::from_value::<Reply>(reply) {
+        Ok(Reply::Started { .. }) => JobMsg::Update(Update::Started),
+        Ok(Reply::Progress {
+            analyser, fraction, ..
+        }) => JobMsg::Update(Update::Progress { analyser, fraction }),
+        Ok(Reply::Result {
+            analyser,
+            version,
+            data,
+            ..
+        }) => JobMsg::Result {
+            analyser,
+            version,
+            data,
+        },
+        Ok(Reply::Failed {
+            analyser, error, ..
+        }) => JobMsg::Failed { analyser, error },
+        Ok(Reply::Done { seconds, .. }) => JobMsg::End(Ok(seconds)),
+        Ok(Reply::Cancelled { .. }) => JobMsg::End(Err(CANCELLED.into())),
+        Ok(Reply::Error { error, .. }) => JobMsg::End(Err(error)),
+        Ok(Reply::Hello { .. } | Reply::Heartbeat) => return None,
+        Err(e) => JobMsg::End(Err(format!(
+            "the worker sent something unreadable: {e}"
+        ))),
+    })
+}
+
 /// Why a worker reporting `analysers` in its hello won't do, if it won't: one of
 /// `expect` missing or at another version.
 fn wrong_versions(expect: &[(String, u32)], analysers: &BTreeMap<String, u32>) -> Option<String> {
@@ -1197,18 +1281,191 @@ for line in sys.stdin:
             keep_alive: false,
             expect: vec![],
             max_memory: None,
+            stand_in: None,
         }
     }
 
-    /// A stand-in for the real worker, for tests that start the whole app.
+    /// A stand-in for the real worker, for tests that start the whole app: no
+    /// process, each job answered at once ([`answer`]).
     pub fn stand_in(_role: Role, _threads: usize) -> WorkerConfig {
-        fake(PROTOCOL, false)
+        WorkerConfig {
+            stand_in: Some(answer),
+            ..fake(PROTOCOL, false)
+        }
     }
 
     /// [`stand_in`] with an older grid analyser than the app's (version 2).
     pub fn stand_in_old_grid(_role: Role, _threads: usize) -> WorkerConfig {
-        let mut c = fake(PROTOCOL, false);
-        c.envs.push(("FAKE_GRID_VERSION".into(), "2".into()));
+        WorkerConfig {
+            stand_in: Some(|req| answer_as(req, 2)),
+            ..fake(PROTOCOL, false)
+        }
+    }
+
+    /// What [`FAKE`] answers a request with, worked out here: the same grid for every
+    /// track, and the same made-up chart and "straightened" copy for the tempo lock's
+    /// jobs. A job of any other kind is refused.
+    pub fn answer(req: &serde_json::Value) -> Vec<serde_json::Value> {
+        answer_as(req, 3)
+    }
+
+    fn answer_as(r: &serde_json::Value, grid_version: u32) -> Vec<serde_json::Value> {
+        let id = r["id"].clone();
+        let started = json!({"id": id, "type": "started"});
+        let progress = |analyser: &str| {
+            json!({"id": id, "type": "progress", "analyser": analyser, "fraction": 0.5})
+        };
+        let result = |analyser: &str, version: u32, data: serde_json::Value| {
+            json!({"id": id, "type": "result", "analyser": analyser, "version": version,
+                "data": data})
+        };
+        let done = json!({"id": id, "type": "done", "seconds": 0.1});
+        let wav = r["wav"].as_str().unwrap_or_default();
+        match r["type"].as_str().unwrap_or_default() {
+            "hello" => vec![json!({"type": "hello", "protocol": PROTOCOL,
+                "analysers": {"grid": grid_version},
+                "steps": {"tempo_lock": 1, "straighten": 1, "measure": 1},
+                "detector": "fake", "models_loaded": []})],
+            "tempo_lock" => vec![
+                started,
+                progress("tempo_lock"),
+                result("tempo_lock", 1, json!({"analysis": tempo_chart(wav)})),
+                done,
+            ],
+            "straighten" => {
+                let name = r["name"].as_str().unwrap_or("track");
+                let stem = std::path::Path::new(name)
+                    .file_stem()
+                    .map_or("track".into(), |s| s.to_string_lossy().into_owned());
+                let (bpm, level) = (r["target_bpm"].as_f64().unwrap(), r["level"].as_f64().unwrap());
+                let out = PathBuf::from(r["out_dir"].as_str().unwrap())
+                    .join(format!("{stem} (straightened {bpm} bpm).wav"));
+                std::fs::copy(wav, &out).expect("copy the wav");
+                let floats = |v: &serde_json::Value| -> Vec<f64> {
+                    v.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect()
+                };
+                let beats = floats(&r["beats"]);
+                let period = 60.0 / bpm * level;
+                let target: Vec<f64> = floats(&r["beat_index"])
+                    .iter()
+                    .map(|k| beats[0] + k * period)
+                    .collect();
+                let src = tempo_chart(wav);
+                let duration = src["duration"].as_f64().unwrap() - beats[beats.len() - 1]
+                    + target[target.len() - 1];
+                let jitter: Vec<f64> = target
+                    .iter()
+                    .enumerate()
+                    .map(|(k, t)| t + 0.003 * (k as f64 * 1.7).sin())
+                    .collect();
+                let down: Vec<bool> = src["is_downbeat"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|d| d.as_bool().unwrap())
+                    .collect();
+                vec![
+                    started,
+                    progress("straighten"),
+                    result("straighten", 1, json!({
+                        "output": out, "bpm": bpm, "level": level, "engine": r["engine"],
+                        "grid": {"target_bpm": bpm, "source_beats": beats, "target_beats": target},
+                        "duration": duration, "bitrate_kbps": 320})),
+                    progress("measure"),
+                    result("measure", 1, json!({"analysis": chart_of(&jitter, &down, duration, &[])})),
+                    done,
+                ]
+            }
+            "analyse" => vec![
+                started,
+                progress("grid"),
+                result("grid", 3, json!({
+                    "detector": "fake", "kick_shift_ms": -20.0, "first_beat": 0.5,
+                    "grid": {"kind": "constant", "bpm": 124.0, "downbeat": 0.5, "steady": true,
+                        "spread_ms": 1.0, "drift_pct": 0.1}})),
+                done,
+            ],
+            other => vec![json!({"id": id, "type": "error",
+                "error": format!("the stand-in worker has no {other} jobs")})],
+        }
+    }
+
+    /// How long a WAV file is: (seconds, sample rate), going by its header alone.
+    fn wav_length(path: &str) -> (f64, u32) {
+        let data = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let le = |b: &[u8]| b.iter().rev().fold(0u64, |n, x| n << 8 | *x as u64);
+        let (mut pos, mut float, mut rate, mut channels, mut bytes) = (12, false, 44_100, 2, 0);
+        while pos + 8 <= data.len() {
+            let size = le(&data[pos + 4..pos + 8]) as usize;
+            let body = &data[pos + 8..(pos + 8 + size).min(data.len())];
+            match &data[pos..pos + 4] {
+                b"fmt " => {
+                    float = le(&body[0..2]) == 3;
+                    channels = le(&body[2..4]);
+                    rate = le(&body[4..8]) as u32;
+                }
+                b"data" => bytes = body.len() as u64,
+                _ => {}
+            }
+            pos += 8 + size + (size & 1);
+        }
+        let samples = bytes / if float { 4 } else { 2 };
+        ((samples / channels.max(1)) as f64 / rate as f64, rate)
+    }
+
+    /// A tempo chart for these beats, as the worker's `tempo_lock` and `measure`
+    /// steps give one.
+    fn chart_of(beats: &[f64], down: &[bool], duration: f64, dropped: &[f64]) -> serde_json::Value {
+        let pairs = || beats.iter().zip(&beats[1..]);
+        let times: Vec<f64> = pairs().map(|(a, b)| (a + b) / 2.0).collect();
+        let curve: Vec<f64> = pairs().map(|(a, b)| 60.0 / (b - a)).collect();
+        let mut sorted = curve.clone();
+        sorted.sort_by(f64::total_cmp);
+        let pct = |q: f64| sorted[(sorted.len() - 1).min((q * sorted.len() as f64) as usize)];
+        let med = pct(0.5);
+        json!({"sr": 44100, "duration": duration, "detector": "fake", "beats": beats,
+            "beat_index": (0..beats.len()).collect::<Vec<_>>(),
+            "is_downbeat": &down[..beats.len().min(down.len())],
+            "dropped_beats": dropped, "bpm_times": times, "bpm_curve": curve, "median_bpm": med,
+            "min_bpm": pct(0.02), "max_bpm": pct(0.98), "suggested_bpm": med.round_ties_even(),
+            "sections": [{"start_beat": 0, "end_beat": curve.len(), "start": beats[0],
+                "end": beats[beats.len() - 1], "bpm": med}],
+            "tempo_changes": [], "kick_shift": -0.012})
+    }
+
+    /// The made-up chart of a WAV: a drifting tempo that steps up two thirds of the
+    /// way in.
+    fn tempo_chart(wav: &str) -> serde_json::Value {
+        let (duration, _) = wav_length(wav);
+        let (mut beats, mut t, mut k) = (vec![], 0.25f64, 0u32);
+        while t < duration - 0.3 {
+            beats.push(t);
+            let step_up = if t > duration * 2.0 / 3.0 { 1.06 } else { 1.0 };
+            let bpm = (122.0 + 2.5 * (t / 3.0).sin() + 0.6 * (k as f64 * 2.3).sin()) * step_up;
+            t += 60.0 / bpm;
+            k += 1;
+        }
+        let down: Vec<bool> = (0..beats.len()).map(|j| j % 4 == 0).collect();
+        let mut c = chart_of(&beats, &down, duration, &[beats[5] + 0.11, beats[17] + 0.2]);
+        let cut = beats.iter().position(|b| *b > duration * 2.0 / 3.0).unwrap() - 1;
+        let curve: Vec<f64> = c["bpm_curve"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_f64().unwrap())
+            .collect();
+        let median = |part: &[f64]| {
+            let mut s = part.to_vec();
+            s.sort_by(f64::total_cmp);
+            s[s.len() / 2]
+        };
+        let (m1, m2) = (median(&curve[..cut]), median(&curve[cut..]));
+        let last = beats.len() - 1;
+        c["sections"] = json!([
+            {"start_beat": 0, "end_beat": cut, "start": beats[0], "end": beats[cut], "bpm": m1},
+            {"start_beat": cut, "end_beat": last, "start": beats[cut], "end": beats[last], "bpm": m2}]);
+        c["tempo_changes"] = json!([{"beat": cut, "time": beats[cut], "from_bpm": m1,
+            "to_bpm": m2, "ratio": m2 / m1, "kind": "tempo change"}]);
         c
     }
 }
