@@ -39,8 +39,8 @@ pub(super) fn scratch(name: &str) -> PathBuf {
 pub(super) fn scratch_dir(name: &str) -> PathBuf {
     static SWEPT: std::sync::Once = std::sync::Once::new();
     let root = std::env::temp_dir().join("earshot-app-tests");
-    // A folder is left behind by every run (the harness outlives the test body), at
-    // ~2 GB a run: the first test of a run clears out earlier runs' folders. One
+    // A folder is left behind by every run (the harness outlives the test body):
+    // the first test of a run clears out earlier runs' folders. One
     // untouched for an hour is from a run that's over.
     SWEPT.call_once(|| sweep(&root, std::time::Duration::from_secs(3600)));
     root.join(std::process::id().to_string()).join(name)
@@ -111,6 +111,39 @@ const TRACKS: [(&str, f64); 4] = [
     ("Low Orbit", 128.0),
 ];
 
+/// The fixture library's files, made once a run and shared by every test: each
+/// test's music folder has links to them ([`link_tracks`]), not copies, so a run
+/// doesn't write them out again for every test. They're read-only: a test that
+/// would change a track's file must replace its link with a copy first.
+fn fixture_tracks() -> &'static Path {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = scratch_dir("fixture-tracks");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (title, bpm) in TRACKS {
+            let path = dir.join(format!("{title}.wav"));
+            write_track(&path, bpm, 24.0);
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_readonly(true);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+        dir
+    })
+}
+
+/// Put the fixture library's tracks in `music`: as hard links to the shared files
+/// ([`fixture_tracks`]), or as copies where the folder can't link to them.
+fn link_tracks(music: &Path) {
+    for (title, _) in TRACKS {
+        let name = format!("{title}.wav");
+        let (from, to) = (fixture_tracks().join(&name), music.join(&name));
+        if std::fs::hard_link(&from, &to).is_err() {
+            std::fs::copy(&from, &to).unwrap();
+        }
+    }
+}
+
 /// Where `EARSHOT_SHOT` asks for this test's picture, if it does.
 fn shot_path(test: &str) -> Option<PathBuf> {
     let p = PathBuf::from(std::env::var_os("EARSHOT_SHOT")?);
@@ -138,9 +171,7 @@ pub(super) fn start(test: &str) -> H {
 /// Start the app on the fixture library with this analysis worker, and scan it.
 pub(super) fn start_with(test: &str, worker: fn(Role, usize) -> WorkerConfig) -> H {
     let dir = scratch(test);
-    for (title, bpm) in TRACKS {
-        write_track(&dir.join("music").join(format!("{title}.wav")), bpm, 24.0);
-    }
+    link_tracks(&dir.join("music"));
     let services = Services {
         db: dir.join(store::FILE_NAME),
         null_audio: true,
