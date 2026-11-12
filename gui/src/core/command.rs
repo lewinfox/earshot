@@ -115,6 +115,8 @@ pub enum DeckCmd {
 pub enum MixerCmd {
     /// The deck synced decks follow (`None`: each picks one).
     SyncLeader(Option<DeckId>),
+    /// Master cue: the master mix on the headphones' cue side.
+    MasterCue(earshot_engine::Set),
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +147,15 @@ pub use super::view::ViewCmd;
 pub enum AppCmd {
     /// Close and reopen every MIDI input, e.g. after plugging the controller in.
     ReconnectMidi,
+    /// Make PipeWire let go of the controller's sound card (turn its profile off),
+    /// and play to the card.
+    TakeControllerAudio,
+    /// A display-only knob on the controller moved (it acts on the sound itself):
+    /// show `control` at `value`, and keep earshot's own at its default.
+    ControllerShows {
+        control: super::bus::Control,
+        value: f64,
+    },
     /// A tap on effect unit `unit`'s TAP button, at `at` (when the message came in):
     /// from the second tap on, the unit runs on the tapped tempo.
     FxTap {
@@ -191,6 +202,7 @@ pub fn direct(cmd: Command) -> Result<EngineCommand, Command> {
         Command::Deck(deck, DeckCmd::Engine(c)) => Ok(EngineCommand::Deck(deck, c)),
         Command::Param(p, v) => Ok(EngineCommand::Param(p, v)),
         Command::Fx(unit, cmd) => Ok(EngineCommand::Fx { unit, cmd }),
+        Command::Mixer(MixerCmd::MasterCue(s)) => Ok(EngineCommand::MasterCue(s)),
         other => Err(other),
     }
 }

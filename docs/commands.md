@@ -66,6 +66,7 @@ A name goes from the general to the particular: where, what, which part, what to
 | `mixer_master_balance` | -1 to 1 | master balance |
 | `mixer_headphone_level` | 0 to 1 | headphone level |
 | `mixer_headphone_mix` | 0 to 1 | headphone mix |
+| `mixer_master_headphone_cue` | — | master cue: the master mix in the headphones |
 
 ## Effect units: `fx_N_`, N = 1 to 1
 

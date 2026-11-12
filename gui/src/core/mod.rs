@@ -9,6 +9,7 @@ pub mod audio_watch;
 pub mod bus;
 pub mod collections;
 pub mod command;
+pub mod controller_audio;
 pub mod drives;
 pub mod edit;
 #[allow(dead_code)] // searched by the Vibe suggestion feature to come; tests use it
@@ -22,6 +23,7 @@ pub mod jobs;
 pub mod keymap;
 pub mod keys;
 pub mod library;
+pub mod lights;
 pub mod log;
 pub mod memlock;
 pub mod midi;

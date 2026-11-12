@@ -281,14 +281,23 @@ const SYNC_PHASE_SECS: f64 = 0.25;
 const SYNC_DEADBAND: f64 = 0.008;
 
 /// A jog wheel's bend: turning it as fast as a record goes (1.8 s a turn at 33⅓ rpm)
-/// speeds the deck up by this much (0.2 = 20%), about as Mixxx's DDJ-400 mapping does.
-/// The turning speed is measured over [`BEND_SECS`], and springs back over it.
-const BEND: f64 = 0.2;
+/// speeds the deck up by this much (0.1 = 10%). The turning speed is measured over
+/// [`BEND_SECS`], and springs back over it.
+const BEND: f64 = 0.1;
+/// On a stopped deck, the jog wheel moves the track this fraction of its turn.
+const STOPPED_JOG: f64 = 0.2;
 const BEND_SECS: f64 = 0.1;
 
 /// The tempo fader picks the tempo up when it comes this close (in fader travel,
 /// -1..1) or moves past it.
 const PICKUP: f64 = 0.01;
+
+/// A crossfader side's level at position `x` (-1..1): both full in the centre, each
+/// fading out (a quarter cosine) as the fader moves to the other side.
+fn xf_gain(x: f64, side: usize) -> f64 {
+    let away = if side == 0 { x } else { -x };
+    (away.max(0.0) * std::f64::consts::FRAC_PI_2).cos()
+}
 
 /// Without a grid, beat maths falls back to 120 BPM from zero.
 const FALLBACK_BEAT: f64 = 0.5;
@@ -431,7 +440,7 @@ impl Deck {
             self.bend += by / BEND_SECS;
         } else {
             self.untouched = false;
-            self.player.scratch.nudge(by * BEND, at, now);
+            self.player.scratch.nudge(by * STOPPED_JOG, at, now);
         }
     }
 
@@ -890,6 +899,8 @@ pub struct Renderer {
     xf_gain: [Smoothed; 2],
     head_gain: Smoothed,
     head_mix: Smoothed,
+    /// Master cue ([`MasterParam::MasterCue`]).
+    master_cue: bool,
     limiters: [Limiter; 2],
     limiting: f64,
     vu_main: [f32; 2],
@@ -965,6 +976,7 @@ impl Renderer {
             xf_gain: [Smoothed::new(0.0); 2],
             head_gain: Smoothed::new(1.0),
             head_mix: Smoothed::new(0.5),
+            master_cue: false,
             limiters: [Limiter::new(sr), Limiter::new(sr)],
             limiting: 0.0,
             vu_main: [0.0; 2],
@@ -1182,17 +1194,22 @@ impl Renderer {
         }
         for f in 0..n {
             let head = self.head_gain.next(k) as f32;
-            // Head mix: how much of the master mix the headphones hear, against the cue bus.
-            let mix = self.head_mix.next(k).clamp(0.0, 1.0) as f32;
+            // As on a DJ mixer: the cue side is the cued channels, plus the master with
+            // master cue on, all at full level; the head mix crossfades from it to the
+            // master (constant power: -3 dB each in the middle). The master here is
+            // before the master level. With nothing cued the headphones are silent.
+            let mix = self.head_mix.next(k).clamp(0.0, 1.0);
+            let angle = mix * std::f64::consts::FRAC_PI_2;
+            let (to_cue, to_master) = (angle.cos() as f32, angle.sin() as f32);
+            let cued = any_pfl || self.master_cue;
             for c in 0..2 {
                 let m = self.master[2 * f + c];
-                // With nothing cued the cue bus carries the master mix.
-                let cue = if any_pfl {
-                    0.8 * self.cue[2 * f + c]
-                } else {
-                    m
-                };
-                self.phones[2 * f + c] = head * ((1.0 - mix) * cue + mix * m);
+                let mut cue = if any_pfl { 0.8 * self.cue[2 * f + c] } else { 0.0 };
+                if self.master_cue {
+                    cue += m;
+                }
+                let heard = if cued { to_cue * cue + to_master * m } else { 0.0 };
+                self.phones[2 * f + c] = head * heard;
             }
         }
 
@@ -1492,6 +1509,7 @@ impl Renderer {
             Command::SetSyncLeader(l) => {
                 self.sync_leader = l.filter(|l| l.index() < self.live);
             }
+            Command::MasterCue(set) => self.master_cue = set.apply(self.master_cue),
             Command::SetHotcueMode(m) => {
                 for d in &mut self.decks {
                     d.hotcue_mode = m;
@@ -1598,10 +1616,9 @@ impl Renderer {
 
     fn set_crossfader(&mut self, v: f64) {
         self.crossfader = v.clamp(-1.0, 1.0);
-        // Constant power.
-        let x = (self.crossfader + 1.0) * std::f64::consts::FRAC_PI_4;
-        self.xf_gain[0].target = x.cos();
-        self.xf_gain[1].target = x.sin();
+        for (side, g) in self.xf_gain.iter_mut().enumerate() {
+            g.target = xf_gain(self.crossfader, side);
+        }
     }
 
     fn set_param(&mut self, p: ParamId, v: f64) {
@@ -1619,6 +1636,7 @@ impl Renderer {
                     MasterParam::Crossfader => self.set_crossfader(v),
                     MasterParam::HeadGain => self.head_gain.target = v.clamp(0.0, 1.0),
                     MasterParam::HeadMix => self.head_mix.target = v.clamp(0.0, 1.0),
+                    MasterParam::MasterCue => self.master_cue = v > 0.5,
                     MasterParam::Gain | MasterParam::Balance => {}
                 }
             }
@@ -1714,6 +1732,7 @@ impl Renderer {
         self.master_chain.set(MasterParam::Balance, m.balance);
         self.set_param(ParamId::Master(MasterParam::HeadGain), m.head_gain);
         self.set_param(ParamId::Master(MasterParam::HeadMix), m.head_mix);
+        self.master_cue = m.master_cue;
         for (u, s) in m.fx.into_iter().enumerate() {
             let target_ok = self.fx_target_ok(s.target);
             self.fx[u].set(if target_ok {
@@ -1757,6 +1776,7 @@ impl Renderer {
                 balance: self.master_chain.get(MasterParam::Balance),
                 head_gain: self.head_gain.target,
                 head_mix: self.head_mix.target,
+                master_cue: self.master_cue,
                 vu_main: self.vu_main.map(|v| v as f64),
                 limiting: self.limiting,
                 sync_leader: self.sync_leader,
@@ -2425,10 +2445,10 @@ mod tests {
             rig.run(0.01);
         }
         // 50 blocks, the wheel turning 0.01 s a block: about 1.7 times as fast as a
-        // record, so about a third faster.
+        // record, so about a sixth faster.
         let secs = 50.0 * 256.0 / SR as f64;
         let moved = (rig.pos(0) - start) / secs;
-        assert!(moved > 1.2 && moved < 1.4, "{moved}");
+        assert!(moved > 1.1 && moved < 1.2, "{moved}");
         // Then it springs back to normal speed.
         rig.run(0.5);
         let t = rig.pos(0);
@@ -2858,6 +2878,53 @@ mod tests {
     }
 
     #[test]
+    fn head_mix_at_master_plays_the_master_with_another_deck_cued() {
+        // Deck 1 on air; deck 2 cued with its fader down; the mix all the way to master.
+        let mut rig = Rig::new();
+        load_fn(&mut rig, 0, 5.0, sine(330.0));
+        load_fn(&mut rig, 1, 5.0, sine(550.0));
+        rig.channel(1, ChannelParam::Volume, 0.0);
+        rig.deck(1, DeckCmd::Pfl(Set::On));
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.deck(1, DeckCmd::Play(Set::On));
+        rig.master(MasterParam::HeadMix, 1.0);
+        rig.run(0.5);
+        let p = peaks(&rig.out, 4);
+        assert!(p[0] > 0.1, "the master has deck 1: {p:?}");
+        assert!((p[2] - p[0]).abs() < 0.02, "the headphones hear the master: {p:?}");
+    }
+
+    #[test]
+    fn master_cue_adds_the_master_to_the_cue_side() {
+        let mut rig = Rig::new();
+        rig.load(0, 120.0, 120.0);
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.master(MasterParam::HeadMix, 1.0); // all master side
+        rig.run(0.3);
+        assert_eq!(peaks(&rig.out, 4)[2], 0.0, "nothing cued: silent, whatever the mix");
+        rig.master(MasterParam::HeadMix, 0.0); // the cue side only
+        // Over a second, so each reading spans two beats of the track.
+        let heard = |rig: &mut Rig| {
+            rig.run(1.0);
+            peaks(&rig.out, 4)[2]
+        };
+        rig.deck(0, DeckCmd::Pfl(Set::On));
+        let channel = heard(&mut rig);
+        rig.deck(0, DeckCmd::Pfl(Set::Off));
+        rig.send(Command::MasterCue(Set::On));
+        let master = heard(&mut rig);
+        assert!(rig.snap().mixer.master_cue);
+        rig.deck(0, DeckCmd::Pfl(Set::On));
+        let both = heard(&mut rig);
+        assert!(channel > 0.01 && master > 0.01, "{channel} {master}");
+        // As on a DJ mixer, both add up at full level.
+        assert!(both > channel.max(master) * 1.2, "{both} vs {channel} / {master}");
+        rig.send(Command::MasterCue(Set::Toggle));
+        rig.run(0.05);
+        assert!(!rig.snap().mixer.master_cue);
+    }
+
+    #[test]
     fn master_gain_balance_and_head_mix() {
         let mut rig = Rig::new();
         rig.load(0, 120.0, 120.0);
@@ -2919,6 +2986,15 @@ mod tests {
     }
 
     #[test]
+    fn the_crossfader_is_full_both_sides_in_the_centre() {
+        let g = xf_gain;
+        assert_eq!((g(0.0, 0), g(0.0, 1)), (1.0, 1.0));
+        assert_eq!((g(-1.0, 0), g(1.0, 1)), (1.0, 1.0));
+        assert!(g(1.0, 0).abs() < 1e-12 && g(-1.0, 1).abs() < 1e-12);
+        assert!((g(0.5, 0) - 0.5f64.sqrt()).abs() < 1e-12, "halfway over: -3 dB");
+    }
+
+    #[test]
     fn four_decks_mix_through_their_crossfader_sides() {
         let mut rig = Rig::with_decks(4);
         // Tones on decks 3 (on the left by default) and 4 (set to thru).
@@ -2939,12 +3015,12 @@ mod tests {
         assert!(middle > 0.1, "{middle}");
         rig.master(MasterParam::Crossfader, 1.0);
         assert!(level(&mut rig) < 1e-4);
-        // Deck 4 on thru ignores the crossfader, and is louder than deck 3 was in the
-        // middle (constant power: each side is at -3 dB there).
+        // Deck 4 on thru ignores the crossfader, and is as loud as deck 3 was in the
+        // middle (both sides are full there).
         rig.channel(2, ChannelParam::Volume, 0.0);
         rig.channel(3, ChannelParam::Volume, 1.0);
         let thru = level(&mut rig);
-        assert!(thru > middle * 1.3, "{thru} vs {middle}");
+        assert!((thru - middle).abs() < 0.01, "{thru} vs {middle}");
         rig.master(MasterParam::Crossfader, -1.0);
         assert!((level(&mut rig) - thru).abs() < 0.01);
     }

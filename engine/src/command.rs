@@ -198,11 +198,14 @@ pub enum MasterParam {
     Gain,
     /// -1 (left) .. 1 (right).
     Balance,
-    /// Headphone level, linear, 0..5.
+    /// Headphone level, linear, 0..1.
     HeadGain,
-    /// What the headphones hear: 0 the cue bus only .. 1 the master mix only (0.5 an
-    /// even mix, the default).
+    /// What the headphones hear: 0 the cue side only .. 1 the master mix only (0.5 an
+    /// even mix, the default), crossfaded at constant power.
     HeadMix,
+    /// Master cue (Pioneer's MASTER CUE): the master mix added to the headphones' cue
+    /// side, with the cued channels, as on a DJ mixer. 0 off, 1 on.
+    MasterCue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,6 +328,7 @@ pub struct MixerState {
     pub balance: f64,
     pub head_gain: f64,
     pub head_mix: f64,
+    pub master_cue: bool,
     pub fx: [FxUnitState; FX_UNITS],
 }
 
@@ -336,6 +340,7 @@ impl Default for MixerState {
             balance: 0.0,
             head_gain: 1.0,
             head_mix: 0.5,
+            master_cue: false,
             fx: std::array::from_fn(FxUnitState::default_for),
         }
     }
@@ -416,6 +421,8 @@ pub enum Command {
     /// on another goes back to its default, or the master mix.
     SetFxDecks(usize),
     SetRouting(Routing),
+    /// Master cue on, off or toggled ([`MasterParam::MasterCue`]).
+    MasterCue(Set),
     Preview(PreviewCmd),
     /// An effect unit (0..[`FX_UNITS`]; others are ignored).
     Fx {

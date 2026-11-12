@@ -2625,6 +2625,7 @@ fn controller_mode_has_the_decks_and_its_tabs() {
             control: crossfader,
             arg: None,
             input: crate::core::midi::Input::Cc,
+            display_only: false,
         },
     );
     steps(&mut h, 3);

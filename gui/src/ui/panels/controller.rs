@@ -199,7 +199,8 @@ impl ControllerUi {
             .learned
             .get(key)
             .map_or_else(|| midi::guess_input(key, control), |l| l.input);
-        self.learned.set(key, Learn { control, arg, input });
+        let display_only = self.learned.get(key).is_some_and(|l| l.display_only);
+        self.learned.set(key, Learn { control, arg, input, display_only });
     }
 
     /// Change the number after a mapped command (`-4`, `size`). False if the command
@@ -493,8 +494,15 @@ fn save(t: &ControllerUi, ctx: &egui::Context) {
 }
 
 /// The Mapping table's columns.
-const MAPPING_COLUMNS: [&str; 6] =
-    ["message", "value", "pressed", "earshot_command", "number", "reads as"];
+const MAPPING_COLUMNS: [&str; 7] = [
+    "message",
+    "value",
+    "pressed",
+    "earshot_command",
+    "number",
+    "reads as",
+    "display only",
+];
 
 /// The rows in the order the table is sorted by. Rows with nothing in the column go
 /// last either way; ties stay in message order.
@@ -521,7 +529,8 @@ fn sorted(t: &ControllerUi, mut keys: Vec<(u8, u8)>) -> Vec<(u8, u8)> {
                     Some(a) => Cell::Num(a),
                     None => Cell::Text(word(&l)),
                 }),
-            _ => l.map(|l| Cell::Text(reading_name(l.input).to_string())),
+            5 => l.map(|l| Cell::Text(reading_name(l.input).to_string())),
+            _ => l.map(|l| Cell::Num(l.display_only as u8 as f64)),
         }
     };
     keys.sort_by(|a, b| match (cell(a), cell(b)) {
@@ -553,6 +562,7 @@ fn mapping_table(ui: &mut Ui, t: &mut ControllerUi, cx: &mut Cx) {
         .column(Column::exact(60.0))
         .column(Column::exact(280.0))
         .column(Column::exact(80.0))
+        .column(Column::exact(250.0))
         .column(Column::remainder());
     if let Some(i) = t
         .scroll_to
@@ -634,6 +644,23 @@ fn mapping_table(ui: &mut Ui, t: &mut ControllerUi, cx: &mut Cx) {
                         ui.label(RichText::new("⚠").color(cx.theme.warn)).on_hover_text(
                             format!("No {other} half yet: map another message to the same command, as its {other} half"),
                         );
+                    }
+                });
+                // Display only: for an output level the controller sets itself.
+                row.col(|ui| {
+                    let Some(l) = l.filter(|l| crate::core::midi::can_be_display_only(l.control)) else {
+                        return;
+                    };
+                    let mut on = l.display_only;
+                    if ui
+                        .checkbox(&mut on, "")
+                        .on_hover_text(
+                            "The controller does this itself (a master level knob, say): \
+                             earshot only shows where it is, and leaves the sound alone",
+                        )
+                        .changed()
+                    {
+                        t.learned.set_display_only(key, on);
                     }
                 });
             });

@@ -39,6 +39,7 @@ use crate::core::history::{DeckNow, History, PlayEvent};
 use crate::core::index::{LibraryCmd, LibraryIndex};
 use crate::core::keymap::{self, Keymap};
 use crate::core::library::{self, Library};
+use crate::core::controller_audio;
 use crate::core::midi::{self, Midi};
 use crate::core::notice::{self, Notices};
 use crate::core::player::{self, AudioSettings, DECKS, Player};
@@ -63,6 +64,10 @@ pub struct EarshotApp {
     sink: Sink,
     rx: Receiver<Event>,
     monitor: Option<Monitor>,
+    /// The same monitor, for the controller's lights thread.
+    lights_monitor: crate::core::lights::MonitorSlot,
+    /// A connected controller's own sound card, which audio plays to when there is one.
+    controller: controller_audio::Hold,
     audio: Result<OutputInfo, String>,
     /// Audio stalls (`core::audio_watch`): when each reopened the device, the last
     /// minute's, and what to show about them (until when; or for good, once reopening
@@ -149,13 +154,44 @@ pub struct EarshotApp {
 
 /// Start audio on the chosen device; failing that the default one, then the null
 /// output (so the app still runs without a sound card).
+/// Start audio: on a connected controller's own sound card, directly, whenever there
+/// is one (no other device, and no PipeWire volume, in between); else on the device
+/// in the settings.
 fn start_audio(
     player: &Player,
     settings: &AudioSettings,
     null: bool,
+    controller: &mut controller_audio::Hold,
 ) -> Result<OutputInfo, String> {
     let mut opts = player::output_options(settings);
     opts.null |= null;
+    if !opts.null
+        && let Some(device) = controller.prepare()
+    {
+        opts.device = Some(device);
+        opts.phones_device = None;
+        // The controller's own layout (master on 1-2, headphones on 3-4).
+        player.lock().unwrap().routing = None;
+        // PipeWire may take a moment to close the card after letting it go.
+        let mut why = String::new();
+        for _ in 0..10 {
+            match player::start_engine(player, &opts) {
+                Ok(info) => {
+                    controller.error = None;
+                    return Ok(info);
+                }
+                Err(e) => why = e,
+            }
+            if !why.to_lowercase().contains("busy") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        eprintln!("audio: the controller's sound card: {why}");
+        controller.error = Some(why);
+        return player::start_engine(player, &OutputOptions { null: true, ..opts });
+    }
+    player.lock().unwrap().routing = settings.routing;
     player::start_engine(player, &opts)
         .or_else(|e| {
             if opts.device.is_none() || opts.null {
@@ -217,7 +253,12 @@ impl EarshotApp {
         let settings = Settings::load(&store.reader);
         let player = player::new_player();
         player.lock().unwrap().routing = settings.audio.routing;
-        let audio = start_audio(&player, &settings.audio, services.null_audio);
+        // A controller with a sound card is played to directly, from the start.
+        let mut controller = controller_audio::Hold::default();
+        if services.midi {
+            controller.set(controller_audio::find(&midi::port_names()));
+        }
+        let audio = start_audio(&player, &settings.audio, services.null_audio, &mut controller);
         let monitor = player.lock().unwrap().monitor();
 
         let drives_stop = crate::core::drives::StopOnDrop::default();
@@ -288,8 +329,10 @@ impl EarshotApp {
             lib,
             sink,
             rx,
+            lights_monitor: Arc::new(std::sync::Mutex::new(monitor.clone())),
             monitor,
             audio,
+            controller,
             audio_stalls: VecDeque::new(),
             audio_note: None,
             loaded_from: Default::default(),
@@ -388,18 +431,36 @@ impl EarshotApp {
         Ok(app)
     }
 
+    /// Start audio again (on the controller's sound card, if one's connected).
+    fn reopen_audio(&mut self) {
+        self.preview = None;
+        self.audio = start_audio(&self.player, &self.settings.audio, self.null_audio, &mut self.controller);
+        self.reread_monitor();
+    }
+
+    /// Read the engine's monitor again, after the sound card was reopened.
+    fn reread_monitor(&mut self) {
+        self.monitor = self.player.lock().unwrap().monitor();
+        *self.lights_monitor.lock().unwrap() = self.monitor.clone();
+        self.frame.snap = self.monitor.as_ref().map(|m| m.snapshot());
+    }
+
     /// (Re)open every MIDI input, e.g. after plugging the controller in.
     fn connect_midi(&mut self) {
         // Close the old ports first so they can be reopened.
         self.midi = Midi::default();
         let lane = self.player.lock().unwrap().midi.clone();
         let learned = self.panels.controller.learned.clone();
-        (self.midi, self.midi_ports) = midi::connect_all(&self.sink, &lane, &learned).unwrap_or_else(|e| {
+        (self.midi, self.midi_ports) = midi::connect_all(&self.sink, &lane, &learned, &self.lights_monitor).unwrap_or_else(|e| {
             eprintln!("MIDI: {e}");
             (Midi::default(), vec![])
         });
         self.prefs.set_controller(!self.midi_ports.is_empty());
         self.panels.controller.ports = self.midi_ports.clone();
+        // A controller with a sound card came or went: play to it, or stop.
+        if self.controller.set(controller_audio::find(&self.midi_ports)) {
+            self.reopen_audio();
+        }
     }
 
     /// Each deck's tempo range, as the engine has it.
@@ -637,6 +698,24 @@ impl EarshotApp {
         match cmd {
             Command::View(v) => self.view_cmd(v),
             Command::App(AppCmd::ReconnectMidi) => self.connect_midi(),
+            Command::App(AppCmd::TakeControllerAudio) => {
+                match self.controller.force() {
+                    Ok(()) => self.reopen_audio(),
+                    Err(e) => self.controller.error = Some(e),
+                }
+            }
+            Command::App(AppCmd::ControllerShows { control, value }) => {
+                crate::ui::panels::mixer::set_shown(&self.ctx, control, value);
+                // Earshot's own stays at its default, so the two don't both act.
+                if let Some(range) = control.range() {
+                    let now = self.frame.snap.as_ref().and_then(|s| control.get(s));
+                    if now.is_some_and(|v| (v - range.default).abs() > 1e-9) {
+                        if let Some(c) = control.command(range.default) {
+                            self.dispatch(c);
+                        }
+                    }
+                }
+            }
             Command::App(AppCmd::FxTap { unit, at }) => {
                 if let Some(bpm) = self.fx_taps.get_mut(unit).and_then(|t| t.tap(at)) {
                     self.dispatch(Command::Fx(unit, earshot_engine::FxCmd::TapBpm(bpm)));
@@ -749,10 +828,7 @@ impl EarshotApp {
                 self.audio_note = None;
                 self.settings.audio = settings;
                 self.save_audio_settings();
-                self.preview = None;
-                self.audio = start_audio(&self.player, &self.settings.audio, self.null_audio);
-                self.monitor = self.player.lock().unwrap().monitor();
-                self.frame.snap = self.monitor.as_ref().map(|m| m.snapshot());
+                self.reopen_audio();
             }
             Command::Audio(AudioCmd::Stalled { quiet, decks }) => self.audio_stalled(quiet, &decks),
             other => eprintln!("command: nothing handles {other:?}"),
@@ -784,9 +860,7 @@ impl EarshotApp {
         }
         self.audio_stalls.push_back(now);
         crate::core::log::note(&format!("audio stalled ({ms} ms); reopening it: {decks}"));
-        self.audio = start_audio(&self.player, &self.settings.audio, self.null_audio);
-        self.monitor = self.player.lock().unwrap().monitor();
-        self.frame.snap = self.monitor.as_ref().map(|m| m.snapshot());
+        self.reopen_audio();
         self.audio_note = Some((
             format!("audio stopped for {ms} ms; restarted it"),
             Some(now + Duration::from_secs(30)),
@@ -1067,6 +1141,9 @@ impl EarshotApp {
                 TopBar {
                     audio: &self.audio,
                     audio_note: self.audio_note.as_ref().map(|(n, _)| n.as_str()),
+                    controller_busy: self.controller.found.as_ref().and_then(|c| {
+                        Some((c.id.as_str(), self.controller.error.as_deref()?))
+                    }),
                     midi_ports: &self.midi_ports,
                     analysis: &self.analysis,
                     jobs: &jobs,

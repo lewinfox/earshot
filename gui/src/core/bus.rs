@@ -952,15 +952,23 @@ fn master_spec(p: MasterParam) -> ControlSpec {
         MasterParam::Balance => c("master_balance", "master balance", BALANCE),
         MasterParam::HeadGain => c("headphone_level", "headphone level", HEAD_GAIN),
         MasterParam::HeadMix => c("headphone_mix", "headphone mix", HEAD_MIX),
+        MasterParam::MasterCue => spec(
+            "master_headphone_cue",
+            "master cue: the master mix in the headphones",
+            Kind::Toggle,
+        ),
     }
 }
 
-const MASTER: [(MasterParam, &str); 5] = [
+/// The mixer's controls, with their Mixxx names (Mixxx has no master cue: that name
+/// is earshot's).
+const MASTER: [(MasterParam, &str); 6] = [
     (MasterParam::Crossfader, "crossfader"),
     (MasterParam::Gain, "gain"),
     (MasterParam::Balance, "balance"),
     (MasterParam::HeadGain, "headGain"),
     (MasterParam::HeadMix, "headMix"),
+    (MasterParam::MasterCue, "master_cue"),
 ];
 
 /// Which Mixxx group a deck control is in.
@@ -1038,6 +1046,7 @@ impl Control {
                 MasterParam::Balance => m.balance,
                 MasterParam::HeadGain => m.head_gain,
                 MasterParam::HeadMix => m.head_mix,
+                MasterParam::MasterCue => m.master_cue as u8 as f64,
             }),
             Control::Fx(u, c) => {
                 let s = m.fx.get(u)?;
@@ -1055,6 +1064,9 @@ impl Control {
     pub fn command(self, value: f64) -> Option<Command> {
         match self {
             Control::Deck(deck, c) => c.command(deck, value),
+            // A toggle, like the decks' headphone cue: a press flips it.
+            Control::Master(MasterParam::MasterCue) => (value > 0.5)
+                .then_some(Command::Mixer(MixerCmd::MasterCue(earshot_engine::Set::Toggle))),
             Control::Master(p) => Some(Command::Param(ParamId::Master(p), value)),
             Control::Fx(u, c) if u < FX_UNITS => c.command(u, value),
             Control::Fx(..) => None,

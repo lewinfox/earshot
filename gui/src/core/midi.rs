@@ -14,7 +14,9 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use midir::{MidiInput, MidiInputConnection};
+use midir::{MidiInput, MidiInputConnection, MidiOutput};
+
+use earshot_engine::MasterParam;
 
 use super::bus::{Control, Kind};
 use super::command::{self, Command, Lane};
@@ -115,6 +117,9 @@ fn ddj400_names() -> Vec<(u8, u8, String, String, Input)> {
         m(0x96, 0x46 + d, &g, "LoadSelectedTrack", Input::Note);
     }
     m(0xB6, 0x1F, "[Master]", "crossfader", Input::Msb);
+    // MASTER LEVEL: the controller sets its own output level, so it's display only
+    // (see `ddj400_map`). Mixxx's mapping leaves it out.
+    m(0xB6, 0x08, "[Master]", "gain", Input::Msb);
     m(0xB6, 0x0C, "[Master]", "headMix", Input::Msb);
     m(0xB6, 0x0D, "[Master]", "headGain", Input::Msb);
     m(0xB4, 0x02, "[EffectRack1_EffectUnit1]", "mix", Input::Msb);
@@ -220,6 +225,19 @@ pub struct Learn {
     pub control: Control,
     pub arg: Option<f64>,
     pub input: Input,
+    /// The controller acts on this itself (in its own sound card, say: a master
+    /// level knob): its messages only move earshot's knob on screen, and earshot's
+    /// own control stays at its default, so the sound passes through unchanged.
+    pub display_only: bool,
+}
+
+/// The controls a mapping can mark display only: the output levels, which have a
+/// setting (full) that leaves the sound unchanged.
+pub fn can_be_display_only(control: Control) -> bool {
+    matches!(
+        control,
+        Control::Master(MasterParam::Gain | MasterParam::HeadGain)
+    )
 }
 
 /// The session's mapping: the command each message runs, by message key, on every
@@ -268,6 +286,19 @@ impl Learned {
             .iter()
             .find(|(k, o)| **k != key && o.input == other && o.control == l.control)
             .map(|(k, _)| *k)
+    }
+
+    /// Mark `key`'s control display only (or not); a 14-bit control's other half
+    /// with it, as they're one knob.
+    pub fn set_display_only(&self, key: (u8, u8), on: bool) {
+        let Some(l) = self.get(key) else { return };
+        let on = on && can_be_display_only(l.control);
+        let partner = self.partner(key, &l);
+        for k in std::iter::once(key).chain(partner) {
+            if let Some(l) = self.get(k) {
+                self.set(k, Learn { display_only: on, ..l });
+            }
+        }
     }
 
     pub fn remove(&self, key: (u8, u8)) {
@@ -327,6 +358,9 @@ impl Learned {
                 if let Some(w) = word.or_else(|| l.arg.map(|a| a.to_string())) {
                     o.insert("value".into(), json!(w));
                 }
+                if l.display_only {
+                    o.insert("display_only".into(), json!(true));
+                }
                 if l.input != default_input(status) {
                     let (input, ticks) = match l.input {
                         Input::Note => ("button", None),
@@ -365,6 +399,8 @@ pub fn from_json(text: &str) -> Result<(String, Map), String> {
         value: Option<String>,
         input: Option<String>,
         ticks: Option<u32>,
+        #[serde(default)]
+        display_only: bool,
     }
     let file: File = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let mut map = Map::new();
@@ -391,7 +427,15 @@ pub fn from_json(text: &str) -> Result<(String, Map), String> {
             Some("jog") => Input::Jog(line.ticks.unwrap_or(720)),
             Some(x) => return Err(at(format!("no input kind {x}"))),
         };
-        map.insert(k, Learn { control, arg, input });
+        map.insert(
+            k,
+            Learn {
+                control,
+                arg,
+                input,
+                display_only: line.display_only && can_be_display_only(control),
+            },
+        );
     }
     Ok((file.device, map))
 }
@@ -410,6 +454,7 @@ fn ddj400_map() -> Map {
                 control: mp.control,
                 arg: mp.arg,
                 input: mp.input,
+                display_only: mp.control == Control::Master(MasterParam::Gain),
             };
             ((mp.status, mp.data1), l)
         })
@@ -447,18 +492,35 @@ pub struct MidiMsg {
     pub did: Option<Control>,
 }
 
-/// Keeps the input connections open; dropping it closes them.
+/// Keeps the input connections open, and the lights going; dropping it puts the
+/// lights out and closes them.
 #[derive(Default)]
 pub struct Midi {
     _connections: Vec<MidiInputConnection<()>>,
+    _lights: Option<super::lights::Lights>,
 }
 
-/// Connect to every MIDI input port, sending to the engine on `lane`. Returns the
-/// connections and the port names.
+/// The MIDI input ports there are (not ALSA's Midi Through), without opening them.
+pub fn port_names() -> Vec<String> {
+    let Ok(probe) = MidiInput::new("earshot-probe") else {
+        return vec![];
+    };
+    probe
+        .ports()
+        .iter()
+        .filter_map(|p| probe.port_name(p).ok())
+        .filter(|n| !n.contains("Midi Through"))
+        .collect()
+}
+
+/// Connect to every MIDI input port, sending to the engine on `lane`, and to the
+/// output ports of the same names, for the controller's lights. Returns the
+/// connections and the input port names.
 pub fn connect_all(
     sink: &Sink,
     lane: &Lane,
     learned: &Learned,
+    monitor: &super::lights::MonitorSlot,
 ) -> Result<(Midi, Vec<String>), String> {
     let probe = MidiInput::new("earshot-probe").map_err(|e| e.to_string())?;
     let ports = probe.ports();
@@ -488,12 +550,36 @@ pub fn connect_all(
             Err(e) => eprintln!("MIDI: could not open {name}: {e}"),
         }
     }
+    let outputs = connect_outputs(&names);
+    let lights = (!outputs.is_empty())
+        .then(|| super::lights::Lights::start(outputs, learned.clone(), monitor.clone()));
     Ok((
         Midi {
             _connections: connections,
+            _lights: lights,
         },
         names,
     ))
+}
+
+/// The output ports named like the inputs that opened (a controller's two halves).
+fn connect_outputs(inputs: &[String]) -> Vec<midir::MidiOutputConnection> {
+    let Ok(probe) = MidiOutput::new("earshot-probe") else {
+        return vec![];
+    };
+    let mut out = vec![];
+    for port in probe.ports() {
+        let name = probe.port_name(&port).unwrap_or_default();
+        if !inputs.contains(&name) {
+            continue;
+        }
+        let Ok(output) = MidiOutput::new("earshot") else { continue };
+        match output.connect(&port, "earshot-lights") {
+            Ok(c) => out.push(c),
+            Err(e) => eprintln!("MIDI: could not open {name} for its lights: {e}"),
+        }
+    }
+    out
 }
 
 /// The control a message runs, and the command it makes (if that value does
@@ -536,6 +622,14 @@ fn translate(bytes: &[u8], learned: &Learned) -> Option<(Control, Option<Command
         Input::Relative => data2 as f64 - 128.0,
         Input::Jog(ticks) => (data2 as f64 - 64.0) * SECS_PER_TURN / ticks as f64,
     };
+    // Display only: show it, don't apply it.
+    if l.display_only && can_be_display_only(l.control) {
+        let cmd = Command::App(crate::core::command::AppCmd::ControllerShows {
+            control: l.control,
+            value,
+        });
+        return Some((l.control, Some(cmd)));
+    }
     Some((l.control, l.control.command(value)))
 }
 
@@ -612,6 +706,7 @@ mod tests {
                 control: jump,
                 arg: Some(-4.0),
                 input: guess_input((0x90, 0x0B), jump),
+                display_only: false,
             },
         );
         assert!(matches!(
@@ -632,6 +727,7 @@ mod tests {
                 control: scratch,
                 arg: None,
                 input: Input::Jog(720),
+                display_only: false,
             },
         );
         let json = learned.to_json("DDJ-400");
@@ -776,6 +872,42 @@ mod tests {
         assert!(matches!(cmd14(0xB4, 0x02, 0x7F, 0x7F), Some(Command::Fx(0, FxCmd::Level(l))) if l == 1.0));
     }
 
+    /// A display-only knob says where it is, and runs nothing itself.
+    #[test]
+    fn a_display_only_knob_is_shown_not_applied() {
+        let l = Learned::default();
+        let c = Control::Master(MasterParam::Gain);
+        let half = |input| Learn { control: c, arg: None, input, display_only: false };
+        l.set((0xB6, 0x08), half(Input::Msb));
+        l.set((0xB6, 0x28), half(Input::Lsb));
+        // Ticked on one half: both are display only.
+        l.set_display_only((0xB6, 0x28), true);
+        assert!(l.get((0xB6, 0x08)).unwrap().display_only);
+        assert!(translate(&[0xB6, 0x08, 127], &l).and_then(|t| t.1).is_none());
+        match translate(&[0xB6, 0x28, 127], &l).and_then(|t| t.1) {
+            Some(Command::App(crate::core::command::AppCmd::ControllerShows { control, value })) => {
+                assert_eq!(control, c);
+                assert_eq!(value, 1.0);
+            }
+            other => panic!("{other:?}"),
+        }
+        let (_, back) = from_json(&l.to_json("x")).unwrap();
+        assert!(back[&(0xB6, 0x08)].display_only && back[&(0xB6, 0x28)].display_only);
+    }
+
+    /// A DDJ-400's MASTER LEVEL is display only from the start (the controller sets
+    /// its own output level); only the output levels can be display only.
+    #[test]
+    fn the_ddj_master_level_is_display_only() {
+        let l = ddj();
+        assert!(l.get((0xB6, 0x08)).unwrap().display_only);
+        assert!(l.get((0xB6, 0x28)).unwrap().display_only);
+        assert!(!l.get((0xB6, 0x0D)).unwrap().display_only, "headphone level stays live");
+        // The crossfader can't be: it has no setting that leaves the sound alone.
+        l.set_display_only((0xB6, 0x1F), true);
+        assert!(!l.get((0xB6, 0x1F)).unwrap().display_only);
+    }
+
     #[test]
     fn faders_cover_their_range() {
         assert!(matches!(
@@ -813,10 +945,10 @@ mod tests {
         // whatever their numbers; a coarse half alone is a 7-bit knob.
         let l = Learned::default();
         let c = Control::Deck(deck(0), DeckControl::Filter);
-        l.set((0xB6, 0x17), Learn { control: c, arg: None, input: Input::Msb });
+        l.set((0xB6, 0x17), Learn { control: c, arg: None, input: Input::Msb, display_only: false });
         let alone = translate(&[0xB6, 0x17, 127], &l).and_then(|t| t.1);
         assert!(matches!(alone, Some(Command::Param(_, v)) if v == 1.0), "{alone:?}");
-        l.set((0xB6, 0x40), Learn { control: c, arg: None, input: Input::Lsb });
+        l.set((0xB6, 0x40), Learn { control: c, arg: None, input: Input::Lsb, display_only: false });
         assert_eq!(l.partner((0xB6, 0x17), &l.get((0xB6, 0x17)).unwrap()), Some((0xB6, 0x40)));
         assert!(translate(&[0xB6, 0x17, 127], &l).and_then(|t| t.1).is_none());
         let both = translate(&[0xB6, 0x40, 127], &l).and_then(|t| t.1);

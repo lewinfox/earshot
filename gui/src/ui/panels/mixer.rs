@@ -36,6 +36,8 @@ const MASTER_H: f32 = ROW + 2.0;
 /// Headphone cue buttons, under the gain knobs.
 const PFL_TOP: f32 = ROW + 2.0;
 pub(super) const PFL_H: f32 = 18.0;
+/// The master meters' label ("MASTER" / "LIMIT"), over them.
+const MASTER_LABEL_H: f32 = 12.0;
 /// Channel faders and meters, down to (at the least) the fourth knob row's bottom.
 const FADER_TOP: f32 = PFL_TOP + PFL_H + 6.0;
 const MIN_FADER_BOTTOM: f32 = 4.0 * ROW;
@@ -61,8 +63,20 @@ pub fn on_left(deck: DeckId) -> bool {
     XfSide::default_for(deck) == XfSide::Left
 }
 
+fn shown_id(control: Control) -> egui::Id {
+    egui::Id::new(("display-only", control.name().0))
+}
+
+/// A display-only knob on the controller is at `value`: [`bound`] shows that.
+pub fn set_shown(ctx: &egui::Context, control: Control, value: f64) {
+    ctx.data_mut(|d| d.insert_temp(shown_id(control), value));
+    ctx.request_repaint();
+}
+
 /// A knob or fader bound to `control`: shows the engine's value (the default without
-/// an engine) and sends what the user changes.
+/// an engine) and sends what the user changes. One the controller acts on itself (a
+/// display-only mapping) shows the controller's knob, outlined, and can't be moved
+/// here.
 pub(super) fn bound(
     ui: &mut Ui,
     shared: Option<&EngineSnapshot>,
@@ -71,8 +85,20 @@ pub(super) fn bound(
     add: impl FnOnce(&mut Ui, &Range, &mut f64) -> Response,
 ) -> Response {
     let range = control.range().expect("a knob or fader");
-    let mut v = shared.and_then(|s| control.get(s)).unwrap_or(range.default);
+    let shown: Option<f64> = ui.ctx().data(|d| d.get_temp(shown_id(control)));
+    let mut v = shown
+        .or_else(|| shared.and_then(|s| control.get(s)))
+        .unwrap_or(range.default);
     let r = add(ui, &range, &mut v);
+    if shown.is_some() {
+        ui.painter().rect_stroke(
+            r.rect.expand(1.0),
+            3.0,
+            egui::Stroke::new(1.0_f32, THEME.muted),
+            egui::StrokeKind::Outside,
+        );
+        return r.on_hover_text("Set on the controller (display only): earshot shows it");
+    }
     if r.changed() {
         out.extend(control.command(v));
     }
@@ -219,22 +245,38 @@ pub fn show(
         );
     }
 
-    // Master meters, left and right, between the channels.
+    // Master cue, level with the channels' CUE buttons: the master mix in the
+    // headphones.
+    let master_cue = Control::Master(MasterParam::MasterCue);
+    let lit = shared.is_some_and(|s| s.mixer.master_cue);
+    let r = ui
+        .put(
+            at(main_x + 1.0, PFL_TOP, CENTRE_W - 2.0, PFL_H),
+            HwButton::new("CUE", THEME.accent, vec2(CENTRE_W - 2.0, PFL_H))
+                .font(9.0)
+                .lit(lit),
+        )
+        .on_hover_text("Master cue: the master mix in the headphones");
+    if held(ui, &r) == Some(true) {
+        out.extend(master_cue.command(1.0));
+    }
+    // Master meters, left and right, between the channels, under their label.
+    let meter_top = FADER_TOP + MASTER_LABEL_H;
     for side in 0..2 {
         let level = shared.map_or(0.0, |s| s.mixer.vu_main[side]);
         ui.put(
             at(
                 main_x + CENTRE_W / 2.0 - VU_W + side as f32 * VU_W,
-                FADER_TOP,
+                meter_top,
                 VU_W,
-                fader_bottom - FADER_TOP,
+                fader_bottom - meter_top,
             ),
-            Meter::new(level, vec2(VU_W - 1.0, fader_bottom - FADER_TOP)),
+            Meter::new(level, vec2(VU_W - 1.0, fader_bottom - meter_top)),
         );
     }
     // "MASTER", or a red "LIMIT" while (and a moment after) the limiter turns the
     // master down by more than a little.
-    let master_label = at(main_x, PFL_TOP, CENTRE_W, PFL_H);
+    let master_label = at(main_x, FADER_TOP - 2.0, CENTRE_W, MASTER_LABEL_H);
     let now = ui.input(|i| i.time);
     let held = egui::Id::new("earshot-limit-held");
     if shared.is_some_and(|s| s.mixer.limiting > 0.5) {

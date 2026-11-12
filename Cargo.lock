@@ -1296,6 +1296,7 @@ dependencies = [
 name = "earshot-gui"
 version = "0.1.0"
 dependencies = [
+ "alsa",
  "directories",
  "earshot-engine",
  "eframe",
@@ -1313,6 +1314,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.21",
  "wmidi",
+ "zbus",
 ]
 
 [[package]]

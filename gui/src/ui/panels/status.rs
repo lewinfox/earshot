@@ -43,6 +43,9 @@ pub struct TopBar<'a> {
     pub audio: &'a Result<OutputInfo, String>,
     /// The audio stalled and was restarted, or keeps stalling (`core::audio_watch`).
     pub audio_note: Option<&'a str>,
+    /// The controller's sound card (its name) couldn't be opened, and why: with a
+    /// button to take it from PipeWire.
+    pub controller_busy: Option<(&'a str, &'a str)>,
     pub midi_ports: &'a [String],
     pub analysis: &'a AnalysisSummary,
     /// The jobs running and queued, for the jobs pill.
@@ -225,6 +228,18 @@ impl TopBar<'_> {
             Some(note) => (format!("⚠ {note}"), false),
             None => (audio, ok),
         };
+        if let Some((card, why)) = self.controller_busy {
+            if ui
+                .add(Pill::new(&format!("Take {card} from PipeWire"), Intent::Warning))
+                .on_hover_text(format!(
+                    "Earshot couldn't open {card}'s sound card ({why}). Click to turn off \
+                     PipeWire's use of it (back on when earshot quits) and play to it"
+                ))
+                .clicked()
+            {
+                cx.send(AppCmd::TakeControllerAudio);
+            }
+        }
         let intent = if ok { Intent::Success } else { Intent::Warning };
         if ui
             .add(Pill::new(&audio, intent))

@@ -84,6 +84,8 @@ pub struct MixerSnap {
     pub balance: f64,
     pub head_gain: f64,
     pub head_mix: f64,
+    /// Master cue is on ([`crate::MasterParam::MasterCue`]).
+    pub master_cue: bool,
     /// Master output meters, left and right (peak).
     pub vu_main: [f64; 2],
     /// How much the master limiter turned down in the last block, dB (0 = not at all).
@@ -137,6 +139,7 @@ impl EngineSnapshot {
                 balance: self.mixer.balance,
                 head_gain: self.mixer.head_gain,
                 head_mix: self.mixer.head_mix,
+                master_cue: self.mixer.master_cue,
                 fx: self.mixer.fx,
             },
             sync_leader: self.mixer.sync_leader,

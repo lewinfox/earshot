@@ -18,6 +18,8 @@ use crate::snapshot::Stats;
 #[derive(Debug, Clone, Default)]
 pub struct OutputOptions {
     /// Case-insensitive substring of the device name or id. `None` = default device.
+    /// An id starting `alsa:` (`alsa:hw:CARD=DDJ400,DEV=0`) opens that ALSA device
+    /// directly, bypassing the sound server: a controller's own sound card.
     pub device: Option<String>,
     /// Requested buffer size in frames. `None` = backend default.
     pub buffer_frames: Option<u32>,
@@ -192,6 +194,16 @@ pub fn start(
     ))
 }
 
+#[cfg(target_os = "linux")]
+fn alsa_host() -> Result<cpal::Host, String> {
+    cpal::host_from_id(cpal::HostId::Alsa).map_err(|e| e.to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn alsa_host() -> Result<cpal::Host, String> {
+    Err("ALSA devices are only on Linux".into())
+}
+
 /// The device asked for (by id, or part of its name), or the default.
 fn find_device(host: &cpal::Host, want: Option<&str>) -> Result<cpal::Device, String> {
     match want {
@@ -221,12 +233,22 @@ fn device_name(d: &cpal::Device) -> String {
         .unwrap_or_else(|_| "unknown".into())
 }
 
+/// Whether `device` names an ALSA device to open directly ([`OutputOptions::device`]).
+pub fn is_direct(device: Option<&str>) -> bool {
+    device.is_some_and(|d| d.starts_with("alsa:"))
+}
+
 fn build_stream(
     opts: &OutputOptions,
     stats: Arc<Stats>,
     make_renderer: impl FnOnce(u32) -> Renderer + Send + 'static,
 ) -> Result<(Vec<cpal::Stream>, OutputInfo), String> {
-    let host = cpal::default_host();
+    let direct = is_direct(opts.device.as_deref());
+    let host = if direct {
+        alsa_host()?
+    } else {
+        cpal::default_host()
+    };
     let device = find_device(&host, opts.device.as_deref())?;
     let name = device_name(&device);
 
@@ -234,7 +256,7 @@ fn build_stream(
     // rates, the one the system runs at (PipeWire's 48 kHz, CoreAudio's or Windows'
     // current rate): any other is converted on the way, which costs time and smooth
     // timing.
-    let native = if pipewire_running() {
+    let native = if pipewire_running() && !direct {
         Some(PIPEWIRE_RATE)
     } else {
         device.default_output_config().ok().map(|c| c.sample_rate())
