@@ -183,8 +183,6 @@ impl ControllerUi {
         keys.extend(self.seen.keys());
         keys.sort();
         keys.dedup();
-        // A 14-bit control's fine half is in its coarse half's row.
-        keys.retain(|k| !self.learned.is_fine_half(*k));
         keys
     }
 
@@ -341,10 +339,11 @@ fn named_key(status: u8, midino: u8) -> String {
 }
 
 /// How a message's value reads, as the list names it.
-const READINGS: [(Input, &str); 5] = [
+const READINGS: [(Input, &str); 6] = [
     (Input::Note, "button"),
     (Input::Cc, "knob / fader"),
-    (Input::Cc14(0), "14-bit controller (MSB + LSB)"),
+    (Input::Msb, "14-bit coarse (MSB)"),
+    (Input::Lsb, "14-bit fine (LSB)"),
     (Input::Relative, "steps (1 = +1, 127 = -1)"),
     (Input::Jog(720), "jog wheel (64 = still)"),
 ];
@@ -353,9 +352,10 @@ fn reading_name(i: Input) -> &'static str {
     match i {
         Input::Note => READINGS[0].1,
         Input::Cc => READINGS[1].1,
-        Input::Cc14(_) => READINGS[2].1,
-        Input::Relative => READINGS[3].1,
-        Input::Jog(_) => READINGS[4].1,
+        Input::Msb => READINGS[2].1,
+        Input::Lsb => READINGS[3].1,
+        Input::Relative => READINGS[4].1,
+        Input::Jog(_) => READINGS[5].1,
     }
 }
 
@@ -622,40 +622,22 @@ fn mapping_table(ui: &mut Ui, t: &mut ControllerUi, cx: &mut Cx) {
                             for (input, name) in READINGS {
                                 let on = reading_name(l.input) == name;
                                 if ui.selectable_label(on, name).clicked() && !on {
-                                    // A 14-bit controller starts with MIDI's usual fine half.
-                                    let input = match input {
-                                        Input::Cc14(_) => Input::Cc14(midi::usual_fine(key)),
-                                        i => i,
-                                    };
                                     t.learned.set(key, Learn { input, ..l });
                                 }
                             }
                         });
-                    if let Input::Cc14(fine) = l.input {
-                        fine_picker(ui, t, key, fine, &l);
+                    // A half with no partner yet: say what it needs.
+                    if matches!(l.input, Input::Msb | Input::Lsb)
+                        && t.learned.partner(key, &l).is_none()
+                    {
+                        let other = if l.input == Input::Msb { "fine" } else { "coarse" };
+                        ui.label(RichText::new("⚠").color(cx.theme.warn)).on_hover_text(
+                            format!("No {other} half yet: map another message to the same command, as its {other} half"),
+                        );
                     }
                 });
             });
         });
-}
-
-/// A 14-bit controller's fine half: which message on the same channel it is.
-fn fine_picker(ui: &mut Ui, t: &mut ControllerUi, key: (u8, u8), fine: u8, l: &Learn) {
-    ui.label("fine:");
-    egui::ComboBox::from_id_salt(("fine", key))
-        .selected_text(RichText::new(format!("{:02X} {fine:02X}", key.0)).monospace())
-        .width(70.0)
-        .height(300.0)
-        .show_ui(ui, |ui| {
-            for d in (0..128u8).filter(|d| *d != key.1) {
-                let label = RichText::new(format!("{:02X} {d:02X}", key.0)).monospace();
-                if ui.selectable_label(d == fine, label).clicked() && d != fine {
-                    t.learned.set(key, Learn { input: Input::Cc14(d), ..*l });
-                }
-            }
-        })
-        .response
-        .on_hover_text("The message that sends this control's fine half (MIDI's usual: +32)");
 }
 
 /// The row's command: a list to pick from, with a search box at the top. Picking one
@@ -899,22 +881,23 @@ mod tests {
 
     /// Shift + pad: the list goes to Shift, then the pad, and stays on the pad when
     /// Shift (then the pad) is let go.
-    /// A 14-bit controller is set by hand, on any fine half: that message's row
-    /// goes, and nothing pairs on its own.
+    /// A 14-bit controller is two rows on one command, marked coarse and fine by
+    /// hand; nothing pairs on its own, and both rows stay in the table.
     #[test]
-    fn a_14_bit_controller_is_set_by_hand() {
+    fn a_14_bit_controller_is_marked_by_hand() {
         let mut t = ControllerUi::default();
         t.map_to((0xB6, 0x17), "deck_1_filter");
         t.map_to((0xB6, 0x37), "deck_1_filter");
         t.on_midi(msg(&[0xB6, 0x17, 64]));
         t.on_midi(msg(&[0xB6, 0x37, 3]));
-        assert_eq!(t.learned.get((0xB6, 0x17)).unwrap().input, Input::Cc);
-        assert!(t.keys().contains(&(0xB6, 0x37)), "not paired on its own");
-        // Set by hand, on the unit's own fine half.
-        let l = t.learned.get((0xB6, 0x17)).unwrap();
-        t.learned.set((0xB6, 0x17), Learn { input: Input::Cc14(0x40), ..l });
-        assert!(!t.keys().contains(&(0xB6, 0x40)));
-        assert!(t.keys().contains(&(0xB6, 0x37)), "the +32 one isn't it");
+        let coarse = t.learned.get((0xB6, 0x17)).unwrap();
+        assert_eq!(coarse.input, Input::Cc);
+        t.learned.set((0xB6, 0x17), Learn { input: Input::Msb, ..coarse });
+        let fine = t.learned.get((0xB6, 0x37)).unwrap();
+        t.learned.set((0xB6, 0x37), Learn { input: Input::Lsb, ..fine });
+        let coarse = t.learned.get((0xB6, 0x17)).unwrap();
+        assert_eq!(t.learned.partner((0xB6, 0x17), &coarse), Some((0xB6, 0x37)));
+        assert!(t.keys().contains(&(0xB6, 0x37)), "both rows stay");
     }
 
     /// The Mapping table sorts by any column, either way; rows with nothing there

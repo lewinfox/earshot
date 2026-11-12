@@ -194,7 +194,7 @@ pub enum ChannelParam {
 pub enum MasterParam {
     /// -1 (left) .. 1 (right).
     Crossfader,
-    /// Master output level, linear, 0..5.
+    /// Master output level, linear, 0..1.
     Gain,
     /// -1 (left) .. 1 (right).
     Balance,

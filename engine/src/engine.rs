@@ -1617,7 +1617,7 @@ impl Renderer {
                 }
                 match mp {
                     MasterParam::Crossfader => self.set_crossfader(v),
-                    MasterParam::HeadGain => self.head_gain.target = v.clamp(0.0, 5.0),
+                    MasterParam::HeadGain => self.head_gain.target = v.clamp(0.0, 1.0),
                     MasterParam::HeadMix => self.head_mix.target = v.clamp(0.0, 1.0),
                     MasterParam::Gain | MasterParam::Balance => {}
                 }

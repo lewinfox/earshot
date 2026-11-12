@@ -27,11 +27,13 @@ pub enum Input {
     Note,
     /// A 7-bit absolute CC, across the control's travel.
     Cc,
-    /// A 14-bit controller, as MIDI 1.0 names it: this message is the MSB (the
-    /// coarse half), and the control with this number on the same channel the LSB
-    /// (the fine half), which follows it. Set by hand; MIDI's convention is the
-    /// coarse control + 32. The value goes when the LSB comes.
-    Cc14(u8),
+    /// Half of a 14-bit controller, as MIDI 1.0 names it: the MSB (the coarse
+    /// half) or the LSB (the fine half, sent after it). The two halves are the rows
+    /// mapped to the same command, one of each; the value goes when the LSB comes.
+    /// (MIDI's convention puts the LSB on the MSB's control + 32.) An MSB with no
+    /// LSB partner reads as a 7-bit knob.
+    Msb,
+    Lsb,
     /// A relative encoder: 1..63 = +n steps, 65..127 = -(128 - v) steps.
     Relative,
     /// A jog wheel's turn, centred on 64 (65 = one tick forward, 63 one back), with
@@ -40,11 +42,6 @@ pub enum Input {
     Jog(u32),
 }
 
-/// Where a 14-bit control whose coarse half is `key` usually sends its fine half:
-/// MIDI's convention, the control + 32 (a CC 0-31), else the next one.
-pub fn usual_fine(key: (u8, u8)) -> u8 {
-    if key.1 < 32 { key.1 + 32 } else { key.1.saturating_add(1).min(127) }
-}
 
 /// Seconds of a record that pass in one turn at 33⅓ rpm.
 const SECS_PER_TURN: f64 = 60.0 / (100.0 / 3.0);
@@ -61,13 +58,12 @@ struct Mapping {
 /// The DDJ-400's two decks, its mixer and browse knob, in Mixxx's names.
 fn ddj400_names() -> Vec<(u8, u8, String, String, Input)> {
     let mut v = vec![];
-    let mut m = |status, data1, group: &str, key: &str, input| {
+    let mut m = |status, data1: u8, group: &str, key: &str, input| {
+        v.push((status, data1, group.to_string(), key.to_string(), input));
         // A 14-bit control's fine half: the coarse one + 32, on this unit.
-        let input = match input {
-            Input::Cc14(_) => Input::Cc14(data1 + 32),
-            i => i,
-        };
-        v.push((status, data1, group.to_string(), key.to_string(), input))
+        if input == Input::Msb {
+            v.push((status, data1 + 32, group.to_string(), key.to_string(), Input::Lsb));
+        }
     };
     // The controller has two decks, on MIDI channels 1 and 2.
     for d in 0..2u8 {
@@ -83,14 +79,14 @@ fn ddj400_names() -> Vec<(u8, u8, String, String, Input)> {
         // Tempo slider: as Mixxx's mapping reads it, a raw 0 is the slowest end (the
         // top of the fader is minus on Pioneer gear).
         // 14-bit: each sends its fine half on its control + 32.
-        m(cc, 0x00, &g, "rate", Input::Cc14(0));
-        m(cc, 0x13, &g, "volume", Input::Cc14(0));
-        m(cc, 0x04, &g, "pregain", Input::Cc14(0));
+        m(cc, 0x00, &g, "rate", Input::Msb);
+        m(cc, 0x13, &g, "volume", Input::Msb);
+        m(cc, 0x04, &g, "pregain", Input::Msb);
         let eq = format!("[EqualizerRack1_{g}_Effect1]");
-        m(cc, 0x07, &eq, "parameter3", Input::Cc14(0));
-        m(cc, 0x0B, &eq, "parameter2", Input::Cc14(0));
-        m(cc, 0x0F, &eq, "parameter1", Input::Cc14(0));
-        m(0xB6, 0x17 + d, &format!("[QuickEffectRack1_{g}]"), "super1", Input::Cc14(0));
+        m(cc, 0x07, &eq, "parameter3", Input::Msb);
+        m(cc, 0x0B, &eq, "parameter2", Input::Msb);
+        m(cc, 0x0F, &eq, "parameter1", Input::Msb);
+        m(0xB6, 0x17 + d, &format!("[QuickEffectRack1_{g}]"), "super1", Input::Msb);
         // The jog wheel (Mixxx's mapping, 720 ticks a turn): its top touched, the top
         // turned while touched (scratch in vinyl mode), the top turned untouched (still
         // spinning) and the side turned (both bend).
@@ -118,10 +114,10 @@ fn ddj400_names() -> Vec<(u8, u8, String, String, Input)> {
         }
         m(0x96, 0x46 + d, &g, "LoadSelectedTrack", Input::Note);
     }
-    m(0xB6, 0x1F, "[Master]", "crossfader", Input::Cc14(0));
-    m(0xB6, 0x0C, "[Master]", "headMix", Input::Cc14(0));
-    m(0xB6, 0x0D, "[Master]", "headGain", Input::Cc14(0));
-    m(0xB4, 0x02, "[EffectRack1_EffectUnit1]", "mix", Input::Cc14(0));
+    m(0xB6, 0x1F, "[Master]", "crossfader", Input::Msb);
+    m(0xB6, 0x0C, "[Master]", "headMix", Input::Msb);
+    m(0xB6, 0x0D, "[Master]", "headGain", Input::Msb);
+    m(0xB4, 0x02, "[EffectRack1_EffectUnit1]", "mix", Input::Msb);
     m(0xB6, 0x40, "[Library]", "MoveVertical", Input::Relative);
     // BROWSE pressed, and with Shift.
     m(0x96, 0x41, "[Library]", "MoveFocusForward", Input::Note);
@@ -240,7 +236,8 @@ struct Session {
     seeded: bool,
     /// Counts changes, so whoever keeps a copy (the draft file) knows when to.
     version: u64,
-    /// Each 14-bit control's coarse half, as last sent, waiting for its fine half.
+    /// Each 14-bit control's MSB, as last sent (by its message), waiting for the
+    /// LSB.
     coarse: std::collections::HashMap<(u8, u8), u8>,
 }
 
@@ -252,30 +249,25 @@ impl Learned {
         self.0.lock().unwrap().map.get(&key).copied()
     }
 
-    /// Map `key`. A 14-bit control's fine half is part of it, so it can't run a
-    /// command of its own.
     pub fn set(&self, key: (u8, u8), l: Learn) {
         let mut s = self.0.lock().unwrap();
-        if let Input::Cc14(fine) = l.input {
-            s.map.remove(&(key.0, fine));
-        }
         s.map.insert(key, l);
         s.version += 1;
     }
 
-    /// The 14-bit control whose fine half is `key`: its coarse half's key and
-    /// binding.
-    pub fn coarse_for(&self, key: (u8, u8)) -> Option<((u8, u8), Learn)> {
+    /// The other half of the 14-bit control `l` (mapped on `key`) is half of: the
+    /// row mapped to the same command as the other kind of half.
+    pub fn partner(&self, key: (u8, u8), l: &Learn) -> Option<(u8, u8)> {
+        let other = match l.input {
+            Input::Msb => Input::Lsb,
+            Input::Lsb => Input::Msb,
+            _ => return None,
+        };
         let s = self.0.lock().unwrap();
         s.map
             .iter()
-            .find(|(k, l)| k.0 == key.0 && l.input == Input::Cc14(key.1))
-            .map(|(k, l)| (*k, *l))
-    }
-
-    /// Whether `key` is the fine half of a mapped 14-bit control.
-    pub fn is_fine_half(&self, key: (u8, u8)) -> bool {
-        self.coarse_for(key).is_some()
+            .find(|(k, o)| **k != key && o.input == other && o.control == l.control)
+            .map(|(k, _)| *k)
     }
 
     pub fn remove(&self, key: (u8, u8)) {
@@ -335,14 +327,12 @@ impl Learned {
                 if let Some(w) = word.or_else(|| l.arg.map(|a| a.to_string())) {
                     o.insert("value".into(), json!(w));
                 }
-                if let Input::Cc14(fine) = l.input {
-                    o.insert("fine".into(), json!(format!("{status:02X} {fine:02X}")));
-                }
                 if l.input != default_input(status) {
                     let (input, ticks) = match l.input {
                         Input::Note => ("button", None),
                         Input::Cc => ("absolute", None),
-                        Input::Cc14(_) => ("cc14", None),
+                        Input::Msb => ("msb", None),
+                        Input::Lsb => ("lsb", None),
                         Input::Relative => ("relative", None),
                         Input::Jog(t) => ("jog", Some(t)),
                     };
@@ -375,8 +365,6 @@ pub fn from_json(text: &str) -> Result<(String, Map), String> {
         value: Option<String>,
         input: Option<String>,
         ticks: Option<u32>,
-        /// A 14-bit control's fine half's message.
-        fine: Option<String>,
     }
     let file: File = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let mut map = Map::new();
@@ -397,23 +385,8 @@ pub fn from_json(text: &str) -> Result<(String, Map), String> {
             None => default_input(k.0),
             Some("button") => Input::Note,
             Some("absolute") => Input::Cc,
-            Some("cc14") => {
-                let fine = match line.fine.as_deref() {
-                    None => usual_fine(k),
-                    Some(f) => {
-                        let b: Vec<u8> = f
-                            .split_whitespace()
-                            .map(|b| u8::from_str_radix(b, 16))
-                            .collect::<Result<_, _>>()
-                            .map_err(|_| at("the fine message isn't two hex bytes".into()))?;
-                        match b[..] {
-                            [s, d] if s == status => d,
-                            _ => return Err(at("the fine message isn't on the same channel".into())),
-                        }
-                    }
-                };
-                Input::Cc14(fine)
-            }
+            Some("msb") => Input::Msb,
+            Some("lsb") => Input::Lsb,
             Some("relative") => Input::Relative,
             Some("jog") => Input::Jog(line.ticks.unwrap_or(720)),
             Some(x) => return Err(at(format!("no input kind {x}"))),
@@ -536,18 +509,25 @@ fn translate(bytes: &[u8], learned: &Learned) -> Option<(Control, Option<Command
         Kind::Continuous(range) => range.from_pos(t),
         _ => t,
     };
-    let Some(l) = learned.get(key) else {
-        // The fine half of a 14-bit control: with the coarse half sent before it.
-        let (coarse, l) = learned.coarse_for(key)?;
-        let high = learned.0.lock().unwrap().coarse.get(&coarse).copied()?;
-        let t = ((high as u32) << 7 | data2 as u32) as f64 / 16383.0;
-        return Some((l.control, l.control.command(travel(&l, t))));
-    };
+    let l = learned.get(key)?;
     let value = match l.input {
-        Input::Cc14(_) => {
-            // Kept for the fine half, which sends the value.
-            learned.0.lock().unwrap().coarse.insert(key, data2);
-            return Some((l.control, None));
+        // A 14-bit control's coarse half: kept for the fine half, which sends the
+        // value. Without a fine half, it's a 7-bit knob.
+        Input::Msb => {
+            if learned.partner(key, &l).is_none() {
+                travel(&l, data2 as f64 / 127.0)
+            } else {
+                learned.0.lock().unwrap().coarse.insert(key, data2);
+                return Some((l.control, None));
+            }
+        }
+        Input::Lsb => {
+            let coarse = learned.partner(key, &l)?;
+            let high = learned.0.lock().unwrap().coarse.get(&coarse).copied();
+            let Some(high) = high else {
+                return Some((l.control, None));
+            };
+            travel(&l, ((high as u32) << 7 | data2 as u32) as f64 / 16383.0)
         }
         Input::Note if data2 > 0 => l.control.press_value(l.arg),
         Input::Note => 0.0,
@@ -812,8 +792,7 @@ mod tests {
         ));
     }
 
-    /// A 14-bit knob's two halves make one fine value; the fine half alone, with no
-    /// coarse half yet, does nothing, and has no row of its own.
+    /// A 14-bit knob's two halves make one fine value.
     #[test]
     fn fourteen_bit_knobs() {
         use crate::core::bus::DeckControl;
@@ -827,19 +806,25 @@ mod tests {
         // One fine step on: a hair more, not a jump.
         let a = filter(cmd14(0xB6, 0x17, 64, 1));
         assert!(a > mid && a - mid < 1e-3, "{a}");
+        // The fine half alone, before any coarse half: nothing.
         let learned = ddj();
         assert!(translate(&[0xB6, 0x37, 5], &learned).and_then(|t| t.1).is_none());
-        assert!(learned.is_fine_half((0xB6, 0x37)));
-        // Setting the coarse half to 14-bit takes over a binding on the fine half.
+        // Two rows on one command, one marked coarse and one fine, are a pair,
+        // whatever their numbers; a coarse half alone is a 7-bit knob.
         let l = Learned::default();
         let c = Control::Deck(deck(0), DeckControl::Filter);
-        l.set((0xB6, 0x37), Learn { control: c, arg: None, input: Input::Cc });
-        l.set((0xB6, 0x17), Learn { control: c, arg: None, input: Input::Cc14(0x37) });
-        assert!(l.get((0xB6, 0x37)).is_none());
+        l.set((0xB6, 0x17), Learn { control: c, arg: None, input: Input::Msb });
+        let alone = translate(&[0xB6, 0x17, 127], &l).and_then(|t| t.1);
+        assert!(matches!(alone, Some(Command::Param(_, v)) if v == 1.0), "{alone:?}");
+        l.set((0xB6, 0x40), Learn { control: c, arg: None, input: Input::Lsb });
+        assert_eq!(l.partner((0xB6, 0x17), &l.get((0xB6, 0x17)).unwrap()), Some((0xB6, 0x40)));
+        assert!(translate(&[0xB6, 0x17, 127], &l).and_then(|t| t.1).is_none());
+        let both = translate(&[0xB6, 0x40, 127], &l).and_then(|t| t.1);
+        assert!(matches!(both, Some(Command::Param(_, v)) if v == 1.0), "{both:?}");
         let json = l.to_json("x");
-        assert!(json.contains("\"cc14\"") && json.contains("\"fine\": \"B6 37\""), "{json}");
+        assert!(json.contains("\"msb\"") && json.contains("\"lsb\""), "{json}");
         let (_, back) = from_json(&json).unwrap();
-        assert_eq!(back[&(0xB6, 0x17)].input, Input::Cc14(0x37));
+        assert_eq!(back[&(0xB6, 0x40)].input, Input::Lsb);
     }
 
     #[test]

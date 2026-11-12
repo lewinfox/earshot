@@ -55,7 +55,50 @@ pub struct TopBar<'a> {
 
 impl Panel for TopBar<'_> {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        ui.horizontal(|ui| {
+        // Three groups in one row: the system's state on the right (laid out first,
+        // so it has its room), the app's controls and the jobs on the left, and the
+        // effect units centred in the gap between them, never over either.
+        let row = egui::Rect::from_min_size(
+            ui.max_rect().min,
+            egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+        );
+        let child = |ui: &mut Ui, rect: egui::Rect, layout: egui::Layout| {
+            ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout))
+        };
+        let mut right = child(ui, row, egui::Layout::right_to_left(egui::Align::Center));
+        self.right_group(&mut right, cx);
+        let right_edge = right.min_rect().left();
+        let mut left = child(ui, row, egui::Layout::left_to_right(egui::Align::Center));
+        self.left_group(&mut left, cx);
+        let left_edge = left.min_rect().right();
+        let gap = egui::Rect::from_x_y_ranges(left_edge + 12.0..=right_edge - 12.0, row.y_range());
+        let mut fx = child(ui, gap, egui::Layout::left_to_right(egui::Align::Center));
+        centred_fx(&mut fx, row.center().x, cx);
+        ui.allocate_rect(
+            row.union(left.min_rect()).union(right.min_rect()),
+            egui::Sense::hover(),
+        );
+    }
+}
+
+impl TopBar<'_> {
+    /// The system's state, from the right edge in.
+    fn right_group(&self, ui: &mut Ui, cx: &mut Cx) {
+        if ui.button("Keys").clicked() {
+            cx.send(ViewCmd::ToggleModal(Modal::Keys));
+        }
+        self.memory_meter(ui, cx);
+        ui.add_space(6.0);
+        self.cpu_meter(ui, cx);
+        ui.add_space(6.0);
+        self.midi_pill(ui, cx);
+        self.audio_pill(ui, cx);
+        self.analysis_pill(ui, cx);
+    }
+
+    /// The menus, the mode and its options, then the jobs.
+    fn left_group(&self, ui: &mut Ui, cx: &mut Cx) {
+        {
             ui.menu_button("Menu", |ui| {
                 ui.menu_button("Import", |ui| {
                     if ui.button("Folder…").clicked() {
@@ -147,31 +190,13 @@ impl Panel for TopBar<'_> {
             if mode == Mode::Prepare {
                 target(ui, cx);
             }
-            {
-                deck_count(ui, cx);
-                layers(ui, cx);
-                panes(ui, cx);
-                centred_fx(ui, cx);
-            }
-            // The system's state on the right, built from the right edge in.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Keys").clicked() {
-                    cx.send(ViewCmd::ToggleModal(Modal::Keys));
-                }
-                self.memory_meter(ui, cx);
-                ui.add_space(6.0);
-                self.cpu_meter(ui, cx);
-                ui.add_space(6.0);
-                self.midi_pill(ui, cx);
-                self.audio_pill(ui, cx);
-                self.jobs_pill(ui, cx);
-                self.analysis_pill(ui, cx);
-            });
-        });
+            deck_count(ui, cx);
+            layers(ui, cx);
+            panes(ui, cx);
+            self.jobs_pill(ui, cx);
+        }
     }
-}
 
-impl TopBar<'_> {
     /// The output device and its format: green, or amber with a warning. Clicked,
     /// Settings > Audio.
     fn audio_pill(&self, ui: &mut Ui, cx: &mut Cx) {
@@ -396,13 +421,15 @@ fn panes(ui: &mut Ui, cx: &mut Cx) {
     }
 }
 
-/// The effect units, centred in the bar (as far as what's left of them allows). Their
-/// width is last frame's: the first frame they sit a little off, then settle.
-fn centred_fx(ui: &mut Ui, cx: &mut Cx) {
+/// The effect units, centred on `centre` (the bar's middle) as far as `ui` (the gap
+/// between the bar's other groups) allows. Their width is last frame's: the first
+/// frame they sit a little off, then settle.
+fn centred_fx(ui: &mut Ui, centre: f32, cx: &mut Cx) {
     let id = egui::Id::new("top-bar-fx-width");
     let width: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(0.0);
-    let at = ui.max_rect().center().x - width / 2.0;
-    ui.add_space((at - ui.cursor().min.x).max(12.0));
+    let room = ui.max_rect().x_range();
+    let at = (centre - width / 2.0).min(room.max - width).max(room.min);
+    ui.add_space(at - ui.cursor().min.x);
     let start = ui.cursor().min.x;
     super::fx::show(ui, cx.engine.snap.as_ref(), cx.out);
     let drawn = ui.cursor().min.x - start;

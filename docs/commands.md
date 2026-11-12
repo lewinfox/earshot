@@ -62,9 +62,9 @@ A name goes from the general to the particular: where, what, which part, what to
 | Command | Number | What it does |
 |---|---|---|
 | `mixer_crossfader` | -1 to 1 | crossfader |
-| `mixer_master_level` | 0 to 5 | master level |
+| `mixer_master_level` | 0 to 1 | master level |
 | `mixer_master_balance` | -1 to 1 | master balance |
-| `mixer_headphone_level` | 0 to 5 | headphone level |
+| `mixer_headphone_level` | 0 to 1 | headphone level |
 | `mixer_headphone_mix` | 0 to 1 | headphone mix |
 
 ## Effect units: `fx_N_`, N = 1 to 1

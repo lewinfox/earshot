@@ -268,7 +268,7 @@ impl MainOut {
         ParamSpec {
             name: "gain",
             min: 0.0,
-            max: 5.0,
+            max: 1.0,
             default: 1.0,
         },
         ParamSpec {

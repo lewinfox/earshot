@@ -168,18 +168,20 @@ pub const CROSSFADER: Range = Range {
     centre: Some(0.0),
     format: fmt_balance,
 };
+/// The master output: none to full, no boost, no centre.
 pub const MASTER_GAIN: Range = Range {
     name: "Master level",
     min: 0.0,
-    max: 5.0,
+    max: 1.0,
     default: 1.0,
-    centre: Some(1.0),
+    centre: None,
     format: fmt_db,
 };
 pub const BALANCE: Range = Range {
     name: "Balance",
     ..CROSSFADER
 };
+/// The headphones: as the master.
 pub const HEAD_GAIN: Range = Range {
     name: "Headphone level",
     ..MASTER_GAIN

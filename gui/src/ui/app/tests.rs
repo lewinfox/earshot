@@ -1980,6 +1980,27 @@ fn the_status_line_shows_whats_running() {
     assert!(h.query_by_label_contains("job").is_none());
 }
 
+/// The top bar's groups never overlap: with a job running (its pill left of the
+/// effect units) and the long no-audio pill, the effect units sit between the
+/// two, clear of both, in a window narrower than the app allows.
+#[test]
+fn the_top_bar_keeps_its_groups_apart() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = start("top-bar");
+    h.state_mut().dispatch(ViewCmd::SetMode(Mode::Perform).into());
+    let _job = h.state().jobs.start("Exporting to STICK");
+    h.set_size(vec2(1500.0, 900.0));
+    steps(&mut h, 4);
+    let rect = |h: &H, label: &str| h.get_by_label(label).rect();
+    let fx_left = rect(&h, "FX").left();
+    let fx_right = rect(&h, "REL").right();
+    let job = rect(&h, "1 job");
+    let audio = h.get_by_label_contains("no audio device").rect();
+    assert!(job.right() < fx_left, "the jobs pill {job:?} is left of the FX ({fx_left})");
+    assert!(fx_right < audio.left(), "the FX ({fx_right}) are left of the audio pill {audio:?}");
+    render(&mut h, "top-bar");
+}
+
 /// A stick with files on it isn't ready for a library: its pane says so and offers
 /// to format it; a playlist's "Send to" opens the add window, which offers to format
 /// first, and the format window says what's lost. (The stick here has no device, so
