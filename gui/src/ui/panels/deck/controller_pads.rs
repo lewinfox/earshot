@@ -6,7 +6,12 @@
 //! - Hot cue: the cue's letter, its time and its label.
 //! - Beat loop: a loop of 1/4, 1/2, 1, 2, 4, 8, 16 or 32 beats.
 //! - Beat jump: back and forward in pairs, by 1, 2, 4 and 8 beats.
+//! - Keyboard: first each hot cue's letter, to pick one; then each pad's semitones
+//!   on its page (`core::pads`), the track's own key (±0) tinted.
+//! - Key shift: each pad's semitones, or its step on page 5; the key now tinted.
 //! - The other modes are things earshot doesn't do yet: the pads are blank.
+//!
+//! Shift-click is the pad with SHIFT: pads 7 and 8 turn the page.
 
 use egui::{Color32, Ui, vec2};
 
@@ -15,6 +20,7 @@ use super::loops::size_label;
 use super::{DeckInfo, DeckUi};
 use crate::core::bus::{DeckControl, hot_cue_letter};
 use crate::core::command::Command;
+use crate::core::pads::PadAction;
 use crate::core::view::PadMode;
 use crate::ui::theme::THEME;
 use crate::ui::util;
@@ -63,10 +69,18 @@ impl DeckUi {
                                     .tinted(pad.tinted),
                             )
                             .on_hover_text(format!("{} · pad {}\n{}", mode.label(), i + 1, pad.tip));
-                        let Some(control) = pad.control else { continue };
-                        match held(ui, &r) {
+                        let Some(mut control) = pad.control else { continue };
+                        let held = held(ui, &r);
+                        // Shift-click: the pad's SHIFT message.
+                        if let DeckControl::ModePad { shift, .. } = &mut control {
+                            *shift = ui.input(|i| i.modifiers.shift);
+                        }
+                        match held {
                             Some(true) => self.control(out, control, pad.value),
-                            Some(false) if control == DeckControl::Hotcue(i as u8) => {
+                            Some(false)
+                                if control == DeckControl::Hotcue(i as u8)
+                                    || matches!(control, DeckControl::ModePad { .. }) =>
+                            {
                                 self.control(out, control, 0.0)
                             }
                             _ => {}
@@ -129,6 +143,7 @@ impl DeckUi {
                     value: beats,
                 }
             }
+            PadMode::Keyboard | PadMode::KeyShift => self.mode_pad_face(mode, i),
             _ => Pad {
                 label: String::new(),
                 caption: None,
@@ -138,6 +153,82 @@ impl DeckUi {
                 control: None,
                 value: 0.0,
             },
+        }
+    }
+
+    /// Pad `i` in keyboard or key shift mode.
+    fn mode_pad_face(&self, mode: PadMode, i: usize) -> Pad {
+        let pads = &self.pads;
+        let page = pads.page(mode);
+        let pages = if mode == PadMode::Keyboard { 4 } else { 5 };
+        let control = Some(DeckControl::ModePad { mode, pad: i as u8, shift: false });
+        let paging = format!(
+            "Page {} of {pages}: shift-click pad 7 / 8 for the page before / after",
+            page + 1
+        );
+        let semis = |n: i8| match n {
+            0 => "±0".to_string(),
+            n => format!("{n:+}"),
+        };
+        if mode == PadMode::Keyboard {
+            let Some(slot) = pads.keyboard_cue(&self.state) else {
+                // Picking a hot cue.
+                let letter = hot_cue_letter(i as u8);
+                let set = self.state.hotcues[i].is_some();
+                return Pad {
+                    label: letter.to_string(),
+                    caption: Some("pick".into()),
+                    colour: THEME.hotcue[i],
+                    tinted: set,
+                    tip: if set {
+                        format!("Play hot cue {letter} on the keyboard")
+                    } else {
+                        format!("Set hot cue {letter} here and play it on the keyboard")
+                    },
+                    control,
+                    value: 1.0,
+                };
+            };
+            let letter = hot_cue_letter(slot);
+            let note = pads.action(mode, i);
+            return Pad {
+                label: match note {
+                    Some(PadAction::Semitones(n)) => semis(n),
+                    _ => String::new(),
+                },
+                caption: (note == Some(PadAction::Semitones(0))).then(|| format!("{letter} · own key")),
+                colour: THEME.hotcue[slot as usize],
+                tinted: note == Some(PadAction::Semitones(0)),
+                tip: format!(
+                    "Play hot cue {letter} in this key\n{paging}\nShift-click pads 1-6: pick another hot cue"
+                ),
+                control,
+                value: 1.0,
+            };
+        }
+        let action = pads.action(mode, i);
+        let label = match action {
+            Some(PadAction::Semitones(n)) => semis(n),
+            Some(PadAction::Step(n)) if n > 0 => format!("↑{n}"),
+            Some(PadAction::Step(n)) => format!("↓{}", -n),
+            Some(PadAction::Reset) => "RESET".into(),
+            Some(PadAction::KeySync) | None => String::new(),
+        };
+        let tip = match action {
+            Some(PadAction::Semitones(_)) => "Shift the key to this".to_string(),
+            Some(PadAction::Step(_)) => "Move the key by this many semitones".into(),
+            Some(PadAction::Reset) => "Back to the track's own key".into(),
+            Some(PadAction::KeySync) => "Key sync: not in earshot yet".into(),
+            None => String::new(),
+        };
+        Pad {
+            label,
+            caption: None,
+            colour: THEME.accent,
+            tinted: matches!(action, Some(PadAction::Semitones(n)) if n as f64 == self.state.key_shift.round()),
+            tip: format!("{tip}\n{paging}"),
+            control,
+            value: 1.0,
         }
     }
 }

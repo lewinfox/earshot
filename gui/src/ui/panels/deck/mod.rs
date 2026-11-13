@@ -41,6 +41,7 @@ use crate::core::bus::{Control, DeckControl};
 use crate::core::command::{Command, DeckCmd, ViewCmd};
 use crate::core::store::TrackCues;
 use crate::core::track::Track;
+use crate::core::pads::DeckPads;
 use crate::core::view::PadMode;
 use crate::ui::panels::library::drag;
 use crate::ui::panels::{Cx, Panel};
@@ -329,6 +330,8 @@ pub struct DeckUi {
     overlays: Vec<Overlay>,
     /// The controller's pad mode on this deck: what its pads page shows.
     pub pad_mode: PadMode,
+    /// Keyboard and key shift mode's pages and hot cue.
+    pub pads: DeckPads,
 }
 
 impl DeckUi {
@@ -336,6 +339,7 @@ impl DeckUi {
         DeckUi {
             overlays: Vec::new(),
             pad_mode: PadMode::default(),
+            pads: DeckPads::default(),
             id,
             shown: 0.0,
             seen_generation: u64::MAX,
@@ -418,6 +422,16 @@ impl DeckUi {
     /// Send what one of this deck's controls sends for `value`.
     fn control(&self, out: &mut Vec<Command>, c: DeckControl, value: f64) {
         out.extend(Control::Deck(self.id, c).command(value));
+    }
+
+    /// A pad pressed or let go in keyboard or key shift mode: what the deck is told.
+    pub fn mode_pad(&mut self, mode: PadMode, pad: usize, shift: bool, down: bool) -> Vec<Command> {
+        let state = self.state;
+        self.pads
+            .press(mode, pad, shift, down, &state)
+            .into_iter()
+            .map(|c| Command::Deck(self.id, DeckCmd::Engine(c)))
+            .collect()
     }
 
     /// A deck command that isn't a registry control.
@@ -649,8 +663,21 @@ impl DeckUi {
                     format!("{} - {}", info.title, info.artist)
                 };
                 ui.horizontal(|ui| {
+                    // The key as it sounds: moved by the key shift, which shows beside it.
                     if let Some(k) = info.key {
-                        key_chip_sized(ui, k, 15.0);
+                        let n = s.key_shift.round() as i32;
+                        key_chip_sized(ui, crate::core::keys::transpose(k, n), 15.0);
+                        if n != 0 {
+                            ui.label(
+                                RichText::new(format!("{n:+}"))
+                                    .size(11.0)
+                                    .color(THEME.muted),
+                            )
+                            .on_hover_text(format!(
+                                "Key shifted {n:+} semitones from the track's {}",
+                                util::key_name(k)
+                            ));
+                        }
                     }
                     let r = ui.add(
                         egui::Label::new(RichText::new(title).strong().size(15.0))
@@ -946,6 +973,8 @@ pub struct DeckLayout {
 }
 
 /// A Perform deck.
+
+
 pub struct DeckPanel<'a> {
     pub deck: &'a mut DeckUi,
     pub layout: DeckLayout,
@@ -958,8 +987,6 @@ impl Panel for DeckPanel<'_> {
         self.deck.show(ui, self.layout, info, cx.out);
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

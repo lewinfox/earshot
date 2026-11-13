@@ -213,6 +213,15 @@ pub enum ViewCmd {
     Target(DeckId),
     /// The controller's pads on this deck are in this mode now.
     PadMode(DeckId, PadMode),
+    /// A pad pressed (`down`) or let go in keyboard or key shift mode: see
+    /// `core::pads`.
+    ModePad {
+        deck: DeckId,
+        mode: PadMode,
+        pad: u8,
+        shift: bool,
+        down: bool,
+    },
     /// Four decks: the left hand (0) between decks 1 and 3, or the right (1) between
     /// 2 and 4.
     SwitchLayer(usize),

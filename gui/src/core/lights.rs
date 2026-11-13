@@ -7,6 +7,8 @@
 //! together while a loop plays (RELOOP/EXIT lit). BEAT FX ON gets "on" while the
 //! effect is on, which the DDJ-400 shows by flashing it (and "off" lit steady).
 //!
+//! Pads in keyboard and key shift mode light as `core::pads` says.
+//!
 //! A thread works out every mapped button's light from the engine's latest state,
 //! 20 times a second, and sends only the ones that changed. The controller can't
 //! flash a light itself, so the thread does, half a second on and half off.
@@ -22,6 +24,7 @@ use midir::MidiOutputConnection;
 
 use super::bus::{Control, DeckControl, FxControl};
 use super::midi::{Input, Learned};
+use super::pads::AllPads;
 
 /// How a light shows.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -37,8 +40,9 @@ const TICK: Duration = Duration::from_millis(50);
 const FLASH: Duration = Duration::from_millis(500);
 
 /// The light for a button mapped to `control` (with its number, `arg`), given the
-/// engine's state. Buttons whose command has no on or off stay dark.
-pub fn light(control: Control, arg: Option<f64>, snap: &EngineSnapshot) -> Light {
+/// engine's state and the decks' pads. Buttons whose command has no on or off stay
+/// dark.
+pub fn light(control: Control, arg: Option<f64>, snap: &EngineSnapshot, pads: &AllPads) -> Light {
     let on = |b: bool| if b { Light::On } else { Light::Off };
     let flash = |b: bool| if b { Light::Flash } else { Light::Off };
     match control {
@@ -79,6 +83,10 @@ pub fn light(control: Control, arg: Option<f64>, snap: &EngineSnapshot) -> Light
                 DeckControl::Quantize => on(deck.quantize),
                 DeckControl::Keylock => on(deck.keylock),
                 DeckControl::Vinyl => on(deck.vinyl),
+                DeckControl::KeyShiftReset => on(deck.key_shift != 0.0),
+                DeckControl::ModePad { mode, pad, shift } => {
+                    pads[d.index()].light(mode, pad as usize, shift, deck)
+                }
                 _ => Light::Off,
             }
         }
@@ -119,18 +127,25 @@ pub fn value(light: Light, lit_half: bool) -> u8 {
 }
 
 /// Every mapped button's message and value, as they should be now.
-pub fn frame(learned: &Learned, snap: &EngineSnapshot, lit_half: bool) -> BTreeMap<(u8, u8), u8> {
+pub fn frame(learned: &Learned, snap: &EngineSnapshot, pads: &AllPads, lit_half: bool) -> BTreeMap<(u8, u8), u8> {
     learned
         .all()
         .into_iter()
         .filter(|(_, l)| l.input == Input::Note)
-        .map(|(k, l)| (k, value(light(l.control, l.arg, snap), lit_half)))
+        .map(|(k, l)| (k, value(light(l.control, l.arg, snap, pads), lit_half)))
         .collect()
 }
 
-/// Where the lights thread reads the engine's state. The app puts the engine's
-/// monitor here, and again when the sound card is reopened.
-pub type MonitorSlot = Arc<Mutex<Option<Monitor>>>;
+/// Where the lights thread reads the engine's state and the decks' pads. The app
+/// puts the engine's monitor here (again when the sound card is reopened), and the
+/// pads whenever one is pressed.
+pub type MonitorSlot = Arc<Mutex<LightsState>>;
+
+#[derive(Default)]
+pub struct LightsState {
+    pub monitor: Option<Monitor>,
+    pub pads: AllPads,
+}
 
 /// The lights thread; dropping it puts every light out and stops it.
 pub struct Lights {
@@ -168,10 +183,13 @@ fn run(mut outputs: Vec<MidiOutputConnection>, learned: &Learned, monitor: &Moni
         }
     };
     while !stop.load(Ordering::Relaxed) {
-        let snap = monitor.lock().unwrap().as_ref().map(|m| m.snapshot());
+        let (snap, pads) = {
+            let s = monitor.lock().unwrap();
+            (s.monitor.as_ref().map(|m| m.snapshot()), s.pads)
+        };
         let lit_half = (start.elapsed().as_millis() / FLASH.as_millis()) % 2 == 0;
         let now = match snap {
-            Some(s) => frame(learned, &s, lit_half),
+            Some(s) => frame(learned, &s, &pads, lit_half),
             None => BTreeMap::new(),
         };
         for (&k, &v) in &now {
@@ -220,14 +238,14 @@ mod tests {
     fn play_and_cue_follow_the_transport() {
         let lights = |s: &EngineSnapshot| {
             [DeckControl::LoopIn, DeckControl::LoopOut, DeckControl::Cue, DeckControl::Play]
-                .map(|c| light(d(c), None, s))
+                .map(|c| light(d(c), None, s, &AllPads::default()))
         };
         use Light::*;
         let mut s = EngineSnapshot::default();
         assert_eq!(lights(&s), [On, On, Off, Off], "nothing loaded");
-        assert_eq!(light(d(DeckControl::Sync), None, &s), Off, "nothing else lit");
+        assert_eq!(light(d(DeckControl::Sync), None, &s, &AllPads::default()), Off, "nothing else lit");
         s.decks[0].pfl = true;
-        assert_eq!(light(d(DeckControl::Pfl), None, &s), On, "but headphone cue");
+        assert_eq!(light(d(DeckControl::Pfl), None, &s, &AllPads::default()), On, "but headphone cue");
         s = loaded();
         assert_eq!(lights(&s), [On, On, On, Flash], "paused on the cue point");
         s.decks[0].playing = true;
@@ -241,36 +259,36 @@ mod tests {
     fn loops_flash_their_buttons() {
         let mut s = loaded();
         s.decks[0].playing = true;
-        assert_eq!(light(d(DeckControl::LoopIn), None, &s), Light::On, "ready");
-        assert_eq!(light(d(DeckControl::Reloop), None, &s), Light::Off);
+        assert_eq!(light(d(DeckControl::LoopIn), None, &s, &AllPads::default()), Light::On, "ready");
+        assert_eq!(light(d(DeckControl::Reloop), None, &s, &AllPads::default()), Light::Off);
         // LOOP IN pressed: it flashes, LOOP OUT stays lit.
         s.decks[0].loop_in = Some(1.0);
-        assert_eq!(light(d(DeckControl::LoopIn), None, &s), Light::Flash);
-        assert_eq!(light(d(DeckControl::LoopOut), None, &s), Light::On);
+        assert_eq!(light(d(DeckControl::LoopIn), None, &s, &AllPads::default()), Light::Flash);
+        assert_eq!(light(d(DeckControl::LoopOut), None, &s, &AllPads::default()), Light::On);
         // LOOP OUT pressed: a 4-beat loop at 120 BPM (2 s); both flash.
         s.decks[0].loop_out = Some(3.0);
         s.decks[0].loop_active = true;
-        assert_eq!(light(d(DeckControl::LoopIn), None, &s), Light::Flash);
-        assert_eq!(light(d(DeckControl::LoopOut), None, &s), Light::Flash);
-        assert_eq!(light(d(DeckControl::Reloop), None, &s), Light::On);
-        assert_eq!(light(d(DeckControl::BeatLoop(4.0)), Some(4.0), &s), Light::Flash);
-        assert_eq!(light(d(DeckControl::BeatLoop(8.0)), Some(8.0), &s), Light::Off);
+        assert_eq!(light(d(DeckControl::LoopIn), None, &s, &AllPads::default()), Light::Flash);
+        assert_eq!(light(d(DeckControl::LoopOut), None, &s, &AllPads::default()), Light::Flash);
+        assert_eq!(light(d(DeckControl::Reloop), None, &s, &AllPads::default()), Light::On);
+        assert_eq!(light(d(DeckControl::BeatLoop(4.0)), Some(4.0), &s, &AllPads::default()), Light::Flash);
+        assert_eq!(light(d(DeckControl::BeatLoop(8.0)), Some(8.0), &s, &AllPads::default()), Light::Off);
     }
 
     #[test]
     fn pads_sync_and_effects() {
         let mut s = loaded();
         s.decks[0].hotcues[2] = Some(5.0);
-        assert_eq!(light(d(DeckControl::Hotcue(2)), None, &s), Light::On);
-        assert_eq!(light(d(DeckControl::HotcueClear(2)), None, &s), Light::On);
-        assert_eq!(light(d(DeckControl::Hotcue(3)), None, &s), Light::Off);
+        assert_eq!(light(d(DeckControl::Hotcue(2)), None, &s, &AllPads::default()), Light::On);
+        assert_eq!(light(d(DeckControl::HotcueClear(2)), None, &s, &AllPads::default()), Light::On);
+        assert_eq!(light(d(DeckControl::Hotcue(3)), None, &s, &AllPads::default()), Light::Off);
         s.decks[0].sync = true;
-        assert_eq!(light(d(DeckControl::Sync), None, &s), Light::On);
-        assert_eq!(light(d(DeckControl::BeatJump), Some(4.0), &s), Light::Off, "no state");
-        assert_eq!(light(Control::Fx(0, FxControl::On), None, &s), Light::Off);
+        assert_eq!(light(d(DeckControl::Sync), None, &s, &AllPads::default()), Light::On);
+        assert_eq!(light(d(DeckControl::BeatJump), Some(4.0), &s, &AllPads::default()), Light::Off, "no state");
+        assert_eq!(light(Control::Fx(0, FxControl::On), None, &s, &AllPads::default()), Light::Off);
         s.mixer.fx[0].enabled = true;
-        assert_eq!(light(Control::Fx(0, FxControl::On), None, &s), Light::On, "the controller flashes it");
-        assert_eq!(light(Control::Fx(0, FxControl::Release), None, &s), Light::On);
+        assert_eq!(light(Control::Fx(0, FxControl::On), None, &s, &AllPads::default()), Light::On, "the controller flashes it");
+        assert_eq!(light(Control::Fx(0, FxControl::Release), None, &s, &AllPads::default()), Light::On);
     }
 
     #[test]

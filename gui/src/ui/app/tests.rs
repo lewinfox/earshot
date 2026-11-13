@@ -2692,6 +2692,62 @@ fn pad_modes_label_the_pads() {
     assert_eq!(h.state().panels.decks[1].pad_mode, PadMode::HotCue);
 }
 
+/// Keyboard mode: a pad picks a hot cue (an empty one is set at the playhead), then
+/// each pad plays it with the key shifted by its semitones; SHIFT + pad 7 turns to
+/// the page with +12. Key shift mode: a pad sets the key.
+#[test]
+fn keyboard_and_key_shift_pads() {
+    use crate::core::view::{PadMode, ViewCmd};
+    let mut h = start("keyboard-pads");
+    h.state_mut().prefs.pretend_controller = true;
+    let deck = DeckId::new(0).unwrap();
+    let id = ids(&h)[0];
+    h.state_mut().load(Some(deck), id);
+    settle_until(&mut h, |a| a.panels.decks[0].wave.is_some());
+    let snap = |h: &H| *h.state().frame.snap.as_ref().unwrap().deck(deck);
+    let pad = |h: &mut H, mode, pad: u8, shift| {
+        for down in [true, false] {
+            h.state_mut().dispatch(Command::View(ViewCmd::ModePad { deck, mode, pad, shift, down }));
+        }
+        settle(h);
+    };
+    h.state_mut().dispatch(Command::View(ViewCmd::PadMode(deck, PadMode::Keyboard)));
+    settle(&mut h);
+    // Picking: the pads show the hot cues' letters.
+    assert_eq!(h.state().panels.decks[0].pads.keyboard_cue(&snap(&h)), None);
+    assert!(h.query_all_by_label("C").count() >= 2, "and deck 2's hot cues");
+
+    // Pad 3: hot cue C, empty, so set here (2 s in).
+    h.state_mut().dispatch((deck, EngineCmd::Seek(2.0)).into());
+    settle(&mut h);
+    pad(&mut h, PadMode::Keyboard, 2, false);
+    let cue = snap(&h).hotcues[2].expect("hot cue C set");
+    assert_eq!(h.state().panels.decks[0].pads.keyboard_cue(&snap(&h)), Some(2));
+    h.get_by_label("±0");
+    h.get_by_label("+7");
+    render(&mut h, "keyboard-pads");
+
+    // Pad 2 (+5) from elsewhere: back to C, a fourth up.
+    h.state_mut().dispatch((deck, EngineCmd::Seek(10.0)).into());
+    settle(&mut h);
+    pad(&mut h, PadMode::Keyboard, 1, false);
+    assert_eq!(snap(&h).key_shift, 5.0);
+    assert!((snap(&h).position - cue).abs() < 0.05, "at the hot cue");
+
+    // SHIFT + pad 7: page 1, whose pad 1 is an octave up.
+    pad(&mut h, PadMode::Keyboard, 6, true);
+    pad(&mut h, PadMode::Keyboard, 0, false);
+    assert_eq!(snap(&h).key_shift, 12.0);
+
+    // Key shift mode, page 2: pad 8 is +3; the key stays when the mode changes.
+    h.state_mut().dispatch(Command::View(ViewCmd::PadMode(deck, PadMode::KeyShift)));
+    settle(&mut h);
+    assert_eq!(snap(&h).key_shift, 12.0);
+    pad(&mut h, PadMode::KeyShift, 7, false);
+    assert_eq!(snap(&h).key_shift, 3.0);
+    render(&mut h, "key-shift-pads");
+}
+
 /// Controller mode: Perform's decks, then the Mapping, History and Library tabs. MIDI
 /// messages reach the Mapping tab's list and the History.
 #[test]

@@ -1,5 +1,5 @@
-//! The tempo column on a deck's outside edge: SYNC (right-click to lead), Q and
-//! KEY over the tempo fader, its nudge buttons and its range.
+//! The tempo column on a deck's outside edge: SYNC (right-click to lead), Q,
+//! KEYLOCK and the key shift over the tempo fader, its nudge buttons and its range.
 
 use earshot_engine::{DeckCmd as EngineCmd, TempoRange};
 use egui::{Ui, vec2};
@@ -175,6 +175,51 @@ impl DeckUi {
                 .on_hover_text("Keylock: the tempo fader changes the speed but not the key");
             if held(ui, &r) == Some(true) {
                 self.control(out, DeckControl::Keylock, 1.0);
+            }
+        });
+        self.key_shift_buttons(ui, out);
+    }
+
+    /// Key down a semitone, the shift (click: back to the track's key), key up.
+    fn key_shift_buttons(&mut self, ui: &mut Ui, out: &mut Vec<Command>) {
+        let n = self.state.key_shift;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let side = vec2(20.0, 18.0);
+            let buttons = [
+                (
+                    "−".to_string(),
+                    side,
+                    false,
+                    "Key down a semitone",
+                    DeckControl::KeyShiftDown,
+                ),
+                (
+                    if n == 0.0 {
+                        "KEY 0".into()
+                    } else {
+                        format!("KEY {n:+}")
+                    },
+                    vec2(TEMPO_W - 2.0 * side.x - 8.0, side.y),
+                    n != 0.0,
+                    "Key shift in semitones, tempo untouched. Click: back to the track's key",
+                    DeckControl::KeyShiftReset,
+                ),
+                (
+                    "+".to_string(),
+                    side,
+                    false,
+                    "Key up a semitone",
+                    DeckControl::KeyShiftUp,
+                ),
+            ];
+            for (label, size, lit, tip, control) in buttons {
+                let r = ui
+                    .add(HwButton::new(&label, THEME.accent, size).font(9.0).lit(lit))
+                    .on_hover_text(tip);
+                if held(ui, &r) == Some(true) {
+                    self.control(out, control, 1.0);
+                }
             }
         });
     }

@@ -335,7 +335,10 @@ impl EarshotApp {
             lib,
             sink,
             rx,
-            lights_monitor: Arc::new(std::sync::Mutex::new(monitor.clone())),
+            lights_monitor: Arc::new(std::sync::Mutex::new(crate::core::lights::LightsState {
+                monitor: monitor.clone(),
+                pads: Default::default(),
+            })),
             monitor,
             audio,
             controller,
@@ -447,7 +450,7 @@ impl EarshotApp {
     /// Read the engine's monitor again, after the sound card was reopened.
     fn reread_monitor(&mut self) {
         self.monitor = self.player.lock().unwrap().monitor();
-        *self.lights_monitor.lock().unwrap() = self.monitor.clone();
+        self.lights_monitor.lock().unwrap().monitor = self.monitor.clone();
         self.frame.snap = self.monitor.as_ref().map(|m| m.snapshot());
     }
 
@@ -957,6 +960,20 @@ impl EarshotApp {
                 }
             }
             ViewCmd::PadMode(d, m) => self.panels.decks[d.index()].pad_mode = m,
+            ViewCmd::ModePad {
+                deck,
+                mode,
+                pad,
+                shift,
+                down,
+            } => {
+                let ui = &mut self.panels.decks[deck.index()];
+                let out = ui.mode_pad(mode, pad as usize, shift, down);
+                self.lights_monitor.lock().unwrap().pads[deck.index()] = ui.pads;
+                for c in out {
+                    self.dispatch(c);
+                }
+            }
             ViewCmd::Target(d) => {
                 // The tools' marks leave the old deck; they're drawn on the new one
                 // from the next frame.
@@ -1043,8 +1060,10 @@ impl EarshotApp {
                     track,
                     playing: sh.playing,
                     bpm: sh.bpm,
-                    // How far the key has moved: not at all with keylock.
-                    key_speed: if sh.keylock { 1.0 } else { sh.tempo },
+                    // How far the key has moved: by the tempo unless keylocked, and
+                    // by the key shift.
+                    key_speed: if sh.keylock { 1.0 } else { sh.tempo }
+                        * earshot_engine::keylock::semitones(sh.key_shift),
                 }
             }
             None => DeckNow {

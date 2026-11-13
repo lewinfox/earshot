@@ -132,10 +132,12 @@ fn ddj400_names() -> Vec<(u8, u8, String, String, Input)> {
 
 /// The DDJ-400's pads in beat loop and beat jump mode (each mode's pads send their
 /// own notes), and its Shift buttons, in earshot's names. From Mixxx's DDJ-400
-/// mapping: pads 1-8 on notes 0x60-0x67 (loops) and 0x20-0x27 (jumps), deck 1 on
+/// mapping: pads 1-8 on notes 0x60-0x67 (loops) and 0x20-0x27 (jumps); keyboard
+/// (0x40-0x47) and key shift (0x70-0x77) from rekordbox's, with SHIFT a channel up; deck 1 on
 /// 0x97, deck 2 on 0x99; on each deck's channel, Shift on 0x3F and CUE/LOOP CALL on
 /// 0x51 / 0x53 (with Shift: 0x3E / 0x3D), Shift + RELOOP/EXIT on 0x50, BEAT SYNC
-/// held on 0x5C and LOOP IN held (4-beat loop) on 0x14 (both seen from the unit). The BEAT FX section, on 0x94: CH SELECT
+/// held on 0x5C and LOOP IN held (4-beat loop) on 0x14 (both seen from the unit), and
+/// the pad mode buttons (from rekordbox's table). The BEAT FX section, on 0x94: CH SELECT
 /// 1 / 2 / MASTER on 0x10 / 0x11 / 0x14, ON/OFF on 0x47 (with Shift, Release FX:
 /// 0x43), BEAT ◀ ▶ on 0x4A / 0x4B and BEAT FX SELECT on 0x63 (with Shift, the previous
 /// effect: 0x64).
@@ -166,6 +168,21 @@ fn ddj400_pads() -> Vec<(u8, u8, String, Option<f64>)> {
         // BEAT SYNC held: sync master. LOOP IN held: a 4-beat loop.
         v.push((status, 0x5C, format!("deck_{d}_sync_set_master"), None));
         v.push((status, 0x14, format!("deck_{d}_beat_loop"), Some(4.0)));
+        // The pad mode buttons (with Shift: the mode printed under each), from
+        // rekordbox's DDJ-400 table. The pads send each mode's own notes, so these
+        // only tell the pads page what the pads do now.
+        for (data1, mode) in [
+            (0x1B, "hot_cue"),
+            (0x69, "keyboard"),
+            (0x6D, "beat_loop"),
+            (0x1E, "pad_fx_1"),
+            (0x20, "beat_jump"),
+            (0x6B, "pad_fx_2"),
+            (0x22, "sampler"),
+            (0x6F, "key_shift"),
+        ] {
+            v.push((status, data1, format!("deck_{d}_set_pad_mode_{mode}"), None));
+        }
     }
     for (d, status) in [(1, 0x97u8), (2, 0x99)] {
         for (i, beats) in [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0].into_iter().enumerate() {
@@ -173,6 +190,15 @@ fn ddj400_pads() -> Vec<(u8, u8, String, Option<f64>)> {
         }
         for (i, beats) in [-1.0, 1.0, -2.0, 2.0, -4.0, 4.0, -8.0, 8.0].into_iter().enumerate() {
             v.push((status, 0x20 + i as u8, format!("deck_{d}_beat_jump"), Some(beats)));
+        }
+        // Keyboard and key shift mode's pads (0x40-0x47, 0x70-0x77), and with SHIFT
+        // (the next channel up), from rekordbox's table.
+        for i in 0..8u8 {
+            let n = Some((i + 1) as f64);
+            v.push((status, 0x40 + i, format!("deck_{d}_keyboard_pad"), n));
+            v.push((status + 1, 0x40 + i, format!("deck_{d}_keyboard_pad_shift"), n));
+            v.push((status, 0x70 + i, format!("deck_{d}_key_shift_pad"), n));
+            v.push((status + 1, 0x70 + i, format!("deck_{d}_key_shift_pad_shift"), n));
         }
     }
     v
@@ -811,6 +837,47 @@ mod tests {
         ));
         assert!(cmd([0x90, 0x7E, 0x7F]).is_none(), "unmapped");
         assert!(cmd([0x90, 0x0B]).is_none(), "too short");
+    }
+
+    /// The pad mode buttons tell the pads page which mode the pads are in.
+    #[test]
+    fn pad_mode_buttons() {
+        use crate::core::view::{PadMode, ViewCmd};
+        for (bytes, d, mode) in [
+            ([0x90, 0x1B, 0x7F], 0, PadMode::HotCue),
+            ([0x90, 0x69, 0x7F], 0, PadMode::Keyboard),
+            ([0x91, 0x20, 0x7F], 1, PadMode::BeatJump),
+            ([0x91, 0x6F, 0x7F], 1, PadMode::KeyShift),
+        ] {
+            assert!(
+                matches!(cmd(bytes), Some(Command::View(ViewCmd::PadMode(x, m))) if x == deck(d) && m == mode),
+                "{bytes:02X?}"
+            );
+        }
+        assert!(cmd([0x90, 0x69, 0x00]).is_none(), "nothing on release");
+    }
+
+    /// Keyboard and key shift pads go to the app (which knows the page and the hot
+    /// cue), on press and release, SHIFT's on the next channel.
+    #[test]
+    fn keyboard_and_key_shift_pads() {
+        use crate::core::view::{PadMode, ViewCmd};
+        for (bytes, d, m, p, sh, dn) in [
+            ([0x97, 0x44, 0x7F], 0, PadMode::Keyboard, 4, false, true),
+            ([0x87, 0x44, 0x00], 0, PadMode::Keyboard, 4, false, false),
+            ([0x9A, 0x46, 0x7F], 1, PadMode::Keyboard, 6, true, true),
+            ([0x99, 0x70, 0x7F], 1, PadMode::KeyShift, 0, false, true),
+            ([0x98, 0x77, 0x7F], 0, PadMode::KeyShift, 7, true, true),
+        ] {
+            assert!(
+                matches!(
+                    cmd(bytes),
+                    Some(Command::View(ViewCmd::ModePad { deck: x, mode, pad, shift, down }))
+                        if x == deck(d) && mode == m && pad == p && shift == sh && down == dn
+                ),
+                "{bytes:02X?}"
+            );
+        }
     }
 
     /// Pads in beat loop and beat jump mode: their own notes, each a fixed size.

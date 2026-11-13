@@ -1,7 +1,8 @@
-//! Keylock: keep a deck's key while its tempo changes.
+//! Keylock and key shift: a deck's key, apart from its tempo.
 //!
 //! The deck still plays its samples faster or slower, which moves the pitch with
-//! the tempo; this then shifts the pitch back by `1 / speed` (Signalsmith Stretch,
+//! the tempo; with keylock this shifts the pitch back by `1 / speed`, and a key
+//! shift moves it on by `2^(semitones / 12)` (Signalsmith Stretch,
 //! same length in and out, so timing is untouched). The shifter's output lags its
 //! input, so the deck reads [`Keylock::lead`] ahead of the playhead to make up for
 //! it, and after a jump the shifter is cleared and primed at the new place
@@ -14,6 +15,14 @@ use signalsmith_stretch::Stretch;
 /// Keylock steps aside outside this speed range (scratching, a stopping deck), where
 /// pitch-shifting would sound worse than not.
 pub const SPEEDS: std::ops::RangeInclusive<f64> = 0.5..=2.0;
+
+/// The most a key shift moves the key, in semitones, up or down.
+pub const KEY_SHIFT_MAX: f64 = 24.0;
+
+/// The pitch factor `semitones` make.
+pub fn semitones(semitones: f64) -> f64 {
+    (semitones / 12.0).exp2()
+}
 
 pub struct Keylock {
     stretch: Stretch,
@@ -72,11 +81,10 @@ impl Keylock {
         self.preroll.len() / 2
     }
 
-    /// Shift `buf` (interleaved stereo, read at `speed`) back to its original key, in
-    /// place. Remembers where the playhead ended up (`pos`) to spot jumps.
-    pub fn process(&mut self, buf: &mut [f32], speed: f64, pos: f64) {
-        self.stretch
-            .set_transpose_factor((1.0 / speed) as f32, None);
+    /// Shift `buf` (interleaved stereo) by the pitch factor `transpose`, in place.
+    /// Remembers where the playhead ended up (`pos`) to spot jumps.
+    pub fn process(&mut self, buf: &mut [f32], transpose: f64, pos: f64) {
+        self.stretch.set_transpose_factor(transpose as f32, None);
         let out = &mut self.out[..buf.len()];
         self.stretch.process(&*buf, &mut *out);
         buf.copy_from_slice(out);
@@ -84,7 +92,7 @@ impl Keylock {
         self.next_pos = pos;
     }
 
-    /// Not used for a block (keylock off, deck stopped, or out of range).
+    /// Not used for a block (no keylock or key shift, deck stopped, or out of range).
     pub fn idle(&mut self) {
         self.live = false;
     }
