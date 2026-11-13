@@ -533,9 +533,9 @@ pub enum DeckControl {
     CueJumpNext,
     /// Delete the memory cue (or loop) just called: the one at the cue point.
     CueDelete,
-    /// The controller's Shift button, held (1) or let go (0). It does nothing itself:
-    /// a controller that sends its own messages for shifted buttons (the DDJ-400)
-    /// needs no more, but its Shift still sends a message, so it has a name.
+    /// The controller's Shift button, held (1) or let go (0). A controller that sends
+    /// its own messages for shifted buttons (the DDJ-400) needs no more; earshot only
+    /// shows the pads' SHIFT actions on the pads page while it's held.
     Shift,
     /// Vinyl mode: the jog wheels' tops (and the mouse on the waveform) scratch. Off,
     /// they only bend.
@@ -903,6 +903,7 @@ impl DeckControl {
             LoadSelected if pressed => Some(Command::View(ViewCmd::LoadSelected(deck))),
             LoadStep(n) if pressed => Some(Command::View(ViewCmd::LoadAdjacent(deck, n))),
             SetPadMode(m) if pressed => Some(Command::View(ViewCmd::PadMode(deck, m))),
+            Shift => Some(Command::View(ViewCmd::Shift(deck, pressed))),
             ModePad { mode, pad, shift } => Some(Command::View(ViewCmd::ModePad {
                 deck,
                 mode,

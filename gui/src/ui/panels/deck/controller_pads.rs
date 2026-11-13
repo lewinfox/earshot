@@ -11,7 +11,9 @@
 //! - Key shift: each pad's semitones, or its step on page 5; the key now tinted.
 //! - The other modes are things earshot doesn't do yet: the pads are blank.
 //!
-//! Shift-click is the pad with SHIFT: pads 7 and 8 turn the page.
+//! While the controller's SHIFT (or the keyboard's Shift) is held, the pads show and
+//! do what they do with SHIFT: clear a hot cue; in keyboard and key shift mode, turn
+//! the page (pads 7 and 8) and pick another hot cue (keyboard, pads 1-6).
 
 use egui::{Color32, Ui, vec2};
 
@@ -53,13 +55,18 @@ impl DeckUi {
             ((b - 3.0 * gap) / 4.0).max(d.px(PAD_W)).floor()
         });
         let mode = self.pad_mode;
+        let shift = self.shift_held || ui.input(|i| i.modifiers.shift);
         egui::Grid::new(("controller-pads", self.id.index()))
             .spacing(vec2(d.px(GAP_X), d.px(GAP_Y)))
             .show(ui, |ui| {
                 for row in 0..2 {
                     for col in 0..4 {
                         let i = row * 4 + col;
-                        let pad = self.pad(mode, i, info);
+                        let pad = if shift {
+                            self.shifted_pad(mode, i)
+                        } else {
+                            self.pad(mode, i, info)
+                        };
                         let r = ui
                             .add(
                                 HwButton::new(&pad.label, pad.colour, vec2(w, d.px(BTN_H)))
@@ -69,13 +76,8 @@ impl DeckUi {
                                     .tinted(pad.tinted),
                             )
                             .on_hover_text(format!("{} · pad {}\n{}", mode.label(), i + 1, pad.tip));
-                        let Some(mut control) = pad.control else { continue };
-                        let held = held(ui, &r);
-                        // Shift-click: the pad's SHIFT message.
-                        if let DeckControl::ModePad { shift, .. } = &mut control {
-                            *shift = ui.input(|i| i.modifiers.shift);
-                        }
-                        match held {
+                        let Some(control) = pad.control else { continue };
+                        match held(ui, &r) {
                             Some(true) => self.control(out, control, pad.value),
                             Some(false)
                                 if control == DeckControl::Hotcue(i as u8)
@@ -153,6 +155,71 @@ impl DeckUi {
                 control: None,
                 value: 0.0,
             },
+        }
+    }
+
+    /// Pad `i` with SHIFT held.
+    fn shifted_pad(&self, mode: PadMode, i: usize) -> Pad {
+        let blank = |tip: &str| Pad {
+            label: String::new(),
+            caption: None,
+            colour: THEME.line,
+            tinted: false,
+            tip: tip.into(),
+            control: None,
+            value: 0.0,
+        };
+        match mode {
+            PadMode::HotCue => {
+                let letter = hot_cue_letter(i as u8);
+                if self.state.hotcues[i].is_none() {
+                    return blank(&format!("Hot cue {letter} isn't set"));
+                }
+                Pad {
+                    label: format!("✕ {letter}"),
+                    caption: Some("clear".into()),
+                    colour: THEME.hotcue[i],
+                    tinted: false,
+                    tip: format!("Clear hot cue {letter}"),
+                    control: Some(DeckControl::HotcueClear(i as u8)),
+                    value: 1.0,
+                }
+            }
+            PadMode::Keyboard | PadMode::KeyShift => {
+                let pads = &self.pads;
+                let page = pads.page(mode);
+                let pages = if mode == PadMode::Keyboard { 4 } else { 5 };
+                let control = Some(DeckControl::ModePad { mode, pad: i as u8, shift: true });
+                let pad = |label: String, caption: String, tip: String| Pad {
+                    label,
+                    caption: Some(caption),
+                    colour: THEME.accent,
+                    tinted: false,
+                    tip,
+                    control,
+                    value: 1.0,
+                };
+                match i {
+                    6 if page > 0 => pad(
+                        "◀ PAGE".into(),
+                        format!("to {} of {pages}", page),
+                        "The page before (higher notes in keyboard mode)".into(),
+                    ),
+                    7 if page + 1 < pages => pad(
+                        "PAGE ▶".into(),
+                        format!("to {} of {pages}", page + 2),
+                        "The page after (lower notes in keyboard mode)".into(),
+                    ),
+                    6 | 7 => blank(&format!("Page {} of {pages}: no page that way", page + 1)),
+                    _ if mode == PadMode::Keyboard && pads.keyboard_cue(&self.state).is_some() => pad(
+                        "PICK".into(),
+                        "another hot cue".into(),
+                        "Pick another hot cue to play on the keyboard".into(),
+                    ),
+                    _ => blank("Nothing with SHIFT"),
+                }
+            }
+            _ => blank("Nothing with SHIFT"),
         }
     }
 

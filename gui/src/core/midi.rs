@@ -357,7 +357,7 @@ impl Learned {
 
     /// Start from the built-in DDJ-400 table, the first time one is connected (unless
     /// a mapping was loaded first).
-    fn seed_ddj400(&self) {
+    pub(super) fn seed_ddj400(&self) {
         let mut s = self.0.lock().unwrap();
         if std::mem::replace(&mut s.seeded, true) {
             return;
@@ -900,10 +900,12 @@ mod tests {
             Some(Command::Deck(d, DeckCmd::Engine(EngineCmd::BeatJump(b)))) if d == deck(1) && b == 8.0
         ));
         assert!(cmd([0x87, 0x20, 0x00]).is_none(), "nothing on release");
-        // Shift is mapped (it has a name) but does nothing itself.
+        // Shift only tells the pads page it's held (and let go).
+        use crate::core::view::ViewCmd;
         let shift = translate(&[0x91, 0x3F, 0x7F], &ddj()).unwrap();
         assert_eq!(shift.0.name().0, "deck_2_shift");
-        assert!(shift.1.is_none());
+        assert!(matches!(shift.1, Some(Command::View(ViewCmd::Shift(d, true))) if d == deck(1)));
+        assert!(matches!(cmd([0x81, 0x3F, 0x00]), Some(Command::View(ViewCmd::Shift(_, false)))));
     }
 
     /// The BEAT FX section: CH SELECT puts the effect where it points (moving off a

@@ -9,6 +9,15 @@
 //!
 //! Pads in keyboard and key shift mode light as `core::pads` says.
 //!
+//! While SHIFT is held the DDJ-400 shows its shifted buttons' lights (SHIFT + PLAY
+//! is its own message, with its own light). A shifted button that does nothing of its
+//! own in earshot, or has no light of its own (SHIFT + BEAT SYNC: tempo range), gets
+//! its unshifted twin's light, so SHIFT leaves the lights alone; only the ones whose
+//! job changes (SHIFT + a hot cue pad clears it, keyboard mode's page pads) show their
+//! own. See `shift_twin`.
+//!
+//! When earshot quits (or the controller is reconnected) every mapped light goes out.
+//!
 //! A thread works out every mapped button's light from the engine's latest state,
 //! 20 times a second, and sends only the ones that changed. The controller can't
 //! flash a light itself, so the thread does, half a second on and half off.
@@ -126,14 +135,83 @@ pub fn value(light: Light, lit_half: bool) -> u8 {
     }
 }
 
-/// Every mapped button's message and value, as they should be now.
+/// Whether a button mapped to `control` has a light of its own: one `light` works out
+/// from the state. A shifted pad in keyboard or key shift mode has one only where
+/// SHIFT gives it a job.
+fn own_light(control: Control, snap: &EngineSnapshot, pads: &AllPads) -> bool {
+    use DeckControl as D;
+    match control {
+        Control::Deck(d, D::ModePad { mode, pad, shift: true }) => {
+            pads[d.index()].shift_job(mode, pad as usize, snap.deck(d))
+        }
+        Control::Deck(_, c) => matches!(
+            c,
+            D::LoopIn
+                | D::LoopOut
+                | D::Pfl
+                | D::Play
+                | D::Cue
+                | D::Sync
+                | D::Hotcue(_)
+                | D::HotcueClear(_)
+                | D::Reloop
+                | D::Loop
+                | D::LoopActiveToggle
+                | D::BeatLoop(_)
+                | D::Quantize
+                | D::Keylock
+                | D::Vinyl
+                | D::KeyShiftReset
+                | D::ModePad { .. }
+        ),
+        Control::Master(earshot_engine::MasterParam::MasterCue) => true,
+        Control::Fx(_, c) => matches!(
+            c,
+            FxControl::On | FxControl::Release | FxControl::TargetDeck(_) | FxControl::TargetMaster | FxControl::TempoTap
+        ),
+        _ => false,
+    }
+}
+
+/// A DDJ-400 button's message with SHIFT held: on a deck's channel, PLAY, CUE, LOOP
+/// IN / OUT, RELOOP/EXIT, BEAT SYNC and CHANNEL CUE each send another note (Mixxx's
+/// mapping); a pad sends the same note a channel up.
+pub fn shift_twin((status, data1): (u8, u8)) -> Option<(u8, u8)> {
+    match status {
+        0x90 | 0x91 => {
+            let shifted = match data1 {
+                0x0B => 0x47, // PLAY/PAUSE
+                0x0C => 0x48, // CUE
+                0x10 => 0x4C, // LOOP IN
+                0x11 => 0x4E, // LOOP OUT
+                0x4D => 0x50, // RELOOP/EXIT
+                0x58 => 0x60, // BEAT SYNC
+                0x54 => 0x68, // CHANNEL CUE
+                _ => return None,
+            };
+            Some((status, shifted))
+        }
+        0x97 | 0x99 => Some((status + 1, data1)),
+        _ => None,
+    }
+}
+
+/// Every mapped button's message and value, as they should be now; and each shifted
+/// twin without a light of its own, its button's (see `shift_twin`).
 pub fn frame(learned: &Learned, snap: &EngineSnapshot, pads: &AllPads, lit_half: bool) -> BTreeMap<(u8, u8), u8> {
-    learned
-        .all()
-        .into_iter()
-        .filter(|(_, l)| l.input == Input::Note)
-        .map(|(k, l)| (k, value(light(l.control, l.arg, snap, pads), lit_half)))
-        .collect()
+    let notes: BTreeMap<(u8, u8), _> =
+        learned.all().into_iter().filter(|(_, l)| l.input == Input::Note).collect();
+    let mut out: BTreeMap<(u8, u8), u8> = notes
+        .iter()
+        .map(|(&k, l)| (k, value(light(l.control, l.arg, snap, pads), lit_half)))
+        .collect();
+    for (&k, _) in &notes {
+        let Some(twin) = shift_twin(k) else { continue };
+        if notes.get(&twin).is_none_or(|l| !own_light(l.control, snap, pads)) {
+            out.insert(twin, out[&k]);
+        }
+    }
+    out
 }
 
 /// Where the lights thread reads the engine's state and the decks' pads. The app
@@ -204,11 +282,17 @@ fn run(mut outputs: Vec<MidiOutputConnection>, learned: &Learned, monitor: &Moni
         sent = now;
         std::thread::sleep(TICK);
     }
-    for (&k, &v) in &sent {
-        if v != 0 {
-            send(&mut outputs, k, 0);
-        }
+    // Every mapped button's light out, not only the ones lit here: the controller
+    // lights some itself (its pad mode buttons), and shouldn't be left lit.
+    for k in off_at_exit(learned, &sent) {
+        send(&mut outputs, k, 0);
     }
+}
+
+/// The lights to put out on leaving: every mapped button's, and any lit here since.
+fn off_at_exit(learned: &Learned, sent: &BTreeMap<(u8, u8), u8>) -> std::collections::BTreeSet<(u8, u8)> {
+    let mapped = learned.all().into_iter().filter(|(_, l)| l.input == Input::Note).map(|(k, _)| k);
+    mapped.chain(sent.iter().filter(|(_, v)| **v != 0).map(|(k, _)| *k)).collect()
 }
 
 #[cfg(test)]
@@ -289,6 +373,59 @@ mod tests {
         s.mixer.fx[0].enabled = true;
         assert_eq!(light(Control::Fx(0, FxControl::On), None, &s, &AllPads::default()), Light::On, "the controller flashes it");
         assert_eq!(light(Control::Fx(0, FxControl::Release), None, &s, &AllPads::default()), Light::On);
+    }
+
+    #[test]
+    fn every_mapped_light_goes_out_at_exit() {
+        let learned = Learned::default();
+        learned.seed_ddj400();
+        let mut sent = BTreeMap::new();
+        // Something lit here that's since been unmapped still goes out.
+        sent.insert((0x90, 0x7E), 0x7F);
+        let off = off_at_exit(&learned, &sent);
+        assert!(off.contains(&(0x90, 0x69)), "a pad mode button, never lit by earshot");
+        assert!(off.contains(&(0x97, 0x44)), "a keyboard pad");
+        assert!(off.contains(&(0x90, 0x7E)));
+        assert!(!off.iter().any(|(s, _)| s & 0xF0 == 0xB0), "knobs have no lights");
+    }
+
+    /// SHIFT held shows the shifted buttons' lights: those without a job of their own
+    /// show their button's, so SHIFT changes only the lights whose job changes.
+    #[test]
+    fn shift_leaves_the_lights_alone_but_for_changed_jobs() {
+        let learned = Learned::default();
+        learned.seed_ddj400();
+        let mut s = loaded();
+        s.decks[0].playing = true;
+        s.decks[0].sync = true;
+        s.decks[0].loop_in = Some(1.0);
+        s.decks[0].loop_out = Some(3.0);
+        s.decks[0].loop_active = true;
+        s.decks[0].hotcues[0] = Some(2.0);
+        let f = frame(&learned, &s, &AllPads::default(), true);
+        for (button, twin, what) in [
+            ((0x90, 0x0B), (0x90, 0x47), "PLAY"),
+            ((0x90, 0x0C), (0x90, 0x48), "CUE"),
+            ((0x90, 0x58), (0x90, 0x60), "BEAT SYNC"),
+            ((0x90, 0x10), (0x90, 0x4C), "LOOP IN"),
+            ((0x97, 0x64), (0x98, 0x64), "beat loop pad 5 (the 4-beat loop)"),
+            ((0x97, 0x40), (0x98, 0x40), "keyboard pad 1, picking (hot cue A set)"),
+            ((0x97, 0x70), (0x98, 0x70), "key shift pad 1"),
+        ] {
+            assert_eq!(f[&button], 0x7F, "{what} lit");
+            assert_eq!(f.get(&twin), Some(&0x7F), "{what} with SHIFT");
+        }
+        // Jobs that change keep their own: hot cue B unset clears nothing; key shift's
+        // pad 8 turns to page 3, pad 7 to page 1.
+        assert_eq!(f[&(0x98, 0x01)], 0x00, "SHIFT + hot cue B");
+        assert_eq!(f[&(0x98, 0x76)], 0x7F, "SHIFT + key shift pad 7");
+        assert_eq!(f[&(0x97, 0x76)], 0x7F, "key shift pad 7");
+        // A shifted button with no light of its own (SHIFT + BEAT SYNC: tempo range).
+        let rows = r#"{"device":"DDJ-400","inputs":[{"command":"deck_1_beat_sync","message":"90 58"},{"command":"deck_1_tempo_range_next","message":"90 60"}]}"#;
+        let learned = Learned::default();
+        learned.replace(crate::core::midi::from_json(rows).unwrap().1);
+        let f = frame(&learned, &s, &AllPads::default(), true);
+        assert_eq!(f[&(0x90, 0x60)], 0x7F, "tempo range shows BEAT SYNC's");
     }
 
     #[test]

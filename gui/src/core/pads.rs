@@ -3,8 +3,8 @@
 //! over the 8 pads in pages; SHIFT + pad 7 / 8 turns to the page before / after, and
 //! a deck starts on page 2, whose pad 5 is the track's own key.
 //!
-//! - Keyboard: the pads first flash, to pick a hot cue (an empty pad sets one at the
-//!   playhead). Then each pad plays that hot cue with the key shifted by its
+//! - Keyboard: the pads with a hot cue first flash, to pick one (an empty, dark pad
+//!   sets one at the playhead). Then each pad plays that hot cue with the key shifted by its
 //!   semitones, as the hot cue pads do (held while paused: a preview). SHIFT + pads
 //!   1-6 drop the hot cue, to pick again. The key stays where the last pad left it.
 //! - Key shift: each pad sets the key shift. Page 5 has steps instead: up / down a
@@ -170,8 +170,15 @@ impl DeckPads {
         }
     }
 
+    /// Whether SHIFT gives pad `pad` (0-based) a job in `mode`: turning the page (pads
+    /// 7 and 8), or picking another hot cue (keyboard mode's pads 1-6, once one is
+    /// picked). The others keep their unshifted light while SHIFT is held.
+    pub fn shift_job(&self, mode: PadMode, pad: usize, d: &DeckSnap) -> bool {
+        pad >= 6 || (mode == PadMode::Keyboard && self.keyboard_cue(d).is_some())
+    }
+
     /// Pad `pad`'s light in `mode` (SHIFT's message: `shift`), with a track loaded.
-    /// Keyboard: every pad flashes while picking; then the track's own key (±0)
+    /// Keyboard: the pads with a hot cue flash while picking; then the track's own key (±0)
     /// flashes and the other notes are lit. Key shift: the pad at the key now
     /// flashes. With SHIFT: the page turns that can go, and keyboard's drop.
     pub fn light(&self, mode: PadMode, pad: usize, shift: bool, d: &DeckSnap) -> Light {
@@ -185,7 +192,8 @@ impl DeckPads {
             };
         }
         if mode == PadMode::Keyboard && !picked {
-            return Light::Flash;
+            let set = d.hotcues.get(pad).is_some_and(Option::is_some);
+            return if set { Light::Flash } else { Light::Off };
         }
         match self.action(mode, pad) {
             Some(S(0)) if mode == PadMode::Keyboard => Light::Flash,
@@ -230,8 +238,10 @@ mod tests {
         let mut p = DeckPads::default();
         let mut d = loaded(1);
         d.hotcues[2] = Some(10.0);
-        // Picking: every pad flashes; pressing C picks it, and sends nothing.
-        assert_eq!(p.light(PadMode::Keyboard, 0, false, &d), Light::Flash);
+        // Picking: C (set) flashes, A (empty) is dark; pressing C picks it, and sends
+        // nothing.
+        assert_eq!(p.light(PadMode::Keyboard, 2, false, &d), Light::Flash);
+        assert_eq!(p.light(PadMode::Keyboard, 0, false, &d), Light::Off);
         assert!(p.press(PadMode::Keyboard, 2, false, true, &d).is_empty());
         assert!(p.press(PadMode::Keyboard, 2, false, false, &d).is_empty());
         assert_eq!(p.keyboard_cue(&d), Some(2));

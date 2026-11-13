@@ -213,6 +213,9 @@ pub enum ViewCmd {
     Target(DeckId),
     /// The controller's pads on this deck are in this mode now.
     PadMode(DeckId, PadMode),
+    /// The controller's SHIFT on this deck held (true) or let go: the pads page shows
+    /// what the pads do with it.
+    Shift(DeckId, bool),
     /// A pad pressed (`down`) or let go in keyboard or key shift mode: see
     /// `core::pads`.
     ModePad {

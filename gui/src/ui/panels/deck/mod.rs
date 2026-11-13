@@ -332,6 +332,8 @@ pub struct DeckUi {
     pub pad_mode: PadMode,
     /// Keyboard and key shift mode's pages and hot cue.
     pub pads: DeckPads,
+    /// The controller's SHIFT is held: the pads page shows the pads' SHIFT actions.
+    pub shift_held: bool,
 }
 
 impl DeckUi {
@@ -340,6 +342,7 @@ impl DeckUi {
             overlays: Vec::new(),
             pad_mode: PadMode::default(),
             pads: DeckPads::default(),
+            shift_held: false,
             id,
             shown: 0.0,
             seen_generation: u64::MAX,

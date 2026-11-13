@@ -2697,6 +2697,7 @@ fn pad_modes_label_the_pads() {
 /// the page with +12. Key shift mode: a pad sets the key.
 #[test]
 fn keyboard_and_key_shift_pads() {
+    use crate::core::bus::Control;
     use crate::core::view::{PadMode, ViewCmd};
     let mut h = start("keyboard-pads");
     h.state_mut().prefs.pretend_controller = true;
@@ -2726,6 +2727,22 @@ fn keyboard_and_key_shift_pads() {
     h.get_by_label("±0");
     h.get_by_label("+7");
     render(&mut h, "keyboard-pads");
+
+    // SHIFT held on the controller: the pads show their SHIFT actions.
+    let (shift, _) = Control::parse("deck_1_shift", None).unwrap();
+    h.state_mut().dispatch(shift.command(1.0).unwrap());
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("PICK").count(), 6);
+    h.get_by_label("◀ PAGE");
+    h.get_by_label("PAGE ▶");
+    render(&mut h, "keyboard-pads-shift");
+    h.state_mut().dispatch(Command::View(ViewCmd::PadMode(deck, PadMode::HotCue)));
+    settle(&mut h);
+    h.get_by_label("✕ C");
+    h.state_mut().dispatch(shift.command(0.0).unwrap());
+    h.state_mut().dispatch(Command::View(ViewCmd::PadMode(deck, PadMode::Keyboard)));
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("PICK").count(), 0, "SHIFT let go");
 
     // Pad 2 (+5) from elsewhere: back to C, a fourth up.
     h.state_mut().dispatch((deck, EngineCmd::Seek(10.0)).into());

@@ -960,6 +960,7 @@ impl EarshotApp {
                 }
             }
             ViewCmd::PadMode(d, m) => self.panels.decks[d.index()].pad_mode = m,
+            ViewCmd::Shift(d, held) => self.panels.decks[d.index()].shift_held = held,
             ViewCmd::ModePad {
                 deck,
                 mode,
@@ -1223,6 +1224,12 @@ impl EarshotApp {
 }
 
 impl eframe::App for EarshotApp {
+    /// Close the MIDI ports first, so the controller's lights go out (see
+    /// `core::lights`) rather than staying as they were.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.midi = Midi::default();
+    }
+
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.prefs.tables = self.panels.library.tables.clone();
         eframe::set_value(storage, prefs::KEY, &self.prefs);
