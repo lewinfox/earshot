@@ -18,6 +18,7 @@ use crate::command::{
 use crate::decode::TrackAudio;
 use crate::dsp::{self, Limiter, Smoothed};
 use crate::fx::{BeatClock, FALLBACK_BPM, FX_UNITS, FxCmd, FxTarget, FxUnit, FxUnitState};
+use crate::keylock::KEY_SHIFT_MAX;
 use crate::processor::{Channel, KNOB_SECS, MasterChain};
 use crate::snapshot::{
     DeckSnap, EngineEvent, EngineSnapshot, MixerSnap, Monitor, PreviewSnap, Stats,
@@ -466,6 +467,7 @@ impl Deck {
         t.active_loop = None;
         t.jump(cue, JumpReason::Load);
         self.player.speed = 1.0;
+        self.player.key_shift = 0.0;
         self.player.scratch.cancel();
         self.cue_point = cue;
         self.untouched = true;
@@ -489,6 +491,7 @@ impl Deck {
         self.player.transport.playing = loaded && s.playing;
         self.player.transport.loop_ = s.loop_;
         self.player.keylock = s.keylock;
+        self.set_key_shift(s.key_shift);
         self.vinyl = s.vinyl;
         if let Some(c) = s.cues.main {
             self.cue_point = c;
@@ -786,8 +789,16 @@ impl Deck {
             | DeckCmd::Bend { .. } => {}
             DeckCmd::Quantize(set) => self.quantize = set.apply(self.quantize),
             DeckCmd::Keylock(set) => self.player.keylock = set.apply(self.player.keylock),
+            DeckCmd::KeyShift(n) => self.set_key_shift(n),
+            DeckCmd::KeyShiftBy(n) => self.set_key_shift(self.player.key_shift + n),
             // Handled by the renderer.
             DeckCmd::Play(_) | DeckCmd::Sync(_) | DeckCmd::Pfl(_) | DeckCmd::Crossfader(_) => {}
+        }
+    }
+
+    fn set_key_shift(&mut self, semitones: f64) {
+        if semitones.is_finite() {
+            self.player.key_shift = semitones.clamp(-KEY_SHIFT_MAX, KEY_SHIFT_MAX);
         }
     }
 
@@ -824,6 +835,7 @@ impl Deck {
             following: self.following,
             quantize: self.quantize,
             keylock: self.player.keylock,
+            key_shift: self.player.key_shift,
             vinyl: self.vinyl,
             loop_in: l.start,
             loop_out: l.end,
@@ -2132,6 +2144,53 @@ mod tests {
                 "tempo with keylock {keylock}"
             );
         }
+    }
+
+    #[test]
+    fn key_shift_moves_the_key_but_not_the_tempo() {
+        // (keylock, rate, semitones, want): alone, on top of keylock, and on top of
+        // the tempo's own pitch change.
+        for (keylock, rate, shift, want) in [
+            (false, 0.0, 12.0, 880.0),
+            (false, 0.0, -5.0, 440.0 * (-5.0f64 / 12.0).exp2()),
+            (true, 0.08, -12.0, 220.0),
+            (false, 0.08, 7.0, 440.0 * 1.08 * (7.0f64 / 12.0).exp2()),
+        ] {
+            let mut rig = Rig::new();
+            load_fn(&mut rig, 0, 20.0, sine(440.0));
+            rig.deck(0, DeckCmd::Keylock(Set::from_bool(keylock)));
+            rig.deck(0, DeckCmd::Rate(rate));
+            rig.deck(0, DeckCmd::KeyShift(shift));
+            rig.deck(0, DeckCmd::Play(Set::On));
+            rig.run(0.5);
+            let start = rig.pos(0);
+            let f = frequency(&record(&mut rig, 1.0));
+            let what = format!("keylock {keylock}, rate {rate}, shift {shift}");
+            assert!(
+                (f - want).abs() < want * 0.005,
+                "{what}: {f:.1} Hz, want {want:.1}"
+            );
+            assert!(
+                (rig.pos(0) - start - (1.0 + rate)).abs() < 0.02,
+                "tempo, {what}"
+            );
+        }
+    }
+
+    #[test]
+    fn key_shift_steps_stay_in_range_and_a_load_clears_them() {
+        let mut rig = Rig::new();
+        load_fn(&mut rig, 0, 20.0, sine(440.0));
+        rig.deck(0, DeckCmd::KeyShiftBy(2.0));
+        rig.deck(0, DeckCmd::KeyShiftBy(-3.0));
+        rig.run(0.01);
+        assert_eq!(rig.snap().decks[0].key_shift, -1.0);
+        rig.deck(0, DeckCmd::KeyShift(100.0));
+        rig.run(0.01);
+        assert_eq!(rig.snap().decks[0].key_shift, KEY_SHIFT_MAX);
+        load_fn(&mut rig, 0, 20.0, sine(440.0));
+        rig.run(0.01);
+        assert_eq!(rig.snap().decks[0].key_shift, 0.0);
     }
 
     /// Times (s) where clicks start in `x`.

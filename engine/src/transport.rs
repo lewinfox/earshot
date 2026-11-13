@@ -114,6 +114,8 @@ pub struct Player {
     pub speed: f64,
     /// Keep the key when the speed changes (needs a shifter, see [`Player::new`]).
     pub keylock: bool,
+    /// Semitones up (negative: down), whatever the speed (needs a shifter too).
+    pub key_shift: f64,
     shifter: Option<Keylock>,
     /// A hand on the record (the mouse on the waveform, a jog wheel): see
     /// [`crate::scratch`].
@@ -122,12 +124,13 @@ pub struct Player {
 
 impl Player {
     /// `keylock`: allocate a pitch shifter (`sample_rate`, up to `max_block` frames)
-    /// so the player can keep its key.
+    /// so the player can keep or shift its key.
     pub fn new(lead_in: f64, keylock: Option<(u32, usize)>) -> Player {
         Player {
             transport: Transport::new(lead_in),
             speed: 1.0,
             keylock: false,
+            key_shift: 0.0,
             shifter: keylock.map(|(sr, block)| Keylock::new(sr, block)),
             scratch: Scratch::default(),
         }
@@ -171,10 +174,14 @@ impl Player {
         let step = self.speed / sr;
         let loop_ = self.transport.loop_.bounds();
         let speed = self.speed;
-        // Where the audio for a playhead position comes from: with keylock the player
+        // The pitch factor: undo the speed's with keylock, then the key shift's.
+        let transpose =
+            if self.keylock { 1.0 / speed } else { 1.0 } * keylock::semitones(self.key_shift);
+        // Where the audio for a playhead position comes from: when shifting the player
         // reads ahead by the shifter's delay, wrapping round a loop.
+        let shifting = self.keylock || self.key_shift != 0.0;
         let mut shifter = match &mut self.shifter {
-            Some(k) if self.keylock && keylock::SPEEDS.contains(&speed) => Some(k),
+            Some(k) if shifting && keylock::SPEEDS.contains(&speed) => Some(k),
             other => {
                 if let Some(k) = other {
                     k.idle();
@@ -209,7 +216,7 @@ impl Player {
             }
         }
         if let Some(k) = shifter {
-            k.process(&mut buf[..played * 2], speed, t.pos);
+            k.process(&mut buf[..played * 2], transpose, t.pos);
         }
         ended
     }

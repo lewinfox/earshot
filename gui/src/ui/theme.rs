@@ -3,8 +3,6 @@
 //! No other UI file names a colour by its numbers; they read [`THEME`] (panels get it
 //! as `cx.theme`).
 
-use std::sync::atomic::{AtomicU32, Ordering};
-
 use earshot_engine::{DeckId, MAX_DECKS};
 use egui::{Color32, Margin, Stroke, Ui, Vec2, vec2};
 
@@ -13,12 +11,15 @@ use crate::core::store::Memory;
 /// The text size, as a multiple of normal (View > Text size, Ctrl +/-). Only the
 /// lists, bars, menus and windows' text grows, with what sits in a line of it (table
 /// rows, their waveforms); the decks and mixer keep their hand-fitted sizes
-/// ([`normal_text`]). An `f32`'s bits.
-static TEXT_SCALE: AtomicU32 = AtomicU32::new(0x3f80_0000);
+/// ([`normal_text`]). The UI's thread's own: the app draws on one thread, and each
+/// app test on its own, so one test's text size doesn't move another's widgets.
+thread_local! {
+    static TEXT_SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+}
 
 /// The text size, as a multiple of normal.
 pub fn text_scale() -> f32 {
-    f32::from_bits(TEXT_SCALE.load(Ordering::Relaxed))
+    TEXT_SCALE.get()
 }
 
 /// A font size (or a text line's height) at the chosen text size.
@@ -28,7 +29,7 @@ pub fn fs(size: f32) -> f32 {
 
 /// Set the text size: earshot's own fonts read [`fs`], egui's widgets its text styles.
 pub fn set_text_scale(ctx: &egui::Context, k: f32) {
-    TEXT_SCALE.store(k.to_bits(), Ordering::Relaxed);
+    TEXT_SCALE.set(k);
     ctx.all_styles_mut(|s| s.text_styles = text_styles(k));
 }
 

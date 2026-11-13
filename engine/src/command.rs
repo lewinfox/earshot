@@ -150,6 +150,11 @@ pub enum DeckCmd {
     Sync(Set),
     Quantize(Set),
     Keylock(Set),
+    /// Shift the key this many semitones (negative: down) without touching the tempo,
+    /// within ±[`crate::KEY_SHIFT_MAX`]. Back to 0 when a track loads.
+    KeyShift(f64),
+    /// Move the key shift by this many semitones.
+    KeyShiftBy(f64),
     /// Headphone cue for this deck's channel.
     Pfl(Set),
     Crossfader(XfSide),
@@ -296,6 +301,8 @@ pub struct DeckState {
     pub sync: bool,
     pub quantize: bool,
     pub keylock: bool,
+    /// Semitones: see [`DeckCmd::KeyShift`].
+    pub key_shift: f64,
     pub vinyl: bool,
     pub channel: ChannelState,
 }
@@ -315,6 +322,7 @@ impl Default for DeckState {
             sync: false,
             quantize: true,
             keylock: false,
+            key_shift: 0.0,
             vinyl: true,
             channel: ChannelState::default(),
         }
