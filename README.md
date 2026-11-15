@@ -97,7 +97,11 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   has a BPM and a grid on a deck straight away (*Menu → Settings… → Analysis →
   Quick-analyse new tracks* turns this off). The full analysis is yours to run:
   right-click a track → *Analyse*, or a folder → *Analyse unanalysed tracks*. It
-  replaces the quick grid, as fixing the grid by hand does. A track with no grid at
+  replaces the quick grid, as fixing the grid by hand does. While the computer is
+  short of resources (a low-power profile, capped CPUs, the audio behind, or under
+  1.5 GB of memory left: the top bar says *analysis: quick only*), the full analysis
+  waits in its queue and the tracks asked for get a quick grid meanwhile; it runs by
+  itself once there's room again. A track with no grid at
   all (the quick grid wasn't sure of it, or the setting was off) is analysed in the
   background when it's loaded: it plays at once, on a quick grid or a placeholder from
   its BPM tag, and the deck switches to the analysed grid when it's done. Like

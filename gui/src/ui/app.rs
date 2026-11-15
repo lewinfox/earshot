@@ -252,6 +252,10 @@ struct Hud {
     realtime_lost: bool,
     keylock_cheap: bool,
     power: Option<crate::core::power::Warning>,
+    /// Too little memory is left for the analysis worker (`power::memory_short`).
+    memory_short: bool,
+    /// Any of those: full analysis waits, and tracks get quick grids meanwhile.
+    low_resource: bool,
     alerts: Vec<crate::ui::panels::status::Alert>,
     last: Option<Instant>,
 }

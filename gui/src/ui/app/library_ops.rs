@@ -429,8 +429,12 @@ impl EarshotApp {
         } else {
             AnalysisMode::Static
         };
-        for id in ids {
+        for &id in &ids {
             self.lib.analyser.queue(id, None, asked, true, mode);
+        }
+        // The full analysis has to wait: a quick grid for those with none, meanwhile.
+        if self.hud.low_resource {
+            self.quick.send(ids);
         }
     }
 }

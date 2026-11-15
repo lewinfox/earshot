@@ -9,6 +9,7 @@
 
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// CPUs held below this share of their top speed count as capped.
@@ -21,6 +22,25 @@ const ASK_EVERY: u32 = 6;
 
 /// The watch's latest finding (`None`: it isn't running).
 static LATEST: Mutex<Option<Option<Warning>>> = Mutex::new(None);
+
+/// With less memory than this left (kB: 1.5 GB), there's no room for the analysis
+/// worker and its model.
+pub const MEMORY_SHORT_KB: u64 = 1_500_000;
+
+/// Whether the watch last found memory short (never, when it isn't running).
+static MEMORY_SHORT: AtomicBool = AtomicBool::new(false);
+
+/// `MemAvailable` from `/proc/meminfo`'s text, kB.
+pub fn mem_available_kb(meminfo: &str) -> Option<u64> {
+    let rest = meminfo.lines().find_map(|l| l.strip_prefix("MemAvailable:"))?;
+    rest.split_whitespace().next()?.parse().ok()
+}
+
+/// Whether there's too little memory left to start the analysis worker, as the watch
+/// last read it.
+pub fn memory_short() -> bool {
+    MEMORY_SHORT.load(Ordering::Relaxed)
+}
 
 /// What the system says about its power, as read.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -171,6 +191,17 @@ pub fn watch() {
                     logged = warning.clone();
                 }
                 *LATEST.lock().unwrap() = Some(warning);
+                let short = std::fs::read_to_string("/proc/meminfo")
+                    .ok()
+                    .and_then(|t| mem_available_kb(&t))
+                    .is_some_and(|kb| kb < MEMORY_SHORT_KB);
+                if short != MEMORY_SHORT.swap(short, Ordering::Relaxed) {
+                    if short {
+                        eprintln!("power: less than 1.5 GB of memory is left");
+                    } else {
+                        eprintln!("power: there's memory to spare again");
+                    }
+                }
                 std::thread::sleep(TICK);
             }
         });
@@ -186,6 +217,13 @@ mod tests {
             cpus: cpus.to_vec(),
             max_perf_pct: pct,
         }
+    }
+
+    #[test]
+    fn reads_the_memory_left_from_meminfo() {
+        let text = "MemTotal:       16000000 kB\nMemFree:          200000 kB\nMemAvailable:    1234567 kB\n";
+        assert_eq!(mem_available_kb(text), Some(1_234_567));
+        assert_eq!(mem_available_kb("MemTotal: 1 kB\n"), None);
     }
 
     #[test]

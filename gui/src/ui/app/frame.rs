@@ -128,6 +128,22 @@ impl EarshotApp {
         }
         if let Some(power) = crate::core::power::latest() {
             self.hud.power = power;
+            self.hud.memory_short = crate::core::power::memory_short();
+        }
+        // Short of resources: full analysis (the worker and its model) waits in its
+        // queue, and tracks get the quick grid finder's grid meanwhile.
+        let short = lost || cheap || self.hud.power.is_some() || self.hud.memory_short;
+        if short != self.hud.low_resource {
+            self.hud.low_resource = short;
+            self.lib.analyser.set_held(short);
+            if short {
+                eprintln!(
+                    "analysis: the machine is short of resources: full analysis waits, \
+                     and tracks get a quick grid meanwhile"
+                );
+            } else {
+                eprintln!("analysis: there's room again: full analysis carries on");
+            }
         }
         let mut alerts = vec![];
         if lost {
@@ -155,6 +171,25 @@ impl EarshotApp {
             alerts.push(Alert {
                 text: format!("⚠ {}", p.text),
                 tip: p.detail.clone(),
+                serious: false,
+            });
+        }
+        if self.hud.memory_short {
+            alerts.push(Alert {
+                text: "⚠ low memory".into(),
+                tip: "Less than 1.5 GB of memory is left: not enough to start the \
+                      analysis worker and its model."
+                    .into(),
+                serious: false,
+            });
+        }
+        if short {
+            alerts.push(Alert {
+                text: "analysis: quick only".into(),
+                tip: "The computer is short of resources, so full analysis is waiting: \
+                      tracks get a quick grid for now (amber in the library). What's \
+                      queued runs by itself once there's room again."
+                    .into(),
                 serious: false,
             });
         }

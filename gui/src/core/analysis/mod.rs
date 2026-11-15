@@ -284,6 +284,21 @@ impl Analyser {
         }
     }
 
+    /// Tell the queue whether the machine is short of resources (a low-power
+    /// profile, capped CPUs, the audio behind, little memory left). While it is, no
+    /// lane starts a track, so the worker and its model aren't started for one: what's
+    /// asked for waits in the queue (it's saved, so across a restart too) and runs
+    /// once there's room again. A track already being analysed finishes. Tracks get
+    /// their grid from the quick finder meanwhile (`library::QuickAnalyser`).
+    pub fn set_held(&self, on: bool) {
+        let mut q = self.shared.queue.lock().unwrap();
+        if q.held != on {
+            q.held = on;
+            drop(q);
+            self.shared.wake();
+        }
+    }
+
     /// Make sure a track is analysed. A track just loaded onto a deck (`audio` given)
     /// goes to the deck lane, ahead of everything, taking it over from the background
     /// if it was waiting or running there. One someone `asked` for goes next, ahead of
@@ -798,9 +813,9 @@ fn needed(
         // results were versioned, or a quick one (full analysis of a track that has
         // one is left to the user: `Want::Force`).
         //
-        // Low-resource mode (#22) belongs with the queue that runs these jobs: it
-        // holds full analysis back, and quick analysis (`library::QuickAnalyser`,
-        // which never comes through here) carries on.
+        // A machine short of resources holds full analysis back in the queue that
+        // runs these jobs (`JobQueue::held`); quick analysis
+        // (`library::QuickAnalyser`, which never comes through here) carries on.
         (AnalyserId::Grid, Want::Missing) => grid.is_none(),
         (_, Want::Missing) => result.is_none(),
         // Only ever replaces an analysed grid, or a quick one (which was only there
