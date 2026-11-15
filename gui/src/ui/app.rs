@@ -802,6 +802,12 @@ impl EarshotApp {
                     .store
                     .send(settings::save(settings::CUE_FIRST_BEAT, &on));
             }
+            Command::App(AppCmd::LoadWhilePlaying(on)) => {
+                self.settings.load_while_playing = on;
+                self.lib
+                    .store
+                    .send(settings::save(settings::LOAD_WHILE_PLAYING, &on));
+            }
             Command::App(AppCmd::ReloadKeymap) => self.reload_keymap(),
             Command::App(AppCmd::DismissNotice(id)) => self.notices.dismiss(id),
             Command::App(c @ (AppCmd::CountStale | AppCmd::QueueStale)) => {
@@ -1237,6 +1243,7 @@ impl EarshotApp {
             routing,
             hotcue_mode: self.settings.hotcue_mode,
             cue_first_beat: self.settings.cue_first_beat,
+            load_while_playing: self.settings.load_while_playing,
             auto_hide_mixer: self.prefs.auto_hide_mixer,
             stem_mode: self.prefs.stem_mode,
             keymap: &self.keymap,

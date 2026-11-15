@@ -53,17 +53,17 @@ pub const TABS_W: f32 = 22.0;
 pub const TAB_GAP: f32 = 4.0;
 
 // ---- fonts ----
-pub const FONT_PAD: f32 = 12.0;
+pub const FONT_PAD: f32 = 16.0;
 /// A hot cue's name, under its number.
-pub const FONT_CAPTION: f32 = 8.5;
-pub const FONT_LOOP: f32 = 10.0;
+pub const FONT_CAPTION: f32 = 10.5;
+pub const FONT_LOOP: f32 = 13.0;
 /// ½ and ×2.
-pub const FONT_LOOP_STEP: f32 = 11.0;
-pub const FONT_JUMP: f32 = 10.0;
-pub const FONT_GRID: f32 = 10.0;
-pub const FONT_STEM: f32 = 9.0;
-pub const FONT_CUE: f32 = 11.0;
-pub const FONT_PLAY: f32 = 12.0;
+pub const FONT_LOOP_STEP: f32 = 15.0;
+pub const FONT_JUMP: f32 = 13.0;
+pub const FONT_GRID: f32 = 13.0;
+pub const FONT_STEM: f32 = 12.0;
+pub const FONT_CUE: f32 = 15.0;
+pub const FONT_PLAY: f32 = 16.0;
 /// In the jog ring: the BPM ("124" and ".00"), the tempo change and range, VINYL.
 pub const FONT_BPM: f32 = 18.5;
 pub const FONT_BPM_FRAC: f32 = 11.0;

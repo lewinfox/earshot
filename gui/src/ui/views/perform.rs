@@ -28,12 +28,14 @@ pub fn decks_rows(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx, mode: &
     let decks = cx.prefs.decks();
     let compact = decks.len() > 2;
     let waves_h = cx.prefs.layout().sizes.waves;
+    // The waveforms make way for a bigger library (the decks stay).
+    let waves_shown = shown && !cx.prefs.library_maximized;
     let r = egui::TopBottomPanel::top(format!("waves-{mode}"))
         .resizable(true)
         .default_height(waves_h)
         .height_range(60.0..=520.0)
         .frame(row_frame(cx, Margin::same(6)))
-        .show_animated(ctx, shown, |ui| {
+        .show_animated(ctx, waves_shown, |ui| {
             ui.spacing_mut().item_spacing.y = 3.0;
             let n = decks.len() as f32;
             let height = (ui.available_height() - 3.0 * (n - 1.0)) / n;
@@ -53,8 +55,7 @@ pub fn decks_rows(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx, mode: &
     let gaps = STACK_GAP * (per_side - 1.0);
     let height = (min_height(compact) * per_side + gaps).max(mixer::HEIGHT + 12.0);
     let deck_h = (height - gaps) / per_side;
-    // The decks make way for a bigger library (the waveforms stay).
-    let decks_shown = shown && !cx.prefs.library_maximized;
+    let decks_shown = shown;
     egui::TopBottomPanel::top(format!("decks-{mode}"))
         .exact_height(height + 8.0)
         .frame(row_frame(cx, Margin::symmetric(6, 4)))

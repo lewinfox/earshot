@@ -178,6 +178,8 @@ pub enum AppCmd {
     HotcueMode(earshot_engine::HotcueMode),
     /// Cue newly loaded tracks on their first beat, else at their start (and save it).
     CueFirstBeat(bool),
+    /// Let a track load onto a playing deck, else refuse it (and save it).
+    LoadWhilePlaying(bool),
     /// Read the user's keymap file again (the built-in one if there's none).
     ReloadKeymap,
     /// Count the tracks with stale analysis (answered with `Event::Stale`).

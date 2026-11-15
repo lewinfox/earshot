@@ -371,8 +371,9 @@ impl EarshotApp {
         });
     }
 
-    /// The load's ticket, as its [`Event::Loaded`] will carry.
-    pub(super) fn load(&mut self, deck: Option<DeckId>, track_id: i64) -> u64 {
+    /// The load's ticket, as its [`Event::Loaded`] will carry; `None` if it was
+    /// refused (the deck is playing, and the setting doesn't allow that).
+    pub(super) fn load(&mut self, deck: Option<DeckId>, track_id: i64) -> Option<u64> {
         // Double-click: in Prepare, the target deck; else the first deck that isn't
         // playing.
         let decks = &self.panels.decks;
@@ -382,6 +383,17 @@ impl EarshotApp {
                 .find(|d| !decks[d.index()].playing())
                 .unwrap_or(DeckId::new(0).expect("deck 1")),
         });
+        if self.panels.decks[deck.index()].playing() && !self.settings.load_while_playing {
+            self.notify(
+                crate::core::notice::Level::Warning,
+                format!(
+                    "Deck {} is playing: stop it first to load a track (or allow loading onto a \
+                     playing deck in Settings › Decks)",
+                    crate::core::bus::deck_letter(deck)
+                ),
+            );
+            return None;
+        }
         let lib = &self.panels.library;
         self.loaded_from[deck.index()] = lib
             .here(self.prefs.layout().source, &self.panels.flow)
@@ -408,7 +420,7 @@ impl EarshotApp {
                 result,
             });
         });
-        ticket
+        Some(ticket)
     }
 
     pub(super) fn analyse(&self, ids: Vec<i64>, dynamic: bool, asked: bool) {

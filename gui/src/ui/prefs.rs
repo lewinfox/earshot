@@ -45,7 +45,7 @@ pub struct UiPrefs {
     pub show_mixer: bool,
     /// Hide the mixer while a controller is connected (it has its own).
     pub auto_hide_mixer: bool,
-    /// The decks hidden for a bigger library (`ui_library_maximize_toggle`); not kept
+    /// The scrolling waveforms hidden for a bigger library (`ui_library_maximize_toggle`); not kept
     /// between runs.
     #[serde(skip)]
     pub library_maximized: bool,

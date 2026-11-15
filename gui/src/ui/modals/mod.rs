@@ -32,6 +32,7 @@ pub struct ModalEnv<'a> {
     pub routing: Routing,
     pub hotcue_mode: earshot_engine::HotcueMode,
     pub cue_first_beat: bool,
+    pub load_while_playing: bool,
     pub auto_hide_mixer: bool,
     pub stem_mode: crate::core::view::StemMode,
     pub keymap: &'a Keymap,

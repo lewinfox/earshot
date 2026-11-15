@@ -310,8 +310,8 @@ pub enum Control {
 /// A control over what's on screen.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum UiControl {
-    /// Hide the decks so the library gets their room (the waveforms stay), or bring
-    /// them back: Mixxx's maximised library, Pioneer's VIEW.
+    /// Hide the scrolling waveforms so the library gets their room (the decks stay),
+    /// or bring them back: Mixxx's maximised library, Pioneer's VIEW.
     LibraryMaximize,
 }
 
@@ -322,7 +322,7 @@ impl UiControl {
         match self {
             UiControl::LibraryMaximize => spec(
                 "library_maximize_toggle",
-                "hide the decks for a bigger library, or show them",
+                "hide the waveforms for a bigger library, or show them",
                 Kind::Button,
             ),
         }

@@ -113,4 +113,4 @@ A name goes from the general to the particular: where, what, which part, what to
 
 | Command | Number | What it does |
 |---|---|---|
-| `ui_library_maximize_toggle` | pressed (1) or let go (0) | hide the decks for a bigger library, or show them |
+| `ui_library_maximize_toggle` | pressed (1) or let go (0) | hide the waveforms for a bigger library, or show them |

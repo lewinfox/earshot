@@ -136,6 +136,19 @@ fn decks(ui: &mut Ui, env: &ModalEnv) -> Vec<Command> {
         "When a track loads. Off, the cue is at the start of the track.",
     );
     ui.add_space(8.0);
+    let mut load = env.load_while_playing;
+    if ui
+        .checkbox(&mut load, "Allow loading a track onto a playing deck")
+        .changed()
+    {
+        out.push(Command::App(AppCmd::LoadWhilePlaying(load)));
+    }
+    muted(
+        ui,
+        "Off, a load onto a playing deck is refused, so the track on air can't be \
+         replaced by mistake.",
+    );
+    ui.add_space(8.0);
     let mut hide = env.auto_hide_mixer;
     if ui
         .checkbox(&mut hide, "Auto-hide mixer when controller connected")

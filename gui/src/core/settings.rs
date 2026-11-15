@@ -23,6 +23,8 @@ pub const HOTCUE_MODE: &str = "decks.hotcue_mode";
 pub const FLOW_OPEN: &str = "flow.open";
 /// Cue a newly loaded track on its first beat (else at its start).
 pub const CUE_FIRST_BEAT: &str = "decks.cue_first_beat";
+/// A track may be loaded onto a deck that's playing (else the load is refused).
+pub const LOAD_WHILE_PLAYING: &str = "decks.load_while_playing";
 /// The most the stems cache may take, GB: the least recently used go at start-up.
 pub const STEMS_CACHE_GB: &str = "stems.cache_gb";
 /// [`STEMS_CACHE_GB`] until it's set.
@@ -39,6 +41,7 @@ pub struct Settings {
     pub deck_options: Vec<DeckOptions>,
     pub hotcue_mode: HotcueMode,
     pub cue_first_beat: bool,
+    pub load_while_playing: bool,
     pub flow_open: Option<CollectionId>,
     pub import_without_asking: bool,
     pub stems_cache_gb: f64,
@@ -72,6 +75,7 @@ impl Settings {
             deck_options: read(reader, DECK_OPTIONS).unwrap_or_default(),
             hotcue_mode: read(reader, HOTCUE_MODE).unwrap_or_default(),
             cue_first_beat: read(reader, CUE_FIRST_BEAT).unwrap_or(true),
+            load_while_playing: read(reader, LOAD_WHILE_PLAYING).unwrap_or(false),
             flow_open: read(reader, FLOW_OPEN).unwrap_or_default(),
             import_without_asking: read(reader, IMPORT_WITHOUT_ASKING).unwrap_or_default(),
             stems_cache_gb: read(reader, STEMS_CACHE_GB).unwrap_or(STEMS_CACHE_GB_DEFAULT),

@@ -1658,10 +1658,7 @@ fn related_tracks_and_a_bigger_library() {
     assert_eq!(decks(&h), 2);
     h.state_mut().dispatch(cmd("ui_library_maximize_toggle"));
     steps(&mut h, 10);
-    assert_eq!(decks(&h), 0, "the decks are hidden");
-    h.state_mut().dispatch(cmd("ui_library_maximize_toggle"));
-    steps(&mut h, 10);
-    assert_eq!(decks(&h), 2);
+    assert_eq!(decks(&h), 2, "the decks stay (the waveforms go)");
 }
 
 /// "Add to Flow ▸ <Flow>" in the track menu adds a card that follows nothing.
@@ -1966,6 +1963,36 @@ fn cue_first_beat_setting() {
     settle_until(&mut h, |a| a.frame.deck(DeckId::new(0).unwrap()).grid.is_some());
     let snap = h.state().frame.snap.as_ref().unwrap().decks[0];
     assert_eq!(snap.cue_point, 0.0);
+}
+
+/// A load onto a playing deck is refused, with a notice, unless the setting allows it.
+#[test]
+fn loading_onto_a_playing_deck() {
+    use crate::core::settings;
+    let mut h = start("load-while-playing");
+    let deck = DeckId::new(0).unwrap();
+    let ids = ids(&h);
+    assert!(!h.state().settings.load_while_playing, "refused by default");
+    h.state_mut().load(Some(deck), ids[0]);
+    settle_until(&mut h, |a| a.frame.deck(deck).grid.is_some());
+    h.state_mut().dispatch((deck, EngineCmd::Play(Set::On)).into());
+    settle(&mut h);
+    assert!(h.state().panels.decks[0].playing());
+    let loaded = |h: &H| h.state().frame.snap.as_ref().unwrap().deck(deck).track_id;
+
+    let before = loaded(&h);
+    assert_eq!(h.state_mut().load(Some(deck), ids[1]), None);
+    settle(&mut h);
+    assert_eq!(loaded(&h), before, "still the track on air");
+    let notice = h.state().notices.shown().last().expect("a notice").text.clone();
+    assert!(notice.contains("Deck A is playing"), "{notice}");
+
+    h.state_mut().dispatch(Command::App(AppCmd::LoadWhilePlaying(true)));
+    settle_until(&mut h, |a| {
+        settings::read::<bool>(&a.lib.store.reader, settings::LOAD_WHILE_PLAYING) == Some(true)
+    });
+    assert!(h.state_mut().load(Some(deck), ids[1]).is_some());
+    settle_until(&mut h, |a| a.frame.snap.as_ref().unwrap().deck(deck).track_id != before);
 }
 
 /// Prepare's Export tab draws: what to export on the left, where to on the right.

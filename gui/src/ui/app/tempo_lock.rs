@@ -124,7 +124,9 @@ impl EarshotApp {
     }
 
     fn listen_load(&mut self, id: TrackId, at: f64, play: bool) {
-        let ticket = self.load(Some(self.prefs.target()), id);
+        let Some(ticket) = self.load(Some(self.prefs.target()), id) else {
+            return;
+        };
         // Not from a library list: there's no "next track" to it.
         self.loaded_from[self.prefs.target().index()] = None;
         self.listener.pending = Some(Pending { ticket, at, play });
