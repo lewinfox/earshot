@@ -1000,7 +1000,14 @@ impl EarshotApp {
                     *l = !*l;
                 }
             }
-            ViewCmd::PadMode(d, m) => self.panels.decks[d.index()].pad_mode = m,
+            ViewCmd::PadMode(d, m) => {
+                let ui = &mut self.panels.decks[d.index()];
+                let out = ui.set_pad_mode(m);
+                self.lights_monitor.lock().unwrap().pads[d.index()] = ui.pads;
+                for c in out {
+                    self.dispatch(c);
+                }
+            }
             ViewCmd::Shift(d, held) => self.panels.decks[d.index()].shift_held = held,
             ViewCmd::ModePad {
                 deck,

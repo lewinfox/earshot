@@ -2792,6 +2792,68 @@ fn keyboard_and_key_shift_pads() {
     render(&mut h, "key-shift-pads");
 }
 
+/// Pad FX modes: the pads show their bank's effects, and SHIFT its other 8. An effect
+/// is on its deck while its pad is held, and off when it's let go, or when the pads
+/// change mode under it.
+#[test]
+fn pad_fx_pads() {
+    use crate::core::bus::Control;
+    use crate::core::pads::PAD_FX_BANKS;
+    use crate::core::view::{PadMode, ViewCmd};
+    let mut h = start("pad-fx-pads");
+    h.state_mut().prefs.pretend_controller = true;
+    let deck = DeckId::new(0).unwrap();
+    let id = ids(&h)[0];
+    h.state_mut().load(Some(deck), id);
+    settle_until(&mut h, |a| a.panels.decks[0].wave.is_some());
+    let snap = |h: &H| *h.state().frame.snap.as_ref().unwrap().deck(deck);
+    let pad = |h: &mut H, name: &str, pad: u8, down: bool| {
+        let (control, _) = Control::parse(name, Some(&(pad + 1).to_string())).unwrap();
+        h.state_mut().dispatch(control.command(if down { 1.0 } else { 0.0 }).unwrap());
+        settle(h);
+    };
+    h.state_mut().dispatch(Command::View(ViewCmd::PadMode(deck, PadMode::PadFx1)));
+    settle(&mut h);
+    // Bank 1's first 8, each with its letter.
+    h.get_by_label("ECHO 1/4");
+    h.get_by_label("ROLL 1");
+    assert_eq!(snap(&h).pad_fx, None);
+
+    // Pad 1 held: effect A on the deck (and not the other), until it's let go.
+    pad(&mut h, "deck_1_pad_fx_1_pad", 0, true);
+    assert_eq!(snap(&h).pad_fx, Some(PAD_FX_BANKS[0][0]));
+    assert_eq!(h.state().frame.snap.as_ref().unwrap().decks[1].pad_fx, None);
+    assert_eq!(h.state().panels.decks[0].pads.fx_held, Some((PadMode::PadFx1, 0, false)));
+    render(&mut h, "pad-fx-pads");
+    pad(&mut h, "deck_1_pad_fx_1_pad", 0, false);
+    assert_eq!(snap(&h).pad_fx, None);
+
+    // SHIFT held on the controller: the bank's other 8.
+    let (shift, _) = Control::parse("deck_1_shift", None).unwrap();
+    h.state_mut().dispatch(shift.command(1.0).unwrap());
+    settle(&mut h);
+    h.get_by_label("TRANS 1/8");
+    h.get_by_label("V.BRAKE 3/4");
+    h.get_by_label("BACK SPIN 1/2");
+    assert_eq!(h.query_all_by_label("ECHO 1/4").count(), 0);
+    pad(&mut h, "deck_1_pad_fx_1_pad_shift", 7, true);
+    assert_eq!(snap(&h).pad_fx, Some(PAD_FX_BANKS[0][15]));
+    pad(&mut h, "deck_1_pad_fx_1_pad_shift", 7, false);
+    assert_eq!(snap(&h).pad_fx, None);
+    h.state_mut().dispatch(shift.command(0.0).unwrap());
+
+    // Bank 2; a pad still held when the pads change mode is let go.
+    h.state_mut().dispatch(Command::View(ViewCmd::PadMode(deck, PadMode::PadFx2)));
+    settle(&mut h);
+    h.get_by_label("REVERB 1");
+    pad(&mut h, "deck_1_pad_fx_2_pad", 4, true);
+    assert_eq!(snap(&h).pad_fx, Some(PAD_FX_BANKS[1][4]));
+    h.state_mut().dispatch(Command::View(ViewCmd::PadMode(deck, PadMode::HotCue)));
+    settle(&mut h);
+    assert_eq!(snap(&h).pad_fx, None);
+    assert_eq!(h.state().panels.decks[0].pads.fx_held, None);
+}
+
 /// Controller mode: Perform's decks, then the Mapping, History and Library tabs. MIDI
 /// messages reach the Mapping tab's list and the History.
 #[test]

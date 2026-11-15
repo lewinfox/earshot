@@ -19,6 +19,7 @@ use crate::decode::TrackAudio;
 use crate::dsp::{self, Limiter, Smoothed};
 use crate::fx::{BeatClock, FALLBACK_BPM, FX_UNITS, FxCmd, FxTarget, FxUnit, FxUnitState};
 use crate::keylock::KEY_SHIFT_MAX;
+use crate::pad_fx::PadFxSlot;
 use crate::processor::{Channel, KNOB_SECS, MasterChain};
 use crate::snapshot::{
     DeckSnap, EngineEvent, EngineSnapshot, MixerSnap, Monitor, PreviewSnap, Stats,
@@ -827,7 +828,11 @@ impl Deck {
             DeckCmd::KeyShift(n) => self.set_key_shift(n),
             DeckCmd::KeyShiftBy(n) => self.set_key_shift(self.player.key_shift + n),
             // Handled by the renderer.
-            DeckCmd::Play(_) | DeckCmd::Sync(_) | DeckCmd::Pfl(_) | DeckCmd::Crossfader(_) => {}
+            DeckCmd::Play(_)
+            | DeckCmd::Sync(_)
+            | DeckCmd::Pfl(_)
+            | DeckCmd::Crossfader(_)
+            | DeckCmd::PadFx(_) => {}
         }
     }
 
@@ -871,6 +876,8 @@ impl Deck {
             quantize: self.quantize,
             keylock: self.player.keylock,
             key_shift: self.player.key_shift,
+            // The renderer's: see `Renderer::publish`.
+            pad_fx: None,
             vinyl: self.vinyl,
             loop_in: l.start,
             loop_out: l.end,
@@ -941,6 +948,10 @@ pub struct Renderer {
     fx_free_beat: [f64; FX_UNITS],
     /// Each unit's beat while tapped, from 0 at the last tap.
     fx_tap_beat: [f64; FX_UNITS],
+    /// Each live deck's pad effect slot, straight after its channel, and the deck's
+    /// seconds per beat when it last moved (as `fx_spb`).
+    pad_fx: [Option<PadFxSlot>; MAX_DECKS],
+    pad_spb: [f64; MAX_DECKS],
     crossfader: f64,
     /// Left and right crossfader gains, eased.
     xf_gain: [Smoothed; 2],
@@ -968,6 +979,22 @@ pub struct Renderer {
     /// times they would in real time ([`Renderer::moment`]).
     #[cfg(test)]
     simulated_time: bool,
+}
+
+/// Deck `dk`'s beat clock for the block just rendered. `spb`: its seconds per beat
+/// when it last moved, kept up here, so a tail keeps its timing while it's stopped.
+fn deck_clock(dk: &Deck, spb: &mut f64, sr: f64) -> BeatClock {
+    let bpm = dk.sync_bpm().unwrap_or(FALLBACK_BPM);
+    let speed = dk.player.speed.abs();
+    let moving = dk.track.is_some() && dk.playing() && speed > 0.05;
+    if moving {
+        *spb = 60.0 / (bpm * speed);
+    }
+    BeatClock {
+        beat_end: dk.beat_at(dk.pos()),
+        beats_per_frame: if moving { bpm * speed / 60.0 / sr } else { 0.0 },
+        secs_per_beat: *spb,
+    }
 }
 
 /// The decks in use: the first `live`.
@@ -1023,6 +1050,8 @@ impl Renderer {
             fx_spb: [60.0 / FALLBACK_BPM; FX_UNITS],
             fx_free_beat: [0.0; FX_UNITS],
             fx_tap_beat: [0.0; FX_UNITS],
+            pad_fx: std::array::from_fn(|i| (i < live).then(|| PadFxSlot::new(sr))),
+            pad_spb: [60.0 / FALLBACK_BPM; MAX_DECKS],
             crossfader: 0.0,
             xf_gain: [Smoothed::new(0.0); 2],
             head_gain: Smoothed::new(1.0),
@@ -1190,11 +1219,21 @@ impl Renderer {
             }
         }
 
-        // Channel chains: gain, EQ, filter. Meters read here, before the faders.
+        // Channel chains: gain, EQ, filter, then the deck's pad effect. Meters read
+        // here, before the faders.
         let secs = n as f64 / sr;
         for d in slots(live) {
+            let mut peak = self.channels[d].process(&mut self.deck_buf[d][..n * 2]);
+            if let Some(slot) = &mut self.pad_fx[d] {
+                let clock = deck_clock(&self.decks[d], &mut self.pad_spb[d], sr);
+                let busy = slot.busy();
+                let buf = &mut self.deck_buf[d][..n * 2];
+                slot.process(buf, &clock);
+                if busy {
+                    peak = buf.iter().fold(0.0, |m, s| m.max(s.abs()));
+                }
+            }
             let ch = &mut self.channels[d];
-            let peak = ch.process(&mut self.deck_buf[d][..n * 2]);
             ch.vu = meter(ch.vu, peak, secs);
         }
 
@@ -1354,18 +1393,7 @@ impl Renderer {
             self.fx_spb[u] = clock.secs_per_beat;
             return Some(clock);
         };
-        let dk = &self.decks[d];
-        let bpm = dk.sync_bpm().unwrap_or(FALLBACK_BPM);
-        let speed = dk.player.speed.abs();
-        let moving = dk.playing() && speed > 0.05;
-        if moving {
-            self.fx_spb[u] = 60.0 / (bpm * speed);
-        }
-        Some(BeatClock {
-            beat_end: dk.beat_at(dk.pos()),
-            beats_per_frame: if moving { bpm * speed / 60.0 / sr } else { 0.0 },
-            secs_per_beat: self.fx_spb[u],
-        })
+        Some(deck_clock(&self.decks[d], &mut self.fx_spb[u], sr))
     }
 
     /// The deck `d` follows when synced: the app's chosen leader, or else the best
@@ -1680,6 +1708,11 @@ impl Renderer {
                 let at = self.clock_at(at).min(now);
                 self.decks[d].bend(by, at, now);
             }
+            DeckCmd::PadFx(fx) => {
+                if let Some(slot) = &mut self.pad_fx[d] {
+                    slot.set(fx);
+                }
+            }
             other => self.decks[d].apply(other, &mut self.outbox),
         }
     }
@@ -1795,6 +1828,10 @@ impl Renderer {
             let (d, ds) = (id.index(), st.deck_mut(id));
             self.decks[d].restore(ds);
             self.channels[d].restore(&ds.channel);
+            // A pad held across a restore is let go.
+            if let Some(slot) = &mut self.pad_fx[d] {
+                slot.set(None);
+            }
         }
         let m = st.mixer;
         self.set_crossfader(m.crossfader);
@@ -1825,6 +1862,7 @@ impl Renderer {
         for d in slots(self.live) {
             let dk = &mut self.decks[d];
             decks[d] = dk.snapshot(&self.channels[d]);
+            decks[d].pad_fx = self.pad_fx[d].as_ref().and_then(PadFxSlot::held);
             let playing = dk.playing();
             if playing != dk.was_playing {
                 dk.was_playing = playing;
@@ -2070,6 +2108,55 @@ mod tests {
         assert!(peak(&record(&mut rig, 0.3)) > 0.05);
         assert!(rig.snap().mixer.fx_busy[0]);
         assert!(rig.snap().mixer.fx[0].enabled);
+    }
+
+    /// A pad effect is on while its pad is held, on its own deck: a brake takes the
+    /// sound to a stop while the track plays on underneath, and it's back when the pad
+    /// is let go.
+    #[test]
+    fn a_pad_effect_is_on_while_its_pad_is_held() {
+        use crate::pad_fx::{PadFx, PadFxKind};
+        let mut rig = fx_rig(crate::fx::FxKind::Echo);
+        rig.run(0.5);
+        assert_eq!(rig.snap().decks[0].pad_fx, None);
+        // One beat, at the fallback 120 BPM: stopped half a second on.
+        let brake = PadFx::new(PadFxKind::Brake, 1.0);
+        rig.deck(0, DeckCmd::PadFx(Some(brake)));
+        rig.deck(1, DeckCmd::PadFx(None));
+        let before = rig.pos(0);
+        rig.run(0.6);
+        assert_eq!(rig.snap().decks[0].pad_fx, Some(brake));
+        assert_eq!(rig.snap().decks[1].pad_fx, None);
+        assert!(peak(&record(&mut rig, 0.2)) < 1e-4, "braked to silence");
+        assert!(rig.pos(0) - before > 0.7, "the track played on");
+        // The tone peaks at 0.5; the meter has been falling since the sound stopped.
+        assert!(rig.snap().decks[0].vu < 0.25, "the meter shows the effect");
+        assert!(!rig.snap().mixer.fx[0].enabled, "the effect unit is its own");
+        rig.deck(0, DeckCmd::PadFx(None));
+        rig.run(0.1);
+        assert_eq!(rig.snap().decks[0].pad_fx, None);
+        assert!(peak(&record(&mut rig, 0.2)) > 0.3, "let go: the track again");
+    }
+
+    /// A pad echo rings on after the pad is let go, even with the deck stopped. The
+    /// slot is before the fader: the fader takes the tail down with it.
+    #[test]
+    fn a_pad_echo_rings_out_before_the_fader() {
+        use crate::pad_fx::{PadFx, PadFxKind};
+        let mut rig = fx_rig(crate::fx::FxKind::Echo);
+        rig.deck(0, DeckCmd::PadFx(Some(PadFx::new(PadFxKind::Echo, 0.5))));
+        rig.run(1.0);
+        rig.deck(0, DeckCmd::PadFx(None));
+        rig.deck(0, DeckCmd::Play(Set::Off));
+        rig.run(0.05);
+        assert!(peak(&record(&mut rig, 0.3)) > 0.05, "the tail");
+        rig.channel(0, ChannelParam::Volume, 0.0);
+        rig.run(0.05);
+        assert!(peak(&record(&mut rig, 0.2)) < 1e-4, "the fader is after it");
+        // Given long enough the tail is over; a deck that isn't live takes no pad.
+        rig.run(12.0);
+        assert!(!rig.r.pad_fx[0].as_ref().unwrap().busy());
+        assert!(rig.r.pad_fx.iter().filter(|s| s.is_some()).count() == rig.r.live);
     }
 
     /// With two decks shown, an effect goes on A, B or the master mix only, and a unit on
