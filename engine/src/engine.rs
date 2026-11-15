@@ -948,6 +948,8 @@ pub struct Renderer {
     head_mix: Smoothed,
     /// Master cue ([`MasterParam::MasterCue`]).
     master_cue: bool,
+    /// See [`Command::PhonesCueOnly`].
+    phones_cue_only: bool,
     limiters: [Limiter; 2],
     limiting: f64,
     vu_main: [f32; 2],
@@ -1026,6 +1028,7 @@ impl Renderer {
             head_gain: Smoothed::new(1.0),
             head_mix: Smoothed::new(0.5),
             master_cue: false,
+            phones_cue_only: false,
             limiters: [Limiter::new(sr), Limiter::new(sr)],
             limiting: 0.0,
             vu_main: [0.0; 2],
@@ -1267,10 +1270,14 @@ impl Renderer {
             for c in 0..2 {
                 let m = self.master[2 * f + c];
                 let mut cue = if any_pfl { 0.8 * self.cue[2 * f + c] } else { 0.0 };
-                if self.master_cue {
-                    cue += m;
-                }
-                let heard = if cued { to_cue * cue + to_master * m } else { 0.0 };
+                let heard = if self.phones_cue_only {
+                    cue
+                } else {
+                    if self.master_cue {
+                        cue += m;
+                    }
+                    if cued { to_cue * cue + to_master * m } else { 0.0 }
+                };
                 self.phones[2 * f + c] = head * heard;
             }
         }
@@ -1572,6 +1579,7 @@ impl Renderer {
                 self.sync_leader = l.filter(|l| l.index() < self.live);
             }
             Command::MasterCue(set) => self.master_cue = set.apply(self.master_cue),
+            Command::PhonesCueOnly(on) => self.phones_cue_only = on,
             Command::SetHotcueMode(m) => {
                 for d in &mut self.decks {
                     d.hotcue_mode = m;
@@ -3038,6 +3046,39 @@ mod tests {
         let p = peaks(&rig.out, 4);
         assert!(p[0] > 0.1, "the master has deck 1: {p:?}");
         assert!((p[2] - p[0]).abs() < 0.02, "the headphones hear the master: {p:?}");
+    }
+
+    /// A DDJ-400 blends the headphones itself: earshot's headphones carry only the
+    /// cued deck, whatever its own head mix and master cue say, and the master only
+    /// what's on air.
+    #[test]
+    fn phones_cue_only_carries_just_the_cued_decks() {
+        let mut rig = Rig::new();
+        load_fn(&mut rig, 0, 5.0, sine(330.0));
+        load_fn(&mut rig, 1, 5.0, sine(550.0));
+        rig.send(Command::PhonesCueOnly(true));
+        // Deck 1 on air; deck 2 cued with its fader down; a mix and master cue left
+        // on from before.
+        rig.channel(1, ChannelParam::Volume, 0.0);
+        rig.deck(1, DeckCmd::Pfl(Set::On));
+        rig.master(MasterParam::HeadMix, 1.0);
+        rig.send(Command::MasterCue(Set::On));
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.deck(1, DeckCmd::Play(Set::On));
+        rig.run(0.5);
+        let both = peaks(&rig.out, 4);
+        assert!(both[0] > 0.1, "the master has deck 1: {both:?}");
+        assert!(both[2] > 0.1, "the headphones have deck 2: {both:?}");
+        // Deck 2 alone in the headphones: they stay as loud with deck 1 stopped, and
+        // go silent with deck 2's cue off.
+        rig.deck(0, DeckCmd::Play(Set::Off));
+        rig.run(0.5);
+        let alone = peaks(&rig.out, 4);
+        assert!(alone[0] < 0.001, "nothing on air: {alone:?}");
+        assert!((alone[2] - both[2]).abs() < 0.02, "deck 2 only: {both:?} then {alone:?}");
+        rig.deck(1, DeckCmd::Pfl(Set::Off));
+        rig.run(0.5);
+        assert!(peaks(&rig.out, 4)[2] < 0.001, "nothing cued: silent");
     }
 
     #[test]

@@ -117,6 +117,8 @@ pub enum MixerCmd {
     SyncLeader(Option<DeckId>),
     /// Master cue: the master mix on the headphones' cue side.
     MasterCue(earshot_engine::Set),
+    /// The headphones carry only the cued decks (the controller blends them).
+    PhonesCueOnly(bool),
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +205,7 @@ pub fn direct(cmd: Command) -> Result<EngineCommand, Command> {
         Command::Param(p, v) => Ok(EngineCommand::Param(p, v)),
         Command::Fx(unit, cmd) => Ok(EngineCommand::Fx { unit, cmd }),
         Command::Mixer(MixerCmd::MasterCue(s)) => Ok(EngineCommand::MasterCue(s)),
+        Command::Mixer(MixerCmd::PhonesCueOnly(on)) => Ok(EngineCommand::PhonesCueOnly(on)),
         other => Err(other),
     }
 }

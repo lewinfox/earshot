@@ -434,6 +434,11 @@ pub enum Command {
     SetRouting(Routing),
     /// Master cue on, off or toggled ([`MasterParam::MasterCue`]).
     MasterCue(Set),
+    /// The headphones carry only the cued channels, at full: a controller (a DDJ-400)
+    /// blends in the master itself, from the master's own channels, with its own
+    /// headphone mix knob and master cue. Earshot's head mix and master cue are then
+    /// ignored.
+    PhonesCueOnly(bool),
     Preview(PreviewCmd),
     /// An effect unit (0..[`FX_UNITS`]; others are ignored).
     Fx {

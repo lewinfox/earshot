@@ -158,6 +158,8 @@ fn ddj400_pads() -> Vec<(u8, u8, String, Option<f64>)> {
     ] {
         v.push((0x94, data1, name.to_string(), None));
     }
+    // MASTER CUE (seen from the unit): display only, the controller does it itself.
+    v.push((0x96, 0x63, "mixer_master_headphone_cue".to_string(), None));
     for (d, status) in [(1, 0x90u8), (2, 0x91)] {
         v.push((status, 0x3F, format!("deck_{d}_shift"), None));
         // CUE/LOOP CALL ◀ ▶, and with Shift: delete / save a memory cue.
@@ -260,12 +262,32 @@ pub struct Learn {
 }
 
 /// The controls a mapping can mark display only: the output levels, which have a
-/// setting (full) that leaves the sound unchanged.
+/// setting (full) that leaves the sound unchanged, and the headphone mix and master
+/// cue, held at the cue side and off (a DDJ-400 puts the master into the headphones
+/// itself, from its sound card's channels 1-2, so earshot's headphone channels carry
+/// only the cue; Mixxx's mapping leaves all of these to it). A display-only button
+/// isn't lit by earshot: the controller lights it.
 pub fn can_be_display_only(control: Control) -> bool {
-    matches!(
-        control,
-        Control::Master(MasterParam::Gain | MasterParam::HeadGain)
-    )
+    display_only_value(control).is_some()
+}
+
+/// Where earshot holds its own control while a display-only knob stands in for it.
+pub fn display_only_value(control: Control) -> Option<f64> {
+    match control {
+        Control::Master(MasterParam::Gain | MasterParam::HeadGain) => control.range().map(|r| r.default),
+        Control::Master(MasterParam::HeadMix | MasterParam::MasterCue) => Some(0.0),
+        _ => None,
+    }
+}
+
+/// The command that puts `control` at `value` (a toggle: on or off, not toggled).
+pub fn set_command(control: Control, value: f64) -> Option<Command> {
+    match control {
+        Control::Master(MasterParam::MasterCue) => Some(Command::Mixer(
+            crate::core::command::MixerCmd::MasterCue(earshot_engine::Set::from_bool(value > 0.5)),
+        )),
+        _ => control.command(value),
+    }
 }
 
 /// The session's mapping: the command each message runs, by message key, on every
@@ -482,7 +504,10 @@ fn ddj400_map() -> Map {
                 control: mp.control,
                 arg: mp.arg,
                 input: mp.input,
-                display_only: mp.control == Control::Master(MasterParam::Gain),
+                display_only: matches!(
+                    mp.control,
+                    Control::Master(MasterParam::Gain | MasterParam::HeadMix | MasterParam::MasterCue)
+                ),
             };
             ((mp.status, mp.data1), l)
         })
@@ -966,14 +991,26 @@ mod tests {
         assert!(back[&(0xB6, 0x08)].display_only && back[&(0xB6, 0x28)].display_only);
     }
 
-    /// A DDJ-400's MASTER LEVEL is display only from the start (the controller sets
-    /// its own output level); only the output levels can be display only.
+    /// A DDJ-400's MASTER LEVEL and HEADPHONES MIXING are display only from the start
+    /// (the controller does both itself); only the output levels and the headphone mix
+    /// can be display only.
     #[test]
     fn the_ddj_master_level_is_display_only() {
         let l = ddj();
         assert!(l.get((0xB6, 0x08)).unwrap().display_only);
         assert!(l.get((0xB6, 0x28)).unwrap().display_only);
         assert!(!l.get((0xB6, 0x0D)).unwrap().display_only, "headphone level stays live");
+        // HEADPHONES MIXING too: the controller blends its master into the headphones,
+        // and earshot's headphone channels carry only the cue.
+        assert!(l.get((0xB6, 0x0C)).unwrap().display_only);
+        assert!(l.get((0xB6, 0x2C)).unwrap().display_only);
+        assert_eq!(display_only_value(Control::Master(MasterParam::HeadMix)), Some(0.0));
+        // MASTER CUE too: the controller puts the master in the headphones itself.
+        assert!(l.get((0x96, 0x63)).unwrap().display_only);
+        assert!(matches!(
+            translate(&[0x96, 0x63, 0x7F], &l),
+            Some((_, Some(Command::App(crate::core::command::AppCmd::ControllerShows { .. }))))
+        ));
         // The crossfader can't be: it has no setting that leaves the sound alone.
         l.set_display_only((0xB6, 0x1F), true);
         assert!(!l.get((0xB6, 0x1F)).unwrap().display_only);

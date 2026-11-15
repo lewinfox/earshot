@@ -199,8 +199,12 @@ pub fn shift_twin((status, data1): (u8, u8)) -> Option<(u8, u8)> {
 /// Every mapped button's message and value, as they should be now; and each shifted
 /// twin without a light of its own, its button's (see `shift_twin`).
 pub fn frame(learned: &Learned, snap: &EngineSnapshot, pads: &AllPads, lit_half: bool) -> BTreeMap<(u8, u8), u8> {
-    let notes: BTreeMap<(u8, u8), _> =
-        learned.all().into_iter().filter(|(_, l)| l.input == Input::Note).collect();
+    // A display-only button is the controller's to light.
+    let notes: BTreeMap<(u8, u8), _> = learned
+        .all()
+        .into_iter()
+        .filter(|(_, l)| l.input == Input::Note && !l.display_only)
+        .collect();
     let mut out: BTreeMap<(u8, u8), u8> = notes
         .iter()
         .map(|(&k, l)| (k, value(light(l.control, l.arg, snap, pads), lit_half)))
@@ -291,7 +295,11 @@ fn run(mut outputs: Vec<MidiOutputConnection>, learned: &Learned, monitor: &Moni
 
 /// The lights to put out on leaving: every mapped button's, and any lit here since.
 fn off_at_exit(learned: &Learned, sent: &BTreeMap<(u8, u8), u8>) -> std::collections::BTreeSet<(u8, u8)> {
-    let mapped = learned.all().into_iter().filter(|(_, l)| l.input == Input::Note).map(|(k, _)| k);
+    let mapped = learned
+        .all()
+        .into_iter()
+        .filter(|(_, l)| l.input == Input::Note && !l.display_only)
+        .map(|(k, _)| k);
     mapped.chain(sent.iter().filter(|(_, v)| **v != 0).map(|(k, _)| *k)).collect()
 }
 
