@@ -70,9 +70,9 @@ impl DeckUi {
     /// on the left so they keep clear of CUE and play.
     pub(super) fn jog(&self, ui: &mut Ui, out: &mut Vec<Command>) {
         let s = self.state;
-        let d = self.dims;
+        let jog = self.dims.jog();
+        let d = self.dims.ring();
         let k = d.k;
-        let jog = d.jog();
         let (rect, resp) = ui.allocate_exact_size(vec2(jog + d.px(JOG_LEFT), jog), Sense::hover());
         let c = pos2(rect.right() - jog / 2.0, rect.center().y);
         let r = jog / 2.0 - d.px(JOG_ROOM);
@@ -149,10 +149,11 @@ impl DeckUi {
         // VINYL: the only part that turns vinyl mode on or off, so a stray click on
         // the ring can't.
         let label = pos2(c.x, top - d.px(VINYL_GAP));
+        // Laid out without a colour, so it takes the ink below (on, hovered, off).
         let text = p.layout_no_wrap(
             "VINYL".into(),
             FontId::proportional(d.px(FONT_VINYL)),
-            THEME.text,
+            egui::Color32::PLACEHOLDER,
         );
         let vinyl_rect = Align2::CENTER_BOTTOM
             .anchor_size(label, text.size())

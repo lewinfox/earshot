@@ -139,8 +139,9 @@ impl PendingLoad {
 
 // Layout.
 const TEMPO_W: f32 = 76.0;
-/// SYNC and ★ over Q and KEY, in the header (without a tempo fader).
-const BUTTONS_W: f32 = TEMPO_W + 6.0;
+/// SYNC, ★, Q and KEYLOCK over the key shift, in the header (without a tempo fader):
+/// two lines, no taller than the title and details beside them.
+const BUTTONS_W: f32 = 2.0 * TEMPO_W + 4.0 + 6.0;
 
 /// The controls row's scale: every size in it is [`design`]'s times `k`, so the row
 /// grows and shrinks as one piece.
@@ -151,6 +152,11 @@ struct Dims {
 
 impl Dims {
     const FULL: Dims = Dims { k: 1.0 };
+
+    /// While Perform shows two decks: the row this tall at least.
+    fn full() -> Dims {
+        Dims::for_row(FULL_ROW)
+    }
 
     /// While Perform shows four decks: the row this tall at least.
     fn compact() -> Dims {
@@ -182,22 +188,28 @@ impl Dims {
     }
 
     fn jog(self) -> f32 {
-        self.px(design::JOG_D)
+        self.ring().px(design::JOG_D)
+    }
+
+    /// The jog ring's own scale: it and all in it are drawn bigger than the rest.
+    fn ring(self) -> Dims {
+        Dims { k: self.k * design::JOG_SCALE }
     }
 }
 
 /// The controls row's height at its design size.
 fn row_h() -> f32 {
-    design::JOG_D.max(2.0 * design::BTN_H + design::GAP_Y)
+    (design::JOG_D * design::JOG_SCALE).max(2.0 * design::BTN_H + design::GAP_Y)
 }
 
-/// The controls row's least height while Perform shows four decks.
-const COMPACT_ROW: f32 = 60.0;
+/// The controls row's least height while Perform shows two decks, and four.
+const FULL_ROW: f32 = 150.0;
+const COMPACT_ROW: f32 = 90.0;
 
 /// A deck panel's least height, full size or while Perform shows four decks. Given
 /// more, its controls grow to fill it (the overview keeps its height).
 pub fn min_height(compact: bool) -> f32 {
-    if compact { 150.0 } else { 198.0 }
+    if compact { 180.0 } else { 264.0 }
 }
 
 /// The pages of a player's controls, picked with the tabs on their outer edge (as in
@@ -538,7 +550,7 @@ impl DeckUi {
         // its width: the frame, the tempo fader, the controls, the tabs and the least
         // gap between.
         let fader_w = if tempo_fader { TEMPO_W + 8.0 } else { 0.0 };
-        let least = if compact { Dims::compact() } else { Dims::FULL };
+        let least = if compact { Dims::compact() } else { Dims::full() };
         let extra = (height - min_height(compact)).max(0.0);
         let mut k = Dims::for_row(least.controls_h() + extra).k;
         if self.fit.is_some_and(|(w, _)| w != width) {
@@ -707,9 +719,12 @@ impl DeckUi {
             });
             if buttons {
                 ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
-                    self.sync_buttons(ui, info, out);
-                    self.mode_buttons(ui, out);
+                    ui.spacing_mut().item_spacing = vec2(4.0, 3.0);
+                    ui.horizontal(|ui| {
+                        self.sync_buttons(ui, info, out, 16.0);
+                        self.mode_buttons(ui, out, 16.0);
+                    });
+                    self.key_shift_buttons(ui, out, 2.0 * TEMPO_W + 4.0, 16.0);
                 });
             }
             ui.with_layout(Layout::top_down(Align::Max), |ui| {

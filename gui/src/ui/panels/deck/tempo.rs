@@ -51,8 +51,9 @@ impl DeckUi {
         ui.vertical(|ui| {
             ui.set_width(TEMPO_W);
             ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
-            self.sync_buttons(ui, info, out);
-            self.mode_buttons(ui, out);
+            self.sync_buttons(ui, info, out, 20.0);
+            self.mode_buttons(ui, out, 18.0);
+            self.key_shift_buttons(ui, out, TEMPO_W, 18.0);
             // The fader gets exactly what's left, so it never stretches the deck.
             let h = height - ui.min_rect().height() - ui.spacing().item_spacing.y;
             ui.horizontal_top(|ui| {
@@ -106,8 +107,8 @@ impl DeckUi {
         });
     }
 
-    /// SYNC, and beside it the sync leader's star.
-    pub(super) fn sync_buttons(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
+    /// SYNC, and beside it the sync leader's star, `h` tall.
+    pub(super) fn sync_buttons(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>, h: f32) {
         let s = self.state;
         let following = match s.following.map(deck_letter) {
             Some(l) if s.sync => format!("\nFollowing deck {l}"),
@@ -124,7 +125,7 @@ impl DeckUi {
             ui.spacing_mut().item_spacing.x = 4.0;
             let r = ui
                 .add(
-                    HwButton::new("SYNC", self.colour(), vec2(TEMPO_W - 28.0, 20.0))
+                    HwButton::new("SYNC", self.colour(), vec2(TEMPO_W - 28.0, h))
                         .font(10.0)
                         .lit(s.sync),
                 )
@@ -136,7 +137,7 @@ impl DeckUi {
             }
             let r = ui
                 .add(
-                    HwButton::new("★", self.colour(), vec2(24.0, 20.0))
+                    HwButton::new("★", self.colour(), vec2(24.0, h))
                         .font(11.0)
                         .lit(info.leader),
                 )
@@ -151,14 +152,14 @@ impl DeckUi {
         });
     }
 
-    /// Q (quantise) and KEY (keylock).
-    pub(super) fn mode_buttons(&mut self, ui: &mut Ui, out: &mut Vec<Command>) {
+    /// Q (quantise) and KEYLOCK, `h` tall.
+    pub(super) fn mode_buttons(&mut self, ui: &mut Ui, out: &mut Vec<Command>, h: f32) {
         let s = self.state;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let r = ui
                 .add(
-                    HwButton::new("Q", THEME.accent, vec2(24.0, 18.0))
+                    HwButton::new("Q", THEME.accent, vec2(24.0, h))
                         .font(10.0)
                         .lit(s.quantize),
                 )
@@ -168,7 +169,7 @@ impl DeckUi {
             }
             let r = ui
                 .add(
-                    HwButton::new("KEYLOCK", THEME.accent, vec2(TEMPO_W - 28.0, 18.0))
+                    HwButton::new("KEYLOCK", THEME.accent, vec2(TEMPO_W - 28.0, h))
                         .font(9.0)
                         .lit(s.keylock),
                 )
@@ -177,15 +178,15 @@ impl DeckUi {
                 self.control(out, DeckControl::Keylock, 1.0);
             }
         });
-        self.key_shift_buttons(ui, out);
     }
 
-    /// Key down a semitone, the shift (click: back to the track's key), key up.
-    fn key_shift_buttons(&mut self, ui: &mut Ui, out: &mut Vec<Command>) {
+    /// Key down a semitone, the shift (click: back to the track's key), key up: `w`
+    /// wide in all, `h` tall.
+    pub(super) fn key_shift_buttons(&mut self, ui: &mut Ui, out: &mut Vec<Command>, w: f32, h: f32) {
         let n = self.state.key_shift;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            let side = vec2(20.0, 18.0);
+            let side = vec2(20.0, h);
             let buttons = [
                 (
                     "−".to_string(),
@@ -200,7 +201,7 @@ impl DeckUi {
                     } else {
                         format!("KEY {n:+}")
                     },
-                    vec2(TEMPO_W - 2.0 * side.x - 8.0, side.y),
+                    vec2(w - 2.0 * side.x - 8.0, side.y),
                     n != 0.0,
                     "Key shift in semitones, tempo untouched. Click: back to the track's key",
                     DeckControl::KeyShiftReset,

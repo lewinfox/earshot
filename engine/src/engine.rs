@@ -2610,6 +2610,32 @@ mod tests {
         assert!((rig.pos(0) - t - 1.0).abs() < 0.01);
     }
 
+    /// Turning the jog wheel out of vinyl mode bends the speed smoothly, with keylock
+    /// or a key shift too: no clicks where the speed changes, block to block.
+    #[test]
+    fn a_jog_bend_is_smooth() {
+        // The largest jump from one sample to the next, beyond what a 440 Hz tone at
+        // its level has (0.5 * TAU * 440 / SR, about 0.031).
+        let roughness = |x: &[f32]| x.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
+        for (keylock, shift) in [(false, 0.0), (true, 0.0), (false, 3.0)] {
+            let mut rig = Rig::new();
+            load_fn(&mut rig, 0, 20.0, sine(440.0));
+            rig.deck(0, DeckCmd::Keylock(Set::from_bool(keylock)));
+            rig.deck(0, DeckCmd::KeyShift(shift));
+            rig.deck(0, DeckCmd::Vinyl(Set::Off));
+            rig.deck(0, DeckCmd::Play(Set::On));
+            rig.run(0.5);
+            let steady = roughness(&record(&mut rig, 0.3));
+            let mut bent = vec![];
+            for _ in 0..60 {
+                rig.deck(0, DeckCmd::HandMove { by: 0.005, at: Instant::now() });
+                bent.extend(record(&mut rig, 0.006));
+            }
+            let bent = roughness(&bent);
+            assert!(bent < steady * 1.3, "keylock {keylock}, shift {shift}: steady {steady}, bent {bent}");
+        }
+    }
+
     #[test]
     fn turning_the_jog_wheel_moves_a_stopped_deck_a_little() {
         let mut rig = Rig::new();

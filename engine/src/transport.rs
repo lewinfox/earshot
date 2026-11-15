@@ -117,6 +117,9 @@ pub struct Player {
     /// Semitones up (negative: down), whatever the speed (needs a shifter too).
     pub key_shift: f64,
     shifter: Option<Keylock>,
+    /// How far ahead of the playhead the last block read for the shifter (seconds of
+    /// track): see [`Player::render`].
+    lead: f64,
     /// A hand on the record (the mouse on the waveform, a jog wheel): see
     /// [`crate::scratch`].
     pub scratch: Scratch,
@@ -132,6 +135,7 @@ impl Player {
             keylock: false,
             key_shift: 0.0,
             shifter: keylock.map(|(sr, block)| Keylock::new(sr, block)),
+            lead: 0.0,
             scratch: Scratch::default(),
         }
     }
@@ -195,18 +199,26 @@ impl Player {
             _ => t,
         };
         let t = &mut self.transport;
-        if let Some(k) = shifter.as_deref_mut()
-            && k.needs_restart(t.pos)
-        {
-            let len = k.preroll_frames();
-            let start = t.pos + lead - len as f64 * step;
-            k.restart(|i| mix.sample(source(start + i as f64 * step) * src_rate, 0.0));
+        // The read-ahead moves with the speed. Going on from the last block, it moves
+        // across this one, not at its start: a jump there would click (and a jog
+        // wheel's bend changes the speed every block).
+        let mut from = lead;
+        if let Some(k) = shifter.as_deref_mut() {
+            if k.needs_restart(t.pos) {
+                let len = k.preroll_frames();
+                let start = t.pos + lead - len as f64 * step;
+                k.restart(|i| mix.sample(source(start + i as f64 * step) * src_rate, 0.0));
+            } else {
+                from = self.lead;
+            }
         }
+        self.lead = lead;
         let mut played = buf.len() / 2;
         let frames = played as f32;
         let mut ended = false;
         for (f, frame) in buf.chunks_exact_mut(2).enumerate() {
-            let (l, r) = mix.sample(source(t.pos + lead) * src_rate, f as f32 / frames);
+            let ahead = from + (lead - from) * f as f64 / frames as f64;
+            let (l, r) = mix.sample(source(t.pos + ahead) * src_rate, f as f32 / frames);
             frame[0] = l;
             frame[1] = r;
             if t.advance(step) {
