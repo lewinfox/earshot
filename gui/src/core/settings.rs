@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::collections::CollectionId;
 use super::player::AudioSettings;
+use super::sampler::Bank;
 use super::store::{Reader, StoreCmd};
 
 /// [`AudioSettings`]: the output device, buffer size and routing.
@@ -29,6 +30,8 @@ pub const LOAD_WHILE_PLAYING: &str = "decks.load_while_playing";
 pub const STEMS_CACHE_GB: &str = "stems.cache_gb";
 /// [`STEMS_CACHE_GB`] until it's set.
 pub const STEMS_CACHE_GB_DEFAULT: f64 = 20.0;
+/// The sampler's 16 slots ([`Bank`]): each one's sound file, volume and loop switch.
+pub const SAMPLER: &str = "sampler.slots";
 /// Add another library's tracks to earshot without asking, when they're put in a
 /// playlist, crate or Flow.
 pub const IMPORT_WITHOUT_ASKING: &str = "import.without_asking";
@@ -50,6 +53,7 @@ pub struct Settings {
     pub import_without_asking: bool,
     pub stems_cache_gb: f64,
     pub quick_analyse_new: bool,
+    pub sampler: Bank,
 }
 
 /// A player's options that stay as they were set, from one run to the next.
@@ -85,6 +89,7 @@ impl Settings {
             import_without_asking: read(reader, IMPORT_WITHOUT_ASKING).unwrap_or_default(),
             stems_cache_gb: read(reader, STEMS_CACHE_GB).unwrap_or(STEMS_CACHE_GB_DEFAULT),
             quick_analyse_new: read(reader, QUICK_ANALYSE_NEW).unwrap_or(true),
+            sampler: read(reader, SAMPLER).unwrap_or_default(),
         }
     }
 }

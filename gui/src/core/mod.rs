@@ -34,6 +34,7 @@ pub mod pads;
 pub mod player;
 pub mod power;
 pub mod query;
+pub mod sampler;
 pub mod selection;
 pub mod services;
 pub mod session;
@@ -64,6 +65,11 @@ pub enum Event {
         deck: earshot_engine::DeckId,
         /// The request's ticket (`player::request_load`).
         ticket: u64,
+        result: Result<(), String>,
+    },
+    /// A sound finished loading into a sampler slot, or couldn't (`sampler::load`).
+    Sample {
+        slot: earshot_engine::SampleSlot,
         result: Result<(), String>,
     },
     /// A library scan finished (the tracks themselves arrive as a

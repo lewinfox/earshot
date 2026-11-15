@@ -36,6 +36,9 @@ pub enum Command {
     Audio(AudioCmd),
     /// The headphone preview of a library track.
     Preview(PreviewCmd),
+    /// The sampler's slots (`core::sampler`): playing and stopping go straight to
+    /// the engine; the UI runs the rest (it keeps the bank).
+    Sampler(super::sampler::SamplerCmd),
     View(ViewCmd),
     App(AppCmd),
     /// Library tracks: load, analyse, library folders. Run by the UI, like `View`.
@@ -210,6 +213,7 @@ pub fn direct(cmd: Command) -> Result<EngineCommand, Command> {
         Command::Fx(unit, cmd) => Ok(EngineCommand::Fx { unit, cmd }),
         Command::Mixer(MixerCmd::MasterCue(s)) => Ok(EngineCommand::MasterCue(s)),
         Command::Mixer(MixerCmd::PhonesCueOnly(on)) => Ok(EngineCommand::PhonesCueOnly(on)),
+        Command::Sampler(c) => c.direct().ok_or(Command::Sampler(c)),
         other => Err(other),
     }
 }

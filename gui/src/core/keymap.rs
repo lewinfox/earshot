@@ -237,6 +237,7 @@ impl Keymap {
                 }
                 Control::Library(_) => ("Library".to_string(), None),
                 Control::Ui(_) => ("Screen".to_string(), None),
+                Control::Sampler(..) => ("Sampler".to_string(), None),
             };
             let row = (b.label(), b.describe());
             match sections.iter_mut().find(|s| s.title == title) {

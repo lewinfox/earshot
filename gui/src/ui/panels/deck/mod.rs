@@ -82,6 +82,20 @@ pub struct DeckInfo {
     pub cues: Arc<TrackCues>,
 }
 
+/// A sampler slot on a deck's pads page (`core::sampler`), as the app has it this
+/// frame.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SamplePad {
+    /// The slot, 0-based.
+    pub slot: usize,
+    /// Its sound's name (`None`: the slot is empty).
+    pub name: Option<String>,
+    /// The engine has its sound, and is playing it.
+    pub loaded: bool,
+    pub playing: bool,
+    pub looping: bool,
+}
+
 /// A track asked for but still decoding. The deck shows its details from the library
 /// straight away, and a placeholder where the waveforms go.
 #[derive(Clone, Debug, PartialEq)]
@@ -349,6 +363,8 @@ pub struct DeckUi {
     pub pads: DeckPads,
     /// The controller's SHIFT is held: the pads page shows the pads' SHIFT actions.
     pub shift_held: bool,
+    /// The sampler slots on this deck's pads (kept up to date while they show).
+    pub sample_pads: [SamplePad; crate::core::sampler::PADS],
 }
 
 impl DeckUi {
@@ -358,6 +374,7 @@ impl DeckUi {
             pad_mode: PadMode::default(),
             pads: DeckPads::default(),
             shift_held: false,
+            sample_pads: Default::default(),
             id,
             shown: 0.0,
             seen_generation: u64::MAX,
