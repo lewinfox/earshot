@@ -156,8 +156,10 @@ See [`gui/README.md`](gui/README.md) for the code layout and an off-screen scree
 
 ## Releases
 
-Pushing a `vX.Y.Z` tag makes a GitHub release (`.github/workflows/release.yml`). For
-each platform, `packaging/bundle.sh` puts the app in a folder with everything it runs:
+Pushing a `vX.Y.Z` tag makes a GitHub release (`.github/workflows/release.yml`).
+`make release` does it: bump `version` in `gui/Cargo.toml` (through a PR), then, on an
+up-to-date `main`, it tags `v<version>` and pushes the tag, after checking and asking.
+For each platform, `packaging/bundle.sh` puts the app in a folder with everything it runs:
 
 - a standalone Python with the worker's packages installed, as `worker/uv.lock` pins them
 - the worker's code
