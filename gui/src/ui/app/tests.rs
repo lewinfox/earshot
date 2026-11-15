@@ -316,6 +316,27 @@ fn perform() {
         t.elapsed().as_secs_f64() * 1000.0 / n as f64,
         worst * 1000.0
     );
+    // What follows the build each frame, before the GPU: turning the shapes into
+    // triangles. (The GPU's own work isn't measured here.)
+    let out = h.output();
+    let (shapes, ppp) = (out.shapes.clone(), out.pixels_per_point);
+    let t = Instant::now();
+    let mut triangles = 0;
+    for _ in 0..n {
+        let prims = h.ctx.tessellate(shapes.clone(), ppp);
+        triangles = prims
+            .iter()
+            .map(|p| match &p.primitive {
+                egui::epaint::Primitive::Mesh(m) => m.indices.len() / 3,
+                _ => 0,
+            })
+            .sum();
+    }
+    eprintln!(
+        "tessellation: {:.2} ms average: {} shapes, {triangles} triangles",
+        t.elapsed().as_secs_f64() * 1000.0 / n as f64,
+        shapes.len()
+    );
     render(&mut h, "perform");
     // With the mixer hidden (as with a controller): no tempo faders.
     h.state_mut().dispatch(ViewCmd::ShowMixer(false).into());
