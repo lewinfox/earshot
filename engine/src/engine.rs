@@ -19,6 +19,7 @@ use crate::decode::TrackAudio;
 use crate::dsp::{self, Limiter, Smoothed};
 use crate::fx::{BeatClock, FALLBACK_BPM, FX_UNITS, FxCmd, FxTarget, FxUnit, FxUnitState};
 use crate::keylock::KEY_SHIFT_MAX;
+use crate::load::LoadWatch;
 use crate::processor::{Channel, KNOB_SECS, MasterChain};
 use crate::snapshot::{
     DeckSnap, EngineEvent, EngineSnapshot, MixerSnap, Monitor, PreviewSnap, Stats,
@@ -964,6 +965,16 @@ pub struct Renderer {
     clock_offset: Option<f64>,
     /// Rendered only when asked, not as time passes ([`Renderer::set_stepped`]).
     stepped: bool,
+    /// Nothing waits for the audio ([`Renderer::set_untimed`]).
+    untimed: bool,
+    /// Whether keylock is on its cheaper setting, from how long callbacks take.
+    load: LoadWatch,
+    /// The decks' keylock is on its cheaper setting ([`Renderer::set_cheap_keylock`]).
+    keylock_cheap: bool,
+    /// Tests: the load each callback reports, in place of the time it really took
+    /// (which depends on the machine running them).
+    #[cfg(test)]
+    test_load: f32,
     /// Tests render faster than real time: they set this to have callbacks come at the
     /// times they would in real time ([`Renderer::moment`]).
     #[cfg(test)]
@@ -1037,6 +1048,11 @@ impl Renderer {
             epoch: Instant::now(),
             clock_offset: None,
             stepped: false,
+            untimed: false,
+            load: LoadWatch::default(),
+            keylock_cheap: false,
+            #[cfg(test)]
+            test_load: 0.0,
             #[cfg(test)]
             simulated_time: false,
         };
@@ -1099,6 +1115,55 @@ impl Renderer {
         if elapsed * 10 > budget_ns * 8 {
             s.slow_callbacks.fetch_add(1, Relaxed);
         }
+        let load = self.load_of(elapsed, budget_ns);
+        let cheap = self.load.callback(load, total as f64 / self.sample_rate);
+        self.set_cheap_keylock(cheap);
+    }
+
+    /// The share of its time a callback used, for [`LoadWatch`]: nothing when no
+    /// sound card is waiting for the audio.
+    #[cfg(not(test))]
+    fn load_of(&self, elapsed_ns: u64, budget_ns: u64) -> f32 {
+        if self.untimed || self.stepped || budget_ns == 0 {
+            0.0
+        } else {
+            (elapsed_ns as f64 / budget_ns as f64) as f32
+        }
+    }
+
+    /// Tests say what the load is.
+    #[cfg(test)]
+    fn load_of(&self, _elapsed_ns: u64, _budget_ns: u64) -> f32 {
+        let _ = self.untimed;
+        self.test_load
+    }
+
+    /// Put every deck's keylock on its cheaper setting, or back on its full one. Each
+    /// primes its shifter again when it next plays (once: a deck already there is
+    /// left alone). The app reads which it is from [`Stats::keylock_cheap`].
+    fn set_cheap_keylock(&mut self, cheap: bool) {
+        if cheap == self.keylock_cheap {
+            return;
+        }
+        self.keylock_cheap = cheap;
+        for deck in &mut self.decks {
+            deck.player.set_cheap_keylock(cheap);
+        }
+        self.stats.keylock_cheap.store(cheap, Relaxed);
+    }
+
+    /// The audio thread ran past the real-time limit and has dropped to normal
+    /// scheduling ([`crate::realtime`]): keylock goes cheaper at once, without waiting
+    /// to see the load. Called on the audio thread, before the callback's render.
+    pub(crate) fn overran(&mut self) {
+        self.load.overrun();
+        self.set_cheap_keylock(self.load.cheap());
+    }
+
+    /// No sound card is waiting for the audio (the null output): how long a callback
+    /// takes doesn't matter, so keylock stays on its full setting.
+    pub(crate) fn set_untimed(&mut self) {
+        self.untimed = true;
     }
 
     /// The engine's clock now, seconds.
@@ -2290,6 +2355,95 @@ mod tests {
             (first - 0.1 / 1.08).abs() < 0.008,
             "first click after the jump at {first:.3}s"
         );
+    }
+
+    /// How far (s) each click heard in `x` is from where the playhead was, for a
+    /// [`click_track`] played from track time `from` at `speed`.
+    fn clicks_off(x: &[f32], from: f64, speed: f64) -> Vec<f64> {
+        clicks(x)
+            .iter()
+            .map(|h| {
+                let beats = (from + h * speed) / 0.5;
+                (beats - beats.round()) * 0.5 / speed
+            })
+            .collect()
+    }
+
+    #[test]
+    fn keylock_goes_cheaper_under_sustained_load_and_back_when_there_is_room() {
+        let mut rig = Rig::new();
+        load_fn(&mut rig, 0, 60.0, click_track);
+        load_fn(&mut rig, 1, 60.0, sine(440.0));
+        for d in 0..2 {
+            rig.deck(d, DeckCmd::Keylock(Set::On));
+            rig.deck(d, DeckCmd::Rate(0.08));
+        }
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.run(1.0);
+        let cheap = |rig: &Rig| rig.monitor.stats().keylock_cheap.load(Relaxed);
+        assert!(!cheap(&rig), "room to spare: the full setting");
+
+        // One slow callback, then a few: not sustained, nothing changes.
+        rig.r.test_load = 0.95;
+        rig.run(0.05);
+        rig.r.test_load = 0.2;
+        rig.run(1.0);
+        assert!(!cheap(&rig));
+
+        // Behind for a while: the cheaper setting, with the clicks still where the
+        // playhead is (its shorter delay is read ahead by, after one re-prime).
+        rig.r.test_load = 0.9;
+        let from = rig.pos(0);
+        let heard = record(&mut rig, 4.0);
+        assert!(cheap(&rig));
+        let off = clicks_off(&heard, from, 1.08);
+        assert!(off.len() >= 7, "{off:?}");
+        for o in &off {
+            assert!(o.abs() < 0.008, "clicks off the playhead by {off:?}");
+        }
+
+        // The cheaper setting brought the load down some: not enough to go back.
+        rig.r.test_load = 0.5;
+        rig.run(crate::load::RECOVER_SECS + 2.0);
+        assert!(cheap(&rig));
+
+        // A deck started while it's cheaper keeps its key too.
+        rig.deck(0, DeckCmd::Play(Set::Off));
+        rig.channel(0, ChannelParam::Volume, 0.0);
+        rig.deck(1, DeckCmd::Play(Set::On));
+        rig.run(0.5);
+        let f = frequency(&record(&mut rig, 1.0));
+        assert!((f - 440.0).abs() < 2.0, "cheaper keylock: {f:.1} Hz");
+
+        // Room for long enough: back to the full setting, in time and in key.
+        rig.r.test_load = 0.1;
+        rig.run(crate::load::RECOVER_SECS + 0.5);
+        assert!(!cheap(&rig));
+        let f = frequency(&record(&mut rig, 1.0));
+        assert!((f - 440.0).abs() < 2.0, "the full setting again: {f:.1} Hz");
+        rig.deck(1, DeckCmd::Play(Set::Off));
+        rig.run(0.5);
+        rig.channel(0, ChannelParam::Volume, 1.0);
+        rig.deck(0, DeckCmd::Seek(40.25));
+        rig.deck(0, DeckCmd::Play(Set::On));
+        let heard = record(&mut rig, 2.0);
+        let off = clicks_off(&heard, 40.25, 1.08);
+        assert!(off.len() >= 3, "{off:?}");
+        for o in &off {
+            assert!(o.abs() < 0.008, "clicks off the playhead by {off:?}");
+        }
+    }
+
+    #[test]
+    fn running_past_the_real_time_limit_puts_keylock_on_its_cheaper_setting_at_once() {
+        let mut rig = Rig::new();
+        rig.run(0.1);
+        rig.r.overran();
+        assert!(rig.monitor.stats().keylock_cheap.load(Relaxed));
+        // With room, it goes back as it does from load.
+        rig.r.test_load = 0.1;
+        rig.run(crate::load::RECOVER_SECS + 0.5);
+        assert!(!rig.monitor.stats().keylock_cheap.load(Relaxed));
     }
 
     #[test]

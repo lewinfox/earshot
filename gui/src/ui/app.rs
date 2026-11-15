@@ -241,6 +241,14 @@ struct Hud {
     /// logged.
     phones_short: u64,
     phones_realigns: u64,
+    /// The machine can't keep up (`EarshotApp::watch_strain`): the audio thread has
+    /// dropped out of real time, keylock is on its lighter setting, and the system is
+    /// holding the CPU back; as last seen (and logged), and the top bar's pills for
+    /// them.
+    realtime_lost: bool,
+    keylock_cheap: bool,
+    power: Option<crate::core::power::Warning>,
+    alerts: Vec<crate::ui::panels::status::Alert>,
     last: Option<Instant>,
 }
 
@@ -1207,6 +1215,7 @@ impl EarshotApp {
                 }
                 TopBar {
                     audio: &self.audio,
+                    alerts: &self.hud.alerts,
                     audio_note: self.audio_note.as_ref().map(|(n, _)| n.as_str()),
                     controller_busy: self.controller.found.as_ref().and_then(|c| {
                         Some((c.id.as_str(), self.controller.error.as_deref()?))
