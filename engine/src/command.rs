@@ -11,6 +11,7 @@ use crate::decode::TrackAudio;
 use crate::engine::Routing;
 use crate::fx::{FX_UNITS, FxCmd, FxUnitState};
 use crate::pad_fx::PadFx;
+use crate::sampler::{SAMPLER_SLOTS, SampleState, SamplerCmd};
 use crate::stems::StemAudio;
 use crate::tempo::TempoRange;
 
@@ -370,6 +371,8 @@ pub struct EngineState {
     pub mixer: MixerState,
     pub sync_leader: Option<DeckId>,
     pub hotcue_mode: HotcueMode,
+    /// The sampler's slots: their sounds, volumes and loop switches.
+    pub sampler: [SampleState; SAMPLER_SLOTS],
 }
 
 /// What pressing a hot cue does on a stopped deck (a playing one just jumps there).
@@ -449,6 +452,8 @@ pub enum Command {
         unit: usize,
         cmd: FxCmd,
     },
+    /// The sampler ([`crate::sampler`]).
+    Sampler(SamplerCmd),
     /// Put every deck and the mixer back as they were (after an audio restart).
     Restore(Box<EngineState>),
 }

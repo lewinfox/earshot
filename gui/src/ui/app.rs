@@ -116,6 +116,8 @@ pub struct EarshotApp {
     drives: Vec<crate::core::drives::Drive>,
     /// Each effect unit's TAP presses.
     fx_taps: [crate::core::tap::Taps; earshot_engine::FX_UNITS],
+    /// Why each sampler slot's sound couldn't be loaded, if it couldn't.
+    sample_errors: [Option<String>; earshot_engine::SAMPLER_SLOTS],
     /// Ends the drive watcher's thread when the app goes.
     _drives_stop: crate::core::drives::StopOnDrop,
     uses: crate::core::drives::Uses,
@@ -391,6 +393,7 @@ impl EarshotApp {
             drives: vec![],
             _drives_stop: drives_stop,
             fx_taps: Default::default(),
+            sample_errors: Default::default(),
             uses: Default::default(),
             sticks_added: Default::default(),
             cues: HashMap::new(),
@@ -432,6 +435,7 @@ impl EarshotApp {
             app.panels.debug.lights = Some(app.lights_monitor.clone());
             app.feed_recorder();
         }
+        app.start_sampler();
         let options = app.settings.deck_options.clone();
         for (i, o) in options.into_iter().enumerate().take(session::SLOTS) {
             let deck = session::slot(i);
@@ -960,6 +964,7 @@ impl EarshotApp {
             Command::Preview(PreviewCmd::Toggle(id)) => self.toggle_preview(id),
             Command::Preview(PreviewCmd::Seek(id, at)) => self.seek_preview(id, at),
             Command::Preview(PreviewCmd::Stop(id)) => self.stop_preview(id),
+            Command::Sampler(c) => self.sampler_cmd(c),
             Command::Audio(AudioCmd::Restart(settings)) => {
                 self.audio_stalls.clear();
                 self.audio_note = None;
@@ -1364,6 +1369,12 @@ impl EarshotApp {
                 path: &self.keymap_path,
                 origin: &self.keymap_origin,
             },
+            sampler: crate::ui::modals::sampler::SamplerEnv {
+                bank: &self.settings.sampler,
+                slots: self.frame.snap.as_ref().map(|s| &s.sampler),
+                errors: &self.sample_errors,
+                selected: (self.panels.library.focused_track(&self.panels.flow)).is_some(),
+            },
         };
         self.modals.show(ctx, &env, cx.out);
         out
@@ -1456,6 +1467,7 @@ mod frame;
 mod input;
 mod library_ops;
 mod preview;
+mod sampler;
 mod tempo_lock;
 #[cfg(test)]
 mod tests;

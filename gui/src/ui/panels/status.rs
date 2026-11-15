@@ -113,6 +113,14 @@ impl TopBar<'_> {
                     cx.send(ViewCmd::ToggleModal(Modal::Settings));
                     ui.close();
                 }
+                if ui
+                    .button("Sampler…")
+                    .on_hover_text("The 16 sampler slots: a sound for each, its volume and loop")
+                    .clicked()
+                {
+                    cx.send(ViewCmd::ToggleModal(Modal::Sampler));
+                    ui.close();
+                }
                 if ui.button("Rescan library").clicked() {
                     cx.send(LibraryCmd::Rescan);
                     ui.close();

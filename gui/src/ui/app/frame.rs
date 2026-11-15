@@ -45,6 +45,10 @@ impl EarshotApp {
             self.panels.decks[id.index()].controller = self.prefs.controller();
             self.panels.decks[id.index()].active =
                 self.prefs.four_decks() && self.prefs.active_decks().contains(&id);
+            // Only the pads page in sampler mode shows them.
+            if self.panels.decks[id.index()].pad_mode == crate::core::view::PadMode::Sampler {
+                self.panels.decks[id.index()].sample_pads = self.sample_pads(id);
+            }
             self.panels.decks[id.index()].tick(ctx, sh, &info);
             self.frame.decks[id.index()] = Some(info);
         }
@@ -55,7 +59,9 @@ impl EarshotApp {
     /// decoding), a waveform being scrubbed, a track loading or being analysed.
     pub(super) fn moving(&self) -> bool {
         let playing = self.frame.snap.as_ref().is_some_and(|s| {
-            s.live().iter().any(|d| d.playing) || s.preview.playing
+            s.live().iter().any(|d| d.playing)
+                || s.preview.playing
+                || s.sampler.iter().any(|v| v.playing)
         });
         playing
             || self

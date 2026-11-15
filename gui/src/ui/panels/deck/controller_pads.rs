@@ -11,12 +11,14 @@
 //! - Key shift: each pad's semitones, or its step on page 5; the key now tinted.
 //! - Pad FX 1 and 2: each pad's effect and its length in beats, with its letter in
 //!   the bank (A-P, Q-AF); the one held tinted.
+//! - Sampler: each slot's sound (slots 1-8 on the left decks, 9-16 on the right),
+//!   tinted while it plays. An empty slot's pad opens the sampler's window.
 //! - The other modes are things earshot doesn't do yet: the pads are blank.
 //!
 //! While the controller's SHIFT (or the keyboard's Shift) is held, the pads show and
 //! do what they do with SHIFT: clear a hot cue; in keyboard and key shift mode, turn
 //! the page (pads 7 and 8) and pick another hot cue (keyboard, pads 1-6); in pad FX
-//! mode, the bank's other 8 effects.
+//! mode, the bank's other 8 effects; stop a sampler slot.
 
 use egui::{Color32, Ui, vec2};
 
@@ -79,6 +81,12 @@ impl DeckUi {
                                     .tinted(pad.tinted),
                             )
                             .on_hover_text(format!("{} · pad {}\n{}", mode.label(), i + 1, pad.tip));
+                        if mode == PadMode::Sampler {
+                            if held(ui, &r) == Some(true) {
+                                out.extend(self.sampler_press(i, shift));
+                            }
+                            continue;
+                        }
                         let Some(control) = pad.control else { continue };
                         match held(ui, &r) {
                             Some(true) => self.control(out, control, pad.value),
@@ -150,6 +158,7 @@ impl DeckUi {
             }
             PadMode::Keyboard | PadMode::KeyShift => self.mode_pad_face(mode, i),
             PadMode::PadFx1 | PadMode::PadFx2 => self.pad_fx_face(mode, i, false),
+            PadMode::Sampler => self.sampler_pad(i, false),
             _ => Pad {
                 label: String::new(),
                 caption: None,
@@ -224,6 +233,7 @@ impl DeckUi {
                 }
             }
             PadMode::PadFx1 | PadMode::PadFx2 => self.pad_fx_face(mode, i, true),
+            PadMode::Sampler => self.sampler_pad(i, true),
             _ => blank("Nothing with SHIFT"),
         }
     }
@@ -255,6 +265,62 @@ impl DeckUi {
             ),
             control: Some(DeckControl::ModePad { mode, pad: i as u8, shift }),
             value: 1.0,
+        }
+    }
+
+    /// Pad `i` in sampler mode (with SHIFT held: `shift`): its slot's sound.
+    fn sampler_pad(&self, i: usize, shift: bool) -> Pad {
+        let s = &self.sample_pads[i];
+        let n = s.slot + 1;
+        let (label, caption, tip) = match (&s.name, shift) {
+            (None, true) => (String::new(), None, format!("Slot {n} is empty")),
+            (None, false) => (
+                n.to_string(),
+                Some("empty".to_string()),
+                format!("Slot {n} is empty: click to give it a sound (Menu > Sampler…)"),
+            ),
+            (Some(name), true) => (
+                format!("■ {n}"),
+                Some("stop".to_string()),
+                format!("Stop slot {n}: {name}"),
+            ),
+            (Some(name), false) => (
+                name.clone(),
+                Some(match (s.loaded, s.looping) {
+                    (false, _) => format!("{n} · not loaded"),
+                    (true, true) => format!("{n} · loop"),
+                    (true, false) => n.to_string(),
+                }),
+                format!("Play slot {n} from its start: {name}\nShift-click stops it"),
+            ),
+        };
+        Pad {
+            label,
+            caption,
+            colour: if s.name.is_some() { THEME.accent } else { THEME.line },
+            tinted: s.playing && !shift,
+            tip,
+            // Not a deck's control: `sampler_press`.
+            control: None,
+            value: 1.0,
+        }
+    }
+
+    /// What clicking pad `i` in sampler mode sends: play its slot, or stop it with
+    /// SHIFT; an empty slot's pad opens the sampler's window, to give it a sound.
+    fn sampler_press(&self, i: usize, shift: bool) -> Vec<Command> {
+        use crate::core::sampler::SamplerCmd;
+        let s = &self.sample_pads[i];
+        let Some(slot) = earshot_engine::SampleSlot::new(s.slot) else {
+            return vec![];
+        };
+        match (s.name.is_some(), shift) {
+            (true, true) => vec![Command::Sampler(SamplerCmd::Stop(slot))],
+            (true, false) => vec![Command::Sampler(SamplerCmd::Play(slot))],
+            (false, true) => vec![],
+            (false, false) => vec![Command::View(crate::core::view::ViewCmd::ToggleModal(
+                crate::core::view::Modal::Sampler,
+            ))],
         }
     }
 

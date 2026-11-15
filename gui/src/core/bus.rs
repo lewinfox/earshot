@@ -18,11 +18,13 @@ use std::time::Instant;
 
 use earshot_engine::{
     ChannelParam, DeckCmd as EngineCmd, DeckId, DeckSnap, EQ_HIGH, EQ_LOW, EQ_MID, EngineSnapshot,
-    FX_UNITS, FxCmd, FxTarget, HOTCUES, MAX_DECKS, MasterParam, ParamId, Press, Set,
+    FX_UNITS, FxCmd, FxTarget, HOTCUES, MAX_DECKS, MasterParam, ParamId, Press, SAMPLER_SLOTS,
+    SampleSlot, Set,
 };
 
 use super::command::{AppCmd, Command, DeckCmd, MixerCmd, ViewCmd};
 use super::player::GridOp;
+use super::sampler::SamplerCmd;
 use super::view::PadMode;
 
 // ---- values -------------------------------------------------------------------------
@@ -305,6 +307,43 @@ pub enum Control {
     Library(LibraryControl),
     /// What's on screen.
     Ui(UiControl),
+    /// A sampler slot (`core::sampler`).
+    Sampler(SampleSlot, SamplerControl),
+}
+
+/// A control on a sampler slot: the DDJ-400's pads in SAMPLER mode.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SamplerControl {
+    /// Play the slot's sound from its start (a pad).
+    Play,
+    /// Stop it (SHIFT + pad).
+    Stop,
+}
+
+impl SamplerControl {
+    pub const ALL: [SamplerControl; 2] = [SamplerControl::Play, SamplerControl::Stop];
+
+    pub fn spec(self) -> ControlSpec {
+        match self {
+            SamplerControl::Play => spec("play", "play the sample, from its start", Kind::Button),
+            SamplerControl::Stop => spec("stop", "stop the sample", Kind::Button),
+        }
+    }
+
+    pub fn command(self, slot: SampleSlot, value: f64) -> Option<Command> {
+        (value > 0.0).then_some(Command::Sampler(match self {
+            SamplerControl::Play => SamplerCmd::Play(slot),
+            SamplerControl::Stop => SamplerCmd::Stop(slot),
+        }))
+    }
+
+    /// Mixxx's key, in `[SamplerN]`.
+    fn mixxx(self) -> &'static str {
+        match self {
+            SamplerControl::Play => "cue_gotoandplay",
+            SamplerControl::Stop => "stop",
+        }
+    }
 }
 
 /// A control over what's on screen.
@@ -1136,6 +1175,7 @@ impl Control {
             Control::Fx(_, c) => c.spec(),
             Control::Library(c) => c.spec(),
             Control::Ui(c) => c.spec(),
+            Control::Sampler(_, c) => c.spec(),
         }
     }
 
@@ -1168,6 +1208,11 @@ impl Control {
                 }
             }
             Control::Library(_) | Control::Ui(_) => None,
+            // On while the slot plays.
+            Control::Sampler(slot, SamplerControl::Play) => {
+                Some(snap.sampler[slot.index()].playing as u8 as f64)
+            }
+            Control::Sampler(_, SamplerControl::Stop) => None,
         }
     }
 
@@ -1183,6 +1228,7 @@ impl Control {
             Control::Fx(..) => None,
             Control::Library(c) => c.command(value),
             Control::Ui(c) => c.command(value),
+            Control::Sampler(slot, c) => c.command(slot, value),
         }
     }
 
@@ -1199,6 +1245,9 @@ impl Control {
             Control::Fx(u, c) => (format!("fx_{}_{}", u + 1, c.spec().name), None),
             Control::Library(c) => (format!("library_{}", c.spec().name), None),
             Control::Ui(c) => (format!("ui_{}", c.spec().name), None),
+            Control::Sampler(slot, c) => {
+                (format!("sampler_{}_{}", slot.index() + 1, c.spec().name), None)
+            }
         }
     }
 
@@ -1252,6 +1301,12 @@ impl Control {
             numbered(rest, FX_UNITS).and_then(|(u, thing)| {
                 let c = FxControl::ALL.into_iter().find(|c| c.spec().name == thing)?;
                 Some(Control::Fx(u, c))
+            })
+        } else if let Some(rest) = name.strip_prefix("sampler_") {
+            size_only_on_decks()?;
+            numbered(rest, SAMPLER_SLOTS).and_then(|(n, thing)| {
+                let c = SamplerControl::ALL.into_iter().find(|c| c.spec().name == thing)?;
+                Some(Control::Sampler(SampleSlot::new(n)?, c))
             })
         } else if let Some(rest) = name.strip_prefix("deck_") {
             numbered(rest, MAX_DECKS).and_then(|(d, thing)| {
@@ -1318,6 +1373,8 @@ impl Control {
                 if ms < 0.0 { "earlier" } else { "later" }
             ),
             Control::Fx(u, c) => format!("FX{} {}", u + 1, c.spec().help),
+            Control::Sampler(slot, SamplerControl::Play) => format!("play sample {}", slot.index() + 1),
+            Control::Sampler(slot, SamplerControl::Stop) => format!("stop sample {}", slot.index() + 1),
             Control::Library(LibraryControl::Browse) => match arg {
                 Some(v) if v < 0.0 => "previous track".into(),
                 Some(_) => "next track".into(),
@@ -1366,6 +1423,9 @@ impl Control {
                 Some(("[Library]".into(), "RelatedTracks".into()))
             }
             Control::Ui(c) => Some(("[Skin]".into(), c.mixxx().into())),
+            Control::Sampler(slot, c) => {
+                Some((format!("[Sampler{}]", slot.index() + 1), c.mixxx().into()))
+            }
         }
     }
 
@@ -1389,6 +1449,14 @@ impl Control {
         }
         if group == "[Skin]" {
             return UiControl::ALL.into_iter().find(|c| c.mixxx() == key).map(Control::Ui);
+        }
+        if let Some(n) = group
+            .strip_prefix("[Sampler")
+            .and_then(|g| g.strip_suffix(']'))
+        {
+            let slot = SampleSlot::new(n.parse::<usize>().ok()?.checked_sub(1)?)?;
+            let c = SamplerControl::ALL.into_iter().find(|c| c.mixxx() == key)?;
+            return Some(Control::Sampler(slot, c));
         }
         if group == "[Library]" {
             return LibraryControl::ALL
@@ -1445,6 +1513,9 @@ pub fn command_names() -> Vec<String> {
     }
     all.extend(LibraryControl::ALL.iter().map(|c| Control::Library(*c)));
     all.extend(UiControl::ALL.iter().map(|c| Control::Ui(*c)));
+    for slot in SampleSlot::all() {
+        all.extend(SamplerControl::ALL.iter().map(|c| Control::Sampler(slot, *c)));
+    }
     let mut names: Vec<String> = vec![];
     for c in all {
         let name = c.name().0;
@@ -1541,6 +1612,17 @@ pub fn commands_markdown() -> String {
     table(
         "What's on screen: `ui_`",
         UiControl::ALL.iter().map(|&c| row(Control::Ui(c), None)).collect(),
+    );
+    let first = SampleSlot::new(0).expect("slot 1");
+    table(
+        &format!("Sampler: `sampler_N_`, N = 1 to {SAMPLER_SLOTS}"),
+        SamplerControl::ALL
+            .iter()
+            .map(|&c| {
+                let name = Control::Sampler(first, c).name().0.replacen("sampler_1_", "sampler_N_", 1);
+                row(Control::Sampler(first, c), Some(name))
+            })
+            .collect(),
     );
     out
 }
@@ -1803,6 +1885,9 @@ mod tests {
         all.extend(FxControl::ALL.iter().map(|c| Control::Fx(0, *c)));
         all.extend(LibraryControl::ALL.iter().map(|c| Control::Library(*c)));
         all.extend(UiControl::ALL.iter().map(|c| Control::Ui(*c)));
+        for slot in SampleSlot::all() {
+            all.extend(SamplerControl::ALL.iter().map(|c| Control::Sampler(slot, *c)));
+        }
         for c in all {
             let (name, word) = c.name();
             let (back, _) = Control::parse(&name, word.as_deref()).unwrap();

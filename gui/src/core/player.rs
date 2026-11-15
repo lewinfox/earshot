@@ -57,6 +57,8 @@ pub struct Inner {
     pub routing: Option<Routing>,
     /// MIDI's own ring into the engine, refilled whenever audio (re)starts.
     pub midi: Lane,
+    /// The sampler's sounds and settings (`core::sampler`; kept for audio restarts).
+    pub sampler: super::sampler::Session,
     /// The engine's count of events it had to drop, as last seen: when it grows, the
     /// sessions are brought up to date from a snapshot.
     dropped_seen: u64,
@@ -148,6 +150,7 @@ impl Inner {
             mixer: self.mixer,
             sync_leader: self.sync_leader,
             hotcue_mode: self.hotcue_mode,
+            sampler: self.sampler.slots.clone(),
             ..EngineState::default()
         };
         for id in session::players(MAX_DECKS) {
@@ -178,6 +181,7 @@ pub fn new_player() -> Player {
         load_tickets: [0; SLOTS],
         routing: None,
         midi: Lane::default(),
+        sampler: Default::default(),
         dropped_seen: 0,
     }))
 }

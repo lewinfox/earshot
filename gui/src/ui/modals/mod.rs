@@ -9,6 +9,7 @@
 pub mod audio;
 pub mod keys;
 pub mod metadata;
+pub mod sampler;
 pub mod settings;
 
 use std::collections::HashMap;
@@ -39,6 +40,7 @@ pub struct ModalEnv<'a> {
     pub mode: Mode,
     pub analysis: AnalysisEnv<'a>,
     pub keymap_file: KeymapEnv<'a>,
+    pub sampler: sampler::SamplerEnv<'a>,
 }
 
 #[derive(Default)]
@@ -110,6 +112,7 @@ impl Modals {
                 Modal::Settings => settings::TITLE,
                 Modal::Keys => keys::TITLE,
                 Modal::Metadata => metadata::TITLE,
+                Modal::Sampler => sampler::TITLE,
             };
             ctx.move_to_top(egui::LayerId::new(
                 egui::Order::Middle,
@@ -134,6 +137,12 @@ impl Modals {
                         .collapsible(false)
                         .show(ctx, |ui| done = self.meta.ui(ui, out));
                     open &= !done;
+                }
+                Modal::Sampler => {
+                    egui::Window::new(sampler::TITLE)
+                        .open(&mut open)
+                        .resizable(false)
+                        .show(ctx, |ui| sampler::ui(ui, &env.sampler, out));
                 }
             }
             if !open {

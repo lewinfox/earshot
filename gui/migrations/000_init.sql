@@ -345,7 +345,8 @@ CREATE UNIQUE INDEX jobs_track_kind ON jobs(track_id, kind);
 -- Settings, as text (JSON for structured ones): 'analysis.background_workers' (how
 -- many background worker processes may run at once), 'audio.output' (device, buffer
 -- size, routing), 'decks.tempo_ranges' (each deck's tempo fader range), 'flow.open'
--- (the Flow on the canvas last; JSON, null for none). The UI's own preferences
+-- (the Flow on the canvas last; JSON, null for none), 'sampler.slots' (the sampler's
+-- 16 slots: each one's sound file, volume and loop switch). The UI's own preferences
 -- (layout, zoom) are kept by eframe, not here.
 CREATE TABLE settings (
   key    TEXT PRIMARY KEY,
