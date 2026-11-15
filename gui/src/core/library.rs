@@ -253,6 +253,51 @@ pub fn start_hasher(store: Store) -> Hasher {
     })
 }
 
+/// Where to send new tracks (their ids) to be quick-analysed
+/// ([`start_quick_analyser`]).
+pub type QuickAnalyser = Mailbox<Vec<i64>>;
+
+/// A background worker that gives tracks new to the library their quick grid
+/// ([`quick_analyse`]), one at a time at idle priority: decoding each is most of the
+/// work. Send it what `StoreEvent::NewTracks` lists. What's waiting when the app
+/// closes isn't kept: those tracks stay unanalysed until the user analyses them.
+///
+/// Low-resource mode (#22) doesn't hold this back: quick analysis is what still
+/// runs then.
+pub fn start_quick_analyser(store: Store) -> QuickAnalyser {
+    background::serve("earshot-quick", idle_priority, move |tracks: Vec<i64>| {
+        for id in tracks {
+            if let Err(e) = quick_analyse(&store, id) {
+                eprintln!("quick analysis of track {id}: {e}");
+            }
+        }
+    })
+}
+
+/// Work out a track's quick grid (`audio::quick`: Rust, no worker) and save it as
+/// `GridSource::Quick`, unless the track has a grid already or its beat isn't clear
+/// enough for one (it stays unanalysed). Returns whether a grid was sent to be
+/// saved. Blocking (it decodes the file).
+pub fn quick_analyse(store: &Store, id: i64) -> Result<bool, String> {
+    let reader = &store.reader;
+    // Analysed, fixed or removed since it was found.
+    if reader.active_grid(id).map_err(|e| e.to_string())?.is_some() {
+        return Ok(false);
+    }
+    let at = reader.track_location(id).map_err(|e| e.to_string())?;
+    let (audio, tags) = decode::decode(&at)?;
+    let Some((grid, first_beat)) = super::player::quick_grid(&tags, &audio) else {
+        return Ok(false);
+    };
+    // The Store saves it only if the track still has no grid.
+    store.send(StoreCmd::SaveQuickGrid {
+        track: id,
+        grid: std::sync::Arc::new(grid),
+        first_beat,
+    });
+    Ok(true)
+}
+
 /// Linux's idle CPU and disk classes for the calling thread: hashing reads whole
 /// files, and mustn't get in the way of playback.
 fn idle_priority() {

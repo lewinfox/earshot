@@ -6,7 +6,7 @@ impl EarshotApp {
     /// Play a track in the headphones from `start` (0..1), decoding it first. A track
     /// with no beatgrid yet is queued for analysis too.
     pub(super) fn start_preview(&mut self, id: i64, start: f32) {
-        if self.index.get(id).is_some_and(|t| !t.analysed()) && self.index.analysis(id).is_none() {
+        if self.index.get(id).is_some_and(|t| !t.has_grid()) && self.index.analysis(id).is_none() {
             self.lib
                 .analyser
                 .queue(id, None, false, false, AnalysisMode::Static);

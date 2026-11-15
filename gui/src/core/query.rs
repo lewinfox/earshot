@@ -13,7 +13,7 @@
 //! tag:vocal  in:12          a tag; in collection 12
 //! plays>=3  played<7        times played; days since it was last played
 //! is:analysed  is:dynamic  is:drifting  is:missing
-//! status:busy               analysis: none, done, busy (queued or running), attention
+//! status:busy               analysis: none, quick (a quick grid only), done, busy (queued or running), attention
 //! -tag:vocal  NOT x         leave out
 //! a OR b  a | b  (a b) c    either; grouping. Terms side by side all have to match.
 //! sort:bpm  sort:-energy    order (`-`: highest first); the first one wins ties last
@@ -511,12 +511,12 @@ impl Parser {
             }
             Kind::Status => {
                 if !matches!(op, Op::Contains | Op::Eq) {
-                    return err("use status:done (or none, busy, attention)");
+                    return err("use status:done (or none, quick, busy, attention)");
                 }
                 match Status::parse(value) {
                     Some(s) => Ok(Expr::Cmp(f, Op::Eq, Value::Status(s))),
                     None => err(format!(
-                        "status:{value}? Try status:none, done, busy or attention"
+                        "status:{value}? Try status:none, quick, done, busy or attention"
                     )),
                 }
             }
@@ -794,14 +794,16 @@ fn sql_field(f: Field) -> String {
         Field::LastPlayed => "((unixepoch('subsec') - (SELECT max(started_at) FROM plays p
                                 WHERE p.track_id = t.id)) / 86400.0)"
             .into(),
-        Field::Analysed => "(t.active_grid_id IS NOT NULL)".into(),
+        Field::Analysed => "EXISTS (SELECT 1 FROM beatgrids g WHERE g.id = t.active_grid_id
+                            AND g.source <> 'quick')"
+            .into(),
         Field::Dynamic => "EXISTS (SELECT 1 FROM beatgrids g WHERE g.id = t.active_grid_id
                            AND g.source = 'analysis-dynamic')"
             .into(),
         Field::Drifts => "EXISTS (SELECT 1 FROM track_features x WHERE x.track_id = t.id
                           AND x.name = 'drifts' AND x.value <> 0)"
             .into(),
-        // As `Status`'s order: none 0, done 1, busy 2, attention 3. A failed analysis
+        // As `Status`'s order: none 0, quick 1, done 2, busy 3, attention 4. A failed analysis
         // is the stored error (in memory it lasts until the app restarts), and busy
         // is a queued job. Then the user's mark, else analysis's (`Track::needs_attention`).
         Field::Status => format!(
@@ -810,11 +812,13 @@ fn sql_field(f: Field) -> String {
                   WHEN EXISTS (SELECT 1 FROM jobs j WHERE j.track_id = t.id
                                AND j.kind LIKE 'analyse:%') THEN {busy}
                   WHEN coalesce(t.needs_attention, {drifts} AND NOT {dynamic}) THEN {attention}
-                  WHEN {analysed} THEN {done} ELSE {none} END",
+                  WHEN {analysed} THEN {done}
+                  WHEN t.active_grid_id IS NOT NULL THEN {quick} ELSE {none} END",
             drifts = sql_field(Field::Drifts),
             dynamic = sql_field(Field::Dynamic),
             analysed = sql_field(Field::Analysed),
             none = Status::None as i32,
+            quick = Status::Quick as i32,
             done = Status::Done as i32,
             busy = Status::Busy as i32,
             attention = Status::Attention as i32,
@@ -1088,6 +1092,13 @@ mod tests {
         let untagged = track(2, "Other", "X", None, "");
         assert!(!eval(&q("bpm<200"), &untagged, &()));
         assert!(!eval(&q("is:analysed"), &untagged, &()));
+        // A quick grid gives a BPM, but isn't "analysed".
+        let mut quick = lib_track(3, "Quick", "X");
+        (quick.bpm, quick.grid_source) = (Some(124.0), Some(GridSource::Quick));
+        let quick = Track::new(quick);
+        assert!(eval(&q("bpm:124 status:quick -is:analysed"), &quick, &()));
+        assert!(!eval(&q("status:done"), &quick, &()));
+        assert!(eval(&q("status:done"), &t, &()) && !eval(&q("status:quick"), &t, &()));
     }
 
     #[test]

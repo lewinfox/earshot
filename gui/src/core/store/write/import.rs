@@ -6,7 +6,10 @@ use std::ops::Range;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::{Writer, activate_grid, grid_bpm, insert_grid, put_meta, record_file, reindex};
+use super::{
+    Writer, activate_grid, grid_bpm, insert_grid, last_track, new_tracks, put_meta, record_file,
+    reindex,
+};
 use crate::core::collections::{CollectionKind, Section};
 use crate::core::external::{self, ExtCue, ImportNode, ImportSave, Imported, NodeKind};
 use crate::core::store::{CueKind, GridSource, Result, now, path_bytes, read};
@@ -23,6 +26,7 @@ impl Writer {
         let opts = save.options;
         let mut done = Imported::default();
         let tx = self.conn.transaction()?;
+        let before = last_track(&tx)?;
         for f in &save.files {
             record_file(&tx, f, t)?;
         }
@@ -94,8 +98,10 @@ impl Writer {
                 done.shown_in = Some((id, *section));
             }
         }
+        let new = new_tracks(&tx, before)?;
         tx.commit()?;
         self.emit_library()?;
+        self.emit_new_tracks(new);
         self.emit_collections()?;
         Ok(done)
     }

@@ -456,13 +456,18 @@ pub fn load_track(
     let first_beat = reader.first_beat(id).map_err(|e| e.to_string())?;
     let audio = Arc::new(audio);
     let mut estimate = false;
-    let (grid, source) = match stored {
-        Some((model, src)) => (
-            Some(Beatgrid::from_model(model, audio.duration()).map_err(|e| e.to_string())?),
-            src.label().to_string(),
-        ),
-        None => match sidecar_grid(&at) {
-            Some(g) => (Some(g), GridSource::Sidecar.label().into()),
+    // A sidecar beside the file beats a quick grid, as it does no grid at all.
+    let sidecar = match stored {
+        None | Some((_, GridSource::Quick)) => sidecar_grid(&at),
+        Some(_) => None,
+    };
+    let (grid, source) = match sidecar {
+        Some(g) => (Some(g), GridSource::Sidecar.label().into()),
+        None => match stored {
+            Some((model, src)) => (
+                Some(Beatgrid::from_model(model, audio.duration()).map_err(|e| e.to_string())?),
+                src.label().to_string(),
+            ),
             None => {
                 // No analysed, hand-fixed or sidecar grid: analyse in the background,
                 // starting now. The deck goes on with no grid, gets an estimated one a
@@ -878,7 +883,7 @@ fn estimate_grid(
 }
 
 /// How a deck shows a quick grid's source.
-pub const QUICK_GRID_LABEL: &str = "quick grid";
+pub const QUICK_GRID_LABEL: &str = GridSource::Quick.label();
 
 /// The quick grid is used only when its beat is at least this clear (see
 /// `quick::QuickGrid::confidence`); below it, the BPM tag's placeholder is.
@@ -902,17 +907,24 @@ fn sidecar_grid(at: &Location) -> Option<Beatgrid> {
     }
 }
 
+/// A decoded track's quick grid (`quick::grid`, around its BPM tag if it has one) and
+/// its first beat with music in it, if the beat is clear enough to use.
+pub fn quick_grid(tags: &decode::TrackTags, audio: &TrackAudio) -> Option<(Beatgrid, f64)> {
+    let tag_bpm = tags.bpm.filter(|b| *b > 40.0);
+    let q = quick::grid(audio, tag_bpm).filter(|q| q.confidence >= QUICK_GRID_CONFIDENCE)?;
+    let grid = Beatgrid::from_model(GridModel::Constant(q.grid), audio.duration()).ok()?;
+    Some((grid, q.grid.anchor))
+}
+
 /// A grid worked out on the spot: the quick grid, else a steady one at the BPM tag.
 fn estimated_grid(tags: &decode::TrackTags, audio: &TrackAudio) -> Estimate {
     let duration = audio.duration();
     let tag_bpm = tags.bpm.filter(|b| *b > 40.0);
-    if let Some(q) = quick::grid(audio, tag_bpm).filter(|q| q.confidence >= QUICK_GRID_CONFIDENCE)
-        && let Ok(g) = Beatgrid::from_model(GridModel::Constant(q.grid), duration)
-    {
+    if let Some((g, first_beat)) = quick_grid(tags, audio) {
         return Estimate {
             grid: Some(g),
             source: QUICK_GRID_LABEL.into(),
-            first_beat: Some(q.grid.anchor),
+            first_beat: Some(first_beat),
         };
     }
     match tag_bpm {

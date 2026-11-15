@@ -33,6 +33,10 @@ pub const STEMS_CACHE_GB_DEFAULT: f64 = 20.0;
 /// playlist, crate or Flow.
 pub const IMPORT_WITHOUT_ASKING: &str = "import.without_asking";
 
+/// Give tracks new to the library a quick grid in the background
+/// (`library::QuickAnalyser`). On until it's turned off.
+pub const QUICK_ANALYSE_NEW: &str = "analysis.quick_new_tracks";
+
 /// What was saved, read once at startup.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
@@ -45,6 +49,7 @@ pub struct Settings {
     pub flow_open: Option<CollectionId>,
     pub import_without_asking: bool,
     pub stems_cache_gb: f64,
+    pub quick_analyse_new: bool,
 }
 
 /// A player's options that stay as they were set, from one run to the next.
@@ -79,6 +84,7 @@ impl Settings {
             flow_open: read(reader, FLOW_OPEN).unwrap_or_default(),
             import_without_asking: read(reader, IMPORT_WITHOUT_ASKING).unwrap_or_default(),
             stems_cache_gb: read(reader, STEMS_CACHE_GB).unwrap_or(STEMS_CACHE_GB_DEFAULT),
+            quick_analyse_new: read(reader, QUICK_ANALYSE_NEW).unwrap_or(true),
         }
     }
 }
