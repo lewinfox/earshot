@@ -691,12 +691,22 @@ impl DeckControl {
             ),
             ModePad { mode, shift, .. } => spec(
                 match (mode, shift) {
+                    (PadMode::PadFx1, false) => "pad_fx_1_pad",
+                    (PadMode::PadFx1, true) => "pad_fx_1_pad_shift",
+                    (PadMode::PadFx2, false) => "pad_fx_2_pad",
+                    (PadMode::PadFx2, true) => "pad_fx_2_pad_shift",
                     (PadMode::KeyShift, false) => "key_shift_pad",
                     (PadMode::KeyShift, true) => "key_shift_pad_shift",
                     (_, false) => "keyboard_pad",
                     (_, true) => "keyboard_pad_shift",
                 },
-                if shift {
+                if matches!(mode, PadMode::PadFx1 | PadMode::PadFx2) {
+                    if shift {
+                        "pad FX pad with SHIFT: its effect, while held"
+                    } else {
+                        "pad FX pad: its effect, while held"
+                    }
+                } else if shift {
                     "pad with SHIFT: page before (7) / after (8); keyboard: pick again (1-6)"
                 } else if mode == PadMode::KeyShift {
                     "key shift pad: set the key"
@@ -715,7 +725,7 @@ impl DeckControl {
 
     /// Every deck control, with sample parameters for the parametrised ones (for
     /// looking names up and for tests).
-    pub const ALL: [DeckControl; 59] = {
+    pub const ALL: [DeckControl; 63] = {
         use DeckControl::*;
         [
             Play,
@@ -776,6 +786,10 @@ impl DeckControl {
             ModePad { mode: PadMode::Keyboard, pad: 0, shift: true },
             ModePad { mode: PadMode::KeyShift, pad: 0, shift: false },
             ModePad { mode: PadMode::KeyShift, pad: 0, shift: true },
+            ModePad { mode: PadMode::PadFx1, pad: 0, shift: false },
+            ModePad { mode: PadMode::PadFx1, pad: 0, shift: true },
+            ModePad { mode: PadMode::PadFx2, pad: 0, shift: false },
+            ModePad { mode: PadMode::PadFx2, pad: 0, shift: true },
             Shift,
         ]
     };
@@ -808,11 +822,19 @@ impl DeckControl {
             ("beat_loop", _) => BeatLoop(num.filter(|b| *b > 0.0)?),
             ("grid_nudge", _) => GridNudge(num?),
             ("load_step", _) => LoadStep(num.filter(|n| n.fract() == 0.0 && *n != 0.0)? as i32),
-            ("keyboard_pad" | "keyboard_pad_shift" | "key_shift_pad" | "key_shift_pad_shift", _) => {
+            (
+                "keyboard_pad" | "keyboard_pad_shift" | "key_shift_pad" | "key_shift_pad_shift" | "pad_fx_1_pad"
+                | "pad_fx_1_pad_shift" | "pad_fx_2_pad" | "pad_fx_2_pad_shift",
+                _,
+            ) => {
                 let pad = num.filter(|n| n.fract() == 0.0 && (1.0..=8.0).contains(n))? as u8 - 1;
                 ModePad {
                     mode: if name.starts_with("keyboard") {
                         PadMode::Keyboard
+                    } else if name.starts_with("pad_fx_1") {
+                        PadMode::PadFx1
+                    } else if name.starts_with("pad_fx_2") {
+                        PadMode::PadFx2
                     } else {
                         PadMode::KeyShift
                     },

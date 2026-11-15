@@ -11,12 +11,14 @@
 //! - Key shift: each pad's semitones, or its step on page 5; the key now tinted.
 //! - Sampler: each slot's sound (slots 1-8 on the left decks, 9-16 on the right),
 //!   tinted while it plays. An empty slot's pad opens the sampler's window.
+//! - Pad FX 1 and 2: each pad's effect and its length in beats, with its letter in
+//!   the bank (A-P, Q-AF); the one held tinted.
 //! - The other modes are things earshot doesn't do yet: the pads are blank.
 //!
 //! While the controller's SHIFT (or the keyboard's Shift) is held, the pads show and
 //! do what they do with SHIFT: clear a hot cue; in keyboard and key shift mode, turn
 //! the page (pads 7 and 8) and pick another hot cue (keyboard, pads 1-6); stop a
-//! sampler slot.
+//! sampler slot; in pad FX mode, the bank's other 8 effects.
 
 use egui::{Color32, Ui, vec2};
 
@@ -25,7 +27,7 @@ use super::loops::size_label;
 use super::{DeckInfo, DeckUi};
 use crate::core::bus::{DeckControl, hot_cue_letter};
 use crate::core::command::Command;
-use crate::core::pads::PadAction;
+use crate::core::pads::{self, PadAction};
 use crate::core::view::PadMode;
 use crate::ui::theme::THEME;
 use crate::ui::util;
@@ -156,6 +158,7 @@ impl DeckUi {
             }
             PadMode::Keyboard | PadMode::KeyShift => self.mode_pad_face(mode, i),
             PadMode::Sampler => self.sampler_pad(i, false),
+            PadMode::PadFx1 | PadMode::PadFx2 => self.pad_fx_face(mode, i, false),
             _ => Pad {
                 label: String::new(),
                 caption: None,
@@ -230,6 +233,7 @@ impl DeckUi {
                 }
             }
             PadMode::Sampler => self.sampler_pad(i, true),
+            PadMode::PadFx1 | PadMode::PadFx2 => self.pad_fx_face(mode, i, true),
             _ => blank("Nothing with SHIFT"),
         }
     }
@@ -268,6 +272,36 @@ impl DeckUi {
             tip,
             // Not a deck's control: `sampler_press`.
             control: None,
+            value: 1.0,
+        }
+    }
+
+    /// Pad `i` in a pad FX mode, with SHIFT or not: its effect, on while it's held.
+    fn pad_fx_face(&self, mode: PadMode, i: usize, shift: bool) -> Pad {
+        let (Some(fx), Some(letter)) = (pads::pad_fx(mode, i, shift), pads::pad_fx_letter(mode, i, shift)) else {
+            return Pad {
+                label: String::new(),
+                caption: None,
+                colour: THEME.line,
+                tinted: false,
+                tip: String::new(),
+                control: None,
+                value: 0.0,
+            };
+        };
+        let length = pads::beats_label(fx.beats);
+        let name = fx.kind.name();
+        let other = if shift { "Without SHIFT" } else { "Shift-click" };
+        Pad {
+            label: format!("{} {length}", name.to_uppercase()),
+            caption: Some(letter.clone()),
+            colour: THEME.accent,
+            tinted: self.pads.fx_held == Some((mode, i as u8, shift)),
+            tip: format!(
+                "Effect {letter}: {name}, {length} beat{}, while held\n{other}: the bank's other 8 effects",
+                if fx.beats == 1.0 { "" } else { "s" }
+            ),
+            control: Some(DeckControl::ModePad { mode, pad: i as u8, shift }),
             value: 1.0,
         }
     }

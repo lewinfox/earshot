@@ -11,6 +11,7 @@ pub mod fx;
 pub mod keylock;
 pub mod load;
 pub mod output;
+pub mod pad_fx;
 pub mod phones_out;
 pub mod processor;
 pub mod realtime;
@@ -39,6 +40,7 @@ pub use fx::{FX_UNITS, FxCmd, FxKind, FxRelease, FxTarget, FxUnitState, step_bea
 pub use keylock::KEY_SHIFT_MAX;
 pub use output::{OutputInfo, OutputOptions};
 pub use sampler::{SAMPLER_SLOTS, SampleSlot, SampleSnap, SampleState, SamplerCmd};
+pub use pad_fx::{PadFx, PadFxKind};
 pub use snapshot::{DeckSnap, EngineEvent, EngineSnapshot, MixerSnap, Monitor, PreviewSnap, Stats};
 pub use tempo::TempoRange;
 pub use transport::LEAD_IN;

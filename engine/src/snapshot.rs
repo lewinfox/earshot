@@ -48,6 +48,8 @@ pub struct DeckSnap {
     pub keylock: bool,
     /// The key shifted this many semitones ([`crate::DeckCmd::KeyShift`]).
     pub key_shift: f64,
+    /// The pad effect held now ([`crate::DeckCmd::PadFx`]).
+    pub pad_fx: Option<crate::pad_fx::PadFx>,
     /// Vinyl mode: see [`crate::DeckCmd::Vinyl`].
     pub vinyl: bool,
     pub loop_in: Option<f64>,

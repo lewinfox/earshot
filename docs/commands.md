@@ -63,6 +63,10 @@ A name goes from the general to the particular: where, what, which part, what to
 | `deck_N_keyboard_pad_shift` | the pad, 1 to 8 | pad with SHIFT: page before (7) / after (8); keyboard: pick again (1-6) |
 | `deck_N_key_shift_pad` | the pad, 1 to 8 | key shift pad: set the key |
 | `deck_N_key_shift_pad_shift` | the pad, 1 to 8 | pad with SHIFT: page before (7) / after (8); keyboard: pick again (1-6) |
+| `deck_N_pad_fx_1_pad` | the pad, 1 to 8 | pad FX pad: its effect, while held |
+| `deck_N_pad_fx_1_pad_shift` | the pad, 1 to 8 | pad FX pad with SHIFT: its effect, while held |
+| `deck_N_pad_fx_2_pad` | the pad, 1 to 8 | pad FX pad: its effect, while held |
+| `deck_N_pad_fx_2_pad_shift` | the pad, 1 to 8 | pad FX pad with SHIFT: its effect, while held |
 | `deck_N_shift` | pressed (1) or let go (0) | shift (held) |
 | `deck_N_load_selected` | pressed (1) or let go (0) | load the selected track |
 
