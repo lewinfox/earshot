@@ -10,10 +10,13 @@
 //! - Key shift: each pad sets the key shift. Page 5 has steps instead: up / down a
 //!   semitone, a fifth up (+7), a fourth down (-5), an octave either way, and the
 //!   reset.
+//! - Pad FX 1 and 2: each pad plays an effect on its deck for as long as it's held
+//!   (the engine's pad effect slot). Each mode has a bank of 16: 8 pads, and 8 more
+//!   with SHIFT ([`PAD_FX_BANKS`]).
 //!
 //! Pads are numbered 0-7 here: 0-3 the top row, 4-7 the bottom.
 
-use earshot_engine::{DeckCmd as EngineCmd, DeckSnap, MAX_DECKS, Press};
+use earshot_engine::{DeckCmd as EngineCmd, DeckSnap, MAX_DECKS, PadFx, PadFxKind, Press};
 
 use super::lights::Light;
 use super::view::PadMode;
@@ -54,6 +57,92 @@ pub const PAGES: [[Option<PadAction>; 8]; 5] = [
 /// The page a deck starts on (page 2).
 pub const FIRST_PAGE: usize = 1;
 
+const fn fx(kind: PadFxKind, beats: f64) -> PadFx {
+    PadFx::new(kind, beats)
+}
+
+use PadFxKind::{Brake, Echo, HighPass, LowPass, Reverb, Roll, Spin, Trans};
+
+/// The two pad FX banks: PAD FX 1's effects A-P, then PAD FX 2's Q-AF. In each, the
+/// first 8 are the pads' and the next 8 the pads' with SHIFT.
+///
+/// Rekordbox's own defaults couldn't be found written down anywhere, only that they
+/// are these kinds of effect at a spread of lengths: this is a spread in that
+/// spirit, not a copy of its banks.
+pub const PAD_FX_BANKS: [[PadFx; 16]; 2] = [
+    [
+        fx(Echo, 0.25),
+        fx(Echo, 0.5),
+        fx(Echo, 0.75),
+        fx(Echo, 1.0),
+        fx(Roll, 0.125),
+        fx(Roll, 0.25),
+        fx(Roll, 0.5),
+        fx(Roll, 1.0),
+        fx(Trans, 0.125),
+        fx(Trans, 0.25),
+        fx(Trans, 0.5),
+        fx(Trans, 1.0),
+        fx(LowPass, 2.0),
+        fx(HighPass, 2.0),
+        fx(Brake, 0.75),
+        fx(Spin, 0.5),
+    ],
+    [
+        fx(Reverb, 1.0),
+        fx(Reverb, 2.0),
+        fx(Reverb, 4.0),
+        fx(Echo, 0.125),
+        fx(LowPass, 1.0),
+        fx(LowPass, 4.0),
+        fx(HighPass, 1.0),
+        fx(HighPass, 4.0),
+        fx(Roll, 0.0625),
+        fx(Roll, 2.0),
+        fx(Trans, 0.0625),
+        fx(Trans, 2.0),
+        fx(Brake, 0.5),
+        fx(Brake, 2.0),
+        fx(Spin, 1.0),
+        fx(Spin, 2.0),
+    ],
+];
+
+/// Which pad FX bank `mode` plays, if it's a pad FX mode.
+pub fn pad_fx_bank(mode: PadMode) -> Option<usize> {
+    match mode {
+        PadMode::PadFx1 => Some(0),
+        PadMode::PadFx2 => Some(1),
+        _ => None,
+    }
+}
+
+/// The effect on pad `pad` in a pad FX mode, with SHIFT or not.
+pub fn pad_fx(mode: PadMode, pad: usize, shift: bool) -> Option<PadFx> {
+    let slot = pad + if shift { 8 } else { 0 };
+    PAD_FX_BANKS.get(pad_fx_bank(mode)?)?.get(slot).copied().filter(|_| pad < 8)
+}
+
+/// A length in beats as a pad shows it: 1/4, 3/4, 2.
+pub fn beats_label(beats: f64) -> String {
+    if beats >= 1.0 && beats.fract() == 0.0 {
+        return format!("{beats}");
+    }
+    let sixteenths = ((beats * 16.0).round() as u32).max(1);
+    let common = 1 << sixteenths.trailing_zeros().min(4);
+    format!("{}/{}", sixteenths / common, 16 / common)
+}
+
+/// The letter rekordbox gives that effect: A-P in bank 1, Q-AF in bank 2.
+pub fn pad_fx_letter(mode: PadMode, pad: usize, shift: bool) -> Option<String> {
+    let n = pad_fx_bank(mode)? * 16 + pad + if shift { 8 } else { 0 };
+    let letter = |i: usize| (b'A' + i as u8) as char;
+    Some(match n {
+        0..26 => letter(n).to_string(),
+        _ => format!("A{}", letter(n - 26)),
+    })
+}
+
 /// A deck's keyboard and key shift pads.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DeckPads {
@@ -62,6 +151,9 @@ pub struct DeckPads {
     pub keyboard_cue: Option<(u8, u64)>,
     /// The keyboard pad held down (it lets the hot cue go on release).
     held: Option<u8>,
+    /// The pad FX pad held down: its mode, its pad and whether it was pressed with
+    /// SHIFT. Letting another go (after this one took over from it) does nothing.
+    pub fx_held: Option<(PadMode, u8, bool)>,
     pub keyboard_page: usize,
     pub key_shift_page: usize,
 }
@@ -71,6 +163,7 @@ impl Default for DeckPads {
         DeckPads {
             keyboard_cue: None,
             held: None,
+            fx_held: None,
             keyboard_page: FIRST_PAGE,
             key_shift_page: FIRST_PAGE,
         }
@@ -119,6 +212,9 @@ impl DeckPads {
     /// Pad `pad` pressed (`down`) or let go in `mode`, with SHIFT held or not, on a
     /// deck in state `d`: what the deck is told.
     pub fn press(&mut self, mode: PadMode, pad: usize, shift: bool, down: bool, d: &DeckSnap) -> Vec<EngineCmd> {
+        if pad_fx_bank(mode).is_some() {
+            return self.pad_fx(mode, pad, shift, down);
+        }
         if shift {
             if down {
                 match pad {
@@ -139,6 +235,31 @@ impl DeckPads {
                 Some(PadAction::KeySync) | None => vec![],
             },
             _ => vec![],
+        }
+    }
+
+    /// A pad FX pad: its effect goes on when it's pressed, and off when it's let go
+    /// (unless another pad has taken over since). The pad let go is the one pressed
+    /// whether or not SHIFT is still as it was.
+    fn pad_fx(&mut self, mode: PadMode, pad: usize, shift: bool, down: bool) -> Vec<EngineCmd> {
+        if down {
+            let Some(effect) = pad_fx(mode, pad, shift) else {
+                return vec![];
+            };
+            self.fx_held = Some((mode, pad as u8, shift));
+            vec![EngineCmd::PadFx(Some(effect))]
+        } else if self.fx_held.is_some_and(|(m, p, _)| (m, p as usize) == (mode, pad)) {
+            self.release_fx()
+        } else {
+            vec![]
+        }
+    }
+
+    /// Let the held pad FX pad go, if there is one (the pads changed mode under it).
+    pub fn release_fx(&mut self) -> Vec<EngineCmd> {
+        match self.fx_held.take() {
+            Some(_) => vec![EngineCmd::PadFx(None)],
+            None => vec![],
         }
     }
 
@@ -174,15 +295,24 @@ impl DeckPads {
     /// 7 and 8), or picking another hot cue (keyboard mode's pads 1-6, once one is
     /// picked). The others keep their unshifted light while SHIFT is held.
     pub fn shift_job(&self, mode: PadMode, pad: usize, d: &DeckSnap) -> bool {
-        pad >= 6 || (mode == PadMode::Keyboard && self.keyboard_cue(d).is_some())
+        // Every pad FX pad has another effect with SHIFT.
+        pad_fx_bank(mode).is_some() || pad >= 6 || (mode == PadMode::Keyboard && self.keyboard_cue(d).is_some())
     }
 
     /// Pad `pad`'s light in `mode` (SHIFT's message: `shift`), with a track loaded.
     /// Keyboard: the pads with a hot cue flash while picking; then the track's own key (±0)
     /// flashes and the other notes are lit. Key shift: the pad at the key now
     /// flashes. With SHIFT: the page turns that can go, and keyboard's drop.
+    /// Pad FX: every pad is lit, and the one held flashes.
     pub fn light(&self, mode: PadMode, pad: usize, shift: bool, d: &DeckSnap) -> Light {
         let on = |b: bool| if b { Light::On } else { Light::Off };
+        if pad_fx_bank(mode).is_some() {
+            return match pad_fx(mode, pad, shift) {
+                Some(_) if self.fx_held == Some((mode, pad as u8, shift)) => Light::Flash,
+                Some(_) => Light::On,
+                None => Light::Off,
+            };
+        }
         let picked = mode == PadMode::Keyboard && self.keyboard_cue(d).is_some();
         if shift {
             return match pad {
@@ -221,6 +351,65 @@ mod tests {
             EngineCmd::KeyShift(n) => Some(*n),
             _ => None,
         })
+    }
+
+    #[test]
+    fn pad_fx_banks_are_lettered_a_to_af() {
+        let letter = |mode, pad, shift| pad_fx_letter(mode, pad, shift).unwrap();
+        assert_eq!(letter(PadMode::PadFx1, 0, false), "A");
+        assert_eq!(letter(PadMode::PadFx1, 7, false), "H");
+        assert_eq!(letter(PadMode::PadFx1, 0, true), "I");
+        assert_eq!(letter(PadMode::PadFx1, 7, true), "P");
+        assert_eq!(letter(PadMode::PadFx2, 0, false), "Q");
+        assert_eq!(letter(PadMode::PadFx2, 1, true), "Z");
+        assert_eq!(letter(PadMode::PadFx2, 2, true), "AA");
+        assert_eq!(letter(PadMode::PadFx2, 7, true), "AF");
+        assert_eq!(pad_fx_letter(PadMode::Keyboard, 0, false), None);
+        // 32 effects, no two the same, each of a length the engine takes as it is.
+        let all: Vec<PadFx> = PAD_FX_BANKS.iter().flatten().copied().collect();
+        for (i, a) in all.iter().enumerate() {
+            assert!((1.0 / 16.0..=16.0).contains(&a.beats), "{a:?}");
+            assert!(!all[..i].contains(a), "{a:?} twice");
+        }
+        assert_eq!(pad_fx(PadMode::PadFx1, 0, false), Some(PAD_FX_BANKS[0][0]));
+        assert_eq!(pad_fx(PadMode::PadFx2, 7, true), Some(PAD_FX_BANKS[1][15]));
+        assert_eq!(pad_fx(PadMode::PadFx1, 8, false), None, "8 pads");
+        assert_eq!(pad_fx(PadMode::HotCue, 0, false), None);
+        let labels = [0.0625, 0.25, 0.75, 1.0, 1.5, 4.0].map(beats_label);
+        assert_eq!(labels, ["1/16", "1/4", "3/4", "1", "3/2", "4"]);
+    }
+
+    #[test]
+    fn pad_fx_is_on_while_its_pad_is_held() {
+        let mut p = DeckPads::default();
+        let d = loaded(1);
+        let a = PAD_FX_BANKS[0][0];
+        let j = PAD_FX_BANKS[0][9];
+        // Pad 1 down: effect A on, and its light flashes; the others are lit.
+        assert_eq!(p.press(PadMode::PadFx1, 0, false, true, &d), vec![EngineCmd::PadFx(Some(a))]);
+        assert_eq!(p.light(PadMode::PadFx1, 0, false, &d), Light::Flash);
+        assert_eq!(p.light(PadMode::PadFx1, 1, false, &d), Light::On);
+        assert_eq!(p.light(PadMode::PadFx1, 0, true, &d), Light::On, "SHIFT's is another");
+        assert_eq!(p.light(PadMode::PadFx2, 0, false, &d), Light::On, "and bank 2's");
+        // SHIFT + pad 2 takes over: letting pad 1 go then does nothing.
+        assert_eq!(p.press(PadMode::PadFx1, 1, true, true, &d), vec![EngineCmd::PadFx(Some(j))]);
+        assert!(p.press(PadMode::PadFx1, 0, false, false, &d).is_empty());
+        assert_eq!(p.light(PadMode::PadFx1, 1, true, &d), Light::Flash);
+        assert_eq!(p.press(PadMode::PadFx1, 1, true, false, &d), vec![EngineCmd::PadFx(None)]);
+        assert_eq!(p.fx_held, None);
+        assert_eq!(p.light(PadMode::PadFx1, 1, true, &d), Light::On);
+        // SHIFT turns no page here, and every shifted pad has a light of its own.
+        assert_eq!(p.keyboard_page, FIRST_PAGE);
+        assert!(p.shift_job(PadMode::PadFx2, 0, &d));
+        // Bank 2's first pad, pressed with SHIFT (effect Y) and let go after SHIFT.
+        let y = PAD_FX_BANKS[1][8];
+        assert_eq!(p.press(PadMode::PadFx2, 0, true, true, &d), vec![EngineCmd::PadFx(Some(y))]);
+        assert_eq!(p.press(PadMode::PadFx2, 0, false, false, &d), vec![EngineCmd::PadFx(None)]);
+        // Held when the pads change mode: let go then, and its own release is nothing.
+        p.press(PadMode::PadFx2, 3, false, true, &d);
+        assert_eq!(p.release_fx(), vec![EngineCmd::PadFx(None)]);
+        assert!(p.release_fx().is_empty());
+        assert!(p.press(PadMode::PadFx2, 3, false, false, &d).is_empty());
     }
 
     #[test]

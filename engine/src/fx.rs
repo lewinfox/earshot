@@ -43,7 +43,7 @@ const ECHO_RECOVER_SECS: f64 = 0.5;
 /// down: in a break, or after the music stops, the tail rings out as it is.
 const ECHO_DRY_FLOOR: f64 = 1e-6;
 /// Below this the echo's tail counts as gone.
-const SILENT: f32 = 1e-5;
+pub(crate) const SILENT: f32 = 1e-5;
 
 /// The part of each Trans cycle that's open.
 const TRANS_DUTY: f64 = 0.5;
@@ -51,7 +51,7 @@ const TRANS_DUTY: f64 = 0.5;
 const TRANS_EDGE_SECS: f64 = 0.0015;
 
 /// Seconds for an effect to come in or go out when switched on or off.
-const SWITCH_SECS: f64 = 0.005;
+pub(crate) const SWITCH_SECS: f64 = 0.005;
 
 /// Tempo used when there's nothing to follow (no grid, nothing playing).
 pub const FALLBACK_BPM: f64 = 120.0;
@@ -220,7 +220,7 @@ impl BeatClock {
 
     /// The beat at frame `f` of an `n`-frame block.
     #[inline]
-    fn beat(&self, f: usize, n: usize) -> f64 {
+    pub(crate) fn beat(&self, f: usize, n: usize) -> f64 {
         self.beat_end - (n - f) as f64 * self.beats_per_frame
     }
 }
@@ -228,15 +228,15 @@ impl BeatClock {
 // ---- Echo -------------------------------------------------------------------------
 
 /// An effect's on/off and level, each eased.
-struct Controls {
-    on: Smoothed,
-    level: Smoothed,
+pub(crate) struct Controls {
+    pub(crate) on: Smoothed,
+    pub(crate) level: Smoothed,
     k_switch: f64,
     k_level: f64,
 }
 
 impl Controls {
-    fn new(level: f64, sr: f64) -> Controls {
+    pub(crate) fn new(level: f64, sr: f64) -> Controls {
         Controls {
             on: Smoothed::new(0.0),
             level: Smoothed::new(level),
@@ -246,7 +246,7 @@ impl Controls {
     }
 
     /// Off, and done fading out.
-    fn off(&self) -> bool {
+    pub(crate) fn off(&self) -> bool {
         self.on.target == 0.0 && self.on.current == 0.0
     }
 
@@ -280,7 +280,7 @@ impl OnePole {
 }
 
 /// A stereo delay line with feedback, whose time follows the beat.
-struct Echo {
+pub(crate) struct Echo {
     /// Interleaved stereo, a power of two of frames long.
     line: Vec<f32>,
     mask: usize,
@@ -295,7 +295,7 @@ struct Echo {
     /// Frames in a row the output has been silent: once that's a whole delay with
     /// nothing going in, the tail is over.
     quiet: usize,
-    running: bool,
+    pub(crate) running: bool,
     /// Mean square of the dry input and of the output, and the gain keeping the
     /// output no louder than the input, with their easing rates.
     dry_ms: f64,
@@ -308,7 +308,12 @@ struct Echo {
 
 impl Echo {
     fn new(sr: f64) -> Echo {
-        let frames = ((MAX_ECHO_SECS * sr) as usize + 2).next_power_of_two();
+        Echo::with_max_secs(MAX_ECHO_SECS, sr)
+    }
+
+    /// An echo whose longest time is `max_secs`.
+    pub(crate) fn with_max_secs(max_secs: f64, sr: f64) -> Echo {
+        let frames = ((max_secs * sr) as usize + 2).next_power_of_two();
         Echo {
             line: vec![0.0; frames * 2],
             mask: frames - 1,
@@ -325,6 +330,13 @@ impl Echo {
             k_match: dsp::ease_per_sample(ECHO_MATCH_SECS, sr),
             k_duck: dsp::ease_per_sample(ECHO_DUCK_SECS, sr),
             k_recover: dsp::ease_per_sample(ECHO_RECOVER_SECS, sr),
+        }
+    }
+
+    /// Not running: the next echo starts at `delay_frames`, with no glide to it.
+    pub(crate) fn start_at(&mut self, delay_frames: f64) {
+        if !self.running {
+            self.delay = Smoothed::new(delay_frames.clamp(1.0, self.max_delay()));
         }
     }
 
@@ -346,7 +358,7 @@ impl Echo {
 
     /// `c`: how much of the input goes in (on), and how loud the repeats are (level).
     /// Skipped once the tail has died away and nothing is going in.
-    fn process(&mut self, buf: &mut [f32], delay_frames: f64, c: &mut Controls) {
+    pub(crate) fn process(&mut self, buf: &mut [f32], delay_frames: f64, c: &mut Controls) {
         let n = buf.len() / 2;
         if !self.running && c.off() {
             // Off and silent: just keep the level where it's going.
@@ -422,21 +434,27 @@ impl Echo {
 // ---- Trans ------------------------------------------------------------------------
 
 /// A gate on the beat: open for the first half of each cycle, cut for the second.
-struct Trans {
+pub(crate) struct Trans {
     /// The gain, easing between open and cut.
-    gain: Smoothed,
+    pub(crate) gain: Smoothed,
     edge: f64,
 }
 
 impl Trans {
-    fn new(sr: f64) -> Trans {
+    pub(crate) fn new(sr: f64) -> Trans {
         Trans {
             gain: Smoothed::new(1.0),
             edge: dsp::ease_per_sample(TRANS_EDGE_SECS, sr),
         }
     }
 
-    fn process(&mut self, buf: &mut [f32], clock: &BeatClock, beats: f64, c: &mut Controls) {
+    pub(crate) fn process(
+        &mut self,
+        buf: &mut [f32],
+        clock: &BeatClock,
+        beats: f64,
+        c: &mut Controls,
+    ) {
         let n = buf.len() / 2;
         if c.off() && self.gain.current == 1.0 {
             c.level.current = c.level.target;
