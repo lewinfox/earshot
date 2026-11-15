@@ -81,6 +81,80 @@ impl EarshotApp {
         }
     }
 
+    /// What's being done about a machine that can't keep up, for the log and the top
+    /// bar. The audio thread can't write logs or show anything: it sets flags, and
+    /// this notices when they change.
+    pub(super) fn watch_strain(&mut self) {
+        use crate::ui::panels::status::Alert;
+        let (lost, cheap) = self.monitor.as_ref().map_or((false, false), |m| {
+            let s = m.stats();
+            (s.realtime_lost.load(Relaxed), s.keylock_cheap.load(Relaxed))
+        });
+        if lost != self.hud.realtime_lost {
+            self.hud.realtime_lost = lost;
+            if lost {
+                eprintln!(
+                    "audio: ran past the real-time limit (SIGXCPU): the audio thread has \
+                     dropped to normal priority, so the system doesn't end earshot. The \
+                     sound may drop out; reopening the sound card (Audio settings) goes \
+                     back to real time"
+                );
+                self.notify(
+                    notice::Level::Warning,
+                    "The computer can't keep up with the audio: it has dropped out of real \
+                     time, and the sound may drop out",
+                );
+            } else {
+                // A new engine: its streams run on new threads, real-time as usual.
+                eprintln!("audio: the sound card was reopened after real time was lost");
+            }
+        }
+        if cheap != self.hud.keylock_cheap {
+            self.hud.keylock_cheap = cheap;
+            if cheap {
+                eprintln!(
+                    "audio: making the sound is using most of the time there is: keylock \
+                     is on its lighter setting"
+                );
+            } else {
+                eprintln!("audio: there's room again: keylock is back on its full setting");
+            }
+        }
+        if let Some(power) = crate::core::power::latest() {
+            self.hud.power = power;
+        }
+        let mut alerts = vec![];
+        if lost {
+            alerts.push(Alert {
+                text: "⚠ audio not real-time".into(),
+                tip: "Making the sound took longer than the sound lasts, for long enough \
+                      that the system was about to end earshot. The audio now runs at \
+                      normal priority and may drop out. Free up the CPU, then pick the \
+                      device again in Audio settings to go back to real time."
+                    .into(),
+                serious: true,
+            });
+        }
+        if cheap {
+            alerts.push(Alert {
+                text: "keylock: lighter".into(),
+                tip: "Making the sound is using most of the time there is, so keylock is \
+                      on its lighter setting (a little less clean). It goes back by itself \
+                      once there's room."
+                    .into(),
+                serious: false,
+            });
+        }
+        if let Some(p) = &self.hud.power {
+            alerts.push(Alert {
+                text: format!("⚠ {}", p.text),
+                tip: p.detail.clone(),
+                serious: false,
+            });
+        }
+        self.hud.alerts = alerts;
+    }
+
     pub(super) fn tick_hud(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
         let dt = ctx.input(|i| i.unstable_dt);
@@ -101,6 +175,7 @@ impl EarshotApp {
             return;
         }
         self.hud.last = Some(now);
+        self.watch_strain();
         let mut dts: Vec<f32> = self.hud.frames.iter().map(|f| f.1).collect();
         if dts.is_empty() {
             return;

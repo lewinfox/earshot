@@ -2,7 +2,7 @@
 //! triple buffer, so a reader always sees one whole callback's state), [`EngineEvent`]s
 //! for things that happened, and a few [`Stats`] counters.
 
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 
 use crate::command::{
@@ -273,6 +273,13 @@ pub struct Stats {
     pub phones_realigns: AtomicU64,
     /// Frames queued for the headphones (smoothed): how far behind the master they are.
     pub phones_level: AtomicU64,
+    /// An audio thread ran past the real-time limit and dropped to normal scheduling
+    /// ([`crate::realtime`]). It stays so until the sound card is reopened (a new
+    /// engine, with new counters).
+    pub realtime_lost: AtomicBool,
+    /// Keylock is on its cheaper setting, as the machine can't keep up
+    /// ([`crate::load`]).
+    pub keylock_cheap: AtomicBool,
 }
 
 impl Stats {
