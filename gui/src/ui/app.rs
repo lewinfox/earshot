@@ -245,23 +245,17 @@ struct Hud {
     /// logged.
     phones_short: u64,
     phones_realigns: u64,
-    /// The machine can't keep up (`EarshotApp::watch_strain`): the audio thread has
-    /// dropped out of real time, keylock is on its lighter setting, and the system is
+    /// The machine can't keep up (`EarshotApp::watch_strain`): the audio is behind
+    /// (and how often it has run up against the real-time limit), and the system is
     /// holding the CPU back; as last seen (and logged), and the top bar's pills for
     /// them.
-    realtime_lost: bool,
-    keylock_cheap: bool,
+    overruns: u64,
+    behind: bool,
     power: Option<crate::core::power::Warning>,
     /// Too little memory is left for the analysis worker (`power::memory_short`).
     memory_short: bool,
-    /// Any of those: full analysis waits, and tracks get quick grids meanwhile.
+    /// Any of those: analysis and stems wait, and tracks get quick grids meanwhile.
     low_resource: bool,
-    /// The audio has switched the effects off to keep up (`Stats::effects_off`).
-    effects_off: bool,
-    /// When real time was seen to be lost, and when the audio was last reopened by
-    /// itself to get it back (`watch_strain`).
-    lost_at: Option<Instant>,
-    reopened_at: Option<Instant>,
     alerts: Vec<crate::ui::panels::status::Alert>,
     last: Option<Instant>,
 }

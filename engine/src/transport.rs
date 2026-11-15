@@ -155,13 +155,6 @@ impl Player {
         }
     }
 
-    /// Keylock's cheaper setting, or its full one ([`Keylock::set_cheap`]).
-    pub fn set_cheap_keylock(&mut self, cheap: bool) {
-        if let Some(k) = &mut self.shifter {
-            k.set_cheap(cheap);
-        }
-    }
-
     /// Not playing this block.
     pub fn idle(&mut self) {
         if let Some(k) = &mut self.shifter {

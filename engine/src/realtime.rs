@@ -2,19 +2,21 @@
 //! Linux limits how long a real-time thread may run without a break (`RLIMIT_RTTIME`):
 //! past the soft limit the process is sent SIGXCPU, and past the hard one (200 ms with
 //! rtkit) it's killed. A machine too slow to make a block of sound in the time the
-//! block lasts never gives the audio thread a break, so that is what happens.
+//! block lasts never gives the audio thread a break (it never has to wait for the
+//! sound card), so that is what happens.
 //!
 //! SIGXCPU's default action kills the process too. [`install`] handles it instead: the
 //! handler only counts (the signal goes to the process, so it lands on whichever
 //! thread). Each audio thread keeps an [`Overrun`] and asks it at the start of every
-//! callback; when the count has moved, the thread drops itself to normal scheduling,
-//! which the limit doesn't apply to. The sound may drop out, but the app lives.
-//!
-//! A stream opened later runs on a new thread, which the sound system makes real-time
-//! as usual (setting the limit again): reopening the sound card is how to get real
-//! time back.
+//! callback; when the count has moved, the thread takes the break the limit asks
+//! for: a sleep of [`BREAK`], which starts the limit's count again. It stays
+//! real-time, and the app lives. The audio was already behind by then; the break
+//! costs it a fraction of a millisecond more.
 
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+
+/// The break an audio thread takes on running up against the limit.
+pub const BREAK: std::time::Duration = std::time::Duration::from_micros(200);
 
 /// Times SIGXCPU has arrived.
 static OVERRUNS: AtomicU32 = AtomicU32::new(0);
@@ -76,33 +78,42 @@ impl Overrun {
     }
 
     /// Call at the start of a callback, on the audio thread. If the process has run
-    /// past the real-time limit since the last call, drops this thread to normal
-    /// scheduling and returns true. Real-time safe: an atomic load, and one system
-    /// call the time it happens.
+    /// up against the real-time limit since the last call, takes a break
+    /// ([`BREAK`]) and returns true. An atomic load; the time it happens, a short
+    /// sleep and two system calls.
     pub fn check(&mut self) -> bool {
         let now = OVERRUNS.load(Relaxed);
         if now == self.seen {
             return false;
         }
         self.seen = now;
-        demote_current_thread();
+        take_a_break();
         true
     }
 }
 
-/// Put the calling thread on the normal scheduler (which any thread may always do).
+/// Wait for [`BREAK`]: a blocking call, which is what starts the limit's count of
+/// time without one again. And put the soft limit back: the kernel moves it on a
+/// second each time it sends the signal, which would put it past the hard limit, and
+/// the next time there'd be no warning before the end.
 #[cfg(target_os = "linux")]
-fn demote_current_thread() {
-    // SAFETY: a zeroed sched_param is priority 0, the only one SCHED_OTHER takes; the
-    // call changes this thread's scheduling and nothing else.
+fn take_a_break() {
+    std::thread::sleep(BREAK);
+    // SAFETY: reads and writes this process's own limit, with valid pointers.
     unsafe {
-        let param: libc::sched_param = std::mem::zeroed();
-        libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_OTHER, &param);
+        let mut limit: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_RTTIME, &mut limit) == 0
+            && limit.rlim_cur != libc::RLIM_INFINITY
+            && limit.rlim_cur >= 1_000_000
+        {
+            limit.rlim_cur -= 1_000_000;
+            libc::setrlimit(libc::RLIMIT_RTTIME, &limit);
+        }
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn demote_current_thread() {}
+fn take_a_break() {}
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
@@ -137,19 +148,19 @@ mod tests {
     }
 
     /// One test, as the count is the whole process's: a signal raised here lands in the
-    /// handler, the next check demotes the thread, and the one after has nothing new.
-    /// Then, where the system allows real-time threads, the real thing: a real-time
-    /// thread that never takes a break runs past the soft limit, is sent SIGXCPU by the
-    /// kernel, and steps down before the hard limit would have killed the process.
+    /// handler, the next check sees it, and the one after has nothing new. Then, where
+    /// the system allows real-time threads, the real thing: a real-time thread that
+    /// never waits runs up against the soft limit again and again, is sent SIGXCPU by
+    /// the kernel each time, takes its break, and is still real-time (and the process
+    /// alive) long after the hard limit would have ended it.
     #[test]
-    fn running_past_the_real_time_limit_demotes_the_thread_and_the_process_lives() {
+    fn running_up_against_the_real_time_limit_takes_a_break_and_stays_real_time() {
         install();
         let mut overrun = Overrun::new();
         assert!(!overrun.check(), "nothing yet");
         // SAFETY: raises a signal this process handles.
         unsafe { libc::raise(libc::SIGXCPU) };
         assert!(overrun.check(), "seen by the next callback");
-        assert_eq!(policy(), libc::SCHED_OTHER);
         assert!(!overrun.check(), "once per signal");
         // Another stream's thread, opened later, starts from here.
         assert!(!Overrun::new().check());
@@ -173,32 +184,36 @@ mod tests {
             assert_eq!(policy(), libc::SCHED_FIFO);
             let mut overrun = Overrun::new();
             // Callbacks back to back, never waiting: each checks first, as the
-            // stream's does. Without the handler the signal ends the process; without
-            // the demotion the hard limit does, 200 ms in.
+            // stream's does. Without the handler the first signal ends the process;
+            // without the breaks the hard limit does, 200 ms in.
             let started = std::time::Instant::now();
-            let mut demoted_after = None;
-            while started.elapsed() < std::time::Duration::from_millis(500) {
-                if overrun.check() && demoted_after.is_none() {
-                    demoted_after = Some(started.elapsed());
+            let mut breaks = 0;
+            while started.elapsed() < std::time::Duration::from_millis(1500) {
+                if overrun.check() {
+                    breaks += 1;
                 }
                 std::hint::black_box((0..10_000u64).sum::<u64>());
             }
-            // The kernel raised the soft limit by a second when it sent the signal;
-            // put it back as found (it only ever counts for real-time threads).
-            // SAFETY: restores this process's limit.
-            unsafe { libc::setrlimit(libc::RLIMIT_RTTIME, &limit) };
-            Some((demoted_after, policy()))
+            let policy = policy();
+            // SAFETY: back to normal scheduling, and the limit as found.
+            unsafe {
+                let param: libc::sched_param = std::mem::zeroed();
+                libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_OTHER, &param);
+                libc::setrlimit(libc::RLIMIT_RTTIME, &limit);
+            }
+            Some((breaks, policy))
         })
         .join()
         .expect("the thread ran to the end");
         match lived {
-            Some((Some(after), policy)) => {
-                assert!(after.as_millis() < 200, "demoted after {after:?}");
-                assert_eq!(policy, libc::SCHED_OTHER);
+            // Had the kernel enforced the limit, the thread took breaks or the process
+            // died: it doesn't enforce it here (some sandboxes).
+            Some((0, _)) => eprintln!("no SIGXCPU from the kernel here: not tried"),
+            Some((breaks, policy)) => {
+                eprintln!("{breaks} breaks in 1.5 s");
+                assert!(breaks > 10, "a break each time the limit came up: {breaks}");
+                assert_eq!(policy, libc::SCHED_FIFO, "still real-time");
             }
-            // Had the kernel enforced the limit, the thread stepped down or the
-            // process died: it doesn't enforce it here (some sandboxes).
-            Some((None, _)) => eprintln!("no SIGXCPU from the kernel here: not tried"),
             None => {}
         }
     }

@@ -1,41 +1,33 @@
-//! Doing less when the machine can't keep up. Each audio callback is timed against
-//! how long the audio it made lasts (its load: 1 means it only just made it).
+//! Noticing when the machine can't keep up. Each audio callback is timed against
+//! how long the audio it made lasts (its load: 1 means it only just made it). When
+//! the load stays high the audio is *behind* ([`LoadWatch`]), and the app is told
+//! ([`crate::Stats::behind`]), so that it can stop what it's doing in the background
+//! (analysis, stems). Nothing about the sound itself changes: keylock and the
+//! effects are left exactly as they are.
 //!
-//! What goes first is what matters least to how the tracks sound ([`Shedding`]): when
-//! the load stays high the effects go off (the effect units and the pad effects).
-//! Keylock is part of the sound of the tracks themselves, so it's kept as it is for
-//! as long as it can be: only if the load stays high with the effects already off
-//! does it go over to its cheaper setting
-//! ([`crate::keylock::Keylock::set_cheap`]). When there has been room for a while
-//! they come back in the other order: keylock's full setting first, then the effects.
-//!
-//! One [`LoadWatch`] decides each step (called "cheap" below, after keylock's).
-//!
-//! Going back is the slow direction, so it doesn't flap: the cheaper setting costs
-//! less, so "room" means well under the load that set it off, held for
-//! [`RECOVER_SECS`]; and if the full setting is too much again soon after, the next
-//! wait is twice as long. Every switch re-primes the decks' shifters, which can be
-//! heard as a small bump.
+//! Saying there's room again is the slow direction, so the background work doesn't
+//! start and stop over and over: "room" means well under the load that set it off,
+//! held for [`RECOVER_SECS`]; and if the audio is behind again soon after, the next
+//! wait is twice as long.
 
 /// A callback using this much of its time or more counts as behind.
 pub const HIGH: f32 = 0.75;
-/// On the cheaper setting, this much or less is room to go back.
+/// Once behind, this much or less is room.
 pub const LOW: f32 = 0.35;
-/// Behind for this long (seconds of audio): go cheaper.
+/// At that load for this long (seconds of audio): behind.
 pub const STRAIN_SECS: f64 = 0.2;
-/// Room for this long: go back to the full setting.
+/// Room for this long: no longer behind.
 pub const RECOVER_SECS: f64 = 10.0;
-/// The longest wait before going back, after going back keeps not working.
+/// The longest wait before saying there's room, after that keeps being wrong.
 pub const RECOVER_MAX_SECS: f64 = 320.0;
-/// Back on the full setting for less than this before it's too much again: going
-/// back was a mistake, and the next wait doubles.
+/// Room for less than this before it's behind again: the next wait doubles.
 const SETTLED_SECS: f64 = 60.0;
 
-/// Decides between keylock's full and cheaper settings from each callback's load.
+/// Decides whether the audio is behind, from each callback's load.
 /// Plain arithmetic: nothing here allocates, locks or waits.
 #[derive(Debug, Clone)]
 pub struct LoadWatch {
-    cheap: bool,
+    behind: bool,
     /// Seconds behind (on the full setting) or with room (on the cheaper one), lately:
     /// counts up while it is so and down while it isn't, so one odd callback neither
     /// sets it off nor starts the count again.
@@ -49,7 +41,7 @@ pub struct LoadWatch {
 impl Default for LoadWatch {
     fn default() -> Self {
         LoadWatch {
-            cheap: false,
+            behind: false,
             held: 0.0,
             since: f64::INFINITY,
             recover: RECOVER_SECS,
@@ -59,15 +51,15 @@ impl Default for LoadWatch {
 
 impl LoadWatch {
     /// Whether keylock should be on its cheaper setting.
-    pub fn cheap(&self) -> bool {
-        self.cheap
+    pub fn behind(&self) -> bool {
+        self.behind
     }
 
     /// A callback made `secs` of audio using `load` of that time. Returns
-    /// [`LoadWatch::cheap`] as it is now.
+    /// [`LoadWatch::behind`] as it is now.
     pub fn callback(&mut self, load: f32, secs: f64) -> bool {
         self.since += secs;
-        let (counts, enough) = if self.cheap {
+        let (counts, enough) = if self.behind {
             (load <= LOW, self.recover)
         } else {
             (load >= HIGH, STRAIN_SECS)
@@ -78,73 +70,29 @@ impl LoadWatch {
             (self.held - secs).max(0.0)
         };
         if self.held >= enough {
-            self.switch(!self.cheap);
+            self.switch(!self.behind);
         }
-        self.cheap
+        self.behind
     }
 
     /// The real-time limit was hit ([`crate::realtime`]): go cheaper now.
     pub fn overrun(&mut self) {
-        if !self.cheap {
+        if !self.behind {
             self.switch(true);
         }
     }
 
-    fn switch(&mut self, cheap: bool) {
-        if cheap {
+    fn switch(&mut self, behind: bool) {
+        if behind {
             self.recover = if self.since < SETTLED_SECS {
                 (self.recover * 2.0).min(RECOVER_MAX_SECS)
             } else {
                 RECOVER_SECS
             };
         }
-        self.cheap = cheap;
+        self.behind = behind;
         self.held = 0.0;
         self.since = 0.0;
-    }
-}
-
-/// A load that counts as neither behind nor room: what a step's watch is given while
-/// it's another step's turn.
-const NEUTRAL: f32 = (HIGH + LOW) / 2.0;
-
-/// What's being left out to keep up, in the order it goes: the effects, then (only
-/// if that wasn't enough) keylock's full setting. Plain arithmetic, like its two
-/// [`LoadWatch`]es.
-#[derive(Debug, Clone, Default)]
-pub struct Shedding {
-    effects: LoadWatch,
-    keylock: LoadWatch,
-}
-
-impl Shedding {
-    /// Whether the effects are off.
-    pub fn effects_off(&self) -> bool {
-        self.effects.cheap()
-    }
-
-    /// Whether keylock is on its cheaper setting. Never without the effects off.
-    pub fn keylock_cheap(&self) -> bool {
-        self.keylock.cheap()
-    }
-
-    /// A callback made `secs` of audio using `load` of that time.
-    pub fn callback(&mut self, load: f32, secs: f64) {
-        // Keylock's turn only with the effects off; the effects come back only once
-        // keylock is on its full setting again.
-        let (effects, keylock) = match (self.effects.cheap(), self.keylock.cheap()) {
-            (false, _) => (load, NEUTRAL),
-            (true, false) => (load, load),
-            (true, true) => (NEUTRAL, load),
-        };
-        self.effects.callback(effects, secs);
-        self.keylock.callback(keylock, secs);
-    }
-
-    /// The real-time limit was hit ([`crate::realtime`]): the effects go off now.
-    /// Keylock follows only if the load stays high after that.
-    pub fn overrun(&mut self) {
-        self.effects.overrun();
     }
 }
 
@@ -152,42 +100,12 @@ impl Shedding {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_effects_go_first_and_keylock_only_if_that_was_not_enough() {
-        let mut s = Shedding::default();
-        let run = |s: &mut Shedding, load: f32, secs: f64| {
-            let mut t = 0.0;
-            while t < secs {
-                t += BLOCK;
-                s.callback(load, BLOCK);
-            }
-        };
-        run(&mut s, 0.3, 30.0);
-        assert!(!s.effects_off() && !s.keylock_cheap());
-        // Behind: the effects go, and that brings the load down enough.
-        run(&mut s, 0.9, STRAIN_SECS + 0.05);
-        assert!(s.effects_off() && !s.keylock_cheap());
-        run(&mut s, 0.6, 120.0);
-        assert!(s.effects_off() && !s.keylock_cheap(), "keylock is kept");
-        // Still behind with them off: keylock's cheaper setting.
-        run(&mut s, 0.9, STRAIN_SECS + 0.05);
-        assert!(s.effects_off() && s.keylock_cheap());
-        // Room: keylock's full setting first, the effects a while after.
-        run(&mut s, 0.1, RECOVER_SECS + 0.1);
-        assert!(s.effects_off() && !s.keylock_cheap());
-        run(&mut s, 0.1, RECOVER_SECS + 0.1);
-        assert!(!s.effects_off() && !s.keylock_cheap());
-        // The real-time limit: the effects at once, keylock not.
-        s.overrun();
-        assert!(s.effects_off() && !s.keylock_cheap());
-    }
-
     /// A 256-frame block at 48 kHz.
     const BLOCK: f64 = 256.0 / 48_000.0;
 
     /// Feed `secs` of callbacks at `load`; the time (s) of the first switch, if any.
     fn feed(w: &mut LoadWatch, load: f32, secs: f64) -> Option<f64> {
-        let before = w.cheap();
+        let before = w.behind();
         let mut t = 0.0;
         while t < secs {
             t += BLOCK;
@@ -211,7 +129,7 @@ mod tests {
         assert_eq!(feed(&mut w, 0.74, 60.0), None, "just under the mark");
         let at = feed(&mut w, 0.8, 5.0).expect("goes cheaper");
         assert!((at - STRAIN_SECS).abs() < 2.0 * BLOCK, "after {at:.3} s");
-        assert!(w.cheap());
+        assert!(w.behind());
     }
 
     #[test]
@@ -219,7 +137,7 @@ mod tests {
         // Three callbacks in four behind: it gets there, more slowly.
         let mut w = LoadWatch::default();
         let mut blocks = 0;
-        while !w.cheap() {
+        while !w.behind() {
             blocks += 1;
             assert!(blocks < 1000);
             w.callback(if blocks % 4 == 0 { 0.5 } else { 0.9 }, BLOCK);
@@ -235,7 +153,7 @@ mod tests {
     fn goes_back_only_with_room_for_a_while() {
         let mut w = LoadWatch::default();
         feed(&mut w, 0.9, 1.0);
-        assert!(w.cheap());
+        assert!(w.behind());
         // The cheaper setting brought the load down, but not to where the full one
         // would fit: stay.
         assert_eq!(feed(&mut w, 0.5, 120.0), None);
@@ -245,7 +163,7 @@ mod tests {
         assert_eq!(feed(&mut w, 0.6, RECOVER_SECS), None);
         let at = feed(&mut w, 0.2, 60.0).expect("goes back");
         assert!((at - RECOVER_SECS).abs() < 2.0 * BLOCK, "after {at:.2} s");
-        assert!(!w.cheap());
+        assert!(!w.behind());
     }
 
     #[test]
@@ -254,7 +172,7 @@ mod tests {
         let mut waits = vec![];
         for _ in 0..8 {
             feed(&mut w, 0.9, 1.0);
-            assert!(w.cheap());
+            assert!(w.behind());
             waits.push(feed(&mut w, 0.1, 1000.0).expect("goes back"));
         }
         for (i, want) in [10.0, 20.0, 40.0, 80.0, 160.0, 320.0, 320.0, 320.0]
@@ -274,7 +192,7 @@ mod tests {
     fn hitting_the_real_time_limit_goes_cheaper_at_once() {
         let mut w = LoadWatch::default();
         w.overrun();
-        assert!(w.cheap());
+        assert!(w.behind());
         // Already there: nothing more to do, and the count isn't started again.
         feed(&mut w, 0.1, RECOVER_SECS / 2.0);
         w.overrun();

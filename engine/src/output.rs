@@ -393,9 +393,9 @@ fn phones_stream(
         .build_output_stream(
             config,
             move |data: &mut [f32], _| {
-                // Past the real-time limit (either stream's thread): step down.
+                // Up against the real-time limit (either stream's thread): a break.
                 if overrun.check() {
-                    rt_stats.realtime_lost.store(true, Relaxed);
+                    rt_stats.overruns.fetch_add(1, Relaxed);
                 }
                 crate::dsp::flush_denormals();
                 aligner.process(data, channels as usize)
@@ -432,12 +432,11 @@ where
         .build_output_stream(
             config,
             move |data: &mut [T], _| {
-                // Past the real-time limit: this thread steps down to normal
-                // scheduling before the system ends the app, and does less work from
-                // here. Only atomics and the one system call: the app does the logging
-                // when it sees the flag.
+                // Up against the real-time limit: this thread takes a moment's break,
+                // which keeps it real-time and the app alive. Only atomics and that:
+                // the app does the logging when it sees the count.
                 if overrun.check() {
-                    stats.realtime_lost.store(true, Relaxed);
+                    stats.overruns.fetch_add(1, Relaxed);
                     renderer.overran();
                 }
                 crate::dsp::flush_denormals();

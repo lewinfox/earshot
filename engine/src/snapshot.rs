@@ -284,16 +284,12 @@ pub struct Stats {
     pub phones_realigns: AtomicU64,
     /// Frames queued for the headphones (smoothed): how far behind the master they are.
     pub phones_level: AtomicU64,
-    /// An audio thread ran past the real-time limit and dropped to normal scheduling
-    /// ([`crate::realtime`]). It stays so until the sound card is reopened (a new
-    /// engine, with new counters).
-    pub realtime_lost: AtomicBool,
-    /// Keylock is on its cheaper setting, as the machine can't keep up
-    /// ([`crate::load`]).
-    pub keylock_cheap: AtomicBool,
-    /// The effects are off (the effect units and the pad effects), as the machine
-    /// can't keep up: they go before keylock does ([`crate::load`]).
-    pub effects_off: AtomicBool,
+    /// Times an audio thread ran up against the real-time limit and took a moment's
+    /// break to stay inside it ([`crate::realtime`]).
+    pub overruns: AtomicU64,
+    /// Making the sound is using most of the time there is ([`crate::load`]): the
+    /// app holds its background work back.
+    pub behind: AtomicBool,
 }
 
 impl Stats {

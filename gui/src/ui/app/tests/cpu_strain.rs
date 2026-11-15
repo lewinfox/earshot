@@ -1,6 +1,6 @@
-//! A machine that can't keep up with the audio: the top bar says what the audio is
-//! doing about it (out of real time, keylock on its lighter setting) and when the
-//! system is holding the CPU back; reopening the sound card starts afresh.
+//! A machine that can't keep up with the audio: the top bar says so, and when the
+//! system is holding the CPU back; the work in the background (analysis, stems) gives
+//! way, and nothing about the sound changes.
 
 use egui_kittest::kittest::Queryable;
 
@@ -13,33 +13,50 @@ fn look(h: &mut H) {
 }
 
 #[test]
-fn the_top_bar_says_when_the_audio_cant_keep_up_and_a_reopened_sound_card_starts_afresh() {
+fn the_top_bar_says_when_the_audio_cant_keep_up_and_stems_wait() {
     let mut h = start_with("cpu-strain", stand_in);
     look(&mut h);
-    for label in ["audio not real-time", "keylock: lighter", "low-power mode"] {
+    for label in ["audio struggling", "background work on hold", "low-power mode"] {
         assert!(h.query_by_label_contains(label).is_none(), "{label}");
     }
 
     // The audio thread sets flags (it can't do more); the app notices.
     let stats = |h: &H| h.state().monitor.clone().expect("an engine");
-    stats(&h).stats().keylock_cheap.store(true, Relaxed);
+    stats(&h).stats().behind.store(true, Relaxed);
+    stats(&h).stats().overruns.store(2, Relaxed);
     look(&mut h);
-    assert!(h.query_by_label_contains("keylock: lighter").is_some());
-    assert!(h.query_by_label_contains("audio not real-time").is_none());
-
-    stats(&h).stats().realtime_lost.store(true, Relaxed);
-    look(&mut h);
-    assert!(h.query_by_label_contains("audio not real-time").is_some());
+    assert!(h.query_by_label_contains("audio struggling").is_some());
+    assert!(h.query_by_label_contains("background work on hold").is_some());
     assert!(
         h.state()
             .notices
             .shown()
             .iter()
-            .any(|n| n.text.contains("can't keep up with the audio")),
+            .any(|n| n.text.contains("struggling to keep up with the audio")),
         "and a message in the bottom bar, once"
     );
     look(&mut h);
     assert_eq!(h.state().notices.shown().len(), 1, "not said again");
+
+    // Stems asked for now aren't started.
+    let track = ids(&h)[0];
+    h.state_mut()
+        .dispatch(crate::core::stems::StemsCmd::Calculate(track).into());
+    steps(&mut h, 5);
+    assert!(h.state().stems.status(track).is_none(), "not started");
+    assert!(
+        h.state()
+            .notices
+            .shown()
+            .iter()
+            .any(|n| n.text.contains("Stems will have to wait"))
+    );
+
+    // Room again: the pills go by themselves.
+    stats(&h).stats().behind.store(false, Relaxed);
+    look(&mut h);
+    assert!(h.query_by_label_contains("audio struggling").is_none());
+    assert!(h.query_by_label_contains("background work on hold").is_none());
 
     // The system holding the CPU back, as the power watch reports it.
     h.state_mut().hud.power = Some(crate::core::power::Warning {
@@ -48,18 +65,7 @@ fn the_top_bar_says_when_the_audio_cant_keep_up_and_a_reopened_sound_card_starts
     });
     look(&mut h);
     assert!(h.query_by_label_contains("low-power mode").is_some());
-
-    // Picking the device again opens a new engine: real time and the full keylock.
-    let settings = h.state().settings.audio.clone();
-    h.state_mut()
-        .dispatch(Command::Audio(AudioCmd::Restart(settings)));
-    look(&mut h);
-    assert!(h.query_by_label_contains("audio not real-time").is_none());
-    assert!(h.query_by_label_contains("keylock: lighter").is_none());
-    assert!(
-        h.query_by_label_contains("low-power mode").is_some(),
-        "the power profile is the system's, not the sound card's"
-    );
+    assert!(h.query_by_label_contains("background work on hold").is_some());
 }
 
 /// Short of resources, full analysis waits in its queue (the worker isn't started
@@ -90,7 +96,7 @@ fn short_of_resources_analysis_is_quick_only_and_the_full_one_runs_once_there_is
         detail: "The power profile is low-power.".into(),
     });
     look(&mut h);
-    assert!(h.query_by_label_contains("analysis: quick only").is_some());
+    assert!(h.query_by_label_contains("background work on hold").is_some());
 
     let tracks: Vec<i64> = h.state().index.tracks().iter().map(|t| t.id).collect();
     h.state_mut().dispatch(
@@ -115,7 +121,7 @@ fn short_of_resources_analysis_is_quick_only_and_the_full_one_runs_once_there_is
     // Room again: what was queued runs, and replaces the quick grids.
     h.state_mut().hud.power = None;
     look(&mut h);
-    assert!(h.query_by_label_contains("analysis: quick only").is_none());
+    assert!(h.query_by_label_contains("background work on hold").is_none());
     settle_until(&mut h, |a| {
         a.index
             .tracks()
@@ -124,43 +130,3 @@ fn short_of_resources_analysis_is_quick_only_and_the_full_one_runs_once_there_is
     });
 }
 
-/// The audio comes first: when it switches the effects off to keep up the top bar
-/// says so, stems aren't started, and real time lost comes back by itself (a new
-/// audio stream) once no deck is playing.
-#[test]
-fn the_effects_go_off_stems_wait_and_real_time_comes_back_by_itself() {
-    let mut h = start_with("cpu-strain-first", stand_in);
-    look(&mut h);
-    let stats = |h: &H| h.state().monitor.clone().expect("an engine");
-
-    stats(&h).stats().effects_off.store(true, Relaxed);
-    look(&mut h);
-    assert!(h.query_by_label_contains("effects off").is_some());
-    assert!(h.query_by_label_contains("keylock: lighter").is_none(), "keylock is kept");
-    assert!(h.query_by_label_contains("analysis: quick only").is_some());
-
-    // Stems asked for now aren't started.
-    let track = ids(&h)[0];
-    h.state_mut()
-        .dispatch(crate::core::stems::StemsCmd::Calculate(track).into());
-    steps(&mut h, 5);
-    assert!(h.state().stems.status(track).is_none(), "not started");
-    assert!(
-        h.state()
-            .notices
-            .shown()
-            .iter()
-            .any(|n| n.text.contains("Stems will have to wait"))
-    );
-    stats(&h).stats().effects_off.store(false, Relaxed);
-
-    // Real time lost: with nothing playing, a little later the audio is opened
-    // again by itself.
-    stats(&h).stats().realtime_lost.store(true, Relaxed);
-    look(&mut h);
-    assert!(h.query_by_label_contains("audio not real-time").is_some());
-    h.state_mut().hud.lost_at = Some(Instant::now() - std::time::Duration::from_secs(10));
-    look(&mut h);
-    assert!(h.query_by_label_contains("audio not real-time").is_none());
-    assert!(!stats(&h).stats().realtime_lost.load(Relaxed), "a new engine");
-}
