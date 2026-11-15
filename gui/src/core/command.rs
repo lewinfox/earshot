@@ -180,6 +180,8 @@ pub enum AppCmd {
     CueFirstBeat(bool),
     /// Let a track load onto a playing deck, else refuse it (and save it).
     LoadWhilePlaying(bool),
+    /// Quick-analyse tracks new to the library, or leave them unanalysed (and save it).
+    QuickAnalyseNew(bool),
     /// Read the user's keymap file again (the built-in one if there's none).
     ReloadKeymap,
     /// Count the tracks with stale analysis (answered with `Event::Stale`).

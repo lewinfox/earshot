@@ -180,6 +180,11 @@ impl Writer {
             StoreCmd::UpdateSource(s) => self.update_source(&s),
             StoreCmd::RemoveSource(id) => self.remove_source(id),
             StoreCmd::SaveUserGrid { track, grid } => self.save_user_grid(track, &grid).map(|_| ()),
+            StoreCmd::SaveQuickGrid {
+                track,
+                grid,
+                first_beat,
+            } => self.save_quick_grid(track, &grid, first_beat).map(|_| ()),
             StoreCmd::SaveWaveform { track, data } => self.save_waveform(track, &data),
             StoreCmd::SaveFileCache {
                 key: (path, size, mtime),
@@ -299,6 +304,13 @@ impl Writer {
         Ok(())
     }
 
+    /// Say which tracks are new to the library ([`new_tracks`]), if any are.
+    pub(super) fn emit_new_tracks(&mut self, new: Vec<i64>) {
+        if !new.is_empty() {
+            self.emit(StoreEvent::NewTracks(new));
+        }
+    }
+
     pub(super) fn emit_library(&mut self) -> Result<()> {
         let t = read::tracks(&self.conn, None)?;
         self.emit(StoreEvent::Library(t));
@@ -322,6 +334,7 @@ impl Writer {
         let roots = scanned;
         let t = now();
         let tx = self.conn.transaction()?;
+        let before = last_track(&tx)?;
         tx.execute_batch(
             "CREATE TEMP TABLE IF NOT EXISTS seen(path BLOB PRIMARY KEY); DELETE FROM seen;",
         )?;
@@ -352,8 +365,11 @@ impl Writer {
             record_file(&tx, f, t)?;
         }
         link_to_folders(&tx, found, t)?;
+        let new = new_tracks(&tx, before)?;
         tx.commit()?;
-        self.emit_library()
+        self.emit_library()?;
+        self.emit_new_tracks(new);
+        Ok(())
     }
 
     /// Record a file's audio hash, worked out in the background. If another track has
@@ -443,9 +459,11 @@ impl Writer {
             let id = insert_grid(&tx, s.track, &g.grid, g.source, Some(run))?;
             let current = read::active_grid(&tx, s.track)?;
             let hand_fixed = current.is_some_and(|(_, src)| src == GridSource::User);
+            // A quick grid always gives way, even one saved while the job ran.
+            let quick = current.is_some_and(|(_, src)| src == GridSource::Quick);
             // Compare-and-set: only if nobody changed the grid while the job ran, and
             // never over a hand-fixed grid unless the user asked for this analysis.
-            if current.map(|c| c.0) == g.expected_active && (g.force || !hand_fixed) {
+            if quick || (current.map(|c| c.0) == g.expected_active && (g.force || !hand_fixed)) {
                 activate_grid(&tx, s.track, id, grid_bpm(&g.grid))?;
                 switched = true;
             }
@@ -479,6 +497,28 @@ impl Writer {
             new: Some(id),
         }));
         Ok(id)
+    }
+
+    /// A quick grid (`GridSource::Quick`), made active with the track's BPM from it,
+    /// and where its beats start (the initial cue). Only for a track with no grid:
+    /// it never replaces one, so analysis or a hand fix that got there first stays.
+    /// Returns the grid's id if it was saved.
+    pub fn save_quick_grid(
+        &mut self,
+        track: i64,
+        grid: &Beatgrid,
+        first_beat: f64,
+    ) -> Result<Option<i64>> {
+        let tx = self.conn.transaction()?;
+        if read::active_grid(&tx, track)?.is_some() {
+            return Ok(None);
+        }
+        let id = insert_grid(&tx, track, grid, GridSource::Quick, None)?;
+        activate_grid(&tx, track, id, grid_bpm(grid))?;
+        save_features(&tx, track, &[("first_beat", first_beat)], None)?;
+        tx.commit()?;
+        self.tracks_changed(&[track])?;
+        Ok(Some(id))
     }
 
     /// A waveform worked out outside analysis (on load): it counts as the waveform
@@ -1338,6 +1378,23 @@ fn link_to_folders(tx: &Connection, found: &[PathBuf], t: i64) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The newest track's id (0 with none): taken before recording files, for
+/// [`new_tracks`].
+pub(super) fn last_track(c: &Connection) -> Result<i64> {
+    Ok(c.query_row("SELECT coalesce(max(id), 0) FROM tracks", [], |r| r.get(0))?)
+}
+
+/// The tracks made since `before` ([`last_track`]) that have no beatgrid: the ones
+/// quick analysis is for. (A file that turned out to be a known track moved isn't
+/// new, and an imported track may come with its grid.)
+pub(super) fn new_tracks(c: &Connection, before: i64) -> Result<Vec<i64>> {
+    let mut st =
+        c.prepare("SELECT id FROM tracks WHERE id > ?1 AND active_grid_id IS NULL ORDER BY id")?;
+    Ok(st
+        .query_map([before], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 /// Record one new or changed file and its tags (see [`Writer::apply_scan`]); returns

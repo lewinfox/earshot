@@ -52,7 +52,13 @@ pub enum AllRow {
 }
 
 /// The order All tracks' pane lists the statuses in.
-const STATUSES: [Status; 4] = [Status::None, Status::Busy, Status::Attention, Status::Done];
+const STATUSES: [Status; 5] = [
+    Status::None,
+    Status::Quick,
+    Status::Busy,
+    Status::Attention,
+    Status::Done,
+];
 
 #[derive(Default)]
 pub struct LibraryUi {
@@ -425,7 +431,7 @@ impl LibraryUi {
         out: &mut Vec<Command>,
     ) -> bool {
         let mut clicked = false;
-        let mut count = [0usize; 4];
+        let mut count = [0usize; Status::ALL.len()];
         for t in v.lib.tracks() {
             count[v.lib.status(t) as usize] += 1;
         }

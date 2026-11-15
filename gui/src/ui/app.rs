@@ -93,6 +93,8 @@ pub struct EarshotApp {
     art_loader: crate::core::background::Mailbox<i64>,
     /// Nudge after a scan: works out audio hashes the files' tags didn't have.
     hasher: library::Hasher,
+    /// Gives new tracks their quick grid, if the setting says to.
+    quick: library::QuickAnalyser,
     /// The tempo lock tool, and its tab's A/B player.
     tempo_lock: TempoLock,
     listener: tempo_lock::Listener,
@@ -290,6 +292,7 @@ impl EarshotApp {
         let analyser =
             Analyser::start(sink.clone(), player.clone(), store.clone(), services.worker);
         let hasher = library::start_hasher(store.clone());
+        let quick = library::start_quick_analyser(store.clone());
         let data_dir = services.db.parent().unwrap_or(std::path::Path::new("."));
         let keymap_path = data_dir.join(keymap::FILE_NAME);
         let (keymap, keymap_origin) = keymap::load_user(&keymap_path, spell_key);
@@ -358,6 +361,7 @@ impl EarshotApp {
             midi_ports: vec![],
             art_loader,
             hasher,
+            quick,
             tempo_lock,
             listener: Default::default(),
             stems,
@@ -808,6 +812,12 @@ impl EarshotApp {
                     .store
                     .send(settings::save(settings::LOAD_WHILE_PLAYING, &on));
             }
+            Command::App(AppCmd::QuickAnalyseNew(on)) => {
+                self.settings.quick_analyse_new = on;
+                self.lib
+                    .store
+                    .send(settings::save(settings::QUICK_ANALYSE_NEW, &on));
+            }
             Command::App(AppCmd::ReloadKeymap) => self.reload_keymap(),
             Command::App(AppCmd::DismissNotice(id)) => self.notices.dismiss(id),
             Command::App(c @ (AppCmd::CountStale | AppCmd::QueueStale)) => {
@@ -1249,6 +1259,7 @@ impl EarshotApp {
             keymap: &self.keymap,
             mode: self.prefs.mode,
             analysis: AnalysisEnv {
+                quick_new: self.settings.quick_analyse_new,
                 workers: self.background_workers,
                 cores: analysis::cores(),
                 stale: &self.stale,
