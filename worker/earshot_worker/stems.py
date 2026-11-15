@@ -19,6 +19,8 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from . import device
+
 log = logging.getLogger(__name__)
 
 MODEL = "htdemucs"
@@ -157,9 +159,21 @@ def separate(y: np.ndarray, sr: int, req: dict, progress_for, emit) -> None:
                 within = min(1.0, (d["segment_offset"] + seg) / (hi - lo))
                 progress((k + within) / len(starts))
 
-        with torch.no_grad():
-            part = apply_model(model, norm[None, :, lo:hi], shifts=1, split=True,
-                               overlap=0.25, progress=False, callback=slice_done)[0]
+        def run(on, lo=lo, hi=hi, slice_done=slice_done):
+            with torch.no_grad():
+                return apply_model(model, norm[None, :, lo:hi], shifts=1, split=True,
+                                   overlap=0.25, progress=False, callback=slice_done,
+                                   device=on)[0].cpu()
+
+        # On the GPU if there is one; a failure there is run again on the CPU (a
+        # cancelled job's exception isn't an `Exception`, so it isn't caught).
+        try:
+            part = run(device.best())
+        except Exception as e:
+            if not device.on_gpu():
+                raise
+            device.gpu_failed(e)
+            part = run("cpu")
         out[:, :, lo:hi] += (part[idx] * std + mean).numpy() * fade(start, lo, hi, n, chunk, ov)
         progress((k + 1) / len(starts))
 

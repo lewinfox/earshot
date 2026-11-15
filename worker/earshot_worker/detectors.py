@@ -14,6 +14,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from . import device
+
 log = logging.getLogger(__name__)
 
 
@@ -52,12 +54,11 @@ def get_beat_this(checkpoint: str = CHECKPOINT, dbn: bool = False):
     first ever load also downloads the checkpoint."""
     key = (checkpoint, dbn)
     if key not in _beat_this_models:
-        import torch
         from beat_this.inference import Audio2Beats
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        log.info("loading Beat This! checkpoint %s on %s", checkpoint, device)
-        _beat_this_models[key] = Audio2Beats(checkpoint_path=checkpoint, device=device, dbn=dbn)
+        on = device.best()
+        log.info("loading Beat This! checkpoint %s on %s", checkpoint, on)
+        _beat_this_models[key] = Audio2Beats(checkpoint_path=checkpoint, device=on, dbn=dbn)
     return _beat_this_models[key]
 
 
@@ -68,7 +69,19 @@ def loaded_models() -> list[str]:
 
 def detect_beat_this(mono: np.ndarray, sr: int, dbn: bool = False, progress=None) -> RawBeats:
     """`progress(fraction)` is called as each chunk of the model's input is done; on a
-    CPU that is most of the analysis time."""
+    CPU that is most of the analysis time. A failure on the GPU runs it again on the
+    CPU (a cancelled job's exception isn't an `Exception`, so it isn't caught)."""
+    try:
+        return _detect_beat_this(mono, sr, dbn, progress)
+    except Exception as e:
+        if not device.on_gpu():
+            raise
+        device.gpu_failed(e)
+        _beat_this_models.clear()
+        return _detect_beat_this(mono, sr, dbn, progress)
+
+
+def _detect_beat_this(mono: np.ndarray, sr: int, dbn: bool, progress) -> RawBeats:
     model = get_beat_this(dbn=dbn)
     mono = mono.astype(np.float32)
     if progress is None:
