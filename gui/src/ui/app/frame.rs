@@ -3,6 +3,11 @@
 
 use super::*;
 
+/// Real time lost: how long after, with no deck playing, the audio device is opened
+/// again to get it back; and how long before trying that again.
+const REOPEN_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+const REOPEN_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl EarshotApp {
     pub(super) fn deck_info(&self, deck: DeckId) -> DeckInfo {
         let inner = self.player.lock().unwrap();
@@ -87,24 +92,49 @@ impl EarshotApp {
         }
     }
 
-    /// What's being done about a machine that can't keep up, for the log and the top
+    /// What's being done about a machine that can't keep up (the audio comes first:
+    /// analysis and stems wait, then the effects go, and keylock's quality last), for the log and the top
     /// bar. The audio thread can't write logs or show anything: it sets flags, and
     /// this notices when they change.
     pub(super) fn watch_strain(&mut self) {
         use crate::ui::panels::status::Alert;
-        let (lost, cheap) = self.monitor.as_ref().map_or((false, false), |m| {
+        let (lost, cheap, fx_off) = self.monitor.as_ref().map_or((false, false, false), |m| {
             let s = m.stats();
-            (s.realtime_lost.load(Relaxed), s.keylock_cheap.load(Relaxed))
+            (
+                s.realtime_lost.load(Relaxed),
+                s.keylock_cheap.load(Relaxed),
+                s.effects_off.load(Relaxed),
+            )
         });
+        if fx_off != self.hud.effects_off {
+            self.hud.effects_off = fx_off;
+            if fx_off {
+                eprintln!(
+                    "audio: making the sound is using most of the time there is: the \
+                     effects are off (keylock is kept)"
+                );
+                self.notify(
+                    notice::Level::Warning,
+                    "The computer can't keep up with the audio: the effects are off for now",
+                );
+            } else {
+                eprintln!("audio: there's room again: the effects can be used");
+            }
+        }
+        // The audio itself is behind: whatever stems are being worked out stop.
+        if (fx_off || lost) && self.stems.cancel_all() > 0 {
+            eprintln!("stems: stopped, as the audio can't keep up");
+        }
         if lost != self.hud.realtime_lost {
             self.hud.realtime_lost = lost;
             if lost {
                 eprintln!(
                     "audio: ran past the real-time limit (SIGXCPU): the audio thread has \
                      dropped to normal priority, so the system doesn't end earshot. The \
-                     sound may drop out; reopening the sound card (Audio settings) goes \
-                     back to real time"
+                     sound may drop out; once no deck is playing the audio device is \
+                     opened again, which goes back to real time"
                 );
+                self.hud.lost_at = Some(Instant::now());
                 self.notify(
                     notice::Level::Warning,
                     "The computer can't keep up with the audio: it has dropped out of real \
@@ -113,7 +143,29 @@ impl EarshotApp {
             } else {
                 // A new engine: its streams run on new threads, real-time as usual.
                 eprintln!("audio: the sound card was reopened after real time was lost");
+                self.hud.lost_at = None;
             }
+        }
+        // Real time comes back only with a new audio stream (the system gives it to
+        // the stream's thread when it's opened). Opening one is a moment's silence,
+        // so: once no deck is playing, a little after the trouble, and not over and
+        // over if it's lost again straight away.
+        let playing = self
+            .frame
+            .snap
+            .as_ref()
+            .is_some_and(|sh| sh.live().iter().any(|d| d.playing));
+        let now = Instant::now();
+        if lost
+            && !playing
+            && self.hud.lost_at.is_some_and(|t| now.duration_since(t) >= REOPEN_AFTER)
+            && self.hud.reopened_at.is_none_or(|t| now.duration_since(t) >= REOPEN_EVERY)
+        {
+            self.hud.reopened_at = Some(now);
+            eprintln!("audio: no deck is playing: opening the audio device again for real time");
+            let settings = self.settings.audio.clone();
+            self.dispatch(Command::Audio(AudioCmd::Restart(settings)));
+            return self.watch_strain();
         }
         if cheap != self.hud.keylock_cheap {
             self.hud.keylock_cheap = cheap;
@@ -132,7 +184,8 @@ impl EarshotApp {
         }
         // Short of resources: full analysis (the worker and its model) waits in its
         // queue, and tracks get the quick grid finder's grid meanwhile.
-        let short = lost || cheap || self.hud.power.is_some() || self.hud.memory_short;
+        let short =
+            lost || cheap || fx_off || self.hud.power.is_some() || self.hud.memory_short;
         if short != self.hud.low_resource {
             self.hud.low_resource = short;
             self.lib.analyser.set_held(short);
@@ -151,18 +204,29 @@ impl EarshotApp {
                 text: "⚠ audio not real-time".into(),
                 tip: "Making the sound took longer than the sound lasts, for long enough \
                       that the system was about to end earshot. The audio now runs at \
-                      normal priority and may drop out. Free up the CPU, then pick the \
-                      device again in Audio settings to go back to real time."
+                      normal priority and may drop out. It goes back to real time by \
+                      itself once no deck is playing (a moment's silence)."
                     .into(),
                 serious: true,
+            });
+        }
+        if fx_off {
+            alerts.push(Alert {
+                text: "effects off".into(),
+                tip: "Making the sound is using most of the time there is, so the effects \
+                      are off: the tracks and their keylock come first. Once there's room \
+                      they can be switched on again."
+                    .into(),
+                serious: false,
             });
         }
         if cheap {
             alerts.push(Alert {
                 text: "keylock: lighter".into(),
-                tip: "Making the sound is using most of the time there is, so keylock is \
-                      on its lighter setting (a little less clean). It goes back by itself \
-                      once there's room."
+                tip: "Even with the effects off, making the sound is using most of the \
+                      time there is, so keylock is on its lighter setting (a little less \
+                      clean) rather than dropping out. It goes back by itself once \
+                      there's room."
                     .into(),
                 serious: false,
             });

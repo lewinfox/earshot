@@ -101,7 +101,10 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   short of resources (a low-power profile, capped CPUs, the audio behind, or under
   1.5 GB of memory left: the top bar says *analysis: quick only*), the full analysis
   waits in its queue and the tracks asked for get a quick grid meanwhile; it runs by
-  itself once there's room again. A track with no grid at
+  itself once there's room again. The audio comes first throughout: stems aren't
+  started then either; if making the sound itself falls behind, the effects are
+  switched off (*effects off*) before anything is taken from the tracks, and keylock
+  only goes to its lighter setting if that still isn't enough. A track with no grid at
   all (the quick grid wasn't sure of it, or the setting was off) is analysed in the
   background when it's loaded: it plays at once, on a quick grid or a placeholder from
   its BPM tag, and the deck switches to the analysed grid when it's done. Like

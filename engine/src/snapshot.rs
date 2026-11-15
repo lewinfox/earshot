@@ -291,6 +291,9 @@ pub struct Stats {
     /// Keylock is on its cheaper setting, as the machine can't keep up
     /// ([`crate::load`]).
     pub keylock_cheap: AtomicBool,
+    /// The effects are off (the effect units and the pad effects), as the machine
+    /// can't keep up: they go before keylock does ([`crate::load`]).
+    pub effects_off: AtomicBool,
 }
 
 impl Stats {

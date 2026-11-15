@@ -123,3 +123,44 @@ fn short_of_resources_analysis_is_quick_only_and_the_full_one_runs_once_there_is
             .all(|t| t.grid_source == Some(GridSource::Analysis) && a.index.status(t) == Status::Done)
     });
 }
+
+/// The audio comes first: when it switches the effects off to keep up the top bar
+/// says so, stems aren't started, and real time lost comes back by itself (a new
+/// audio stream) once no deck is playing.
+#[test]
+fn the_effects_go_off_stems_wait_and_real_time_comes_back_by_itself() {
+    let mut h = start_with("cpu-strain-first", stand_in);
+    look(&mut h);
+    let stats = |h: &H| h.state().monitor.clone().expect("an engine");
+
+    stats(&h).stats().effects_off.store(true, Relaxed);
+    look(&mut h);
+    assert!(h.query_by_label_contains("effects off").is_some());
+    assert!(h.query_by_label_contains("keylock: lighter").is_none(), "keylock is kept");
+    assert!(h.query_by_label_contains("analysis: quick only").is_some());
+
+    // Stems asked for now aren't started.
+    let track = ids(&h)[0];
+    h.state_mut()
+        .dispatch(crate::core::stems::StemsCmd::Calculate(track).into());
+    steps(&mut h, 5);
+    assert!(h.state().stems.status(track).is_none(), "not started");
+    assert!(
+        h.state()
+            .notices
+            .shown()
+            .iter()
+            .any(|n| n.text.contains("Stems will have to wait"))
+    );
+    stats(&h).stats().effects_off.store(false, Relaxed);
+
+    // Real time lost: with nothing playing, a little later the audio is opened
+    // again by itself.
+    stats(&h).stats().realtime_lost.store(true, Relaxed);
+    look(&mut h);
+    assert!(h.query_by_label_contains("audio not real-time").is_some());
+    h.state_mut().hud.lost_at = Some(Instant::now() - std::time::Duration::from_secs(10));
+    look(&mut h);
+    assert!(h.query_by_label_contains("audio not real-time").is_none());
+    assert!(!stats(&h).stats().realtime_lost.load(Relaxed), "a new engine");
+}

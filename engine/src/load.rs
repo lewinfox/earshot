@@ -1,8 +1,15 @@
 //! Doing less when the machine can't keep up. Each audio callback is timed against
-//! how long the audio it made lasts (its load: 1 means it only just made it). When
-//! the load stays high, keylock goes over to its cheaper setting
-//! ([`crate::keylock::Keylock::set_cheap`]); when there has been room for a while, it
-//! goes back.
+//! how long the audio it made lasts (its load: 1 means it only just made it).
+//!
+//! What goes first is what matters least to how the tracks sound ([`Shedding`]): when
+//! the load stays high the effects go off (the effect units and the pad effects).
+//! Keylock is part of the sound of the tracks themselves, so it's kept as it is for
+//! as long as it can be: only if the load stays high with the effects already off
+//! does it go over to its cheaper setting
+//! ([`crate::keylock::Keylock::set_cheap`]). When there has been room for a while
+//! they come back in the other order: keylock's full setting first, then the effects.
+//!
+//! One [`LoadWatch`] decides each step (called "cheap" below, after keylock's).
 //!
 //! Going back is the slow direction, so it doesn't flap: the cheaper setting costs
 //! less, so "room" means well under the load that set it off, held for
@@ -97,9 +104,83 @@ impl LoadWatch {
     }
 }
 
+/// A load that counts as neither behind nor room: what a step's watch is given while
+/// it's another step's turn.
+const NEUTRAL: f32 = (HIGH + LOW) / 2.0;
+
+/// What's being left out to keep up, in the order it goes: the effects, then (only
+/// if that wasn't enough) keylock's full setting. Plain arithmetic, like its two
+/// [`LoadWatch`]es.
+#[derive(Debug, Clone, Default)]
+pub struct Shedding {
+    effects: LoadWatch,
+    keylock: LoadWatch,
+}
+
+impl Shedding {
+    /// Whether the effects are off.
+    pub fn effects_off(&self) -> bool {
+        self.effects.cheap()
+    }
+
+    /// Whether keylock is on its cheaper setting. Never without the effects off.
+    pub fn keylock_cheap(&self) -> bool {
+        self.keylock.cheap()
+    }
+
+    /// A callback made `secs` of audio using `load` of that time.
+    pub fn callback(&mut self, load: f32, secs: f64) {
+        // Keylock's turn only with the effects off; the effects come back only once
+        // keylock is on its full setting again.
+        let (effects, keylock) = match (self.effects.cheap(), self.keylock.cheap()) {
+            (false, _) => (load, NEUTRAL),
+            (true, false) => (load, load),
+            (true, true) => (NEUTRAL, load),
+        };
+        self.effects.callback(effects, secs);
+        self.keylock.callback(keylock, secs);
+    }
+
+    /// The real-time limit was hit ([`crate::realtime`]): the effects go off now.
+    /// Keylock follows only if the load stays high after that.
+    pub fn overrun(&mut self) {
+        self.effects.overrun();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_effects_go_first_and_keylock_only_if_that_was_not_enough() {
+        let mut s = Shedding::default();
+        let run = |s: &mut Shedding, load: f32, secs: f64| {
+            let mut t = 0.0;
+            while t < secs {
+                t += BLOCK;
+                s.callback(load, BLOCK);
+            }
+        };
+        run(&mut s, 0.3, 30.0);
+        assert!(!s.effects_off() && !s.keylock_cheap());
+        // Behind: the effects go, and that brings the load down enough.
+        run(&mut s, 0.9, STRAIN_SECS + 0.05);
+        assert!(s.effects_off() && !s.keylock_cheap());
+        run(&mut s, 0.6, 120.0);
+        assert!(s.effects_off() && !s.keylock_cheap(), "keylock is kept");
+        // Still behind with them off: keylock's cheaper setting.
+        run(&mut s, 0.9, STRAIN_SECS + 0.05);
+        assert!(s.effects_off() && s.keylock_cheap());
+        // Room: keylock's full setting first, the effects a while after.
+        run(&mut s, 0.1, RECOVER_SECS + 0.1);
+        assert!(s.effects_off() && !s.keylock_cheap());
+        run(&mut s, 0.1, RECOVER_SECS + 0.1);
+        assert!(!s.effects_off() && !s.keylock_cheap());
+        // The real-time limit: the effects at once, keylock not.
+        s.overrun();
+        assert!(s.effects_off() && !s.keylock_cheap());
+    }
 
     /// A 256-frame block at 48 kHz.
     const BLOCK: f64 = 256.0 / 48_000.0;

@@ -19,7 +19,7 @@ use crate::decode::TrackAudio;
 use crate::dsp::{self, Limiter, Smoothed};
 use crate::fx::{BeatClock, FALLBACK_BPM, FX_UNITS, FxCmd, FxTarget, FxUnit, FxUnitState};
 use crate::keylock::KEY_SHIFT_MAX;
-use crate::load::LoadWatch;
+use crate::load::Shedding;
 use crate::pad_fx::PadFxSlot;
 use crate::processor::{Channel, KNOB_SECS, MasterChain};
 use crate::sampler::{SampleSlot, Sampler};
@@ -981,8 +981,11 @@ pub struct Renderer {
     stepped: bool,
     /// Nothing waits for the audio ([`Renderer::set_untimed`]).
     untimed: bool,
-    /// Whether keylock is on its cheaper setting, from how long callbacks take.
-    load: LoadWatch,
+    /// What's left out to keep up, from how long callbacks take: the effects first,
+    /// keylock's full setting last.
+    load: Shedding,
+    /// The effects are held off ([`Renderer::hold_effects_off`]).
+    effects_off: bool,
     /// The decks' keylock is on its cheaper setting ([`Renderer::set_cheap_keylock`]).
     keylock_cheap: bool,
     /// Tests: the load each callback reports, in place of the time it really took
@@ -1082,7 +1085,8 @@ impl Renderer {
             clock_offset: None,
             stepped: false,
             untimed: false,
-            load: LoadWatch::default(),
+            load: Shedding::default(),
+            effects_off: false,
             keylock_cheap: false,
             #[cfg(test)]
             test_load: 0.0,
@@ -1149,8 +1153,40 @@ impl Renderer {
             s.slow_callbacks.fetch_add(1, Relaxed);
         }
         let load = self.load_of(elapsed, budget_ns);
-        let cheap = self.load.callback(load, total as f64 / self.sample_rate);
-        self.set_cheap_keylock(cheap);
+        self.load.callback(load, total as f64 / self.sample_rate);
+        self.shed();
+    }
+
+    /// Do what [`Shedding`] says: the effects off or allowed again, keylock on its
+    /// cheaper setting or its full one.
+    fn shed(&mut self) {
+        let off = self.load.effects_off();
+        if off != self.effects_off {
+            self.effects_off = off;
+            self.stats.effects_off.store(off, Relaxed);
+        }
+        if off {
+            self.hold_effects_off();
+        }
+        self.set_cheap_keylock(self.load.keylock_cheap());
+    }
+
+    /// Switch off every effect unit and let go of every pad effect, as the user
+    /// would (so each fades or rings out as it does then, and shows as off). Called
+    /// every callback while the effects are shed, so one switched on meanwhile goes
+    /// straight off again. They aren't switched back on afterwards: that's the
+    /// user's to do.
+    fn hold_effects_off(&mut self) {
+        for unit in &mut self.fx {
+            if unit.state().enabled {
+                unit.apply(FxCmd::Enabled(crate::command::Set::Off));
+            }
+        }
+        for slot in self.pad_fx.iter_mut().flatten() {
+            if slot.held().is_some() {
+                slot.set(None);
+            }
+        }
     }
 
     /// The share of its time a callback used, for [`LoadWatch`]: nothing when no
@@ -1186,11 +1222,12 @@ impl Renderer {
     }
 
     /// The audio thread ran past the real-time limit and has dropped to normal
-    /// scheduling ([`crate::realtime`]): keylock goes cheaper at once, without waiting
-    /// to see the load. Called on the audio thread, before the callback's render.
+    /// scheduling ([`crate::realtime`]): the effects go off at once, without waiting
+    /// to see the load (keylock is kept unless the load stays high after that).
+    /// Called on the audio thread, before the callback's render.
     pub(crate) fn overran(&mut self) {
         self.load.overrun();
-        self.set_cheap_keylock(self.load.cheap());
+        self.shed();
     }
 
     /// No sound card is waiting for the audio (the null output): how long a callback
@@ -2540,15 +2577,31 @@ mod tests {
     }
 
     #[test]
-    fn running_past_the_real_time_limit_puts_keylock_on_its_cheaper_setting_at_once() {
+    fn running_past_the_real_time_limit_switches_the_effects_off_at_once_and_keeps_keylock() {
+        use crate::pad_fx::{PadFx, PadFxKind};
         let mut rig = Rig::new();
+        rig.r.fx[0].apply(FxCmd::Enabled(Set::On));
+        rig.deck(0, DeckCmd::PadFx(Some(PadFx::new(PadFxKind::Reverb, 1.0))));
         rig.run(0.1);
+        assert!(rig.snap().mixer.fx[0].enabled);
         rig.r.overran();
-        assert!(rig.monitor.stats().keylock_cheap.load(Relaxed));
-        // With room, it goes back as it does from load.
+        rig.run(0.1);
+        let stats = rig.monitor.stats();
+        assert!(stats.effects_off.load(Relaxed));
+        assert!(!stats.keylock_cheap.load(Relaxed), "keylock is kept");
+        assert!(!rig.snap().mixer.fx[0].enabled);
+        assert_eq!(rig.snap().decks[0].pad_fx, None);
+        // One switched on meanwhile goes straight off again.
+        rig.r.fx[0].apply(FxCmd::Enabled(Set::On));
+        rig.run(0.1);
+        assert!(!rig.snap().mixer.fx[0].enabled);
+        // With room, effects are allowed again (and stay off until switched on).
         rig.r.test_load = 0.1;
         rig.run(crate::load::RECOVER_SECS + 0.5);
-        assert!(!rig.monitor.stats().keylock_cheap.load(Relaxed));
+        assert!(!rig.monitor.stats().effects_off.load(Relaxed));
+        rig.r.fx[0].apply(FxCmd::Enabled(Set::On));
+        rig.run(0.1);
+        assert!(rig.snap().mixer.fx[0].enabled);
     }
 
     #[test]

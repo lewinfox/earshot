@@ -256,6 +256,12 @@ struct Hud {
     memory_short: bool,
     /// Any of those: full analysis waits, and tracks get quick grids meanwhile.
     low_resource: bool,
+    /// The audio has switched the effects off to keep up (`Stats::effects_off`).
+    effects_off: bool,
+    /// When real time was seen to be lost, and when the audio was last reopened by
+    /// itself to get it back (`watch_strain`).
+    lost_at: Option<Instant>,
+    reopened_at: Option<Instant>,
     alerts: Vec<crate::ui::panels::status::Alert>,
     last: Option<Instant>,
 }
@@ -889,6 +895,15 @@ impl EarshotApp {
             Command::Export(c) => self.export_cmd(c),
             Command::TempoLock(TempoLockCmd::Listen { version, at }) => self.listen(version, at),
             Command::TempoLock(c) => self.tempo_lock.run(c),
+            // Stems are the heaviest thing there is to work out: not while the machine
+            // is short of resources (`watch_strain`).
+            Command::Stems(crate::core::stems::StemsCmd::Calculate(_)) if self.hud.low_resource => {
+                self.notify(
+                    notice::Level::Warning,
+                    "Stems will have to wait: the computer is short of resources, and the \
+                     audio comes first",
+                );
+            }
             Command::Stems(c) => self.stems.run(c),
             Command::Trim(c) => self.trim_cmd(c),
             Command::Collection(c) => self.collection_cmd(c),
