@@ -383,15 +383,7 @@ impl EarshotApp {
                 .find(|d| !decks[d.index()].playing())
                 .unwrap_or(DeckId::new(0).expect("deck 1")),
         });
-        if self.panels.decks[deck.index()].playing() && !self.settings.load_while_playing {
-            self.notify(
-                crate::core::notice::Level::Warning,
-                format!(
-                    "Deck {} is playing: stop it first to load a track (or allow loading onto a \
-                     playing deck in Settings › Decks)",
-                    crate::core::bus::deck_letter(deck)
-                ),
-            );
+        if self.refuse_load(deck) {
             return None;
         }
         let lib = &self.panels.library;
@@ -421,6 +413,53 @@ impl EarshotApp {
             });
         });
         Some(ticket)
+    }
+
+    /// The deck is playing and the setting doesn't allow loading onto it: say so.
+    fn refuse_load(&mut self, deck: DeckId) -> bool {
+        if !self.panels.decks[deck.index()].playing() || self.settings.load_while_playing {
+            return false;
+        }
+        self.notify(
+            crate::core::notice::Level::Warning,
+            format!(
+                "Deck {} is playing: stop it first to load a track (or allow loading onto a \
+                 playing deck in Settings › Decks)",
+                crate::core::bus::deck_letter(deck)
+            ),
+        );
+        true
+    }
+
+    /// Instant doubles: the track on the deck beside `to` (1 and 2, 3 and 4) goes on
+    /// `to` too, at the same place, playing in step with it.
+    pub(super) fn instant_double(&mut self, to: DeckId) {
+        let Some(from) = DeckId::new(to.index() ^ 1) else {
+            return;
+        };
+        if self.refuse_load(to) {
+            return;
+        }
+        match player::instant_double(&self.player, from, to) {
+            Ok(ticket) => {
+                self.loaded_from[to.index()] = self.loaded_from[from.index()].clone();
+                let track_id = self.player.lock().unwrap().session(to).track_id;
+                if let Some(id) = track_id {
+                    self.panels.decks[to.index()].start_load(PendingLoad::new(
+                        ticket,
+                        id,
+                        self.index.get(id),
+                    ));
+                }
+                // As any load finishes: the cues, and Prepare's tempo lock.
+                (self.sink)(Event::Loaded {
+                    deck: to,
+                    ticket,
+                    result: Ok(()),
+                });
+            }
+            Err(e) => self.notify(crate::core::notice::Level::Warning, format!("Instant doubles: {e}")),
+        }
     }
 
     pub(super) fn analyse(&self, ids: Vec<i64>, dynamic: bool, asked: bool) {

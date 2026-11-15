@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use crate::beatgrid::Beatgrid;
 use crate::command::{
-    ChannelParam, Command, DeckCmd, DeckId, DeckState, EngineState, HOTCUES, HotcueMode,
+    ChannelParam, Command, DeckCmd, DeckId, DeckState, EngineState, HOTCUES, HotcueMode, XfCurve,
     LoadedTrack, LoopState, MAX_DECKS, MasterParam, ParamId, Press, PreviewCmd, XfSide,
 };
 use crate::decode::TrackAudio;
@@ -330,11 +330,17 @@ const BEND_SECS: f64 = 0.1;
 /// -1..1) or moves past it.
 const PICKUP: f64 = 0.01;
 
-/// A crossfader side's level at position `x` (-1..1): both full in the centre, each
-/// fading out (a quarter cosine) as the fader moves to the other side.
-fn xf_gain(x: f64, side: usize) -> f64 {
+/// A crossfader side's level at position `x` (-1..1) on `curve`. Sharp: both full
+/// in the centre, each fading out (a quarter cosine) as the fader moves to the other
+/// side. Constant power: a quarter cosine across the whole travel, so the two sides'
+/// powers always add up to one.
+fn xf_gain(curve: XfCurve, x: f64, side: usize) -> f64 {
     let away = if side == 0 { x } else { -x };
-    (away.max(0.0) * std::f64::consts::FRAC_PI_2).cos()
+    let q = std::f64::consts::FRAC_PI_2;
+    match curve {
+        XfCurve::Sharp => (away.max(0.0) * q).cos(),
+        XfCurve::ConstantPower => ((away + 1.0) / 2.0 * q).cos(),
+    }
 }
 
 /// Without a grid, beat maths falls back to 120 BPM from zero.
@@ -968,6 +974,7 @@ pub struct Renderer {
     pad_fx: [Option<PadFxSlot>; MAX_DECKS],
     pad_spb: [f64; MAX_DECKS],
     crossfader: f64,
+    xf_curve: XfCurve,
     /// Left and right crossfader gains, eased.
     xf_gain: [Smoothed; 2],
     head_gain: Smoothed,
@@ -1070,6 +1077,7 @@ impl Renderer {
             pad_fx: std::array::from_fn(|i| (i < live).then(|| PadFxSlot::new(sr))),
             pad_spb: [60.0 / FALLBACK_BPM; MAX_DECKS],
             crossfader: 0.0,
+            xf_curve: XfCurve::default(),
             xf_gain: [Smoothed::new(0.0); 2],
             head_gain: Smoothed::new(1.0),
             head_mix: Smoothed::new(0.5),
@@ -1584,6 +1592,41 @@ impl Renderer {
         });
     }
 
+    /// See [`Command::InstantDouble`]. Done between blocks, so both decks render the
+    /// next block from the same place at the same speed.
+    fn instant_double(&mut self, f: usize, t: usize, generation: u64) {
+        let same = match (&self.decks[f].track, &self.decks[t].track) {
+            (Some(a), Some(b)) => Arc::ptr_eq(&a.audio, &b.audio),
+            _ => false,
+        };
+        if f == t || !same || self.decks[t].generation() != generation {
+            return;
+        }
+        let src = &self.decks[f];
+        let (pos, playing, rate, range) = (src.pos(), src.playing(), src.rate, src.range);
+        let (keylock, key_shift) = (src.player.keylock, src.player.key_shift);
+        let loop_ = src.player.transport.loop_;
+        let stems = src.stems.clone();
+        // Each deck's key-lock shifter has a state of its own, which can't be copied:
+        // both start afresh here instead, so they stay sample for sample alike. (Out
+        // of step by a few milliseconds, the two copies would sound like a flanger.)
+        self.decks[f].player.restart_keylock();
+        let dk = &mut self.decks[t];
+        dk.player.restart_keylock();
+        dk.range = range;
+        dk.rate = rate;
+        dk.check_pickup();
+        dk.player.keylock = keylock;
+        dk.set_key_shift(key_shift);
+        dk.jump(pos, JumpReason::Seek);
+        *dk.loop_() = loop_;
+        dk.preview = Preview::None;
+        dk.player.transport.playing = playing;
+        if let Some(old) = std::mem::replace(&mut dk.stems, stems) {
+            self.trash(Garbage::Stems(old));
+        }
+    }
+
     fn apply(&mut self, cmd: Command) {
         match cmd {
             Command::Deck(id, c) => self.deck_cmd(id, c),
@@ -1634,11 +1677,24 @@ impl Renderer {
                     self.decks[d].initial_cue(at, &mut self.outbox);
                 }
             }
+            Command::InstantDouble {
+                from,
+                to,
+                generation,
+            } => {
+                if let (Some(f), Some(t)) = (self.live(from), self.live(to)) {
+                    self.instant_double(f, t, generation);
+                }
+            }
             Command::SetSyncLeader(l) => {
                 self.sync_leader = l.filter(|l| l.index() < self.live);
             }
             Command::MasterCue(set) => self.master_cue = set.apply(self.master_cue),
             Command::PhonesCueOnly(on) => self.phones_cue_only = on,
+            Command::SetXfCurve(c) => {
+                self.xf_curve = c;
+                self.set_crossfader(self.crossfader);
+            }
             Command::SetHotcueMode(m) => {
                 for d in &mut self.decks {
                     d.hotcue_mode = m;
@@ -1756,7 +1812,7 @@ impl Renderer {
     fn set_crossfader(&mut self, v: f64) {
         self.crossfader = v.clamp(-1.0, 1.0);
         for (side, g) in self.xf_gain.iter_mut().enumerate() {
-            g.target = xf_gain(self.crossfader, side);
+            g.target = xf_gain(self.xf_curve, self.crossfader, side);
         }
     }
 
@@ -1889,6 +1945,7 @@ impl Renderer {
         }
         self.apply(Command::SetSyncLeader(st.sync_leader));
         self.apply(Command::SetHotcueMode(st.hotcue_mode));
+        self.apply(Command::SetXfCurve(st.xf_curve));
         for slot in SampleSlot::all() {
             if let Some(old) = self.sampler.restore(slot, &mut st.sampler[slot.index()]) {
                 self.trash(Garbage::Audio(old));
@@ -2083,6 +2140,9 @@ mod tests {
     fn fx_rig(kind: crate::fx::FxKind) -> Rig {
         use crate::fx::FxCmd;
         let mut rig = Rig::new();
+        // Deck 1 at full level with the crossfader in the middle, so the tone's level
+        // is the master's.
+        rig.send(Command::SetXfCurve(XfCurve::Sharp));
         load_fn(&mut rig, 0, 30.0, |t| {
             (t * 440.0 * std::f64::consts::TAU).sin() as f32 * 0.5
         });
@@ -2419,6 +2479,78 @@ mod tests {
             (first - 0.1 / 1.08).abs() < 0.008,
             "first click after the jump at {first:.3}s"
         );
+    }
+
+    /// Instant doubles: the copy plays from the same place, at the same tempo and key,
+    /// in step from then on; a copy of other audio is left alone.
+    #[test]
+    fn instant_double_copies_place_tempo_and_key() {
+        let mut rig = Rig::new();
+        let (audio, grid) = demo(124.0, 124.0, 60.0, 3);
+        let first = track(audio, Some(Arc::new(grid)), 1);
+        let copy = Arc::new(LoadedTrack {
+            generation: 2,
+            audio: first.audio.clone(),
+            grid: first.grid.clone(),
+            ..*first
+        });
+        rig.send(Command::Load { deck: id(0), track: first });
+        rig.deck(0, DeckCmd::Rate(0.04));
+        rig.deck(0, DeckCmd::Keylock(Set::On));
+        rig.deck(0, DeckCmd::KeyShift(2.0));
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.run(1.0);
+        let before = rig.pos(0);
+        rig.send(Command::Load { deck: id(1), track: copy });
+        rig.send(Command::InstantDouble { from: id(0), to: id(1), generation: 2 });
+        rig.run(0.5);
+        let s = rig.snap();
+        let (a, b) = (&s.decks[0], &s.decks[1]);
+        assert!(b.playing);
+        assert_eq!((b.rate, b.keylock, b.key_shift), (0.04, true, 2.0));
+        assert!((a.position - b.position).abs() < 1e-9, "{} vs {}", a.position, b.position);
+        assert!(a.position > before + 0.4);
+
+        // Other audio on deck 2: nothing copied.
+        rig.load(1, 100.0, 100.0);
+        rig.send(Command::InstantDouble { from: id(0), to: id(1), generation: 1 });
+        rig.run(0.1);
+        assert!(!rig.snap().decks[1].playing);
+    }
+
+    /// Instant doubles play the same samples on both decks, key lock or not: two
+    /// copies a few milliseconds apart would sound like a flanger.
+    #[test]
+    fn an_instant_double_sounds_the_same_as_its_original() {
+        for (keylock, rate) in [(false, 0.04), (true, 0.0), (true, 0.04), (true, -0.06)] {
+            // Doubled, then only deck `heard` in the mix.
+            let mk = |heard: usize| {
+                let mut rig = Rig::new();
+                rig.send(Command::SetXfCurve(XfCurve::Sharp));
+                let (audio, grid) = demo(124.0, 124.0, 60.0, 3);
+                let first = track(audio, Some(Arc::new(grid)), 1);
+                let copy = Arc::new(LoadedTrack {
+                    generation: 2,
+                    audio: first.audio.clone(),
+                    grid: first.grid.clone(),
+                    ..*first
+                });
+                rig.send(Command::Load { deck: id(0), track: first });
+                rig.deck(0, DeckCmd::Rate(rate));
+                rig.deck(0, DeckCmd::Keylock(if keylock { Set::On } else { Set::Off }));
+                rig.deck(0, DeckCmd::Play(Set::On));
+                rig.run(1.0);
+                rig.send(Command::Load { deck: id(1), track: copy });
+                rig.send(Command::InstantDouble { from: id(0), to: id(1), generation: 2 });
+                rig.channel(1 - heard, ChannelParam::Volume, 0.0);
+                rig.run(0.5);
+                record(&mut rig, 1.0)
+            };
+            let (x, y) = (mk(0), mk(1));
+            assert!(peak(&x) > 0.1, "heard");
+            let err = x.iter().zip(&y).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+            assert!(err < 1e-6, "keylock {keylock}, rate {rate}: off by {err}");
+        }
     }
 
     #[test]
@@ -3328,12 +3460,24 @@ mod tests {
     }
 
     #[test]
-    fn the_crossfader_is_full_both_sides_in_the_centre() {
-        let g = xf_gain;
+    fn the_sharp_crossfader_is_full_both_sides_in_the_centre() {
+        let g = |x, side| xf_gain(XfCurve::Sharp, x, side);
         assert_eq!((g(0.0, 0), g(0.0, 1)), (1.0, 1.0));
         assert_eq!((g(-1.0, 0), g(1.0, 1)), (1.0, 1.0));
         assert!(g(1.0, 0).abs() < 1e-12 && g(-1.0, 1).abs() < 1e-12);
         assert!((g(0.5, 0) - 0.5f64.sqrt()).abs() < 1e-12, "halfway over: -3 dB");
+    }
+
+    #[test]
+    fn the_constant_power_crossfader_keeps_the_total_power() {
+        let g = |x, side| xf_gain(XfCurve::ConstantPower, x, side);
+        let h = 0.5f64.sqrt();
+        assert!((g(0.0, 0) - h).abs() < 1e-12 && (g(0.0, 1) - h).abs() < 1e-12, "-3 dB each");
+        assert!((g(-1.0, 0) - 1.0).abs() < 1e-12 && g(-1.0, 1).abs() < 1e-12);
+        assert!((g(1.0, 1) - 1.0).abs() < 1e-12 && g(1.0, 0).abs() < 1e-12);
+        for x in [-0.8, -0.3, 0.2, 0.7] {
+            assert!((g(x, 0).powi(2) + g(x, 1).powi(2) - 1.0).abs() < 1e-12);
+        }
     }
 
     #[test]
@@ -3351,18 +3495,20 @@ mod tests {
         assert_eq!(rig.snap().decks[2].crossfader, XfSide::Left);
         assert_eq!(rig.snap().decks[3].crossfader, XfSide::Thru);
 
-        // Deck 3 alone: heard in the middle, gone with the crossfader hard right.
+        // Deck 3 alone: heard in the middle, full hard left, gone hard right.
         rig.channel(2, ChannelParam::Volume, 1.0);
         let middle = level(&mut rig);
         assert!(middle > 0.1, "{middle}");
+        rig.master(MasterParam::Crossfader, -1.0);
+        let full = level(&mut rig);
+        assert!(full > middle, "{full} vs {middle}");
         rig.master(MasterParam::Crossfader, 1.0);
         assert!(level(&mut rig) < 1e-4);
-        // Deck 4 on thru ignores the crossfader, and is as loud as deck 3 was in the
-        // middle (both sides are full there).
+        // Deck 4 on thru ignores the crossfader: as loud as deck 3 at full, either way.
         rig.channel(2, ChannelParam::Volume, 0.0);
         rig.channel(3, ChannelParam::Volume, 1.0);
         let thru = level(&mut rig);
-        assert!((thru - middle).abs() < 0.01, "{thru} vs {middle}");
+        assert!((thru - full).abs() < 0.01, "{thru} vs {full}");
         rig.master(MasterParam::Crossfader, -1.0);
         assert!((level(&mut rig) - thru).abs() < 0.01);
     }

@@ -1,7 +1,7 @@
 //! Deck and audio settings (tempo ranges, keylock and quantise), and the Flow canvas's: engine and app state, kept in the Store's `settings`
 //! table as JSON. (The UI's own preferences, like the layout, are kept by the UI.)
 
-use earshot_engine::{HotcueMode, TempoRange};
+use earshot_engine::{HotcueMode, TempoRange, XfCurve};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +19,8 @@ pub const TEMPO_RANGES: &str = "decks.tempo_ranges";
 pub const DECK_OPTIONS: &str = "decks.options";
 /// What hot cues do on a stopped deck ([`HotcueMode`]).
 pub const HOTCUE_MODE: &str = "decks.hotcue_mode";
+/// The crossfader's curve ([`XfCurve`]).
+pub const XF_CURVE: &str = "mixer.crossfader_curve";
 /// The Flow that was on the canvas last. (Where its canvas was looking is kept with
 /// the Flow: `StoreCmd::SaveFlowCamera`.)
 pub const FLOW_OPEN: &str = "flow.open";
@@ -47,6 +49,7 @@ pub struct Settings {
     pub tempo_ranges: Vec<TempoRange>,
     pub deck_options: Vec<DeckOptions>,
     pub hotcue_mode: HotcueMode,
+    pub xf_curve: XfCurve,
     pub cue_first_beat: bool,
     pub load_while_playing: bool,
     pub flow_open: Option<CollectionId>,
@@ -83,6 +86,7 @@ impl Settings {
             tempo_ranges: read(reader, TEMPO_RANGES).unwrap_or_default(),
             deck_options: read(reader, DECK_OPTIONS).unwrap_or_default(),
             hotcue_mode: read(reader, HOTCUE_MODE).unwrap_or_default(),
+            xf_curve: read(reader, XF_CURVE).unwrap_or_default(),
             cue_first_beat: read(reader, CUE_FIRST_BEAT).unwrap_or(true),
             load_while_playing: read(reader, LOAD_WHILE_PLAYING).unwrap_or(false),
             flow_open: read(reader, FLOW_OPEN).unwrap_or_default(),

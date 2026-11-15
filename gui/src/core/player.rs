@@ -13,7 +13,7 @@ use earshot_engine::decode;
 use earshot_engine::decode::TrackAudio;
 use earshot_engine::media::Location;
 use earshot_engine::{
-    Command, CueSet, DeckId, Engine, EngineSnapshot, EngineState, HotcueMode, LoadedTrack,
+    Command, CueSet, DeckId, Engine, EngineSnapshot, EngineState, HotcueMode, LoadedTrack, XfCurve,
     MAX_DECKS, MixerState, Monitor, OutputInfo, OutputOptions, PreviewCmd, Routing, Set, energy,
     loudness, quick, waveform,
 };
@@ -45,6 +45,8 @@ pub struct Inner {
     pub sync_leader: Option<DeckId>,
     /// What hot cues do on a stopped deck (a setting; kept for audio restarts).
     pub hotcue_mode: HotcueMode,
+    /// The crossfader's curve (a setting; kept for audio restarts).
+    pub xf_curve: XfCurve,
     /// The decks effects can go on: the ones shown (kept for audio restarts).
     pub fx_decks: usize,
     /// Cue a newly loaded track on its first beat, else at its start (a setting).
@@ -150,6 +152,7 @@ impl Inner {
             mixer: self.mixer,
             sync_leader: self.sync_leader,
             hotcue_mode: self.hotcue_mode,
+            xf_curve: self.xf_curve,
             sampler: self.sampler.slots.clone(),
             ..EngineState::default()
         };
@@ -175,6 +178,7 @@ pub fn new_player() -> Player {
         mixer: MixerState::default(),
         sync_leader: None,
         hotcue_mode: HotcueMode::default(),
+        xf_curve: XfCurve::default(),
         fx_decks: DECKS,
         cue_first_beat: true,
         generation: 0,
@@ -253,6 +257,13 @@ pub fn set_hotcue_mode(player: &Player, mode: HotcueMode) -> Result<(), String> 
     let mut inner = player.lock().unwrap();
     inner.hotcue_mode = mode;
     inner.send(Command::SetHotcueMode(mode))
+}
+
+/// The crossfader's curve, from now on (and after an audio restart).
+pub fn set_xf_curve(player: &Player, curve: XfCurve) -> Result<(), String> {
+    let mut inner = player.lock().unwrap();
+    inner.xf_curve = curve;
+    inner.send(Command::SetXfCurve(curve))
 }
 
 /// Effects go only on the first `n` decks (the ones shown), from now on.
@@ -587,6 +598,49 @@ fn put_on_deck(player: &Player, deck: DeckId, ticket: u64, r: Ready) -> Result<u
     let generation = track.generation;
     inner.send(Command::Load { deck, track })?;
     Ok(generation)
+}
+
+/// Instant doubles: put `from`'s track on `to`, playing in step with it (see
+/// [`Command::InstantDouble`]). No decode: the audio, grid, cues and waveforms are
+/// `from`'s. Any load still decoding for `to` is dropped. Returns the new load's
+/// ticket, for its [`super::Event::Loaded`].
+pub fn instant_double(player: &Player, from: DeckId, to: DeckId) -> Result<u64, String> {
+    let mut inner = player.lock().unwrap();
+    if from == to {
+        return Err("a deck can't double itself".into());
+    }
+    let src = inner.session(from).clone();
+    let Some(loaded) = src.loaded() else {
+        return Err(format!("deck {} has no track", from.index() + 1));
+    };
+    inner.load_tickets[to.index()] += 1;
+    let ticket = inner.load_tickets[to.index()];
+    inner.generation += 1;
+    let generation = inner.generation;
+    let track = Arc::new(LoadedTrack {
+        track_id: loaded.track_id,
+        generation,
+        audio: loaded.audio.clone(),
+        grid: loaded.grid.clone(),
+        cues: loaded.cues,
+        auto_gain: loaded.auto_gain,
+    });
+    let session = inner.session_mut(to);
+    session.load(&track);
+    session.title = src.title;
+    session.artist = src.artist;
+    session.grid_source = src.grid_source;
+    session.waveform = src.waveform;
+    session.detail = src.detail;
+    session.stem_waves = src.stem_waves;
+    session.cue_saved = src.cue_saved;
+    inner.send(Command::Load { deck: to, track })?;
+    inner.send(Command::InstantDouble {
+        from,
+        to,
+        generation,
+    })?;
+    Ok(ticket)
 }
 
 /// An outside track (`core::outside`): its file, with the grid and cues its library

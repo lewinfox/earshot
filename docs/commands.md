@@ -69,6 +69,7 @@ A name goes from the general to the particular: where, what, which part, what to
 | `deck_N_pad_fx_2_pad_shift` | the pad, 1 to 8 | pad FX pad with SHIFT: its effect, while held |
 | `deck_N_shift` | pressed (1) or let go (0) | shift (held) |
 | `deck_N_load_selected` | pressed (1) or let go (0) | load the selected track |
+| `deck_N_instant_double` | pressed (1) or let go (0) | instant doubles: the other deck's track, in step with it |
 
 ## Mixer: `mixer_`
 
