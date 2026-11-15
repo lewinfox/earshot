@@ -62,7 +62,6 @@ pub struct DeckInfo {
     pub title: String,
     pub artist: String,
     pub grid: Option<Arc<Beatgrid>>,
-    pub grid_source: String,
     pub generation: u64,
     pub waveform: Arc<Vec<u8>>,
     pub detail: Arc<Vec<u8>>,
@@ -120,7 +119,6 @@ impl PendingLoad {
             },
             artist: self.artist.clone(),
             grid: None,
-            grid_source: String::new(),
             generation: 0,
             waveform: Arc::default(),
             detail: Arc::default(),
@@ -316,11 +314,16 @@ pub struct DeckUi {
     page_dims: Dims,
     /// `controller` when they were measured (the player page differs with one).
     page_controller: bool,
-    /// Room to spare beside the page box this frame, which it takes with a controller.
+    /// Room to spare beside the page box this frame, which it takes (like a flexbox
+    /// item that grows).
     page_spare: f32,
     /// The page box's width while the page shown is drawn (`None` while a hidden page
     /// is measured): what a page that fills it fills.
     page_box: Option<f32>,
+    /// How much wider than its own width the page shown is drawn, to fill the box
+    /// (1 while a page is measured): its widths and the gaps across are times this
+    /// (see [`DeckUi::wx`]); heights aren't.
+    page_sx: f32,
     /// Width of the page and CUE / play last frame, to keep a left deck's against
     /// the mixer.
     controls_w: f32,
@@ -370,6 +373,7 @@ impl DeckUi {
             page_controller: false,
             page_spare: 0.0,
             page_box: None,
+            page_sx: 1.0,
             controls_w: 0.0,
             side: Side::Left,
             dims: Dims::FULL,
@@ -765,15 +769,14 @@ impl DeckUi {
                 let tabs = d.px(TABS_W) + ui.spacing().item_spacing.x;
                 ui.add_space((ui.available_width() - group - tabs).max(d.px(GROUP_GAP)));
             };
-            // With a controller the page box takes the room to spare too, for the pads
-            // (`controls_w` stays the controls' own width, which the deck's fit goes by).
-            self.page_spare = if self.controller {
+            // The page box takes the room to spare too, and the page shown stretches
+            // across it (`controls_w` stays the controls' own width, which the deck's
+            // fit goes by).
+            self.page_spare = {
                 let tabs = d.px(TABS_W) + ui.spacing().item_spacing.x;
                 (ui.available_width() - tabs - self.controls_w - d.px(GROUP_GAP))
                     .max(0.0)
                     .floor()
-            } else {
-                0.0
             };
             let spare = self.page_spare;
             if mirrored {
@@ -832,6 +835,11 @@ impl DeckUi {
         let size = vec2(width + self.page_spare, h);
         let page = self.page;
         self.page_box = Some(size.x);
+        // Stretched from its own width to the box's (once that's known).
+        self.page_sx = self.page_widths[page as usize]
+            .filter(|&w| w > 0.0)
+            .map_or(1.0, |w| (size.x / w).max(1.0));
+        let sx = self.page_sx;
         let used = ui
             .allocate_ui_with_layout(size, Layout::left_to_right(Align::Min), |ui| {
                 ui.set_min_size(size);
@@ -840,16 +848,19 @@ impl DeckUi {
             })
             .inner;
         self.page_box = None;
-        // The box's own share of it: what the page needs, without the room to spare.
-        let used = if used > width {
-            width.max(used - self.page_spare)
-        } else {
-            used
-        };
-        // Never narrower than measured before (a hidden measure can come out a little
-        // wider than the page drawn): the box mustn't shrink under the tabs.
+        self.page_sx = 1.0;
+        // Its own width, unstretched. Never narrower than measured before (a hidden
+        // measure can come out a little wider than the page drawn): the box mustn't
+        // shrink under the tabs.
+        let used = (used / sx).min(width);
         let known = self.page_widths[page as usize].unwrap_or(0.0);
         self.page_widths[page as usize] = Some(known.max(used));
+    }
+
+    /// A width on the page shown: a design size, scaled, and stretched to fill the
+    /// page box (see `page_sx`).
+    fn wx(&self, v: f32) -> f32 {
+        self.dims.px(v) * self.page_sx
     }
 
     /// One page's controls; returns how wide they are.
@@ -862,22 +873,23 @@ impl DeckUi {
         page: Page,
     ) -> f32 {
         let d = self.dims;
-        ui.spacing_mut().item_spacing = vec2(d.px(GAP_X), d.px(GAP_Y));
+        ui.spacing_mut().item_spacing = vec2(self.wx(GAP_X), d.px(GAP_Y));
         let start = ui.cursor().min.x;
+        let group = self.wx(GROUP_GAP);
         match page {
             Page::Player if self.controller => self.controller_pads(ui, info, out),
             Page::Player => {
                 if mirrored {
                     self.jumps(ui, info, out);
-                    ui.add_space(d.px(GROUP_GAP));
+                    ui.add_space(group);
                     self.loops(ui, info, out);
-                    ui.add_space(d.px(GROUP_GAP));
+                    ui.add_space(group);
                     self.pads(ui, info, out);
                 } else {
                     self.pads(ui, info, out);
-                    ui.add_space(d.px(GROUP_GAP));
+                    ui.add_space(group);
                     self.loops(ui, info, out);
-                    ui.add_space(d.px(GROUP_GAP));
+                    ui.add_space(group);
                     self.jumps(ui, info, out);
                 }
             }
@@ -1029,7 +1041,6 @@ mod tests {
             title: title.into(),
             artist: String::new(),
             grid: None,
-            grid_source: String::new(),
             generation: 0,
             waveform: Arc::default(),
             detail: Arc::default(),

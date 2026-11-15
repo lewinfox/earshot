@@ -61,8 +61,6 @@ pub const FONT_LOOP: f32 = 10.0;
 pub const FONT_LOOP_STEP: f32 = 11.0;
 pub const FONT_JUMP: f32 = 10.0;
 pub const FONT_GRID: f32 = 10.0;
-/// "1 at 0:00.000" and where the grid came from, beside the nudges.
-pub const FONT_GRID_NOTE: f32 = 10.0;
 pub const FONT_STEM: f32 = 9.0;
 pub const FONT_CUE: f32 = 11.0;
 pub const FONT_PLAY: f32 = 12.0;

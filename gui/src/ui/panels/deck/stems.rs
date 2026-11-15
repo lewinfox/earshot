@@ -53,12 +53,14 @@ impl DeckUi {
     pub(super) fn stems(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
         let d = self.dims;
         let w = d.px(STEM_W);
+        // Before stems: one button, filling the page box (its own width when measured).
+        let whole = self.page_box.unwrap_or(w * 2.0 + d.px(GAP_X));
         let s = &self.state;
         if !s.stems {
             let Some(track) = s.track_id else {
                 // Nothing loaded: hold the group's place.
                 ui.allocate_exact_size(
-                    vec2(w * 2.0 + d.px(GAP_X), d.double()),
+                    vec2(whole, d.double()),
                     egui::Sense::hover(),
                 );
                 return;
@@ -66,7 +68,7 @@ impl DeckUi {
             if crate::core::outside::is_outside(track) {
                 // Library tracks only, for now.
                 ui.allocate_exact_size(
-                    vec2(w * 2.0 + d.px(GAP_X), d.double()),
+                    vec2(whole, d.double()),
                     egui::Sense::hover(),
                 );
                 return;
@@ -83,7 +85,7 @@ impl DeckUi {
                     HwButton::new(
                         &label,
                         THEME.loop_button,
-                        vec2(w * 2.0 + d.px(GAP_X), d.double()),
+                        vec2(whole, d.double()),
                     )
                     .font(d.px(FONT_LOOP))
                     .lit(job.is_some()),
@@ -100,7 +102,8 @@ impl DeckUi {
         let on: [bool; COUNT] = std::array::from_fn(|i| !s.stem_mute[i]);
         let level = s.stem_level;
         let (pos, colour) = (self.shown, self.colour());
-        // As wide as the page box (the widest other page), or the least that fits.
+        // As wide as the page box, or measured: the widest other page, or the least
+        // that fits. The waveforms take the room.
         let (gap, group) = (d.px(GAP_X), d.px(GROUP_GAP));
         let knob = d.px(STEM_KNOB_D);
         let fixed = knob + 4.0 + w + 2.0 * gap;
@@ -109,7 +112,8 @@ impl DeckUi {
             .iter()
             .filter_map(|p| self.page_widths[*p as usize])
             .fold(0.0_f32, f32::max);
-        let wave_w = ((others.max(least) - group) / 2.0 - fixed).floor();
+        let across = self.page_box.unwrap_or(others).max(least);
+        let wave_w = ((across - group) / 2.0 - fixed).floor();
         let h = d.px(BTN_H);
         if let Some(sw) = &info.stem_waves
             && self
