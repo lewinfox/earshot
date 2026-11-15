@@ -45,6 +45,8 @@ pub struct DeckSnap {
     pub quantize: bool,
     /// The tempo fader leaves the key alone.
     pub keylock: bool,
+    /// The key shifted this many semitones ([`crate::DeckCmd::KeyShift`]).
+    pub key_shift: f64,
     /// Vinyl mode: see [`crate::DeckCmd::Vinyl`].
     pub vinyl: bool,
     pub loop_in: Option<f64>,
@@ -166,6 +168,7 @@ impl EngineSnapshot {
                 sync: d.sync,
                 quantize: d.quantize,
                 keylock: d.keylock,
+                key_shift: d.key_shift,
                 vinyl: d.vinyl,
                 channel: ChannelState {
                     volume: d.volume,

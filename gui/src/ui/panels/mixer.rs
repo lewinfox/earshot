@@ -68,6 +68,11 @@ fn shown_id(control: Control) -> egui::Id {
 }
 
 /// A display-only knob on the controller is at `value`: [`bound`] shows that.
+/// What the controller shows for a display-only control, if it has sent any.
+pub fn shown(ctx: &egui::Context, control: Control) -> Option<f64> {
+    ctx.data(|d| d.get_temp(shown_id(control)))
+}
+
 pub fn set_shown(ctx: &egui::Context, control: Control, value: f64) {
     ctx.data_mut(|d| d.insert_temp(shown_id(control), value));
     ctx.request_repaint();
@@ -248,7 +253,9 @@ pub fn show(
     // Master cue, level with the channels' CUE buttons: the master mix in the
     // headphones.
     let master_cue = Control::Master(MasterParam::MasterCue);
-    let lit = shared.is_some_and(|s| s.mixer.master_cue);
+    // Display only: the controller's own button, shown, and not pressed here.
+    let shown = shown(ui.ctx(), master_cue);
+    let lit = shown.map_or_else(|| shared.is_some_and(|s| s.mixer.master_cue), |v| v > 0.5);
     let r = ui
         .put(
             at(main_x + 1.0, PFL_TOP, CENTRE_W - 2.0, PFL_H),
@@ -257,7 +264,7 @@ pub fn show(
                 .lit(lit),
         )
         .on_hover_text("Master cue: the master mix in the headphones");
-    if held(ui, &r) == Some(true) {
+    if held(ui, &r) == Some(true) && shown.is_none() {
         out.extend(master_cue.command(1.0));
     }
     // Master meters, left and right, between the channels, under their label.

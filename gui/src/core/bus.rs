@@ -22,8 +22,8 @@ use earshot_engine::{
 };
 
 use super::command::{AppCmd, Command, DeckCmd, MixerCmd, ViewCmd};
-use super::view::PadMode;
 use super::player::GridOp;
+use super::view::PadMode;
 
 // ---- values -------------------------------------------------------------------------
 
@@ -221,6 +221,15 @@ pub const FX_LEVEL: Range = Range {
     centre: None,
     format: fmt_percent,
 };
+/// A deck's key shift, in semitones.
+pub const SEMITONES: Range = Range {
+    name: "Key shift",
+    min: -earshot_engine::KEY_SHIFT_MAX,
+    max: earshot_engine::KEY_SHIFT_MAX,
+    default: 0.0,
+    centre: Some(0.0),
+    format: |v| format!("{:+.0} semitones", v),
+};
 /// Beat jump and loop sizes, in beats.
 pub const BEATS: Range = Range {
     name: "Beats",
@@ -301,8 +310,8 @@ pub enum Control {
 /// A control over what's on screen.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum UiControl {
-    /// Hide the decks so the library gets their room (the waveforms stay), or bring
-    /// them back: Mixxx's maximised library, Pioneer's VIEW.
+    /// Hide the scrolling waveforms so the library gets their room (the decks stay),
+    /// or bring them back: Mixxx's maximised library, Pioneer's VIEW.
     LibraryMaximize,
 }
 
@@ -313,7 +322,7 @@ impl UiControl {
         match self {
             UiControl::LibraryMaximize => spec(
                 "library_maximize_toggle",
-                "hide the decks for a bigger library, or show them",
+                "hide the waveforms for a bigger library, or show them",
                 Kind::Button,
             ),
         }
@@ -461,6 +470,12 @@ pub enum DeckControl {
     SyncSetMaster,
     Quantize,
     Keylock,
+    /// Shift the key to this many semitones (rounded), tempo untouched.
+    KeyShift,
+    /// Shift the key a semitone up or down, or back to the track's own.
+    KeyShiftUp,
+    KeyShiftDown,
+    KeyShiftReset,
     /// Headphone cue.
     Pfl,
     /// A hot cue pad (0-based).
@@ -508,15 +523,19 @@ pub enum DeckControl {
     /// The controller's pads are in this mode now (its pad mode buttons): the deck's
     /// pads page shows what they do.
     SetPadMode(PadMode),
+    /// A performance pad (0-based) in a pad mode that keeps state of its own
+    /// (keyboard, key shift: see `core::pads`), pressed or let go, with SHIFT held
+    /// or not. Its own message per mode, as the DDJ-400 sends.
+    ModePad { mode: PadMode, pad: u8, shift: bool },
     /// CUE/LOOP CALL ◀ / ▶: go to the memory cue before (after) the playhead; while
     /// looping, halve (double) the loop instead.
     CueJumpPrev,
     CueJumpNext,
     /// Delete the memory cue (or loop) just called: the one at the cue point.
     CueDelete,
-    /// The controller's Shift button, held (1) or let go (0). It does nothing itself:
-    /// a controller that sends its own messages for shifted buttons (the DDJ-400)
-    /// needs no more, but its Shift still sends a message, so it has a name.
+    /// The controller's Shift button, held (1) or let go (0). A controller that sends
+    /// its own messages for shifted buttons (the DDJ-400) needs no more; earshot only
+    /// shows the pads' SHIFT actions on the pads page while it's held.
     Shift,
     /// Vinyl mode: the jog wheels' tops (and the mouse on the waveform) scratch. Off,
     /// they only bend.
@@ -530,7 +549,14 @@ pub enum DeckControl {
     /// The jog wheel's side turned this many seconds of track: speed up or slow down
     /// while it turns.
     JogBend,
+    /// The jog wheel's top turned with SHIFT held, this many seconds of track: the
+    /// playhead moves [`SEARCH_SPEED`] times that, playing or not (Rekordbox's search).
+    JogSearch,
 }
+
+/// How much faster than the record a SHIFT + jog search moves: a turn of the DDJ-400's
+/// platter (1.8 s of a record at 33⅓ rpm) moves about 29 s.
+pub const SEARCH_SPEED: f64 = 16.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LibraryControl {
@@ -561,6 +587,10 @@ impl DeckControl {
             SyncSetMaster => spec("sync_set_master", "make this deck the sync master", Button),
             Quantize => spec("quantize", "quantise", Toggle),
             Keylock => spec("key_lock", "key lock", Toggle),
+            KeyShift => spec("key_shift", "key shift", Continuous(SEMITONES)),
+            KeyShiftUp => spec("key_shift_up", "key up a semitone", Button),
+            KeyShiftDown => spec("key_shift_down", "key down a semitone", Button),
+            KeyShiftReset => spec("key_shift_reset", "key back to the track's own", Button),
             Pfl => spec("headphone_cue", "headphone cue", Toggle),
             Hotcue(_) => spec("hot_cue", "hot cue", Button),
             HotcueClear(_) => spec("hot_cue_clear", "clear hot cue", Button),
@@ -620,16 +650,33 @@ impl DeckControl {
                 "pad mode",
                 Button,
             ),
+            ModePad { mode, shift, .. } => spec(
+                match (mode, shift) {
+                    (PadMode::KeyShift, false) => "key_shift_pad",
+                    (PadMode::KeyShift, true) => "key_shift_pad_shift",
+                    (_, false) => "keyboard_pad",
+                    (_, true) => "keyboard_pad_shift",
+                },
+                if shift {
+                    "pad with SHIFT: page before (7) / after (8); keyboard: pick again (1-6)"
+                } else if mode == PadMode::KeyShift {
+                    "key shift pad: set the key"
+                } else {
+                    "keyboard pad: pick the hot cue, then play it in this key"
+                },
+                Button,
+            ),
             Vinyl => spec("vinyl_mode", "vinyl mode (jog wheels scratch)", Toggle),
             JogTouch => spec("scratch_hold", "hand on the record (scratch)", Button),
             JogTurn => spec("scratch", "scratch", Relative),
             JogBend => spec("pitch_bend", "bend the speed", Relative),
+            JogSearch => spec("fast_search", "search through the track fast", Relative),
         }
     }
 
     /// Every deck control, with sample parameters for the parametrised ones (for
     /// looking names up and for tests).
-    pub const ALL: [DeckControl; 50] = {
+    pub const ALL: [DeckControl; 59] = {
         use DeckControl::*;
         [
             Play,
@@ -639,6 +686,10 @@ impl DeckControl {
             SyncSetMaster,
             Quantize,
             Keylock,
+            KeyShift,
+            KeyShiftUp,
+            KeyShiftDown,
+            KeyShiftReset,
             Pfl,
             Hotcue(0),
             HotcueClear(0),
@@ -673,6 +724,7 @@ impl DeckControl {
             JogTouch,
             JogTurn,
             JogBend,
+            JogSearch,
             SetPadMode(PadMode::HotCue),
             SetPadMode(PadMode::BeatLoop),
             SetPadMode(PadMode::BeatJump),
@@ -681,6 +733,10 @@ impl DeckControl {
             SetPadMode(PadMode::PadFx1),
             SetPadMode(PadMode::PadFx2),
             SetPadMode(PadMode::KeyShift),
+            ModePad { mode: PadMode::Keyboard, pad: 0, shift: false },
+            ModePad { mode: PadMode::Keyboard, pad: 0, shift: true },
+            ModePad { mode: PadMode::KeyShift, pad: 0, shift: false },
+            ModePad { mode: PadMode::KeyShift, pad: 0, shift: true },
             Shift,
         ]
     };
@@ -713,6 +769,18 @@ impl DeckControl {
             ("beat_loop", _) => BeatLoop(num.filter(|b| *b > 0.0)?),
             ("grid_nudge", _) => GridNudge(num?),
             ("load_step", _) => LoadStep(num.filter(|n| n.fract() == 0.0 && *n != 0.0)? as i32),
+            ("keyboard_pad" | "keyboard_pad_shift" | "key_shift_pad" | "key_shift_pad_shift", _) => {
+                let pad = num.filter(|n| n.fract() == 0.0 && (1.0..=8.0).contains(n))? as u8 - 1;
+                ModePad {
+                    mode: if name.starts_with("keyboard") {
+                        PadMode::Keyboard
+                    } else {
+                        PadMode::KeyShift
+                    },
+                    pad,
+                    shift: name.ends_with("_shift"),
+                }
+            }
             (_, Some(Word::Size { .. })) => return None,
             _ => *Self::ALL
                 .iter()
@@ -745,6 +813,7 @@ impl DeckControl {
             BeatLoop(b) => (name.into(), Some(b.to_string())),
             GridNudge(ms) => (name.into(), Some(ms.to_string())),
             LoadStep(n) => (name.into(), Some(n.to_string())),
+            ModePad { pad, .. } => (name.into(), Some((pad + 1).to_string())),
             _ => (name.into(), None),
         }
     }
@@ -759,6 +828,7 @@ impl DeckControl {
                 | DeckControl::BeatLoop(_)
                 | DeckControl::GridNudge(_)
                 | DeckControl::LoadStep(_)
+                | DeckControl::ModePad { .. }
         )
     }
 
@@ -772,6 +842,8 @@ impl DeckControl {
             Sync => on(d.sync),
             Quantize => on(d.quantize),
             Keylock => on(d.keylock),
+            KeyShift => Some(d.key_shift),
+            KeyShiftReset => on(d.key_shift != 0.0),
             Vinyl => on(d.vinyl),
             Pfl => on(d.pfl),
             Hotcue(n) => on(d.hotcues.get(n as usize).is_some_and(Option::is_some)),
@@ -804,6 +876,10 @@ impl DeckControl {
             Vinyl if pressed => engine(EngineCmd::Vinyl(Set::Toggle)),
             Pfl if pressed => engine(EngineCmd::Pfl(Set::Toggle)),
             Play | Sync | Quantize | Keylock | Pfl | Vinyl => None,
+            KeyShift => engine(EngineCmd::KeyShift(value.round())),
+            KeyShiftUp if pressed => engine(EngineCmd::KeyShiftBy(1.0)),
+            KeyShiftDown if pressed => engine(EngineCmd::KeyShiftBy(-1.0)),
+            KeyShiftReset if pressed => engine(EngineCmd::KeyShift(0.0)),
             Cue => engine(EngineCmd::Cue(press)),
             SetCue => on_press(DeckCmd::SetCue),
             Hotcue(slot) => engine(EngineCmd::Hotcue { slot, press }),
@@ -836,6 +912,14 @@ impl DeckControl {
             LoadSelected if pressed => Some(Command::View(ViewCmd::LoadSelected(deck))),
             LoadStep(n) if pressed => Some(Command::View(ViewCmd::LoadAdjacent(deck, n))),
             SetPadMode(m) if pressed => Some(Command::View(ViewCmd::PadMode(deck, m))),
+            Shift => Some(Command::View(ViewCmd::Shift(deck, pressed))),
+            ModePad { mode, pad, shift } => Some(Command::View(ViewCmd::ModePad {
+                deck,
+                mode,
+                pad,
+                shift,
+                down: pressed,
+            })),
             JogTouch => engine(EngineCmd::Hand(pressed)),
             JogTurn if value != 0.0 => engine(EngineCmd::HandMove {
                 by: value,
@@ -845,6 +929,7 @@ impl DeckControl {
                 by: value,
                 at: Instant::now(),
             }),
+            JogSearch if value != 0.0 => engine(EngineCmd::Search(value * SEARCH_SPEED)),
             _ => None,
         }
     }
@@ -862,6 +947,10 @@ impl DeckControl {
             SyncSetMaster => key("sync_leader"),
             Quantize => key("quantize"),
             Keylock => key("keylock"),
+            KeyShift => key("pitch_adjust"),
+            KeyShiftUp => key("pitch_up"),
+            KeyShiftDown => key("pitch_down"),
+            KeyShiftReset => key("reset_key"),
             Pfl => key("pfl"),
             Hotcue(n) => Some((MixxxGroup::Channel, format!("hotcue_{}_activate", n + 1))),
             HotcueClear(n) => Some((MixxxGroup::Channel, format!("hotcue_{}_clear", n + 1))),
@@ -893,9 +982,9 @@ impl DeckControl {
             JogTouch => key("jog_touch"),
             JogTurn => key("jog_turn"),
             JogBend => key("jog_bend"),
+            JogSearch => key("jog_search"),
             SaveMemory | CueJumpPrev | CueJumpNext | CueDelete | LoopActiveToggle
-            | GridNudge(_) | LoadStep(_)
-            | SetPadMode(_) | Shift => None,
+            | GridNudge(_) | LoadStep(_) | SetPadMode(_) | ModePad { .. } | Shift => None,
         }
     }
 }
@@ -1346,7 +1435,8 @@ fn value_doc(c: Control) -> String {
         Control::Deck(_, BeatLoop(_)) => "beats, or `size`".into(),
         Control::Deck(_, GridNudge(_)) => "milliseconds (negative: earlier)".into(),
         Control::Deck(_, LoadStep(_)) => "tracks (negative: previous)".into(),
-        Control::Deck(_, JogTurn | JogBend) => "seconds of track (negative: back)".into(),
+        Control::Deck(_, ModePad { .. }) => "the pad, 1 to 8".into(),
+        Control::Deck(_, JogTurn | JogBend | JogSearch) => "seconds of track (negative: back)".into(),
         Control::Library(LibraryControl::Browse) => "rows (negative: up)".into(),
         _ => match c.spec().kind {
             Kind::Button => "pressed (1) or let go (0)".into(),
@@ -1518,6 +1608,43 @@ mod tests {
         snap.decks[0].keylock = true;
         assert_eq!(
             Control::Deck(DeckId::new(0).unwrap(), DeckControl::Keylock).get(&snap),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn key_shift_controls() {
+        let d = deck(0);
+        let sends = |c: DeckControl, v: f64| match c.command(d, v) {
+            Some(Command::Deck(x, DeckCmd::Engine(e))) if x == d => Some(e),
+            _ => None,
+        };
+        assert!(
+            matches!(sends(DeckControl::KeyShift, 2.6), Some(EngineCmd::KeyShift(n)) if n == 3.0)
+        );
+        assert!(
+            matches!(sends(DeckControl::KeyShiftUp, 1.0), Some(EngineCmd::KeyShiftBy(n)) if n == 1.0)
+        );
+        assert!(
+            matches!(sends(DeckControl::KeyShiftDown, 1.0), Some(EngineCmd::KeyShiftBy(n)) if n == -1.0)
+        );
+        assert!(
+            matches!(sends(DeckControl::KeyShiftReset, 1.0), Some(EngineCmd::KeyShift(n)) if n == 0.0)
+        );
+        assert!(
+            sends(DeckControl::KeyShiftUp, 0.0).is_none(),
+            "nothing on release"
+        );
+        let (c, _) = Control::parse("deck_2_key_shift_up", None).unwrap();
+        assert_eq!(c, Control::Deck(deck(1), DeckControl::KeyShiftUp));
+        let mut snap = EngineSnapshot::default();
+        snap.decks[0].key_shift = -2.0;
+        assert_eq!(
+            Control::Deck(d, DeckControl::KeyShift).get(&snap),
+            Some(-2.0)
+        );
+        assert_eq!(
+            Control::Deck(d, DeckControl::KeyShiftReset).get(&snap),
             Some(1.0)
         );
     }

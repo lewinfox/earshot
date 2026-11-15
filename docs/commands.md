@@ -15,6 +15,10 @@ A name goes from the general to the particular: where, what, which part, what to
 | `deck_N_sync_set_master` | pressed (1) or let go (0) | make this deck the sync master |
 | `deck_N_quantize` | — | quantise |
 | `deck_N_key_lock` | — | key lock |
+| `deck_N_key_shift` | -24 to 24 | key shift |
+| `deck_N_key_shift_up` | pressed (1) or let go (0) | key up a semitone |
+| `deck_N_key_shift_down` | pressed (1) or let go (0) | key down a semitone |
+| `deck_N_key_shift_reset` | pressed (1) or let go (0) | key back to the track's own |
 | `deck_N_headphone_cue` | — | headphone cue |
 | `deck_N_hot_cue_X` | pressed (1) or let go (0) | hot cue |
 | `deck_N_hot_cue_X_clear` | pressed (1) or let go (0) | clear hot cue |
@@ -46,6 +50,7 @@ A name goes from the general to the particular: where, what, which part, what to
 | `deck_N_scratch_hold` | pressed (1) or let go (0) | hand on the record (scratch) |
 | `deck_N_scratch` | seconds of track (negative: back) | scratch |
 | `deck_N_pitch_bend` | seconds of track (negative: back) | bend the speed |
+| `deck_N_fast_search` | seconds of track (negative: back) | search through the track fast |
 | `deck_N_set_pad_mode_hot_cue` | pressed (1) or let go (0) | pad mode |
 | `deck_N_set_pad_mode_beat_loop` | pressed (1) or let go (0) | pad mode |
 | `deck_N_set_pad_mode_beat_jump` | pressed (1) or let go (0) | pad mode |
@@ -54,6 +59,10 @@ A name goes from the general to the particular: where, what, which part, what to
 | `deck_N_set_pad_mode_pad_fx_1` | pressed (1) or let go (0) | pad mode |
 | `deck_N_set_pad_mode_pad_fx_2` | pressed (1) or let go (0) | pad mode |
 | `deck_N_set_pad_mode_key_shift` | pressed (1) or let go (0) | pad mode |
+| `deck_N_keyboard_pad` | the pad, 1 to 8 | keyboard pad: pick the hot cue, then play it in this key |
+| `deck_N_keyboard_pad_shift` | the pad, 1 to 8 | pad with SHIFT: page before (7) / after (8); keyboard: pick again (1-6) |
+| `deck_N_key_shift_pad` | the pad, 1 to 8 | key shift pad: set the key |
+| `deck_N_key_shift_pad_shift` | the pad, 1 to 8 | pad with SHIFT: page before (7) / after (8); keyboard: pick again (1-6) |
 | `deck_N_shift` | pressed (1) or let go (0) | shift (held) |
 | `deck_N_load_selected` | pressed (1) or let go (0) | load the selected track |
 
@@ -104,4 +113,4 @@ A name goes from the general to the particular: where, what, which part, what to
 
 | Command | Number | What it does |
 |---|---|---|
-| `ui_library_maximize_toggle` | pressed (1) or let go (0) | hide the decks for a bigger library, or show them |
+| `ui_library_maximize_toggle` | pressed (1) or let go (0) | hide the waveforms for a bigger library, or show them |

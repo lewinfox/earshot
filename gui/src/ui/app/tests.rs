@@ -1658,10 +1658,7 @@ fn related_tracks_and_a_bigger_library() {
     assert_eq!(decks(&h), 2);
     h.state_mut().dispatch(cmd("ui_library_maximize_toggle"));
     steps(&mut h, 10);
-    assert_eq!(decks(&h), 0, "the decks are hidden");
-    h.state_mut().dispatch(cmd("ui_library_maximize_toggle"));
-    steps(&mut h, 10);
-    assert_eq!(decks(&h), 2);
+    assert_eq!(decks(&h), 2, "the decks stay (the waveforms go)");
 }
 
 /// "Add to Flow ▸ <Flow>" in the track menu adds a card that follows nothing.
@@ -1966,6 +1963,36 @@ fn cue_first_beat_setting() {
     settle_until(&mut h, |a| a.frame.deck(DeckId::new(0).unwrap()).grid.is_some());
     let snap = h.state().frame.snap.as_ref().unwrap().decks[0];
     assert_eq!(snap.cue_point, 0.0);
+}
+
+/// A load onto a playing deck is refused, with a notice, unless the setting allows it.
+#[test]
+fn loading_onto_a_playing_deck() {
+    use crate::core::settings;
+    let mut h = start("load-while-playing");
+    let deck = DeckId::new(0).unwrap();
+    let ids = ids(&h);
+    assert!(!h.state().settings.load_while_playing, "refused by default");
+    h.state_mut().load(Some(deck), ids[0]);
+    settle_until(&mut h, |a| a.frame.deck(deck).grid.is_some());
+    h.state_mut().dispatch((deck, EngineCmd::Play(Set::On)).into());
+    settle(&mut h);
+    assert!(h.state().panels.decks[0].playing());
+    let loaded = |h: &H| h.state().frame.snap.as_ref().unwrap().deck(deck).track_id;
+
+    let before = loaded(&h);
+    assert_eq!(h.state_mut().load(Some(deck), ids[1]), None);
+    settle(&mut h);
+    assert_eq!(loaded(&h), before, "still the track on air");
+    let notice = h.state().notices.shown().last().expect("a notice").text.clone();
+    assert!(notice.contains("Deck A is playing"), "{notice}");
+
+    h.state_mut().dispatch(Command::App(AppCmd::LoadWhilePlaying(true)));
+    settle_until(&mut h, |a| {
+        settings::read::<bool>(&a.lib.store.reader, settings::LOAD_WHILE_PLAYING) == Some(true)
+    });
+    assert!(h.state_mut().load(Some(deck), ids[1]).is_some());
+    settle_until(&mut h, |a| a.frame.snap.as_ref().unwrap().deck(deck).track_id != before);
 }
 
 /// Prepare's Export tab draws: what to export on the left, where to on the right.
@@ -2690,6 +2717,79 @@ fn pad_modes_label_the_pads() {
 
     // Deck 2 keeps its own mode.
     assert_eq!(h.state().panels.decks[1].pad_mode, PadMode::HotCue);
+}
+
+/// Keyboard mode: a pad picks a hot cue (an empty one is set at the playhead), then
+/// each pad plays it with the key shifted by its semitones; SHIFT + pad 7 turns to
+/// the page with +12. Key shift mode: a pad sets the key.
+#[test]
+fn keyboard_and_key_shift_pads() {
+    use crate::core::bus::Control;
+    use crate::core::view::{PadMode, ViewCmd};
+    let mut h = start("keyboard-pads");
+    h.state_mut().prefs.pretend_controller = true;
+    let deck = DeckId::new(0).unwrap();
+    let id = ids(&h)[0];
+    h.state_mut().load(Some(deck), id);
+    settle_until(&mut h, |a| a.panels.decks[0].wave.is_some());
+    let snap = |h: &H| *h.state().frame.snap.as_ref().unwrap().deck(deck);
+    let pad = |h: &mut H, mode, pad: u8, shift| {
+        for down in [true, false] {
+            h.state_mut().dispatch(Command::View(ViewCmd::ModePad { deck, mode, pad, shift, down }));
+        }
+        settle(h);
+    };
+    h.state_mut().dispatch(Command::View(ViewCmd::PadMode(deck, PadMode::Keyboard)));
+    settle(&mut h);
+    // Picking: the pads show the hot cues' letters.
+    assert_eq!(h.state().panels.decks[0].pads.keyboard_cue(&snap(&h)), None);
+    assert!(h.query_all_by_label("C").count() >= 2, "and deck 2's hot cues");
+
+    // Pad 3: hot cue C, empty, so set here (2 s in).
+    h.state_mut().dispatch((deck, EngineCmd::Seek(2.0)).into());
+    settle(&mut h);
+    pad(&mut h, PadMode::Keyboard, 2, false);
+    let cue = snap(&h).hotcues[2].expect("hot cue C set");
+    assert_eq!(h.state().panels.decks[0].pads.keyboard_cue(&snap(&h)), Some(2));
+    h.get_by_label("±0");
+    h.get_by_label("+7");
+    render(&mut h, "keyboard-pads");
+
+    // SHIFT held on the controller: the pads show their SHIFT actions.
+    let (shift, _) = Control::parse("deck_1_shift", None).unwrap();
+    h.state_mut().dispatch(shift.command(1.0).unwrap());
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("PICK").count(), 6);
+    h.get_by_label("◀ PAGE");
+    h.get_by_label("PAGE ▶");
+    render(&mut h, "keyboard-pads-shift");
+    h.state_mut().dispatch(Command::View(ViewCmd::PadMode(deck, PadMode::HotCue)));
+    settle(&mut h);
+    h.get_by_label("✕ C");
+    h.state_mut().dispatch(shift.command(0.0).unwrap());
+    h.state_mut().dispatch(Command::View(ViewCmd::PadMode(deck, PadMode::Keyboard)));
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("PICK").count(), 0, "SHIFT let go");
+
+    // Pad 2 (+5) from elsewhere: back to C, a fourth up.
+    h.state_mut().dispatch((deck, EngineCmd::Seek(10.0)).into());
+    settle(&mut h);
+    pad(&mut h, PadMode::Keyboard, 1, false);
+    assert_eq!(snap(&h).key_shift, 5.0);
+    assert!((snap(&h).position - cue).abs() < 0.05, "at the hot cue");
+
+    // SHIFT + pad 7: page 1, whose pad 1 is an octave up.
+    pad(&mut h, PadMode::Keyboard, 6, true);
+    pad(&mut h, PadMode::Keyboard, 0, false);
+    assert_eq!(snap(&h).key_shift, 12.0);
+
+    // Key shift mode, page 2: pad 8 is +3; the key stays when the mode changes.
+    h.state_mut().dispatch(Command::View(ViewCmd::PadMode(deck, PadMode::KeyShift)));
+    settle(&mut h);
+    assert_eq!(snap(&h).key_shift, 12.0);
+    pad(&mut h, PadMode::KeyShift, 7, false);
+    assert_eq!(snap(&h).key_shift, 3.0);
+    render(&mut h, "key-shift-pads");
 }
 
 /// Controller mode: Perform's decks, then the Mapping, History and Library tabs. MIDI

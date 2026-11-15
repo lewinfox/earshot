@@ -66,6 +66,10 @@ pub struct EarshotApp {
     monitor: Option<Monitor>,
     /// The same monitor, for the controller's lights thread.
     lights_monitor: crate::core::lights::MonitorSlot,
+    /// The mapping's version when the engine was last told whether the controller
+    /// blends the headphones (see [`EarshotApp::sync_phones_cue_only`]); `None` sends
+    /// it again (a new engine).
+    phones_cue_only_at: Option<u64>,
     /// A connected controller's own sound card, which audio plays to when there is one.
     controller: controller_audio::Hold,
     audio: Result<OutputInfo, String>,
@@ -335,7 +339,11 @@ impl EarshotApp {
             lib,
             sink,
             rx,
-            lights_monitor: Arc::new(std::sync::Mutex::new(monitor.clone())),
+            lights_monitor: Arc::new(std::sync::Mutex::new(crate::core::lights::LightsState {
+                monitor: monitor.clone(),
+                pads: Default::default(),
+            })),
+            phones_cue_only_at: None,
             monitor,
             audio,
             controller,
@@ -447,8 +455,26 @@ impl EarshotApp {
     /// Read the engine's monitor again, after the sound card was reopened.
     fn reread_monitor(&mut self) {
         self.monitor = self.player.lock().unwrap().monitor();
-        *self.lights_monitor.lock().unwrap() = self.monitor.clone();
+        self.lights_monitor.lock().unwrap().monitor = self.monitor.clone();
         self.frame.snap = self.monitor.as_ref().map(|m| m.snapshot());
+        self.phones_cue_only_at = None;
+    }
+
+    /// A mapping whose headphone mix is display only (a DDJ-400's: the controller
+    /// blends the master into the headphones itself) has the engine send only the
+    /// cued decks to the headphones; otherwise earshot blends them. Sent when the
+    /// mapping changes, and to a new engine.
+    fn sync_phones_cue_only(&mut self) {
+        let learned = &self.panels.controller.learned;
+        let v = learned.version();
+        if self.phones_cue_only_at == Some(v) {
+            return;
+        }
+        self.phones_cue_only_at = Some(v);
+        let on = learned.all().into_iter().any(|(_, l)| {
+            l.display_only && l.control == crate::core::bus::Control::Master(earshot_engine::MasterParam::HeadMix)
+        });
+        self.dispatch(Command::Mixer(crate::core::command::MixerCmd::PhonesCueOnly(on)));
     }
 
     /// (Re)open every MIDI input, e.g. after plugging the controller in.
@@ -711,12 +737,24 @@ impl EarshotApp {
                 }
             }
             Command::App(AppCmd::ControllerShows { control, value }) => {
-                crate::ui::panels::mixer::set_shown(&self.ctx, control, value);
-                // Earshot's own stays at its default, so the two don't both act.
-                if let Some(range) = control.range() {
+                // A button toggles what's shown on each press (the controller keeps
+                // its own state; it starts off, as the controller does).
+                let shown = if control.range().is_none() {
+                    if value <= 0.5 {
+                        return;
+                    }
+                    let was = crate::ui::panels::mixer::shown(&self.ctx, control).unwrap_or(0.0);
+                    1.0 - was
+                } else {
+                    value
+                };
+                crate::ui::panels::mixer::set_shown(&self.ctx, control, shown);
+                // Earshot's own stays where it leaves the sound to the controller, so
+                // the two don't both act.
+                if let Some(hold) = crate::core::midi::display_only_value(control) {
                     let now = self.frame.snap.as_ref().and_then(|s| control.get(s));
-                    if now.is_some_and(|v| (v - range.default).abs() > 1e-9) {
-                        if let Some(c) = control.command(range.default) {
+                    if now.is_some_and(|v| (v - hold).abs() > 1e-9) {
+                        if let Some(c) = crate::core::midi::set_command(control, hold) {
                             self.dispatch(c);
                         }
                     }
@@ -763,6 +801,12 @@ impl EarshotApp {
                 self.lib
                     .store
                     .send(settings::save(settings::CUE_FIRST_BEAT, &on));
+            }
+            Command::App(AppCmd::LoadWhilePlaying(on)) => {
+                self.settings.load_while_playing = on;
+                self.lib
+                    .store
+                    .send(settings::save(settings::LOAD_WHILE_PLAYING, &on));
             }
             Command::App(AppCmd::ReloadKeymap) => self.reload_keymap(),
             Command::App(AppCmd::DismissNotice(id)) => self.notices.dismiss(id),
@@ -957,6 +1001,21 @@ impl EarshotApp {
                 }
             }
             ViewCmd::PadMode(d, m) => self.panels.decks[d.index()].pad_mode = m,
+            ViewCmd::Shift(d, held) => self.panels.decks[d.index()].shift_held = held,
+            ViewCmd::ModePad {
+                deck,
+                mode,
+                pad,
+                shift,
+                down,
+            } => {
+                let ui = &mut self.panels.decks[deck.index()];
+                let out = ui.mode_pad(mode, pad as usize, shift, down);
+                self.lights_monitor.lock().unwrap().pads[deck.index()] = ui.pads;
+                for c in out {
+                    self.dispatch(c);
+                }
+            }
             ViewCmd::Target(d) => {
                 // The tools' marks leave the old deck; they're drawn on the new one
                 // from the next frame.
@@ -1043,8 +1102,10 @@ impl EarshotApp {
                     track,
                     playing: sh.playing,
                     bpm: sh.bpm,
-                    // How far the key has moved: not at all with keylock.
-                    key_speed: if sh.keylock { 1.0 } else { sh.tempo },
+                    // How far the key has moved: by the tempo unless keylocked, and
+                    // by the key shift.
+                    key_speed: if sh.keylock { 1.0 } else { sh.tempo }
+                        * earshot_engine::keylock::semitones(sh.key_shift),
                 }
             }
             None => DeckNow {
@@ -1182,6 +1243,7 @@ impl EarshotApp {
             routing,
             hotcue_mode: self.settings.hotcue_mode,
             cue_first_beat: self.settings.cue_first_beat,
+            load_while_playing: self.settings.load_while_playing,
             auto_hide_mixer: self.prefs.auto_hide_mixer,
             stem_mode: self.prefs.stem_mode,
             keymap: &self.keymap,
@@ -1204,6 +1266,12 @@ impl EarshotApp {
 }
 
 impl eframe::App for EarshotApp {
+    /// Close the MIDI ports first, so the controller's lights go out (see
+    /// `core::lights`) rather than staying as they were.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.midi = Midi::default();
+    }
+
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.prefs.tables = self.panels.library.tables.clone();
         eframe::set_value(storage, prefs::KEY, &self.prefs);
@@ -1214,6 +1282,7 @@ impl eframe::App for EarshotApp {
         self.read_engine(ctx);
         self.sync_tempo_lock();
         self.sync_trim();
+        self.sync_phones_cue_only();
         self.send_active_loops();
         // Background analysis holds back while a deck plays, in every mode.
         let playing = self

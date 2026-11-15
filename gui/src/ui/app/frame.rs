@@ -12,7 +12,6 @@ impl EarshotApp {
             title: s.title.clone(),
             artist: s.artist.clone(),
             grid: s.grid.clone(),
-            grid_source: s.grid_source.clone(),
             generation: s.generation,
             waveform: s.waveform.clone(),
             detail: s.detail.clone(),

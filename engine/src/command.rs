@@ -103,6 +103,9 @@ pub enum DeckCmd {
     /// CDJ-style cue: set / return / preview while held.
     Cue(Press),
     Seek(f64),
+    /// Move the playhead this many seconds (negative: back), playing or not: a jog
+    /// wheel turned with SHIFT held (Rekordbox's search).
+    Search(f64),
     BeatJump(f64),
     /// Toggle an auto-loop of this many beats starting at the current beat.
     BeatLoop(f64),
@@ -150,6 +153,11 @@ pub enum DeckCmd {
     Sync(Set),
     Quantize(Set),
     Keylock(Set),
+    /// Shift the key this many semitones (negative: down) without touching the tempo,
+    /// within ±[`crate::KEY_SHIFT_MAX`]. Back to 0 when a track loads.
+    KeyShift(f64),
+    /// Move the key shift by this many semitones.
+    KeyShiftBy(f64),
     /// Headphone cue for this deck's channel.
     Pfl(Set),
     Crossfader(XfSide),
@@ -296,6 +304,8 @@ pub struct DeckState {
     pub sync: bool,
     pub quantize: bool,
     pub keylock: bool,
+    /// Semitones: see [`DeckCmd::KeyShift`].
+    pub key_shift: f64,
     pub vinyl: bool,
     pub channel: ChannelState,
 }
@@ -315,6 +325,7 @@ impl Default for DeckState {
             sync: false,
             quantize: true,
             keylock: false,
+            key_shift: 0.0,
             vinyl: true,
             channel: ChannelState::default(),
         }
@@ -423,6 +434,11 @@ pub enum Command {
     SetRouting(Routing),
     /// Master cue on, off or toggled ([`MasterParam::MasterCue`]).
     MasterCue(Set),
+    /// The headphones carry only the cued channels, at full: a controller (a DDJ-400)
+    /// blends in the master itself, from the master's own channels, with its own
+    /// headphone mix knob and master cue. Earshot's head mix and master cue are then
+    /// ignored.
+    PhonesCueOnly(bool),
     Preview(PreviewCmd),
     /// An effect unit (0..[`FX_UNITS`]; others are ignored).
     Fx {

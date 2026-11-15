@@ -16,8 +16,9 @@ impl DeckUi {
     pub(super) fn pads(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
         let shift = ui.input(|i| i.modifiers.shift);
         let d = self.dims;
+        let (pad_w, gap_x) = (self.wx(BTN_W), self.wx(GAP_X));
         egui::Grid::new(("pads", self.id.index()))
-            .spacing(vec2(d.px(GAP_X), d.px(GAP_Y)))
+            .spacing(vec2(gap_x, d.px(GAP_Y)))
             .show(ui, |ui| {
                 for row in 0..2 {
                     for col in 0..4 {
@@ -42,7 +43,7 @@ impl DeckUi {
                                 HwButton::new(
                                     &label,
                                     THEME.hotcue[i],
-                                    vec2(d.px(BTN_W), d.px(BTN_H)),
+                                    vec2(pad_w, d.px(BTN_H)),
                                 )
                                 .font(d.px(FONT_PAD))
                                 .caption_font(d.px(FONT_CAPTION))

@@ -33,6 +33,7 @@ pub use command::{
 };
 pub use engine::{Out, Routing};
 pub use fx::{FX_UNITS, FxCmd, FxKind, FxRelease, FxTarget, FxUnitState, step_beats};
+pub use keylock::KEY_SHIFT_MAX;
 pub use output::{OutputInfo, OutputOptions};
 pub use snapshot::{DeckSnap, EngineEvent, EngineSnapshot, MixerSnap, Monitor, PreviewSnap, Stats};
 pub use tempo::TempoRange;

@@ -18,6 +18,7 @@ use crate::command::{
 use crate::decode::TrackAudio;
 use crate::dsp::{self, Limiter, Smoothed};
 use crate::fx::{BeatClock, FALLBACK_BPM, FX_UNITS, FxCmd, FxTarget, FxUnit, FxUnitState};
+use crate::keylock::KEY_SHIFT_MAX;
 use crate::processor::{Channel, KNOB_SECS, MasterChain};
 use crate::snapshot::{
     DeckSnap, EngineEvent, EngineSnapshot, MixerSnap, Monitor, PreviewSnap, Stats,
@@ -265,7 +266,32 @@ struct Deck {
     stem_level: [f64; stems::COUNT],
     stem_mute: [bool; stems::COUNT],
     stem_gain: [f32; stems::COUNT],
+    /// Seconds of audio the deck stays quiet for after a search step (see
+    /// [`SEARCH_QUIET_SECS`]), and its level now, eased over [`STEM_RAMP_SECS`].
+    search_quiet: f64,
+    search_gain: f32,
 }
+
+/// Quiet while searching: ease a deck's block toward silence while a search is on
+/// (`quiet`: seconds of it left), and back up after; `gain` is its level now.
+fn search_mute(quiet: &mut f64, gain: &mut f32, buf: &mut [f32], sr: f64) {
+    let n = buf.len() / 2;
+    let target = if *quiet > 0.0 { 0.0 } else { 1.0 };
+    *quiet = (*quiet - n as f64 / sr).max(0.0);
+    if *gain == 1.0 && target == 1.0 {
+        return;
+    }
+    let step = (1.0 / (STEM_RAMP_SECS * sr)) as f32;
+    for frame in buf.chunks_exact_mut(2) {
+        *gain += (target - *gain).clamp(-step, step);
+        frame[0] *= *gain;
+        frame[1] *= *gain;
+    }
+}
+
+/// A search (SHIFT + jog) is silent: the deck goes quiet on its first step and comes
+/// back this long after its last. A jog wheel turning steadily steps far more often.
+const SEARCH_QUIET_SECS: f64 = 0.15;
 
 /// How long a stem takes to go from silent to full (or back): short enough not to
 /// hear as a fade, long enough not to click.
@@ -334,6 +360,8 @@ impl Deck {
             stem_level: [1.0; stems::COUNT],
             stem_mute: [false; stems::COUNT],
             stem_gain: [1.0; stems::COUNT],
+            search_quiet: 0.0,
+            search_gain: 1.0,
         }
     }
 
@@ -466,6 +494,7 @@ impl Deck {
         t.active_loop = None;
         t.jump(cue, JumpReason::Load);
         self.player.speed = 1.0;
+        self.player.key_shift = 0.0;
         self.player.scratch.cancel();
         self.cue_point = cue;
         self.untouched = true;
@@ -489,6 +518,7 @@ impl Deck {
         self.player.transport.playing = loaded && s.playing;
         self.player.transport.loop_ = s.loop_;
         self.player.keylock = s.keylock;
+        self.set_key_shift(s.key_shift);
         self.vinyl = s.vinyl;
         if let Some(c) = s.cues.main {
             self.cue_point = c;
@@ -569,6 +599,14 @@ impl Deck {
                 }
             }
             DeckCmd::Seek(t) => self.jump(t, JumpReason::Seek),
+            DeckCmd::Search(by) => {
+                // Silent from the first step: no fade-out to hear the jump through.
+                if self.search_quiet == 0.0 {
+                    self.search_gain = 0.0;
+                }
+                self.search_quiet = SEARCH_QUIET_SECS;
+                self.jump(self.pos() + by, JumpReason::Seek)
+            }
             DeckCmd::SetCue(at) => {
                 self.untouched = false;
                 self.cue_point = at.unwrap_or_else(|| self.snap(self.pos())).max(-LEAD_IN);
@@ -786,8 +824,16 @@ impl Deck {
             | DeckCmd::Bend { .. } => {}
             DeckCmd::Quantize(set) => self.quantize = set.apply(self.quantize),
             DeckCmd::Keylock(set) => self.player.keylock = set.apply(self.player.keylock),
+            DeckCmd::KeyShift(n) => self.set_key_shift(n),
+            DeckCmd::KeyShiftBy(n) => self.set_key_shift(self.player.key_shift + n),
             // Handled by the renderer.
             DeckCmd::Play(_) | DeckCmd::Sync(_) | DeckCmd::Pfl(_) | DeckCmd::Crossfader(_) => {}
+        }
+    }
+
+    fn set_key_shift(&mut self, semitones: f64) {
+        if semitones.is_finite() {
+            self.player.key_shift = semitones.clamp(-KEY_SHIFT_MAX, KEY_SHIFT_MAX);
         }
     }
 
@@ -824,6 +870,7 @@ impl Deck {
             following: self.following,
             quantize: self.quantize,
             keylock: self.player.keylock,
+            key_shift: self.player.key_shift,
             vinyl: self.vinyl,
             loop_in: l.start,
             loop_out: l.end,
@@ -901,6 +948,8 @@ pub struct Renderer {
     head_mix: Smoothed,
     /// Master cue ([`MasterParam::MasterCue`]).
     master_cue: bool,
+    /// See [`Command::PhonesCueOnly`].
+    phones_cue_only: bool,
     limiters: [Limiter; 2],
     limiting: f64,
     vu_main: [f32; 2],
@@ -979,6 +1028,7 @@ impl Renderer {
             head_gain: Smoothed::new(1.0),
             head_mix: Smoothed::new(0.5),
             master_cue: false,
+            phones_cue_only: false,
             limiters: [Limiter::new(sr), Limiter::new(sr)],
             limiting: 0.0,
             vu_main: [0.0; 2],
@@ -1129,7 +1179,9 @@ impl Renderer {
                     _ => None,
                 },
             };
-            if deck.player.render(&mix, buf, sr, now) {
+            let ended = deck.player.render(&mix, buf, sr, now);
+            search_mute(&mut deck.search_quiet, &mut deck.search_gain, buf, sr);
+            if ended {
                 deck.preview = Preview::None;
                 self.outbox.send(EngineEvent::TrackEnded {
                     deck: deck.id,
@@ -1218,10 +1270,14 @@ impl Renderer {
             for c in 0..2 {
                 let m = self.master[2 * f + c];
                 let mut cue = if any_pfl { 0.8 * self.cue[2 * f + c] } else { 0.0 };
-                if self.master_cue {
-                    cue += m;
-                }
-                let heard = if cued { to_cue * cue + to_master * m } else { 0.0 };
+                let heard = if self.phones_cue_only {
+                    cue
+                } else {
+                    if self.master_cue {
+                        cue += m;
+                    }
+                    if cued { to_cue * cue + to_master * m } else { 0.0 }
+                };
                 self.phones[2 * f + c] = head * heard;
             }
         }
@@ -1523,6 +1579,7 @@ impl Renderer {
                 self.sync_leader = l.filter(|l| l.index() < self.live);
             }
             Command::MasterCue(set) => self.master_cue = set.apply(self.master_cue),
+            Command::PhonesCueOnly(on) => self.phones_cue_only = on,
             Command::SetHotcueMode(m) => {
                 for d in &mut self.decks {
                     d.hotcue_mode = m;
@@ -2134,6 +2191,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn key_shift_moves_the_key_but_not_the_tempo() {
+        // (keylock, rate, semitones, want): alone, on top of keylock, and on top of
+        // the tempo's own pitch change.
+        for (keylock, rate, shift, want) in [
+            (false, 0.0, 12.0, 880.0),
+            (false, 0.0, -5.0, 440.0 * (-5.0f64 / 12.0).exp2()),
+            (true, 0.08, -12.0, 220.0),
+            (false, 0.08, 7.0, 440.0 * 1.08 * (7.0f64 / 12.0).exp2()),
+        ] {
+            let mut rig = Rig::new();
+            load_fn(&mut rig, 0, 20.0, sine(440.0));
+            rig.deck(0, DeckCmd::Keylock(Set::from_bool(keylock)));
+            rig.deck(0, DeckCmd::Rate(rate));
+            rig.deck(0, DeckCmd::KeyShift(shift));
+            rig.deck(0, DeckCmd::Play(Set::On));
+            rig.run(0.5);
+            let start = rig.pos(0);
+            let f = frequency(&record(&mut rig, 1.0));
+            let what = format!("keylock {keylock}, rate {rate}, shift {shift}");
+            assert!(
+                (f - want).abs() < want * 0.005,
+                "{what}: {f:.1} Hz, want {want:.1}"
+            );
+            assert!(
+                (rig.pos(0) - start - (1.0 + rate)).abs() < 0.02,
+                "tempo, {what}"
+            );
+        }
+    }
+
+    #[test]
+    fn key_shift_steps_stay_in_range_and_a_load_clears_them() {
+        let mut rig = Rig::new();
+        load_fn(&mut rig, 0, 20.0, sine(440.0));
+        rig.deck(0, DeckCmd::KeyShiftBy(2.0));
+        rig.deck(0, DeckCmd::KeyShiftBy(-3.0));
+        rig.run(0.01);
+        assert_eq!(rig.snap().decks[0].key_shift, -1.0);
+        rig.deck(0, DeckCmd::KeyShift(100.0));
+        rig.run(0.01);
+        assert_eq!(rig.snap().decks[0].key_shift, KEY_SHIFT_MAX);
+        load_fn(&mut rig, 0, 20.0, sine(440.0));
+        rig.run(0.01);
+        assert_eq!(rig.snap().decks[0].key_shift, 0.0);
+    }
+
     /// Times (s) where clicks start in `x`.
     fn clicks(x: &[f32]) -> Vec<f64> {
         let mut out = vec![];
@@ -2257,6 +2361,43 @@ mod tests {
         rig.deck(0, DeckCmd::Seek(-100.0));
         rig.run(0.01);
         assert!(rig.pos(0) >= -LEAD_IN - 0.02);
+    }
+
+    #[test]
+    fn search_moves_the_playhead_by_its_seconds_within_the_track() {
+        let mut rig = Rig::new();
+        rig.load(0, 120.0, 120.0);
+        rig.deck(0, DeckCmd::Seek(10.0));
+        rig.deck(0, DeckCmd::Search(5.0));
+        rig.run(0.0);
+        assert!((rig.pos(0) - 15.0).abs() < 1e-6, "{}", rig.pos(0));
+        rig.deck(0, DeckCmd::Search(-3.0));
+        rig.run(0.0);
+        assert!((rig.pos(0) - 12.0).abs() < 1e-6, "{}", rig.pos(0));
+        rig.deck(0, DeckCmd::Search(-100.0));
+        rig.run(0.0);
+        assert!(rig.pos(0) >= -LEAD_IN - 1e-6, "no further back than the lead-in");
+    }
+
+    #[test]
+    fn a_search_is_silent_and_the_sound_comes_back_after() {
+        let mut rig = Rig::new();
+        load_fn(&mut rig, 0, 20.0, sine(330.0));
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.run(0.2);
+        assert!(peaks(&rig.out, 4)[0] > 0.1, "playing");
+        // Steps every 50 ms: silent throughout.
+        for _ in 0..4 {
+            rig.deck(0, DeckCmd::Search(1.0));
+            rig.run(0.05);
+            assert!(peaks(&rig.out, 4)[0] < 1e-6, "searching");
+        }
+        // Still quiet just after the last step; back once the quiet is over.
+        rig.run(0.05);
+        assert!(peaks(&rig.out, 4)[0] < 1e-6, "just after");
+        rig.run(0.2);
+        rig.run(0.1);
+        assert!(peaks(&rig.out, 4)[0] > 0.1, "back");
     }
 
     #[test]
@@ -2467,6 +2608,32 @@ mod tests {
         let t = rig.pos(0);
         rig.run(1.0);
         assert!((rig.pos(0) - t - 1.0).abs() < 0.01);
+    }
+
+    /// Turning the jog wheel out of vinyl mode bends the speed smoothly, with keylock
+    /// or a key shift too: no clicks where the speed changes, block to block.
+    #[test]
+    fn a_jog_bend_is_smooth() {
+        // The largest jump from one sample to the next, beyond what a 440 Hz tone at
+        // its level has (0.5 * TAU * 440 / SR, about 0.031).
+        let roughness = |x: &[f32]| x.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
+        for (keylock, shift) in [(false, 0.0), (true, 0.0), (false, 3.0)] {
+            let mut rig = Rig::new();
+            load_fn(&mut rig, 0, 20.0, sine(440.0));
+            rig.deck(0, DeckCmd::Keylock(Set::from_bool(keylock)));
+            rig.deck(0, DeckCmd::KeyShift(shift));
+            rig.deck(0, DeckCmd::Vinyl(Set::Off));
+            rig.deck(0, DeckCmd::Play(Set::On));
+            rig.run(0.5);
+            let steady = roughness(&record(&mut rig, 0.3));
+            let mut bent = vec![];
+            for _ in 0..60 {
+                rig.deck(0, DeckCmd::HandMove { by: 0.005, at: Instant::now() });
+                bent.extend(record(&mut rig, 0.006));
+            }
+            let bent = roughness(&bent);
+            assert!(bent < steady * 1.3, "keylock {keylock}, shift {shift}: steady {steady}, bent {bent}");
+        }
     }
 
     #[test]
@@ -2905,6 +3072,39 @@ mod tests {
         let p = peaks(&rig.out, 4);
         assert!(p[0] > 0.1, "the master has deck 1: {p:?}");
         assert!((p[2] - p[0]).abs() < 0.02, "the headphones hear the master: {p:?}");
+    }
+
+    /// A DDJ-400 blends the headphones itself: earshot's headphones carry only the
+    /// cued deck, whatever its own head mix and master cue say, and the master only
+    /// what's on air.
+    #[test]
+    fn phones_cue_only_carries_just_the_cued_decks() {
+        let mut rig = Rig::new();
+        load_fn(&mut rig, 0, 5.0, sine(330.0));
+        load_fn(&mut rig, 1, 5.0, sine(550.0));
+        rig.send(Command::PhonesCueOnly(true));
+        // Deck 1 on air; deck 2 cued with its fader down; a mix and master cue left
+        // on from before.
+        rig.channel(1, ChannelParam::Volume, 0.0);
+        rig.deck(1, DeckCmd::Pfl(Set::On));
+        rig.master(MasterParam::HeadMix, 1.0);
+        rig.send(Command::MasterCue(Set::On));
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.deck(1, DeckCmd::Play(Set::On));
+        rig.run(0.5);
+        let both = peaks(&rig.out, 4);
+        assert!(both[0] > 0.1, "the master has deck 1: {both:?}");
+        assert!(both[2] > 0.1, "the headphones have deck 2: {both:?}");
+        // Deck 2 alone in the headphones: they stay as loud with deck 1 stopped, and
+        // go silent with deck 2's cue off.
+        rig.deck(0, DeckCmd::Play(Set::Off));
+        rig.run(0.5);
+        let alone = peaks(&rig.out, 4);
+        assert!(alone[0] < 0.001, "nothing on air: {alone:?}");
+        assert!((alone[2] - both[2]).abs() < 0.02, "deck 2 only: {both:?} then {alone:?}");
+        rig.deck(1, DeckCmd::Pfl(Set::Off));
+        rig.run(0.5);
+        assert!(peaks(&rig.out, 4)[2] < 0.001, "nothing cued: silent");
     }
 
     #[test]
