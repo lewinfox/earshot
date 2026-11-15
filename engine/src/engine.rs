@@ -266,7 +266,32 @@ struct Deck {
     stem_level: [f64; stems::COUNT],
     stem_mute: [bool; stems::COUNT],
     stem_gain: [f32; stems::COUNT],
+    /// Seconds of audio the deck stays quiet for after a search step (see
+    /// [`SEARCH_QUIET_SECS`]), and its level now, eased over [`STEM_RAMP_SECS`].
+    search_quiet: f64,
+    search_gain: f32,
 }
+
+/// Quiet while searching: ease a deck's block toward silence while a search is on
+/// (`quiet`: seconds of it left), and back up after; `gain` is its level now.
+fn search_mute(quiet: &mut f64, gain: &mut f32, buf: &mut [f32], sr: f64) {
+    let n = buf.len() / 2;
+    let target = if *quiet > 0.0 { 0.0 } else { 1.0 };
+    *quiet = (*quiet - n as f64 / sr).max(0.0);
+    if *gain == 1.0 && target == 1.0 {
+        return;
+    }
+    let step = (1.0 / (STEM_RAMP_SECS * sr)) as f32;
+    for frame in buf.chunks_exact_mut(2) {
+        *gain += (target - *gain).clamp(-step, step);
+        frame[0] *= *gain;
+        frame[1] *= *gain;
+    }
+}
+
+/// A search (SHIFT + jog) is silent: the deck goes quiet on its first step and comes
+/// back this long after its last. A jog wheel turning steadily steps far more often.
+const SEARCH_QUIET_SECS: f64 = 0.15;
 
 /// How long a stem takes to go from silent to full (or back): short enough not to
 /// hear as a fade, long enough not to click.
@@ -335,6 +360,8 @@ impl Deck {
             stem_level: [1.0; stems::COUNT],
             stem_mute: [false; stems::COUNT],
             stem_gain: [1.0; stems::COUNT],
+            search_quiet: 0.0,
+            search_gain: 1.0,
         }
     }
 
@@ -572,6 +599,14 @@ impl Deck {
                 }
             }
             DeckCmd::Seek(t) => self.jump(t, JumpReason::Seek),
+            DeckCmd::Search(by) => {
+                // Silent from the first step: no fade-out to hear the jump through.
+                if self.search_quiet == 0.0 {
+                    self.search_gain = 0.0;
+                }
+                self.search_quiet = SEARCH_QUIET_SECS;
+                self.jump(self.pos() + by, JumpReason::Seek)
+            }
             DeckCmd::SetCue(at) => {
                 self.untouched = false;
                 self.cue_point = at.unwrap_or_else(|| self.snap(self.pos())).max(-LEAD_IN);
@@ -1141,7 +1176,9 @@ impl Renderer {
                     _ => None,
                 },
             };
-            if deck.player.render(&mix, buf, sr, now) {
+            let ended = deck.player.render(&mix, buf, sr, now);
+            search_mute(&mut deck.search_quiet, &mut deck.search_gain, buf, sr);
+            if ended {
                 deck.preview = Preview::None;
                 self.outbox.send(EngineEvent::TrackEnded {
                     deck: deck.id,
@@ -2316,6 +2353,43 @@ mod tests {
         rig.deck(0, DeckCmd::Seek(-100.0));
         rig.run(0.01);
         assert!(rig.pos(0) >= -LEAD_IN - 0.02);
+    }
+
+    #[test]
+    fn search_moves_the_playhead_by_its_seconds_within_the_track() {
+        let mut rig = Rig::new();
+        rig.load(0, 120.0, 120.0);
+        rig.deck(0, DeckCmd::Seek(10.0));
+        rig.deck(0, DeckCmd::Search(5.0));
+        rig.run(0.0);
+        assert!((rig.pos(0) - 15.0).abs() < 1e-6, "{}", rig.pos(0));
+        rig.deck(0, DeckCmd::Search(-3.0));
+        rig.run(0.0);
+        assert!((rig.pos(0) - 12.0).abs() < 1e-6, "{}", rig.pos(0));
+        rig.deck(0, DeckCmd::Search(-100.0));
+        rig.run(0.0);
+        assert!(rig.pos(0) >= -LEAD_IN - 1e-6, "no further back than the lead-in");
+    }
+
+    #[test]
+    fn a_search_is_silent_and_the_sound_comes_back_after() {
+        let mut rig = Rig::new();
+        load_fn(&mut rig, 0, 20.0, sine(330.0));
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.run(0.2);
+        assert!(peaks(&rig.out, 4)[0] > 0.1, "playing");
+        // Steps every 50 ms: silent throughout.
+        for _ in 0..4 {
+            rig.deck(0, DeckCmd::Search(1.0));
+            rig.run(0.05);
+            assert!(peaks(&rig.out, 4)[0] < 1e-6, "searching");
+        }
+        // Still quiet just after the last step; back once the quiet is over.
+        rig.run(0.05);
+        assert!(peaks(&rig.out, 4)[0] < 1e-6, "just after");
+        rig.run(0.2);
+        rig.run(0.1);
+        assert!(peaks(&rig.out, 4)[0] > 0.1, "back");
     }
 
     #[test]

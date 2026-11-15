@@ -96,6 +96,8 @@ fn ddj400_names() -> Vec<(u8, u8, String, String, Input)> {
         m(cc, 0x22, &g, "jog_turn", Input::Jog(720));
         m(cc, 0x23, &g, "jog_bend", Input::Jog(720));
         m(cc, 0x21, &g, "jog_bend", Input::Jog(720));
+        // The top turned with SHIFT held: search (its touch, 0x67, does nothing).
+        m(cc, 0x29, &g, "jog_search", Input::Jog(720));
         // Performance pads in hot cue mode, unshifted / shifted.
         for k in 0..8u8 {
             let n = k + 1;
@@ -1051,6 +1053,13 @@ mod tests {
             cmd([0xB1, 0x21, 66]),
             Some(Command::Deck(d, DeckCmd::Engine(EngineCmd::Bend { by, .. }))) if d == deck(1) && by > 0.0
         ));
+        // With SHIFT the top searches: two ticks forward, 16 times 2/720 of 1.8 s.
+        let Some(Command::Deck(d, DeckCmd::Engine(EngineCmd::Search(by)))) = cmd([0xB1, 0x29, 66]) else {
+            panic!("not a search")
+        };
+        assert_eq!(d, deck(1));
+        assert!((by - 0.08).abs() < 1e-9, "{by}");
+        assert!(command::direct(cmd([0xB0, 0x29, 62]).unwrap()).is_ok());
     }
 
     #[test]

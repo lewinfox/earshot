@@ -50,6 +50,7 @@ A name goes from the general to the particular: where, what, which part, what to
 | `deck_N_scratch_hold` | pressed (1) or let go (0) | hand on the record (scratch) |
 | `deck_N_scratch` | seconds of track (negative: back) | scratch |
 | `deck_N_pitch_bend` | seconds of track (negative: back) | bend the speed |
+| `deck_N_fast_search` | seconds of track (negative: back) | search through the track fast |
 | `deck_N_set_pad_mode_hot_cue` | pressed (1) or let go (0) | pad mode |
 | `deck_N_set_pad_mode_beat_loop` | pressed (1) or let go (0) | pad mode |
 | `deck_N_set_pad_mode_beat_jump` | pressed (1) or let go (0) | pad mode |

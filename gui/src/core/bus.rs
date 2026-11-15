@@ -549,7 +549,14 @@ pub enum DeckControl {
     /// The jog wheel's side turned this many seconds of track: speed up or slow down
     /// while it turns.
     JogBend,
+    /// The jog wheel's top turned with SHIFT held, this many seconds of track: the
+    /// playhead moves [`SEARCH_SPEED`] times that, playing or not (Rekordbox's search).
+    JogSearch,
 }
+
+/// How much faster than the record a SHIFT + jog search moves: a turn of the DDJ-400's
+/// platter (1.8 s of a record at 33⅓ rpm) moves about 29 s.
+pub const SEARCH_SPEED: f64 = 16.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LibraryControl {
@@ -663,12 +670,13 @@ impl DeckControl {
             JogTouch => spec("scratch_hold", "hand on the record (scratch)", Button),
             JogTurn => spec("scratch", "scratch", Relative),
             JogBend => spec("pitch_bend", "bend the speed", Relative),
+            JogSearch => spec("fast_search", "search through the track fast", Relative),
         }
     }
 
     /// Every deck control, with sample parameters for the parametrised ones (for
     /// looking names up and for tests).
-    pub const ALL: [DeckControl; 58] = {
+    pub const ALL: [DeckControl; 59] = {
         use DeckControl::*;
         [
             Play,
@@ -716,6 +724,7 @@ impl DeckControl {
             JogTouch,
             JogTurn,
             JogBend,
+            JogSearch,
             SetPadMode(PadMode::HotCue),
             SetPadMode(PadMode::BeatLoop),
             SetPadMode(PadMode::BeatJump),
@@ -920,6 +929,7 @@ impl DeckControl {
                 by: value,
                 at: Instant::now(),
             }),
+            JogSearch if value != 0.0 => engine(EngineCmd::Search(value * SEARCH_SPEED)),
             _ => None,
         }
     }
@@ -972,6 +982,7 @@ impl DeckControl {
             JogTouch => key("jog_touch"),
             JogTurn => key("jog_turn"),
             JogBend => key("jog_bend"),
+            JogSearch => key("jog_search"),
             SaveMemory | CueJumpPrev | CueJumpNext | CueDelete | LoopActiveToggle
             | GridNudge(_) | LoadStep(_) | SetPadMode(_) | ModePad { .. } | Shift => None,
         }
@@ -1425,7 +1436,7 @@ fn value_doc(c: Control) -> String {
         Control::Deck(_, GridNudge(_)) => "milliseconds (negative: earlier)".into(),
         Control::Deck(_, LoadStep(_)) => "tracks (negative: previous)".into(),
         Control::Deck(_, ModePad { .. }) => "the pad, 1 to 8".into(),
-        Control::Deck(_, JogTurn | JogBend) => "seconds of track (negative: back)".into(),
+        Control::Deck(_, JogTurn | JogBend | JogSearch) => "seconds of track (negative: back)".into(),
         Control::Library(LibraryControl::Browse) => "rows (negative: up)".into(),
         _ => match c.spec().kind {
             Kind::Button => "pressed (1) or let go (0)".into(),

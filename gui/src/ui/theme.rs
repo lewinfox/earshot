@@ -8,12 +8,12 @@ use egui::{Color32, Margin, Stroke, Ui, Vec2, vec2};
 
 use crate::core::store::Memory;
 
-/// The text size, as a multiple of normal (View > Text size, Ctrl +/-). Only the
-/// lists, bars, menus and windows' text grows, with what sits in a line of it (table
-/// rows, their waveforms); the decks and mixer keep their hand-fitted sizes
-/// ([`normal_text`]). The UI's thread's own: the app draws on one thread, and each
-/// app test on its own, so one test's text size doesn't move another's widgets.
 thread_local! {
+    /// The text size, as a multiple of normal (View > Text size, Ctrl +/-). Only the
+    /// lists, bars, menus and windows' text grows, with what sits in a line of it (table
+    /// rows, their waveforms); the decks and mixer keep their hand-fitted sizes
+    /// ([`normal_text`]). The UI's thread's own: the app draws on one thread, and each
+    /// app test on its own, so one test's text size doesn't move another's widgets.
     static TEXT_SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
 }
 

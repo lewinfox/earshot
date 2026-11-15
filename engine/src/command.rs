@@ -103,6 +103,9 @@ pub enum DeckCmd {
     /// CDJ-style cue: set / return / preview while held.
     Cue(Press),
     Seek(f64),
+    /// Move the playhead this many seconds (negative: back), playing or not: a jog
+    /// wheel turned with SHIFT held (Rekordbox's search).
+    Search(f64),
     BeatJump(f64),
     /// Toggle an auto-loop of this many beats starting at the current beat.
     BeatLoop(f64),
