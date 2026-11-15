@@ -794,15 +794,24 @@ fn needed(
     let fresh = result.is_some_and(|r| !r.failed && r.version >= spec.version && r.same_audio);
     match (a, want) {
         (_, Want::Force) => true,
-        // Any grid will do: a hand-fixed or imported one, or an analysed one from
-        // before results were versioned.
+        // Any grid will do: a hand-fixed or imported one, an analysed one from before
+        // results were versioned, or a quick one (full analysis of a track that has
+        // one is left to the user: `Want::Force`).
+        //
+        // Low-resource mode (#22) belongs with the queue that runs these jobs: it
+        // holds full analysis back, and quick analysis (`library::QuickAnalyser`,
+        // which never comes through here) carries on.
         (AnalyserId::Grid, Want::Missing) => grid.is_none(),
         (_, Want::Missing) => result.is_none(),
-        // Only ever replaces an analysed grid.
+        // Only ever replaces an analysed grid, or a quick one (which was only there
+        // until analysis ran).
         (AnalyserId::Grid, Want::Stale) => {
             !fresh
                 && grid.is_none_or(|g| {
-                    matches!(g.1, GridSource::Analysis | GridSource::AnalysisDynamic)
+                    matches!(
+                        g.1,
+                        GridSource::Quick | GridSource::Analysis | GridSource::AnalysisDynamic
+                    )
                 })
         }
         (_, Want::Stale) => !fresh,
@@ -1148,5 +1157,11 @@ mod tests {
             &[result("grid", 2, false, true)],
             user
         ));
+        // A quick grid: a deck load leaves the full analysis to the user, who gets
+        // it by asking (forced) or with "Re-analyse stale".
+        let quick = Some((1, GridSource::Quick));
+        assert!(!needed(Grid, Want::Missing, &[], quick));
+        assert!(needed(Grid, Want::Stale, &[], quick));
+        assert!(needed(Grid, Want::Force, &[], quick));
     }
 }

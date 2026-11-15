@@ -119,6 +119,9 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 /// Where a beatgrid came from. Stored as TEXT (with a CHECK in the schema).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GridSource {
+    /// Quick analysis (`audio::quick`): one steady tempo from signal processing, made
+    /// when the track was added. The basic level; full analysis replaces it.
+    Quick,
     /// Static (one tempo) analysis.
     Analysis,
     /// Dynamic analysis: follows the drift.
@@ -134,6 +137,7 @@ pub enum GridSource {
 impl GridSource {
     pub const fn as_str(self) -> &'static str {
         match self {
+            GridSource::Quick => "quick",
             GridSource::Analysis => "analysis",
             GridSource::AnalysisDynamic => "analysis-dynamic",
             GridSource::User => "user",
@@ -144,6 +148,7 @@ impl GridSource {
 
     pub fn parse(s: &str) -> Option<GridSource> {
         Some(match s {
+            "quick" => GridSource::Quick,
             "analysis" => GridSource::Analysis,
             "analysis-dynamic" => GridSource::AnalysisDynamic,
             "user" => GridSource::User,
@@ -156,6 +161,7 @@ impl GridSource {
     /// How the deck names it.
     pub const fn label(self) -> &'static str {
         match self {
+            GridSource::Quick => "quick grid",
             GridSource::Analysis => "analysis",
             GridSource::AnalysisDynamic => "analysis (dynamic)",
             GridSource::User => "user",
@@ -163,6 +169,23 @@ impl GridSource {
             GridSource::Import => "import",
         }
     }
+
+    /// How far the track has been analysed, going by its grid.
+    pub const fn level(self) -> AnalysisLevel {
+        match self {
+            GridSource::Quick => AnalysisLevel::Basic,
+            _ => AnalysisLevel::Full,
+        }
+    }
+}
+
+/// How far a track with a beatgrid has been analysed ([`GridSource::level`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnalysisLevel {
+    /// A quick grid only.
+    Basic,
+    /// Analysed by the worker, fixed by hand, or brought in with its grid.
+    Full,
 }
 
 /// What a row in `cues` is. Stored as INTEGER.
@@ -213,6 +236,13 @@ pub enum StoreCmd {
     SaveUserGrid {
         track: i64,
         grid: Arc<earshot_engine::beatgrid::Beatgrid>,
+    },
+    /// A quick grid for a track that has no grid (else nothing is saved), and where
+    /// its beats start.
+    SaveQuickGrid {
+        track: i64,
+        grid: Arc<earshot_engine::beatgrid::Beatgrid>,
+        first_beat: f64,
     },
     /// A waveform worked out on load (the track list shows its thumbnail).
     SaveWaveform {
@@ -424,6 +454,9 @@ pub enum StoreEvent {
     Sources(Vec<Source>),
     /// Every track in the library (after a scan, or tracks merging).
     Library(Vec<LibTrack>),
+    /// Tracks the library hadn't seen before (a scan or an import found them), that
+    /// have no beatgrid: sent just after the [`StoreEvent::Library`] that has them.
+    NewTracks(Vec<i64>),
     /// These tracks changed (analysis, a grid edit, metadata).
     TracksChanged(Vec<LibTrack>),
     /// Waveform thumbnails for the track list.

@@ -5,7 +5,7 @@
 use super::keys::{Camelot, parse_key};
 use super::store::LibTrack;
 
-pub use super::store::GridSource;
+pub use super::store::{AnalysisLevel, GridSource};
 
 /// A track's id in the database. Stable across moves and renames.
 pub type TrackId = i64;
@@ -104,9 +104,25 @@ impl Track {
         }
     }
 
-    /// Has a beatgrid: analysed, fixed by hand or imported.
-    pub fn analysed(&self) -> bool {
+    /// Has a beatgrid of any kind, a quick one included.
+    pub fn has_grid(&self) -> bool {
         self.grid_source.is_some()
+    }
+
+    /// How far it's been analysed: `None` with no grid.
+    pub fn level(&self) -> Option<AnalysisLevel> {
+        self.grid_source.map(GridSource::level)
+    }
+
+    /// Fully analysed: a grid from analysis, fixed by hand or imported (not just a
+    /// quick one).
+    pub fn analysed(&self) -> bool {
+        self.level() == Some(AnalysisLevel::Full)
+    }
+
+    /// Has only a quick grid.
+    pub fn quick(&self) -> bool {
+        self.level() == Some(AnalysisLevel::Basic)
     }
 
     /// Analysis found something to look at: the tempo drifts on a static grid.
@@ -147,15 +163,17 @@ pub enum AnalysisState {
     Failed(String),
 }
 
-/// A track's analysis in one word, as the status column shows it: blank, green,
-/// orange (on its way) or needs attention. Sorts in that order.
+/// A track's analysis in one word, as the status column shows it: blank, amber (a
+/// quick grid only), green, on its way, or needs attention. Sorts in that order.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
 pub enum Status {
     /// Not analysed.
     None,
-    /// Has a beatgrid (analysed, fixed by hand or imported).
+    /// Has a quick grid only (`AnalysisLevel::Basic`).
+    Quick,
+    /// Fully analysed (analysed, fixed by hand or imported).
     Done,
     /// Queued or being analysed.
     Busy,
@@ -165,7 +183,13 @@ pub enum Status {
 }
 
 impl Status {
-    pub const ALL: [Status; 4] = [Status::None, Status::Done, Status::Busy, Status::Attention];
+    pub const ALL: [Status; 5] = [
+        Status::None,
+        Status::Quick,
+        Status::Done,
+        Status::Busy,
+        Status::Attention,
+    ];
 
     /// From the track and where its analysis is (`LibraryIndex::analysis`).
     pub fn of(t: &Track, state: Option<&AnalysisState>) -> Status {
@@ -173,8 +197,11 @@ impl Status {
             Some(AnalysisState::Failed(_)) => Status::Attention,
             Some(AnalysisState::Queued | AnalysisState::Running { .. }) => Status::Busy,
             None if t.needs_attention() => Status::Attention,
-            None if t.analysed() => Status::Done,
-            None => Status::None,
+            None => match t.level() {
+                Some(AnalysisLevel::Full) => Status::Done,
+                Some(AnalysisLevel::Basic) => Status::Quick,
+                None => Status::None,
+            },
         }
     }
 
@@ -182,6 +209,7 @@ impl Status {
     pub const fn name(self) -> &'static str {
         match self {
             Status::None => "none",
+            Status::Quick => "quick",
             Status::Done => "done",
             Status::Busy => "busy",
             Status::Attention => "attention",
@@ -192,6 +220,7 @@ impl Status {
     pub const fn label(self) -> &'static str {
         match self {
             Status::None => "Not analysed",
+            Status::Quick => "Quick grid only",
             Status::Done => "Analysed",
             Status::Busy => "Analysing",
             Status::Attention => "Needs attention",
@@ -202,7 +231,8 @@ impl Status {
     pub fn parse(s: &str) -> Option<Status> {
         Some(match s.to_lowercase().as_str() {
             "none" | "blank" | "new" | "unanalysed" | "unanalyzed" => Status::None,
-            "done" | "green" | "analysed" | "analyzed" | "ok" => Status::Done,
+            "quick" | "basic" | "amber" => Status::Quick,
+            "done" | "green" | "analysed" | "analyzed" | "ok" | "full" => Status::Done,
             "busy" | "orange" | "analysing" | "analyzing" | "queued" | "running" => Status::Busy,
             "attention" | "needs" | "red" | "failed" | "drifting" => Status::Attention,
             _ => return None,
@@ -239,6 +269,59 @@ pub(crate) fn lib_track(id: TrackId, title: &str, artist: &str) -> LibTrack {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quick_grid_is_the_basic_level_and_shows_amber() {
+        let track = |source: Option<GridSource>| {
+            let mut l = lib_track(1, "A", "x");
+            l.grid_source = source;
+            l.bpm = source.map(|_| 124.0);
+            Track::new(l)
+        };
+        let quick = track(Some(GridSource::Quick));
+        assert_eq!(quick.level(), Some(AnalysisLevel::Basic));
+        assert!(quick.has_grid() && quick.quick() && !quick.analysed());
+        assert_eq!(Status::of(&quick, None), Status::Quick);
+        // Every other source is the full level.
+        for source in [
+            GridSource::Analysis,
+            GridSource::AnalysisDynamic,
+            GridSource::User,
+            GridSource::Sidecar,
+            GridSource::Import,
+        ] {
+            let t = track(Some(source));
+            assert_eq!(t.level(), Some(AnalysisLevel::Full), "{source:?}");
+            assert!(t.analysed() && !t.quick());
+            assert_eq!(Status::of(&t, None), Status::Done);
+        }
+        let none = track(None);
+        assert_eq!(
+            (none.level(), Status::of(&none, None)),
+            (None, Status::None)
+        );
+        // Queued and running keep their marks, and red wins over amber.
+        assert_eq!(
+            Status::of(&quick, Some(&AnalysisState::Queued)),
+            Status::Busy
+        );
+        assert_eq!(
+            Status::of(&quick, Some(&AnalysisState::Failed("x".into()))),
+            Status::Attention
+        );
+        let mut marked = quick.clone();
+        marked.needs_attention = Some(true);
+        assert_eq!(Status::of(&marked, None), Status::Attention);
+        // As typed after `status:`, and stored.
+        assert_eq!(Status::parse("quick"), Some(Status::Quick));
+        assert_eq!(Status::parse("amber"), Some(Status::Quick));
+        for s in Status::ALL {
+            assert_eq!(Status::parse(s.name()), Some(s));
+        }
+        for g in [GridSource::Quick, GridSource::Analysis, GridSource::User] {
+            assert_eq!(GridSource::parse(g.as_str()), Some(g));
+        }
+    }
 
     #[test]
     fn resolves_bpm_key_and_search_text() {

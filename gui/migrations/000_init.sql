@@ -168,7 +168,7 @@ CREATE TABLE track_features (
 CREATE TABLE beatgrids (
   id          INTEGER PRIMARY KEY,
   track_id    INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
-  source      TEXT NOT NULL CHECK (source IN ('analysis', 'analysis-dynamic', 'user', 'sidecar', 'import')),
+  source      TEXT NOT NULL CHECK (source IN ('quick', 'analysis', 'analysis-dynamic', 'user', 'sidecar', 'import')),
   run_id      INTEGER REFERENCES analysis_runs(id) ON DELETE SET NULL,
   kind        TEXT NOT NULL CHECK (kind IN ('constant', 'markers')),
   bpm         REAL NOT NULL,

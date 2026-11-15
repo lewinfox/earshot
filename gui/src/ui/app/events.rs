@@ -139,6 +139,11 @@ impl EarshotApp {
                     self.dispatch(LibraryCmd::FindDuplicates.into());
                 }
             }
+            StoreEvent::NewTracks(ids) => {
+                if self.settings.quick_analyse_new {
+                    self.quick.send(ids);
+                }
+            }
             StoreEvent::TracksChanged(tracks) => self.index.patch(tracks),
             StoreEvent::Previews(p) => {
                 for (id, bytes) in p {
