@@ -2506,18 +2506,6 @@ mod tests {
         );
     }
 
-    /// How far (s) each click heard in `x` is from where the playhead was, for a
-    /// [`click_track`] played from track time `from` at `speed`.
-    fn clicks_off(x: &[f32], from: f64, speed: f64) -> Vec<f64> {
-        clicks(x)
-            .iter()
-            .map(|h| {
-                let beats = (from + h * speed) / 0.5;
-                (beats - beats.round()) * 0.5 / speed
-            })
-            .collect()
-    }
-
     /// A machine that can't keep up is noticed and the app told; the sound is left
     /// as it is (keylock, the effects).
     #[test]
