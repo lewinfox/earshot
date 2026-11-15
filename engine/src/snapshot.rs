@@ -10,6 +10,7 @@ use crate::command::{
     MixerState, XfSide,
 };
 use crate::fx::{FX_UNITS, FxUnitState};
+use crate::sampler::{SAMPLER_SLOTS, SampleSnap};
 use crate::tempo::TempoRange;
 
 /// One deck and its channel, as of the end of a callback.
@@ -115,6 +116,8 @@ pub struct EngineSnapshot {
     pub decks_live: usize,
     pub mixer: MixerSnap,
     pub preview: PreviewSnap,
+    /// The sampler's slots.
+    pub sampler: [SampleSnap; SAMPLER_SLOTS],
     pub sample_rate: u32,
     pub last_block_frames: u32,
     /// Callbacks so far (this snapshot is from the last one).
@@ -132,7 +135,9 @@ impl EngineSnapshot {
     }
 
     /// Everything in here that [`crate::Command::Restore`] can put back, without the
-    /// tracks: put those back into `decks[i].track` before sending it.
+    /// tracks: put those back into `decks[i].track` before sending it. The sampler's
+    /// slots keep their volumes and loop switches; their sounds go back the same way
+    /// (`sampler[i].audio`).
     pub fn state(&self) -> EngineState {
         let mut st = EngineState {
             mixer: MixerState {
@@ -147,6 +152,10 @@ impl EngineSnapshot {
             sync_leader: self.mixer.sync_leader,
             ..EngineState::default()
         };
+        for (st, s) in st.sampler.iter_mut().zip(&self.sampler) {
+            st.volume = s.volume;
+            st.looping = s.looping;
+        }
         for (ds, d) in st.decks.iter_mut().zip(&self.decks) {
             *ds = DeckState {
                 track: None,

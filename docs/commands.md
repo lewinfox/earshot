@@ -114,3 +114,10 @@ A name goes from the general to the particular: where, what, which part, what to
 | Command | Number | What it does |
 |---|---|---|
 | `ui_library_maximize_toggle` | pressed (1) or let go (0) | hide the waveforms for a bigger library, or show them |
+
+## Sampler: `sampler_N_`, N = 1 to 16
+
+| Command | Number | What it does |
+|---|---|---|
+| `sampler_N_play` | pressed (1) or let go (0) | play the sample, from its start |
+| `sampler_N_stop` | pressed (1) or let go (0) | stop the sample |

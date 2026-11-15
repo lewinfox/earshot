@@ -157,6 +157,8 @@ pub enum Modal {
     Keys,
     /// The metadata editor (opened on tracks by `EditCmd::Editor`).
     Metadata,
+    /// The sampler's 16 slots: assign a sound to each, its volume and loop switch.
+    Sampler,
 }
 
 /// The settings window's tabs.

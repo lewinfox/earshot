@@ -14,6 +14,7 @@ impl EarshotApp {
                     });
                     self.panels.library.media.art.insert(id, tex);
                 }
+                Event::Sample { slot, result } => self.sample_loaded(slot, result),
                 Event::Scanned(Ok(())) => self.panels.library.browser.scanning = false,
                 Event::Store(e) => self.store_event(e),
                 Event::External(e) => self.external_event(e),

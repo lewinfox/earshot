@@ -134,6 +134,13 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   follows the sync leader or the playing deck) and *ON*. Keys: `G`/`H` switch units
   1/2 on and off, `T`/`Y` pick the next effect, `Shift+G`/`Shift+H` the next target, `C`/`V` halve and double unit 1's length and
   `B`/`N` unit 2's.
+- **Sampler** (*Menu → Sampler…*): 16 slots, each a short sound (a file, or the
+  track selected in the library; its first two minutes, kept in memory) with its own
+  volume and a *Loop* switch. With the DDJ-400's pads in SAMPLER mode a pad plays its
+  slot from the start and SHIFT + pad stops it: slots 1–8 on the left deck's pads,
+  9–16 on the right's. A pad is lit while its slot has a sound and flashes while it
+  plays. Several can play at once, into the master mix. The slots are kept between
+  runs (`sampler_N_play` / `sampler_N_stop` for keys and other controllers).
 - **Mixer and FX** switches in the top bar show or hide those panels mid-set.
 - **Layout**: drag the gaps between panes to resize. *Menu → View → Size* or
   Ctrl −/=/0 scales the whole UI.

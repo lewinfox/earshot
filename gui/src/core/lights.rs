@@ -7,7 +7,9 @@
 //! together while a loop plays (RELOOP/EXIT lit). BEAT FX ON gets "on" while the
 //! effect is on, which the DDJ-400 shows by flashing it (and "off" lit steady).
 //!
-//! Pads in keyboard and key shift mode light as `core::pads` says.
+//! Pads in keyboard and key shift mode light as `core::pads` says. A sampler pad is
+//! lit while its slot has a sound, and flashes while it plays (`core::sampler`); with
+//! SHIFT (stop) it shows the same.
 //!
 //! While SHIFT is held the DDJ-400 shows its shifted buttons' lights (SHIFT + PLAY
 //! is its own message, with its own light). A shifted button that does nothing of its
@@ -31,7 +33,7 @@ use std::time::{Duration, Instant};
 use earshot_engine::{EngineSnapshot, FxTarget, Monitor};
 use midir::MidiOutputConnection;
 
-use super::bus::{Control, DeckControl, FxControl};
+use super::bus::{Control, DeckControl, FxControl, SamplerControl};
 use super::midi::{Input, Learned};
 use super::pads::AllPads;
 
@@ -115,6 +117,7 @@ pub fn light(control: Control, arg: Option<f64>, snap: &EngineSnapshot, pads: &A
                 _ => Light::Off,
             }
         }
+        Control::Sampler(slot, _) => super::sampler::light(&snap.sampler[slot.index()]),
         _ => Light::Off,
     }
 }
@@ -165,6 +168,7 @@ fn own_light(control: Control, snap: &EngineSnapshot, pads: &AllPads) -> bool {
                 | D::ModePad { .. }
         ),
         Control::Master(earshot_engine::MasterParam::MasterCue) => true,
+        Control::Sampler(_, c) => c == SamplerControl::Play,
         Control::Fx(_, c) => matches!(
             c,
             FxControl::On | FxControl::Release | FxControl::TargetDeck(_) | FxControl::TargetMaster | FxControl::TempoTap
@@ -381,6 +385,34 @@ mod tests {
         s.mixer.fx[0].enabled = true;
         assert_eq!(light(Control::Fx(0, FxControl::On), None, &s, &AllPads::default()), Light::On, "the controller flashes it");
         assert_eq!(light(Control::Fx(0, FxControl::Release), None, &s, &AllPads::default()), Light::On);
+    }
+
+    /// A sampler pad: dark while its slot is empty, lit with a sound in it, flashing
+    /// while it plays; SHIFT + pad (stop) shows the same.
+    #[test]
+    fn sampler_pads_show_loaded_and_playing() {
+        let learned = Learned::default();
+        learned.seed_ddj400();
+        let mut s = EngineSnapshot::default();
+        let slot = |i| earshot_engine::SampleSlot::new(i).unwrap();
+        let play = |i| Control::Sampler(slot(i), SamplerControl::Play);
+        assert_eq!(light(play(0), None, &s, &AllPads::default()), Light::Off, "empty");
+        s.sampler[0].loaded = true;
+        s.sampler[9].loaded = true;
+        s.sampler[9].playing = true;
+        assert_eq!(light(play(0), None, &s, &AllPads::default()), Light::On, "loaded");
+        assert_eq!(light(play(9), None, &s, &AllPads::default()), Light::Flash, "playing");
+        // On the controller: deck 1's pad 1 lit, deck 2's pad 2 flashing, the rest dark,
+        // and the same with SHIFT held.
+        for lit_half in [true, false] {
+            let f = frame(&learned, &s, &AllPads::default(), lit_half);
+            assert_eq!(f[&(0x97, 0x30)], 0x7F);
+            assert_eq!(f[&(0x98, 0x30)], 0x7F, "with SHIFT");
+            assert_eq!(f[&(0x97, 0x31)], 0x00, "an empty slot");
+            let flash = if lit_half { 0x7F } else { 0x00 };
+            assert_eq!(f[&(0x99, 0x31)], flash);
+            assert_eq!(f[&(0x9A, 0x31)], flash, "with SHIFT");
+        }
     }
 
     #[test]

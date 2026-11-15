@@ -135,7 +135,9 @@ fn ddj400_names() -> Vec<(u8, u8, String, String, Input)> {
 /// The DDJ-400's pads in beat loop and beat jump mode (each mode's pads send their
 /// own notes), and its Shift buttons, in earshot's names. From Mixxx's DDJ-400
 /// mapping: pads 1-8 on notes 0x60-0x67 (loops) and 0x20-0x27 (jumps); keyboard
-/// (0x40-0x47) and key shift (0x70-0x77) from rekordbox's, with SHIFT a channel up; deck 1 on
+/// (0x40-0x47) and key shift (0x70-0x77) from rekordbox's, with SHIFT a channel up; the
+/// sampler's (0x30-0x37: slots 1-8 on deck 1's pads, 9-16 on deck 2's; SHIFT stops the
+/// slot) from rekordbox's too; deck 1 on
 /// 0x97, deck 2 on 0x99; on each deck's channel, Shift on 0x3F and CUE/LOOP CALL on
 /// 0x51 / 0x53 (with Shift: 0x3E / 0x3D), Shift + RELOOP/EXIT on 0x50, BEAT SYNC
 /// held on 0x5C and LOOP IN held (4-beat loop) on 0x14 (both seen from the unit), and
@@ -203,6 +205,13 @@ fn ddj400_pads() -> Vec<(u8, u8, String, Option<f64>)> {
             v.push((status + 1, 0x40 + i, format!("deck_{d}_keyboard_pad_shift"), n));
             v.push((status, 0x70 + i, format!("deck_{d}_key_shift_pad"), n));
             v.push((status + 1, 0x70 + i, format!("deck_{d}_key_shift_pad_shift"), n));
+        }
+        // Sampler mode's pads (0x30-0x37): deck 1's play slots 1-8, deck 2's 9-16;
+        // with SHIFT (the next channel up) they stop them. From rekordbox's table.
+        for i in 0..8u8 {
+            let slot = (d - 1) * 8 + i + 1;
+            v.push((status, 0x30 + i, format!("sampler_{slot}_play"), None));
+            v.push((status + 1, 0x30 + i, format!("sampler_{slot}_stop"), None));
         }
     }
     v
@@ -917,6 +926,36 @@ mod tests {
                 "{bytes:02X?}"
             );
         }
+    }
+
+    /// Sampler mode's pads play slots 1-8 (deck 1) and 9-16 (deck 2), straight to the
+    /// engine; SHIFT's, a channel up, stop them. Nothing on release.
+    #[test]
+    fn sampler_pads() {
+        use crate::core::sampler::SamplerCmd;
+        let slot = |i| earshot_engine::SampleSlot::new(i).unwrap();
+        for (bytes, want) in [
+            ([0x97, 0x30, 0x7F], SamplerCmd::Play(slot(0))),
+            ([0x97, 0x37, 0x7F], SamplerCmd::Play(slot(7))),
+            ([0x99, 0x30, 0x7F], SamplerCmd::Play(slot(8))),
+            ([0x99, 0x37, 0x7F], SamplerCmd::Play(slot(15))),
+            ([0x98, 0x32, 0x7F], SamplerCmd::Stop(slot(2))),
+            ([0x9A, 0x35, 0x7F], SamplerCmd::Stop(slot(13))),
+        ] {
+            let got = cmd(bytes);
+            assert!(matches!(&got, Some(Command::Sampler(c)) if *c == want), "{bytes:02X?}: {got:?}");
+            assert!(command::direct(got.unwrap()).is_ok(), "{bytes:02X?} goes direct");
+        }
+        assert!(cmd([0x87, 0x30, 0x00]).is_none(), "nothing on release");
+        assert!(cmd([0x97, 0x30, 0x00]).is_none(), "nor on a note-on at velocity 0");
+        let (c, _) = translate(&[0x99, 0x31, 0x7F], &ddj()).unwrap();
+        assert_eq!(c.name().0, "sampler_10_play");
+        // The SAMPLER mode button still tells the pads page.
+        use crate::core::view::{PadMode, ViewCmd};
+        assert!(matches!(
+            cmd([0x90, 0x22, 0x7F]),
+            Some(Command::View(ViewCmd::PadMode(d, PadMode::Sampler))) if d == deck(0)
+        ));
     }
 
     /// Pads in beat loop and beat jump mode: their own notes, each a fixed size.
