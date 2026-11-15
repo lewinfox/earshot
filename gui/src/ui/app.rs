@@ -85,6 +85,9 @@ pub struct EarshotApp {
     quitting: bool,
     /// Each player's track and the list it was loaded from, by `DeckId::index()`.
     loaded_from: [Option<(i64, LoadedFrom)>; session::SLOTS],
+    /// When each deck's load button was last pressed, for a double tap (instant
+    /// doubles); cleared by the double tap.
+    load_taps: [Option<Instant>; session::SLOTS],
     /// Always the null output (tests).
     null_audio: bool,
     midi: Midi,
@@ -367,6 +370,7 @@ impl EarshotApp {
             audio_stalls: VecDeque::new(),
             audio_note: None,
             loaded_from: Default::default(),
+            load_taps: Default::default(),
             notices: Notices::default(),
             asking_quit: false,
             quitting: false,
@@ -419,6 +423,7 @@ impl EarshotApp {
             app.dispatch((deck, EngineCmd::TempoRange(range)).into());
         }
         let _ = player::set_hotcue_mode(&app.player, app.settings.hotcue_mode);
+        let _ = player::set_xf_curve(&app.player, app.settings.xf_curve);
         let _ = player::set_fx_decks(&app.player, app.prefs.decks().len());
         player::set_cue_first_beat(&app.player, app.settings.cue_first_beat);
         app.start_sampler();
@@ -815,6 +820,13 @@ impl EarshotApp {
                     .store
                     .send(settings::save(settings::HOTCUE_MODE, &m));
             }
+            Command::App(AppCmd::XfCurve(c)) => {
+                self.settings.xf_curve = c;
+                if let Err(e) = player::set_xf_curve(&self.player, c) {
+                    eprintln!("crossfader curve: {e}");
+                }
+                self.lib.store.send(settings::save(settings::XF_CURVE, &c));
+            }
             Command::App(AppCmd::CueFirstBeat(on)) => {
                 self.settings.cue_first_beat = on;
                 player::set_cue_first_beat(&self.player, on);
@@ -984,10 +996,14 @@ impl EarshotApp {
             }
             ViewCmd::FocusSearch => lib.browser.search_focus = true,
             ViewCmd::LoadSelected(deck) => {
-                if let Some(id) = lib.focused_track(flow) {
+                // Pressed twice quickly (as rekordbox's LOAD): instant doubles.
+                if double_tap(&mut self.load_taps[deck.index()], Instant::now()) {
+                    self.instant_double(deck);
+                } else if let Some(id) = lib.focused_track(flow) {
                     self.load(Some(deck), id);
                 }
             }
+            ViewCmd::InstantDouble(deck) => self.instant_double(deck),
             ViewCmd::ShowInLibrary(deck) => {
                 let Some(track) = self.player.lock().unwrap().session(deck).track_id else {
                     return;
@@ -1286,6 +1302,7 @@ impl EarshotApp {
             audio: &self.audio,
             routing,
             hotcue_mode: self.settings.hotcue_mode,
+            xf_curve: self.settings.xf_curve,
             cue_first_beat: self.settings.cue_first_beat,
             load_while_playing: self.settings.load_while_playing,
             auto_hide_mixer: self.prefs.auto_hide_mixer,
@@ -1371,6 +1388,17 @@ impl eframe::App for EarshotApp {
         self.save_flow_view(ctx);
         self.schedule_repaint(ctx);
     }
+}
+
+/// Two presses of a load button this close together are a double tap.
+const DOUBLE_TAP: Duration = Duration::from_millis(400);
+
+/// A load button pressed at `now`, last pressed at `last`: true if that makes a double
+/// tap. A double tap clears `last`, so a third press starts again.
+fn double_tap(last: &mut Option<Instant>, now: Instant) -> bool {
+    let double = last.is_some_and(|t| now.saturating_duration_since(t) < DOUBLE_TAP);
+    *last = (!double).then_some(now);
+    double
 }
 
 /// `then` (before `now`) in unix seconds.

@@ -33,7 +33,7 @@ use std::time::Duration;
 pub use command::{
     ChannelParam, ChannelState, Command, CueSet, DeckCmd, DeckId, DeckState, EQ_HIGH, EQ_LOW,
     EQ_MID, EngineState, HOTCUES, HotcueMode, LoadedTrack, LoopState, MAX_DECKS, MasterParam,
-    MixerState, ParamId, Press, PreviewCmd, Set, XfSide,
+    MixerState, ParamId, Press, PreviewCmd, Set, XfCurve, XfSide,
 };
 pub use engine::{Out, Routing};
 pub use fx::{FX_UNITS, FxCmd, FxKind, FxRelease, FxTarget, FxUnitState, step_beats};

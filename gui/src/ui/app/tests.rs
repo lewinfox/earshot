@@ -2930,3 +2930,39 @@ fn controller_mode_has_the_decks_and_its_tabs() {
     assert!(h.query_all_by_label("Save JSON…").count() == 0);
     assert_eq!(h.state().prefs.mode, Mode::Controller);
 }
+
+/// Instant doubles: deck B gets deck A's track at the same place, playing in step;
+/// LOAD pressed twice quickly does it too.
+#[test]
+fn instant_doubles() {
+    let mut h = start("instant-doubles");
+    let (a, b) = (DeckId::new(0).unwrap(), DeckId::new(1).unwrap());
+    let ids = ids(&h);
+    h.state_mut().load(Some(a), ids[0]);
+    settle_until(&mut h, |app| app.frame.deck(a).grid.is_some());
+    h.state_mut().dispatch((a, EngineCmd::Play(Set::On)).into());
+    h.state_mut().dispatch(ViewCmd::InstantDouble(b).into());
+    settle_until(&mut h, |app| {
+        let s = app.frame.snap.as_ref().unwrap();
+        let (x, y) = (s.deck(a), s.deck(b));
+        y.track_id == Some(ids[0])
+            && y.playing
+            && x.position > 0.0
+            && (x.position - y.position).abs() < 1e-6
+    });
+    assert!(h.state().panels.decks[1].pending().is_none(), "nothing left loading");
+}
+
+/// Two presses closer than [`super::DOUBLE_TAP`] are a double tap; a third starts
+/// again, and a slow second press isn't one.
+#[test]
+fn double_tap_on_load() {
+    use super::{DOUBLE_TAP, double_tap};
+    let t0 = std::time::Instant::now();
+    let soon = t0 + DOUBLE_TAP / 2;
+    let mut last = None;
+    assert!(!double_tap(&mut last, t0));
+    assert!(double_tap(&mut last, soon));
+    assert!(!double_tap(&mut last, soon + DOUBLE_TAP / 4), "a third press starts again");
+    assert!(!double_tap(&mut last, soon + DOUBLE_TAP * 2), "too slow");
+}

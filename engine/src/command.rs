@@ -371,6 +371,7 @@ pub struct EngineState {
     pub mixer: MixerState,
     pub sync_leader: Option<DeckId>,
     pub hotcue_mode: HotcueMode,
+    pub xf_curve: XfCurve,
     /// The sampler's slots: their sounds, volumes and loop switches.
     pub sampler: [SampleState; SAMPLER_SLOTS],
 }
@@ -383,6 +384,18 @@ pub enum HotcueMode {
     PlayOnPress,
     /// Play from there while held; letting go stops and goes back (Mixxx's).
     PlayWhileHeld,
+}
+
+/// How the crossfader fades the two sides into each other.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum XfCurve {
+    /// Each side at -3 dB in the middle: two different tracks sound about as loud as
+    /// one at either end.
+    #[default]
+    ConstantPower,
+    /// Both sides full in the middle, each fading only on the far half: for cuts and
+    /// scratching. Two tracks in the middle are louder than one.
+    Sharp,
 }
 
 pub enum PreviewCmd {
@@ -430,11 +443,22 @@ pub enum Command {
         generation: u64,
         stems: Option<Arc<StemAudio>>,
     },
+    /// Instant doubles: `to` has just been given `from`'s track as `generation`; put
+    /// it where `from` is, playing or not, with its tempo, key, loop and stems, so
+    /// the two play in step from this block on. Ignored unless `to` still has that
+    /// load and both decks have the same audio.
+    InstantDouble {
+        from: DeckId,
+        to: DeckId,
+        generation: u64,
+    },
     /// The deck synced decks follow. `None`: each synced deck picks one (a playing
     /// deck that isn't synced itself, if there is one).
     SetSyncLeader(Option<DeckId>),
     /// What hot cues do on a stopped deck, on every player.
     SetHotcueMode(HotcueMode),
+    /// The crossfader's curve.
+    SetXfCurve(XfCurve),
     /// Effects go only on the first this many decks (the ones the app shows); a unit
     /// on another goes back to its default, or the master mix.
     SetFxDecks(usize),

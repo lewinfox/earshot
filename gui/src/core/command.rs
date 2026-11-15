@@ -179,6 +179,8 @@ pub enum AppCmd {
     StemsCacheGb(f64),
     /// What hot cues do on a stopped deck (and save it).
     HotcueMode(earshot_engine::HotcueMode),
+    /// The crossfader's curve (and save it).
+    XfCurve(earshot_engine::XfCurve),
     /// Cue newly loaded tracks on their first beat, else at their start (and save it).
     CueFirstBeat(bool),
     /// Let a track load onto a playing deck, else refuse it (and save it).
