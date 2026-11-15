@@ -2324,6 +2324,64 @@ mod tests {
         move |t| 0.5 * (std::f64::consts::TAU * hz * t).sin() as f32
     }
 
+    /// Measurement, not a test: what a block costs. `cargo test --release -p
+    /// earshot-engine cost_of_a_block -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn cost_of_a_block() {
+        use crate::pad_fx::{PadFx, PadFxKind};
+        fn time(rig: &mut Rig, what: &str) {
+            rig.run(2.0);
+            let mut t: Vec<f64> = (0..3000)
+                .map(|_| {
+                    let t0 = std::time::Instant::now();
+                    rig.r.process(&mut rig.out, 4);
+                    t0.elapsed().as_secs_f64() * 1e6
+                })
+                .collect();
+            t.sort_by(|a, b| a.total_cmp(b));
+            let mean = t.iter().sum::<f64>() / t.len() as f64;
+            let budget = 256.0 / SR as f64 * 1e6;
+            println!(
+                "{what:<44} mean {mean:7.1} us ({:4.1} %)  p99 {:7.1}  max {:7.1} ({:4.1} %)",
+                100.0 * mean / budget,
+                t[t.len() * 99 / 100],
+                t[t.len() - 1],
+                100.0 * t[t.len() - 1] / budget
+            );
+        }
+        let noise = |t: f64| {
+            (0.3 * (t * 440.0 * std::f64::consts::TAU).sin()
+                + 0.2 * ((t * 48_000.0) as u64).wrapping_mul(2654435761).rem_euclid(1000) as f64 / 1000.0
+                - 0.1) as f32
+        };
+        for decks in [2usize, 4] {
+            let mut rig = Rig::with_decks(decks);
+            for d in 0..decks {
+                load_fn(&mut rig, d, 120.0, noise);
+            }
+            time(&mut rig, &format!("{decks} decks loaded, stopped"));
+            for d in 0..decks {
+                rig.deck(d, DeckCmd::Play(Set::On));
+            }
+            time(&mut rig, "  playing at 1.0");
+            for d in 0..decks {
+                rig.deck(d, DeckCmd::Rate(0.08));
+            }
+            time(&mut rig, "  playing at 1.08, no keylock");
+            for d in 0..decks {
+                rig.deck(d, DeckCmd::Keylock(Set::On));
+            }
+            time(&mut rig, "  + keylock");
+            rig.r.fx[0].apply(FxCmd::Enabled(Set::On));
+            time(&mut rig, "  + the effect unit");
+            for d in 0..decks {
+                rig.deck(d, DeckCmd::PadFx(Some(PadFx::new(PadFxKind::Reverb, 1.0))));
+            }
+            time(&mut rig, "  + pad reverb on every deck");
+        }
+    }
+
     #[test]
     fn keylock_keeps_the_key_at_another_tempo() {
         for (keylock, want) in [(false, 440.0 * 1.08), (true, 440.0)] {
