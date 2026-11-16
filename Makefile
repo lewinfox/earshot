@@ -2,11 +2,12 @@
 
 PACKAGES := earshot-gui earshot-engine earshot-audio
 
-.PHONY: help run release install test test-worker fmt clean clean-all clean-db bundle
+.PHONY: help run run-release release install test test-worker fmt clean clean-all clean-db bundle
 
 help:
 	@echo "make run          run the app (debug build)"
-	@echo "make release      run the app (release build)"
+	@echo "make run-release  run the app (release build)"
+	@echo "make release      tag main at gui/Cargo.toml's version and push it: a release"
 	@echo "make install      build the release app and add it to the app menu (this user)"
 	@echo "make test         Rust tests, whole workspace"
 	@echo "make test-worker  the Python worker's tests"
@@ -19,8 +20,12 @@ help:
 run:
 	cargo run -p earshot-gui
 
-release:
+run-release:
 	cargo run --release -p earshot-gui
+
+# Builds and publishes a release on GitHub (packaging/release.sh says what it checks).
+release:
+	packaging/release.sh
 
 # The menu entry runs target/release/earshot-gui in this checkout: run again after
 # moving it.
