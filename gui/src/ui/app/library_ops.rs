@@ -379,9 +379,11 @@ impl EarshotApp {
         let decks = &self.panels.decks;
         let deck = deck.unwrap_or_else(|| match self.prefs.mode {
             Mode::Prepare => self.prefs.target(),
-            Mode::Perform | Mode::Controller | Mode::Debug => DeckId::first(self.prefs.decks().len())
-                .find(|d| !decks[d.index()].playing())
-                .unwrap_or(DeckId::new(0).expect("deck 1")),
+            Mode::Perform | Mode::Controller | Mode::Debug => {
+                DeckId::first(self.prefs.decks().len())
+                    .find(|d| !decks[d.index()].playing())
+                    .unwrap_or(DeckId::new(0).expect("deck 1"))
+            }
         });
         if self.refuse_load(deck) {
             return None;
@@ -458,7 +460,10 @@ impl EarshotApp {
                     result: Ok(()),
                 });
             }
-            Err(e) => self.notify(crate::core::notice::Level::Warning, format!("Instant doubles: {e}")),
+            Err(e) => self.notify(
+                crate::core::notice::Level::Warning,
+                format!("Instant doubles: {e}"),
+            ),
         }
     }
 

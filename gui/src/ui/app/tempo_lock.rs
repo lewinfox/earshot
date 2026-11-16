@@ -19,7 +19,6 @@ use crate::ui::panels::tempo_lock::DetectedBeats;
 /// sources are database rows, numbered from 1).
 const SOURCE: crate::core::sources::SourceId = 0;
 
-
 #[derive(Default)]
 pub(super) struct Listener {
     /// The straightened file, as an outside track.
@@ -75,13 +74,17 @@ impl EarshotApp {
         // Only on Prepare's Tempo lock tab: elsewhere the deck is just a deck.
         let shown = self.prefs.mode == crate::core::view::Mode::Prepare
             && self.prefs.prepare.tool == crate::core::view::Tool::TempoLock;
-        let layer = tab.player.zip(tab.chart.clone()).filter(|_| shown).map(|(version, chart)| {
-            Arc::new(DetectedBeats {
-                version,
-                chart,
-                straightened: tab.straightened.clone(),
-            }) as Arc<dyn Layer>
-        });
+        let layer = tab
+            .player
+            .zip(tab.chart.clone())
+            .filter(|_| shown)
+            .map(|(version, chart)| {
+                Arc::new(DetectedBeats {
+                    version,
+                    chart,
+                    straightened: tab.straightened.clone(),
+                }) as Arc<dyn Layer>
+            });
         self.panels.decks[self.prefs.target().index()].set_overlay("tempo-lock", layer);
     }
 
@@ -133,7 +136,10 @@ impl EarshotApp {
     }
 
     fn player_snap(&self) -> Option<earshot_engine::DeckSnap> {
-        self.frame.snap.as_ref().map(|s| *s.deck(self.prefs.target()))
+        self.frame
+            .snap
+            .as_ref()
+            .map(|s| *s.deck(self.prefs.target()))
     }
 
     fn player_track(&self) -> Option<TrackId> {

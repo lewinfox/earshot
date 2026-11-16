@@ -165,7 +165,10 @@ mod tests {
         assert!(c.to_save(false, 2.0).is_none(), "still settling");
         assert_eq!(c.wait(2.1), Some(SETTLE - Duration::from_millis(100)));
         let later = 2.0 + SETTLE.as_secs_f64();
-        assert!(c.to_save(true, later).is_none(), "not while the pointer is down");
+        assert!(
+            c.to_save(true, later).is_none(),
+            "not while the pointer is down"
+        );
         assert_eq!(c.to_save(false, later), Some(moved));
         assert!(c.to_save(false, later + 1.0).is_none(), "counted as saved");
         assert!(c.take().is_none());

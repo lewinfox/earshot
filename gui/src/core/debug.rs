@@ -148,13 +148,21 @@ impl Recorder {
                 h.xruns
             );
             let controller = controller_text(&h.midi, since, now, mapping);
-            (wav_f32(&samples, h.channels.max(1) as u16, h.rate), states, summary, controller)
+            (
+                wav_f32(&samples, h.channels.max(1) as u16, h.rate),
+                states,
+                summary,
+                controller,
+            )
         };
         let log = super::log::path()
             .and_then(|p| std::fs::read(p).ok())
             .unwrap_or_else(|| b"(no log file)\n".to_vec());
         let mut files = vec![
-            ("info.txt".to_string(), format!("{info}\n{summary}").into_bytes()),
+            (
+                "info.txt".to_string(),
+                format!("{info}\n{summary}").into_bytes(),
+            ),
             ("output.wav".to_string(), wav),
             ("state.txt".to_string(), states.into_bytes()),
             ("log.txt".to_string(), log),
@@ -167,7 +175,8 @@ impl Recorder {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         let path = dir.join(format!("earshot-debug-{unix}.zip"));
-        std::fs::write(&path, zip_stored(&files)).map_err(|e| format!("{}: {e}", path.display()))?;
+        std::fs::write(&path, zip_stored(&files))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         Ok(path)
     }
 }
@@ -181,13 +190,22 @@ fn controller_text(
     now: Instant,
     mapping: Option<&super::midi::Learned>,
 ) -> String {
-    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" ");
+    let hex = |b: &[u8]| {
+        b.iter()
+            .map(|x| format!("{x:02X}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
     let mut latest: std::collections::BTreeMap<(u8, u8), (u8, Instant)> = Default::default();
     for (t, out, b) in midi {
         if !*out && b.len() == 3 && b[0] < 0xF0 {
             // A note off is a 0.
             let v = if b[0] & 0xF0 == 0x80 { 0 } else { b[2] };
-            let status = if b[0] & 0xF0 == 0x80 { b[0] | 0x10 } else { b[0] };
+            let status = if b[0] & 0xF0 == 0x80 {
+                b[0] | 0x10
+            } else {
+                b[0]
+            };
             latest.insert((status, b[1]), (v, *t));
         }
     }
@@ -196,10 +214,16 @@ fn controller_text(
          it's been moved; the controller isn't asked), and what it's mapped to.\n\n",
     );
     for ((s, d), (v, t)) in &latest {
-        let mapped = mapping.and_then(|m| m.get((*s, *d))).map_or("-".to_string(), |l| {
-            let name = l.control.name().0;
-            if l.display_only { format!("{name} (display only)") } else { name }
-        });
+        let mapped = mapping
+            .and_then(|m| m.get((*s, *d)))
+            .map_or("-".to_string(), |l| {
+                let name = l.control.name().0;
+                if l.display_only {
+                    format!("{name} (display only)")
+                } else {
+                    name
+                }
+            });
         out += &format!(
             "{s:02X} {d:02X} = {v:3}  {:>8.2}s ago  {mapped}\n",
             (now - *t).as_secs_f64()
@@ -235,17 +259,27 @@ fn asound() -> String {
     let mut cards: Vec<PathBuf> = cards
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("card")))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("card"))
+        })
         .collect();
     cards.sort();
     for card in cards {
         add(&card.join("id"));
         add(&card.join("stream0"));
-        let Ok(pcms) = std::fs::read_dir(&card) else { continue };
+        let Ok(pcms) = std::fs::read_dir(&card) else {
+            continue;
+        };
         let mut pcms: Vec<PathBuf> = pcms
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("pcm") && n.ends_with('p')))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("pcm") && n.ends_with('p'))
+            })
             .collect();
         pcms.sort();
         for pcm in pcms {
@@ -272,7 +306,11 @@ fn run(history: &Mutex<History>, feed: &Mutex<Feed>) {
                     let line = format!("xruns={} {:?}", h.xruns, m.snapshot());
                     h.states.push_back((last_state, line));
                     let keep = Duration::from_secs(MAX_SECS as u64);
-                    while h.states.front().is_some_and(|(t, _)| last_state - *t > keep) {
+                    while h
+                        .states
+                        .front()
+                        .is_some_and(|(t, _)| last_state - *t > keep)
+                    {
                         h.states.pop_front();
                     }
                 }
@@ -398,7 +436,10 @@ mod tests {
         let text = controller_text(&midi, t(2500), now, None);
         assert!(text.contains("B6 0C =  64"), "{text}");
         assert!(text.contains("90 0B =   0"), "a note off is a 0: {text}");
-        assert!(!text.contains("B0 02 ="), "earshot's own messages aren't controls");
+        assert!(
+            !text.contains("B0 02 ="),
+            "earshot's own messages aren't controls"
+        );
         assert!(text.contains("out B0 02 57"), "{text}");
         assert!(!text.contains("in  B6 0C 0A"), "before the window: {text}");
     }
@@ -420,7 +461,8 @@ mod tests {
         };
         // Three frames: master (1, 3), phones (100, 100).
         for i in 0..3 {
-            h.audio.extend([1.0 + i as f32, 3.0 + i as f32, 100.0, 100.0]);
+            h.audio
+                .extend([1.0 + i as f32, 3.0 + i as f32, 100.0, 100.0]);
         }
         h.frames = 3;
         assert_eq!(h.mono_since(0, 0), (0, vec![2.0, 3.0, 4.0]));
@@ -434,18 +476,39 @@ mod tests {
     fn a_zip_unzip_can_read() {
         let files = vec![
             ("a.txt".to_string(), b"hello\n".to_vec()),
-            ("b.wav".to_string(), wav_f32(&[0.0, 0.5, -0.5, 1.0], 2, 48_000)),
+            (
+                "b.wav".to_string(),
+                wav_f32(&[0.0, 0.5, -0.5, 1.0], 2, 48_000),
+            ),
         ];
         let dir = std::env::temp_dir().join(format!("earshot-zip-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.zip");
         std::fs::write(&path, zip_stored(&files)).unwrap();
-        let Ok(out) = std::process::Command::new("unzip").arg("-p").arg(&path).arg("a.txt").output() else {
+        let Ok(out) = std::process::Command::new("unzip")
+            .arg("-p")
+            .arg(&path)
+            .arg("a.txt")
+            .output()
+        else {
             return; // no unzip here
         };
-        assert_eq!(out.stdout, b"hello\n", "{}", String::from_utf8_lossy(&out.stderr));
-        let test = std::process::Command::new("unzip").arg("-t").arg(&path).output().unwrap();
-        assert!(test.status.success(), "{}", String::from_utf8_lossy(&test.stdout));
+        assert_eq!(
+            out.stdout,
+            b"hello\n",
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let test = std::process::Command::new("unzip")
+            .arg("-t")
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            test.status.success(),
+            "{}",
+            String::from_utf8_lossy(&test.stdout)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

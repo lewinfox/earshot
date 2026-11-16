@@ -6,7 +6,6 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-
 use super::index::LibraryIndex;
 use super::keys::Camelot;
 use super::suggest::{self, Direction, Reference, Scored};
@@ -347,16 +346,12 @@ mod tests {
         let mut s = History::default();
         let decks = [deck(1, false), deck(3, true)];
         s.tick(Instant::now(), &decks);
-        let master = s
-            .reference(&ix, RefSource::Master, &decks, None)
-            .unwrap();
+        let master = s.reference(&ix, RefSource::Master, &decks, None).unwrap();
         assert_eq!(
             (master.id, master.deck, master.bpm),
             (3, Some(1), Some(126.0))
         );
-        let a = s
-            .reference(&ix, RefSource::Deck(0), &decks, None)
-            .unwrap();
+        let a = s.reference(&ix, RefSource::Deck(0), &decks, None).unwrap();
         assert_eq!((a.id, a.playing), (1, false));
         let sel = s
             .reference(&ix, RefSource::Selected, &decks, Some(2))
@@ -378,9 +373,7 @@ mod tests {
             key_speed: 2f64.powf(1.0 / 12.0),
             ..deck(1, true)
         }];
-        let r = s
-            .reference(&ix, RefSource::Deck(0), &up, None)
-            .unwrap();
+        let r = s.reference(&ix, RefSource::Deck(0), &up, None).unwrap();
         assert_eq!(r.key, parse_key("3A"));
     }
 

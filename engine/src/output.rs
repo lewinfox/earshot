@@ -181,7 +181,10 @@ pub fn start(
                             return;
                         }
                     }
-                    eprintln!("[init] audio: playing on {} ({} Hz, {} channel(s), {})", info.device, info.sample_rate, info.channels, info.sample_format);
+                    eprintln!(
+                        "[init] audio: playing on {} ({} Hz, {} channel(s), {})",
+                        info.device, info.sample_rate, info.channels, info.sample_format
+                    );
                     let _ = info_tx.send(Ok(info));
                     let _ = stop_rx.recv(); // park until the handle is dropped
                     drop(streams);
@@ -249,7 +252,10 @@ pub fn is_direct(device: Option<&str>) -> bool {
 /// A step of opening the sound card, for the log (`[init]`), with the time since
 /// the open began.
 fn step(t0: std::time::Instant, what: &str) {
-    eprintln!("[init] audio +{:.1} ms: {what}", t0.elapsed().as_secs_f64() * 1000.0);
+    eprintln!(
+        "[init] audio +{:.1} ms: {what}",
+        t0.elapsed().as_secs_f64() * 1000.0
+    );
 }
 
 fn build_stream(
@@ -264,7 +270,11 @@ fn build_stream(
         &format!(
             "opening {:?} ({}), buffer {:?}, headphones device {:?}",
             opts.device,
-            if direct { "ALSA directly" } else { "the default host" },
+            if direct {
+                "ALSA directly"
+            } else {
+                "the default host"
+            },
             opts.buffer_frames,
             opts.phones_device
         ),
@@ -274,9 +284,16 @@ fn build_stream(
     } else {
         cpal::default_host()
     };
-    let device = find_device(&host, opts.device.as_deref()).inspect_err(|e| step(t0, &format!("no device: {e}")))?;
+    let device = find_device(&host, opts.device.as_deref())
+        .inspect_err(|e| step(t0, &format!("no device: {e}")))?;
     let name = device_name(&device);
-    step(t0, &format!("found device {name:?} (id {:?})", device.id().map(|i| i.to_string())));
+    step(
+        t0,
+        &format!(
+            "found device {name:?} (id {:?})",
+            device.id().map(|i| i.to_string())
+        ),
+    );
 
     // Prefer 4+ channels (master + headphones), 44.1/48 kHz, float samples. Of the
     // rates, the one the system runs at (PipeWire's 48 kHz, CoreAudio's or Windows'
@@ -287,7 +304,10 @@ fn build_stream(
     } else {
         // Opens the card to ask (and closes it again).
         let c = device.default_output_config();
-        step(t0, &format!("asked its default setup (an open and close): {c:?}"));
+        step(
+            t0,
+            &format!("asked its default setup (an open and close): {c:?}"),
+        );
         c.ok().map(|c| c.sample_rate())
     };
     let rate_score = |rate: u32| match (Some(rate) == native, rate) {
@@ -310,7 +330,13 @@ fn build_stream(
             e.to_string()
         })?
         .collect();
-    step(t0, &format!("listed its setups (an open and close): {} of them", ranges.len()));
+    step(
+        t0,
+        &format!(
+            "listed its setups (an open and close): {} of them",
+            ranges.len()
+        ),
+    );
     for r in &ranges {
         step(
             t0,

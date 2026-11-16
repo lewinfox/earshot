@@ -80,7 +80,12 @@ impl DeckUi {
                                     .caption(pad.caption.as_deref())
                                     .tinted(pad.tinted),
                             )
-                            .on_hover_text(format!("{} · pad {}\n{}", mode.label(), i + 1, pad.tip));
+                            .on_hover_text(format!(
+                                "{} · pad {}\n{}",
+                                mode.label(),
+                                i + 1,
+                                pad.tip
+                            ));
                         if mode == PadMode::Sampler {
                             if held(ui, &r) == Some(true) {
                                 out.extend(self.sampler_press(i, shift));
@@ -143,7 +148,11 @@ impl DeckUi {
                 let beats = PAD_JUMPS[i];
                 let n = beats.abs();
                 Pad {
-                    label: if beats < 0.0 { format!("◀ {n}") } else { format!("{n} ▶") },
+                    label: if beats < 0.0 {
+                        format!("◀ {n}")
+                    } else {
+                        format!("{n} ▶")
+                    },
                     caption: None,
                     colour: THEME.text,
                     tinted: false,
@@ -193,7 +202,11 @@ impl DeckUi {
                 let pads = &self.pads;
                 let page = pads.page(mode);
                 let pages = if mode == PadMode::Keyboard { 4 } else { 5 };
-                let control = Some(DeckControl::ModePad { mode, pad: i as u8, shift: true });
+                let control = Some(DeckControl::ModePad {
+                    mode,
+                    pad: i as u8,
+                    shift: true,
+                });
                 let pad = |label: String, caption: String, tip: String| Pad {
                     label,
                     caption: Some(caption),
@@ -215,11 +228,13 @@ impl DeckUi {
                         "The page after (lower notes in keyboard mode)".into(),
                     ),
                     6 | 7 => blank(&format!("Page {} of {pages}: no page that way", page + 1)),
-                    _ if mode == PadMode::Keyboard && pads.keyboard_cue(&self.state).is_some() => pad(
-                        "PICK".into(),
-                        "another hot cue".into(),
-                        "Pick another hot cue to play on the keyboard".into(),
-                    ),
+                    _ if mode == PadMode::Keyboard && pads.keyboard_cue(&self.state).is_some() => {
+                        pad(
+                            "PICK".into(),
+                            "another hot cue".into(),
+                            "Pick another hot cue to play on the keyboard".into(),
+                        )
+                    }
                     _ => blank("Nothing with SHIFT"),
                 }
             }
@@ -231,7 +246,10 @@ impl DeckUi {
 
     /// Pad `i` in a pad FX mode, with SHIFT or not: its effect, on while it's held.
     fn pad_fx_face(&self, mode: PadMode, i: usize, shift: bool) -> Pad {
-        let (Some(fx), Some(letter)) = (pads::pad_fx(mode, i, shift), pads::pad_fx_letter(mode, i, shift)) else {
+        let (Some(fx), Some(letter)) = (
+            pads::pad_fx(mode, i, shift),
+            pads::pad_fx_letter(mode, i, shift),
+        ) else {
             return Pad {
                 label: String::new(),
                 caption: None,
@@ -244,7 +262,11 @@ impl DeckUi {
         };
         let length = pads::beats_label(fx.beats);
         let name = fx.kind.name();
-        let other = if shift { "Without SHIFT" } else { "Shift-click" };
+        let other = if shift {
+            "Without SHIFT"
+        } else {
+            "Shift-click"
+        };
         Pad {
             label: format!("{} {length}", name.to_uppercase()),
             caption: Some(letter.clone()),
@@ -254,7 +276,11 @@ impl DeckUi {
                 "Effect {letter}: {name}, {length} beat{}, while held\n{other}: the bank's other 8 effects",
                 if fx.beats == 1.0 { "" } else { "s" }
             ),
-            control: Some(DeckControl::ModePad { mode, pad: i as u8, shift }),
+            control: Some(DeckControl::ModePad {
+                mode,
+                pad: i as u8,
+                shift,
+            }),
             value: 1.0,
         }
     }
@@ -288,7 +314,11 @@ impl DeckUi {
         Pad {
             label,
             caption,
-            colour: if s.name.is_some() { THEME.accent } else { THEME.line },
+            colour: if s.name.is_some() {
+                THEME.accent
+            } else {
+                THEME.line
+            },
             tinted: s.playing && !shift,
             tip,
             // Not a deck's control: `sampler_press`.
@@ -320,7 +350,11 @@ impl DeckUi {
         let pads = &self.pads;
         let page = pads.page(mode);
         let pages = if mode == PadMode::Keyboard { 4 } else { 5 };
-        let control = Some(DeckControl::ModePad { mode, pad: i as u8, shift: false });
+        let control = Some(DeckControl::ModePad {
+            mode,
+            pad: i as u8,
+            shift: false,
+        });
         let paging = format!(
             "Page {} of {pages}: shift-click pad 7 / 8 for the page before / after",
             page + 1
@@ -355,7 +389,8 @@ impl DeckUi {
                     Some(PadAction::Semitones(n)) => semis(n),
                     _ => String::new(),
                 },
-                caption: (note == Some(PadAction::Semitones(0))).then(|| format!("{letter} · own key")),
+                caption: (note == Some(PadAction::Semitones(0)))
+                    .then(|| format!("{letter} · own key")),
                 colour: THEME.hotcue[slot as usize],
                 tinted: note == Some(PadAction::Semitones(0)),
                 tip: format!(

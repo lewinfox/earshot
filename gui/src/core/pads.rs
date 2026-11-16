@@ -38,10 +38,46 @@ use PadAction::{Reset, Semitones as S, Step};
 
 /// The pages, as the DDJ-400's diagram has them. Keyboard mode has the first four.
 pub const PAGES: [[Option<PadAction>; 8]; 5] = [
-    [Some(S(12)), None, None, None, Some(S(8)), Some(S(9)), Some(S(10)), Some(S(11))],
-    [Some(S(4)), Some(S(5)), Some(S(6)), Some(S(7)), Some(S(0)), Some(S(1)), Some(S(2)), Some(S(3))],
-    [Some(S(-4)), Some(S(-3)), Some(S(-2)), Some(S(-1)), Some(S(-8)), Some(S(-7)), Some(S(-6)), Some(S(-5))],
-    [Some(S(-12)), Some(S(-11)), Some(S(-10)), Some(S(-9)), None, None, None, None],
+    [
+        Some(S(12)),
+        None,
+        None,
+        None,
+        Some(S(8)),
+        Some(S(9)),
+        Some(S(10)),
+        Some(S(11)),
+    ],
+    [
+        Some(S(4)),
+        Some(S(5)),
+        Some(S(6)),
+        Some(S(7)),
+        Some(S(0)),
+        Some(S(1)),
+        Some(S(2)),
+        Some(S(3)),
+    ],
+    [
+        Some(S(-4)),
+        Some(S(-3)),
+        Some(S(-2)),
+        Some(S(-1)),
+        Some(S(-8)),
+        Some(S(-7)),
+        Some(S(-6)),
+        Some(S(-5)),
+    ],
+    [
+        Some(S(-12)),
+        Some(S(-11)),
+        Some(S(-10)),
+        Some(S(-9)),
+        None,
+        None,
+        None,
+        None,
+    ],
     [
         Some(PadAction::KeySync),
         Some(Step(1)),
@@ -120,7 +156,11 @@ pub fn pad_fx_bank(mode: PadMode) -> Option<usize> {
 /// The effect on pad `pad` in a pad FX mode, with SHIFT or not.
 pub fn pad_fx(mode: PadMode, pad: usize, shift: bool) -> Option<PadFx> {
     let slot = pad + if shift { 8 } else { 0 };
-    PAD_FX_BANKS.get(pad_fx_bank(mode)?)?.get(slot).copied().filter(|_| pad < 8)
+    PAD_FX_BANKS
+        .get(pad_fx_bank(mode)?)?
+        .get(slot)
+        .copied()
+        .filter(|_| pad < 8)
 }
 
 /// A length in beats as a pad shows it: 1/4, 3/4, 2.
@@ -211,7 +251,14 @@ impl DeckPads {
 
     /// Pad `pad` pressed (`down`) or let go in `mode`, with SHIFT held or not, on a
     /// deck in state `d`: what the deck is told.
-    pub fn press(&mut self, mode: PadMode, pad: usize, shift: bool, down: bool, d: &DeckSnap) -> Vec<EngineCmd> {
+    pub fn press(
+        &mut self,
+        mode: PadMode,
+        pad: usize,
+        shift: bool,
+        down: bool,
+        d: &DeckSnap,
+    ) -> Vec<EngineCmd> {
         if pad_fx_bank(mode).is_some() {
             return self.pad_fx(mode, pad, shift, down);
         }
@@ -248,7 +295,10 @@ impl DeckPads {
             };
             self.fx_held = Some((mode, pad as u8, shift));
             vec![EngineCmd::PadFx(Some(effect))]
-        } else if self.fx_held.is_some_and(|(m, p, _)| (m, p as usize) == (mode, pad)) {
+        } else if self
+            .fx_held
+            .is_some_and(|(m, p, _)| (m, p as usize) == (mode, pad))
+        {
             self.release_fx()
         } else {
             vec![]
@@ -296,7 +346,9 @@ impl DeckPads {
     /// picked). The others keep their unshifted light while SHIFT is held.
     pub fn shift_job(&self, mode: PadMode, pad: usize, d: &DeckSnap) -> bool {
         // Every pad FX pad has another effect with SHIFT.
-        pad_fx_bank(mode).is_some() || pad >= 6 || (mode == PadMode::Keyboard && self.keyboard_cue(d).is_some())
+        pad_fx_bank(mode).is_some()
+            || pad >= 6
+            || (mode == PadMode::Keyboard && self.keyboard_cue(d).is_some())
     }
 
     /// Pad `pad`'s light in `mode` (SHIFT's message: `shift`), with a track loaded.
@@ -327,7 +379,9 @@ impl DeckPads {
         }
         match self.action(mode, pad) {
             Some(S(0)) if mode == PadMode::Keyboard => Light::Flash,
-            Some(S(n)) if mode == PadMode::KeyShift && n as f64 == d.key_shift.round() => Light::Flash,
+            Some(S(n)) if mode == PadMode::KeyShift && n as f64 == d.key_shift.round() => {
+                Light::Flash
+            }
             Some(PadAction::KeySync) | None => Light::Off,
             Some(_) => Light::On,
         }
@@ -386,16 +440,33 @@ mod tests {
         let a = PAD_FX_BANKS[0][0];
         let j = PAD_FX_BANKS[0][9];
         // Pad 1 down: effect A on, and its light flashes; the others are lit.
-        assert_eq!(p.press(PadMode::PadFx1, 0, false, true, &d), vec![EngineCmd::PadFx(Some(a))]);
+        assert_eq!(
+            p.press(PadMode::PadFx1, 0, false, true, &d),
+            vec![EngineCmd::PadFx(Some(a))]
+        );
         assert_eq!(p.light(PadMode::PadFx1, 0, false, &d), Light::Flash);
         assert_eq!(p.light(PadMode::PadFx1, 1, false, &d), Light::On);
-        assert_eq!(p.light(PadMode::PadFx1, 0, true, &d), Light::On, "SHIFT's is another");
-        assert_eq!(p.light(PadMode::PadFx2, 0, false, &d), Light::On, "and bank 2's");
+        assert_eq!(
+            p.light(PadMode::PadFx1, 0, true, &d),
+            Light::On,
+            "SHIFT's is another"
+        );
+        assert_eq!(
+            p.light(PadMode::PadFx2, 0, false, &d),
+            Light::On,
+            "and bank 2's"
+        );
         // SHIFT + pad 2 takes over: letting pad 1 go then does nothing.
-        assert_eq!(p.press(PadMode::PadFx1, 1, true, true, &d), vec![EngineCmd::PadFx(Some(j))]);
+        assert_eq!(
+            p.press(PadMode::PadFx1, 1, true, true, &d),
+            vec![EngineCmd::PadFx(Some(j))]
+        );
         assert!(p.press(PadMode::PadFx1, 0, false, false, &d).is_empty());
         assert_eq!(p.light(PadMode::PadFx1, 1, true, &d), Light::Flash);
-        assert_eq!(p.press(PadMode::PadFx1, 1, true, false, &d), vec![EngineCmd::PadFx(None)]);
+        assert_eq!(
+            p.press(PadMode::PadFx1, 1, true, false, &d),
+            vec![EngineCmd::PadFx(None)]
+        );
         assert_eq!(p.fx_held, None);
         assert_eq!(p.light(PadMode::PadFx1, 1, true, &d), Light::On);
         // SHIFT turns no page here, and every shifted pad has a light of its own.
@@ -403,8 +474,14 @@ mod tests {
         assert!(p.shift_job(PadMode::PadFx2, 0, &d));
         // Bank 2's first pad, pressed with SHIFT (effect Y) and let go after SHIFT.
         let y = PAD_FX_BANKS[1][8];
-        assert_eq!(p.press(PadMode::PadFx2, 0, true, true, &d), vec![EngineCmd::PadFx(Some(y))]);
-        assert_eq!(p.press(PadMode::PadFx2, 0, false, false, &d), vec![EngineCmd::PadFx(None)]);
+        assert_eq!(
+            p.press(PadMode::PadFx2, 0, true, true, &d),
+            vec![EngineCmd::PadFx(Some(y))]
+        );
+        assert_eq!(
+            p.press(PadMode::PadFx2, 0, false, false, &d),
+            vec![EngineCmd::PadFx(None)]
+        );
         // Held when the pads change mode: let go then, and its own release is nothing.
         p.press(PadMode::PadFx2, 3, false, true, &d);
         assert_eq!(p.release_fx(), vec![EngineCmd::PadFx(None)]);
@@ -434,14 +511,30 @@ mod tests {
         assert!(p.press(PadMode::Keyboard, 2, false, true, &d).is_empty());
         assert!(p.press(PadMode::Keyboard, 2, false, false, &d).is_empty());
         assert_eq!(p.keyboard_cue(&d), Some(2));
-        assert_eq!(p.light(PadMode::Keyboard, 4, false, &d), Light::Flash, "the root");
+        assert_eq!(
+            p.light(PadMode::Keyboard, 4, false, &d),
+            Light::Flash,
+            "the root"
+        );
         assert_eq!(p.light(PadMode::Keyboard, 5, false, &d), Light::On);
         // Pad 2 (top row, second) is +5: shift, then the hot cue, down and up.
         let down = p.press(PadMode::Keyboard, 1, false, true, &d);
         assert_eq!(shift_of(&down), Some(5.0));
-        assert!(matches!(down[1], EngineCmd::Hotcue { slot: 2, press: Press::Down }));
+        assert!(matches!(
+            down[1],
+            EngineCmd::Hotcue {
+                slot: 2,
+                press: Press::Down
+            }
+        ));
         let up = p.press(PadMode::Keyboard, 1, false, false, &d);
-        assert!(matches!(up[..], [EngineCmd::Hotcue { slot: 2, press: Press::Up }]));
+        assert!(matches!(
+            up[..],
+            [EngineCmd::Hotcue {
+                slot: 2,
+                press: Press::Up
+            }]
+        ));
         // A new track: pick again.
         assert_eq!(p.keyboard_cue(&loaded(2)), None);
     }
@@ -453,7 +546,16 @@ mod tests {
         let cmds = p.press(PadMode::Keyboard, 5, false, true, &d);
         assert!(matches!(
             cmds[..],
-            [EngineCmd::Hotcue { slot: 5, press: Press::Down }, EngineCmd::Hotcue { slot: 5, press: Press::Up }]
+            [
+                EngineCmd::Hotcue {
+                    slot: 5,
+                    press: Press::Down
+                },
+                EngineCmd::Hotcue {
+                    slot: 5,
+                    press: Press::Up
+                }
+            ]
         ));
         assert_eq!(p.keyboard_cue(&d), Some(5));
     }
@@ -468,15 +570,28 @@ mod tests {
         p.press(PadMode::Keyboard, 6, true, true, &d);
         p.press(PadMode::Keyboard, 6, true, true, &d);
         assert_eq!(p.keyboard_page, 0);
-        assert_eq!(p.light(PadMode::Keyboard, 6, true, &d), Light::Off, "no page before");
-        assert_eq!(shift_of(&p.press(PadMode::Keyboard, 0, false, true, &d)), Some(12.0));
+        assert_eq!(
+            p.light(PadMode::Keyboard, 6, true, &d),
+            Light::Off,
+            "no page before"
+        );
+        assert_eq!(
+            shift_of(&p.press(PadMode::Keyboard, 0, false, true, &d)),
+            Some(12.0)
+        );
         // SHIFT + pad 8 to the last keyboard page (4), not key shift's page 5.
         for _ in 0..5 {
             p.press(PadMode::Keyboard, 7, true, true, &d);
         }
         assert_eq!(p.keyboard_page, 3);
-        assert_eq!(shift_of(&p.press(PadMode::Keyboard, 3, false, true, &d)), Some(-9.0));
-        assert!(p.press(PadMode::Keyboard, 4, false, true, &d).is_empty(), "no note there");
+        assert_eq!(
+            shift_of(&p.press(PadMode::Keyboard, 3, false, true, &d)),
+            Some(-9.0)
+        );
+        assert!(
+            p.press(PadMode::Keyboard, 4, false, true, &d).is_empty(),
+            "no note there"
+        );
         // SHIFT + pad 3 drops the cue: picking again.
         p.press(PadMode::Keyboard, 2, true, true, &d);
         assert_eq!(p.keyboard_cue(&d), None);
@@ -487,19 +602,41 @@ mod tests {
     fn key_shift_pads_set_and_step_the_key() {
         let mut p = DeckPads::default();
         let mut d = loaded(1);
-        assert_eq!(shift_of(&p.press(PadMode::KeyShift, 7, false, true, &d)), Some(3.0));
-        assert!(p.press(PadMode::KeyShift, 7, false, false, &d).is_empty(), "nothing on release");
+        assert_eq!(
+            shift_of(&p.press(PadMode::KeyShift, 7, false, true, &d)),
+            Some(3.0)
+        );
+        assert!(
+            p.press(PadMode::KeyShift, 7, false, false, &d).is_empty(),
+            "nothing on release"
+        );
         d.key_shift = 3.0;
-        assert_eq!(p.light(PadMode::KeyShift, 7, false, &d), Light::Flash, "the key now");
+        assert_eq!(
+            p.light(PadMode::KeyShift, 7, false, &d),
+            Light::Flash,
+            "the key now"
+        );
         assert_eq!(p.light(PadMode::KeyShift, 4, false, &d), Light::On);
         for _ in 0..3 {
             p.press(PadMode::KeyShift, 7, true, true, &d);
         }
         assert_eq!(p.key_shift_page, 4);
-        assert!(matches!(p.press(PadMode::KeyShift, 2, false, true, &d)[..], [EngineCmd::KeyShiftBy(7.0)]));
-        assert!(matches!(p.press(PadMode::KeyShift, 5, false, true, &d)[..], [EngineCmd::KeyShiftBy(-1.0)]));
-        assert_eq!(shift_of(&p.press(PadMode::KeyShift, 4, false, true, &d)), Some(0.0));
-        assert!(p.press(PadMode::KeyShift, 0, false, true, &d).is_empty(), "key sync: not yet");
+        assert!(matches!(
+            p.press(PadMode::KeyShift, 2, false, true, &d)[..],
+            [EngineCmd::KeyShiftBy(7.0)]
+        ));
+        assert!(matches!(
+            p.press(PadMode::KeyShift, 5, false, true, &d)[..],
+            [EngineCmd::KeyShiftBy(-1.0)]
+        ));
+        assert_eq!(
+            shift_of(&p.press(PadMode::KeyShift, 4, false, true, &d)),
+            Some(0.0)
+        );
+        assert!(
+            p.press(PadMode::KeyShift, 0, false, true, &d).is_empty(),
+            "key sync: not yet"
+        );
         assert_eq!(p.light(PadMode::KeyShift, 0, false, &d), Light::Off);
     }
 }

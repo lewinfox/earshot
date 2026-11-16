@@ -319,10 +319,14 @@ pub const ART_SIZE: u32 = 96;
 /// A background worker that reads tracks' embedded covers, one at a time, and sends
 /// each as an `Event::Art` (`None` when the file has none). Send it track ids.
 pub fn start_art_loader(reader: Reader, sink: Sink) -> Mailbox<i64> {
-    background::serve("art", || {}, move |id| {
-        let art = reader.track_location(id).ok().and_then(|at| cover(&at));
-        sink(Event::Art(id, art));
-    })
+    background::serve(
+        "art",
+        || {},
+        move |id| {
+            let art = reader.track_location(id).ok().and_then(|at| cover(&at));
+            sink(Event::Art(id, art));
+        },
+    )
 }
 
 /// The file's cover, cropped to a square and scaled down.

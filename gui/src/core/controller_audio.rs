@@ -86,7 +86,9 @@ mod linux {
             let card = match seq.get_any_client_info(client).map(|i| i.get_card()) {
                 Ok(Ok(card)) => card,
                 other => {
-                    eprintln!("[init] controller: {p:?} (client {client}): not on a card: {other:?}");
+                    eprintln!(
+                        "[init] controller: {p:?} (client {client}): not on a card: {other:?}"
+                    );
                     return None;
                 }
             };
@@ -95,8 +97,14 @@ mod linux {
                 eprintln!("[init] controller: {p:?} is on card {card}, which doesn't play audio");
                 return None;
             }
-            let id = std::fs::read_to_string(dir.join("id")).ok()?.trim().to_string();
-            eprintln!("[init] controller: {p:?} is on card {card} ({id}); its playback now: {}", card_state(card));
+            let id = std::fs::read_to_string(dir.join("id"))
+                .ok()?
+                .trim()
+                .to_string();
+            eprintln!(
+                "[init] controller: {p:?} is on card {card} ({id}); its playback now: {}",
+                card_state(card)
+            );
             Some(ControllerAudio {
                 card,
                 device: format!("alsa:hw:CARD={id},DEV=0"),
@@ -128,7 +136,10 @@ mod linux {
         format!(
             "{}; {}",
             pick(&status, &["state", "owner_pid"]),
-            pick(&read("hw_params"), &["format", "channels", "rate", "period_size", "buffer_size"])
+            pick(
+                &read("hw_params"),
+                &["format", "channels", "rate", "period_size", "buffer_size"]
+            )
         )
     }
 
@@ -164,7 +175,12 @@ mod linux {
     /// Take the card's reservation, asking whoever holds it (PipeWire) to let go.
     pub fn reserve(c: &ControllerAudio) -> Result<Reservation, String> {
         let t0 = std::time::Instant::now();
-        eprintln!("[init] controller: asking for {} (card {}); its playback now: {}", c.id, c.card, card_state(c.card));
+        eprintln!(
+            "[init] controller: asking for {} (card {}); its playback now: {}",
+            c.id,
+            c.card,
+            card_state(c.card)
+        );
         let r = reserve_inner(c);
         eprintln!(
             "[init] controller: reservation after {:.1} ms: {}; its playback now: {}",
@@ -185,10 +201,16 @@ mod linux {
         let path = format!("/org/freedesktop/ReserveDevice1/Audio{}", c.card);
         let conn = zbus::blocking::Connection::session().map_err(e)?;
         conn.object_server()
-            .at(path.as_str(), Holder { device: format!("hw:{}", c.id) })
+            .at(
+                path.as_str(),
+                Holder {
+                    device: format!("hw:{}", c.id),
+                },
+            )
             .map_err(e)?;
         let dbus = zbus::blocking::fdo::DBusProxy::new(&conn).map_err(|x| x.to_string())?;
-        let wanted = zbus::names::WellKnownName::try_from(name.as_str()).map_err(|x| x.to_string())?;
+        let wanted =
+            zbus::names::WellKnownName::try_from(name.as_str()).map_err(|x| x.to_string())?;
         let ask = |flags: RequestNameFlags| {
             dbus.request_name(wanted.clone(), flags.into())
                 .map_err(|x| x.to_string())
@@ -211,7 +233,10 @@ mod linux {
                     return Err(format!("the program using {} wouldn't let it go", c.id));
                 }
                 let flags = RequestNameFlags::DoNotQueue | RequestNameFlags::ReplaceExisting;
-                match dbus.request_name(wanted, flags).map_err(|x| x.to_string())? {
+                match dbus
+                    .request_name(wanted, flags)
+                    .map_err(|x| x.to_string())?
+                {
                     RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner => {}
                     other => return Err(format!("couldn't reserve {}: {other:?}", c.id)),
                 }
@@ -245,7 +270,11 @@ mod linux {
             .status()
             .map_err(|e| format!("couldn't run wpctl: {e}"))?
             .success();
-        if ok { Ok(()) } else { Err("wpctl set-profile failed".into()) }
+        if ok {
+            Ok(())
+        } else {
+            Err("wpctl set-profile failed".into())
+        }
     }
 
     impl Drop for ForcedOff {
@@ -304,8 +333,14 @@ impl Hold {
         if found == self.found {
             return false;
         }
-        eprintln!("[init] controller: sound card was {:?}, now {:?}", self.found, found);
-        *self = Hold { found, ..Hold::default() };
+        eprintln!(
+            "[init] controller: sound card was {:?}, now {:?}",
+            self.found, found
+        );
+        *self = Hold {
+            found,
+            ..Hold::default()
+        };
         true
     }
 
@@ -345,7 +380,10 @@ mod tests {
     #[test]
     fn a_port_names_its_client() {
         assert_eq!(port_client("DDJ-400:DDJ-400 MIDI 1 20:0"), Some(20));
-        assert_eq!(port_client("Midi Through:Midi Through Port-0 14:0"), Some(14));
+        assert_eq!(
+            port_client("Midi Through:Midi Through Port-0 14:0"),
+            Some(14)
+        );
         assert_eq!(port_client("no numbers"), None);
     }
 

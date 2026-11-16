@@ -16,7 +16,11 @@ fn look(h: &mut H) {
 fn the_top_bar_says_when_the_audio_cant_keep_up_and_stems_wait() {
     let mut h = start_with("cpu-strain", stand_in);
     look(&mut h);
-    for label in ["audio struggling", "background work on hold", "low-power mode"] {
+    for label in [
+        "audio struggling",
+        "background work on hold",
+        "low-power mode",
+    ] {
         assert!(h.query_by_label_contains(label).is_none(), "{label}");
     }
 
@@ -26,7 +30,10 @@ fn the_top_bar_says_when_the_audio_cant_keep_up_and_stems_wait() {
     stats(&h).stats().overruns.store(2, Relaxed);
     look(&mut h);
     assert!(h.query_by_label_contains("audio struggling").is_some());
-    assert!(h.query_by_label_contains("background work on hold").is_some());
+    assert!(
+        h.query_by_label_contains("background work on hold")
+            .is_some()
+    );
     assert!(
         h.state()
             .notices
@@ -56,7 +63,10 @@ fn the_top_bar_says_when_the_audio_cant_keep_up_and_stems_wait() {
     stats(&h).stats().behind.store(false, Relaxed);
     look(&mut h);
     assert!(h.query_by_label_contains("audio struggling").is_none());
-    assert!(h.query_by_label_contains("background work on hold").is_none());
+    assert!(
+        h.query_by_label_contains("background work on hold")
+            .is_none()
+    );
 
     // The system holding the CPU back, as the power watch reports it.
     h.state_mut().hud.power = Some(crate::core::power::Warning {
@@ -65,7 +75,10 @@ fn the_top_bar_says_when_the_audio_cant_keep_up_and_stems_wait() {
     });
     look(&mut h);
     assert!(h.query_by_label_contains("low-power mode").is_some());
-    assert!(h.query_by_label_contains("background work on hold").is_some());
+    assert!(
+        h.query_by_label_contains("background work on hold")
+            .is_some()
+    );
 }
 
 /// Short of resources, full analysis waits in its queue (the worker isn't started
@@ -96,7 +109,10 @@ fn short_of_resources_analysis_is_quick_only_and_the_full_one_runs_once_there_is
         detail: "The power profile is low-power.".into(),
     });
     look(&mut h);
-    assert!(h.query_by_label_contains("background work on hold").is_some());
+    assert!(
+        h.query_by_label_contains("background work on hold")
+            .is_some()
+    );
 
     let tracks: Vec<i64> = h.state().index.tracks().iter().map(|t| t.id).collect();
     h.state_mut().dispatch(
@@ -121,12 +137,13 @@ fn short_of_resources_analysis_is_quick_only_and_the_full_one_runs_once_there_is
     // Room again: what was queued runs, and replaces the quick grids.
     h.state_mut().hud.power = None;
     look(&mut h);
-    assert!(h.query_by_label_contains("background work on hold").is_none());
+    assert!(
+        h.query_by_label_contains("background work on hold")
+            .is_none()
+    );
     settle_until(&mut h, |a| {
-        a.index
-            .tracks()
-            .iter()
-            .all(|t| t.grid_source == Some(GridSource::Analysis) && a.index.status(t) == Status::Done)
+        a.index.tracks().iter().all(|t| {
+            t.grid_source == Some(GridSource::Analysis) && a.index.status(t) == Status::Done
+        })
     });
 }
-

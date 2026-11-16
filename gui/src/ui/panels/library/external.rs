@@ -161,7 +161,11 @@ impl ExternalUi {
                 let mut path = parent.clone().unwrap_or_default();
                 path.push(i);
                 let folder = n.kind == NodeKind::Folder;
-                out.push(((id, Some(path.clone())), parent.clone().map(|p| (id, Some(p))), folder));
+                out.push((
+                    (id, Some(path.clone())),
+                    parent.clone().map(|p| (id, Some(p))),
+                    folder,
+                ));
                 if folder && ui.open_nodes.contains(&(id, path.clone())) {
                     walk(ui, id, &n.children, Some(path), out);
                 }
@@ -596,7 +600,11 @@ impl ExternalUi {
 
     /// Move the list's focus (the keyboard, the browse knob).
     pub fn move_focus(&mut self, delta: i32) {
-        let rows = self.rows.as_ref().map(|(_, r)| r.clone()).unwrap_or_default();
+        let rows = self
+            .rows
+            .as_ref()
+            .map(|(_, r)| r.clone())
+            .unwrap_or_default();
         self.scroll_to = self.sel.move_focus(delta, &rows);
     }
 

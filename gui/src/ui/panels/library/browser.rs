@@ -502,7 +502,12 @@ impl LibraryUi {
 
     /// The browse knob's highlight, if it's on `row`.
     fn outline(&self, ui: &Ui, r: &egui::Response, row: &AllRow) {
-        super::outline(ui, r, self.nav_cursor.as_ref() == Some(row), self.nav_scroll);
+        super::outline(
+            ui,
+            r,
+            self.nav_cursor.as_ref() == Some(row),
+            self.nav_scroll,
+        );
     }
 
     /// The sessions under "History", newest first: when each started, and how many

@@ -141,7 +141,10 @@ impl Panel for StemsPanel<'_> {
                             if ui.button("Solo").clicked() {
                                 for o in 0..COUNT {
                                     let set = Set::from_bool(o != s);
-                                    cx.send((target(cx), EngineCmd::StemMute { stem: o as u8, set }));
+                                    cx.send((
+                                        target(cx),
+                                        EngineCmd::StemMute { stem: o as u8, set },
+                                    ));
                                 }
                             }
                         });

@@ -95,7 +95,9 @@ pub enum DeckCmd {
     /// CUE/LOOP CALL: go to the memory cue before (`forward` false) or after the
     /// playhead; while looping, halve (double) the loop instead. The UI finds the cue
     /// (it has the list).
-    CallMemory { forward: bool },
+    CallMemory {
+        forward: bool,
+    },
     /// Delete the memory cue or loop just called: the one at the cue point (or the
     /// loop playing). The UI finds it.
     DeleteCalledMemory,
@@ -166,10 +168,7 @@ pub enum AppCmd {
     },
     /// A tap on effect unit `unit`'s TAP button, at `at` (when the message came in):
     /// from the second tap on, the unit runs on the tapped tempo.
-    FxTap {
-        unit: usize,
-        at: std::time::Instant,
-    },
+    FxTap { unit: usize, at: std::time::Instant },
     /// Forget the analysis failures counted so far.
     DismissFailures,
     /// Stop all background analysis (a deck's track carries on).

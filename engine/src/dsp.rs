@@ -453,8 +453,16 @@ mod tests {
     #[test]
     fn the_filter_eases_in_from_the_centre() {
         let near = |a: f64, b: f64| (a / b - 1.0).abs() < 0.05;
-        assert!(near(DjFilter::cutoff(-0.25), 13_800.0), "{}", DjFilter::cutoff(-0.25));
-        assert!(near(DjFilter::cutoff(-0.5), 4_470.0), "{}", DjFilter::cutoff(-0.5));
+        assert!(
+            near(DjFilter::cutoff(-0.25), 13_800.0),
+            "{}",
+            DjFilter::cutoff(-0.25)
+        );
+        assert!(
+            near(DjFilter::cutoff(-0.5), 4_470.0),
+            "{}",
+            DjFilter::cutoff(-0.5)
+        );
         assert!(near(DjFilter::cutoff(-1.0), 50.0));
         assert!(near(DjFilter::cutoff(1.0), 10_000.0));
     }

@@ -10,7 +10,12 @@ fn main() {
     println!("cargo:rerun-if-changed={}", root.display());
     let mut entries = vec![];
     let mut makers: Vec<_> = std::fs::read_dir(&root)
-        .map(|d| d.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir()).collect())
+        .map(|d| {
+            d.filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect()
+        })
         .unwrap_or_default();
     makers.sort();
     for dir in makers {
@@ -36,7 +41,12 @@ fn main() {
     let mut out = String::from("&[\n");
     for (maker, model, path) in entries {
         println!("cargo:rerun-if-changed={}", path.display());
-        writeln!(out, "    ({maker:?}, {model:?}, include_str!({:?})),", path.display().to_string()).unwrap();
+        writeln!(
+            out,
+            "    ({maker:?}, {model:?}, include_str!({:?})),",
+            path.display().to_string()
+        )
+        .unwrap();
     }
     out.push_str("]\n");
     let dest = Path::new(&std::env::var("OUT_DIR").unwrap()).join("bundled_controllers.rs");

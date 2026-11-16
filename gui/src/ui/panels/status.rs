@@ -270,7 +270,10 @@ impl TopBar<'_> {
         };
         if let Some((card, why)) = self.controller_busy {
             if ui
-                .add(Pill::new(&format!("Take {card} from PipeWire"), Intent::Warning))
+                .add(Pill::new(
+                    &format!("Take {card} from PipeWire"),
+                    Intent::Warning,
+                ))
                 .on_hover_text(format!(
                     "Earshot couldn't open {card}'s sound card ({why}). Click to turn off \
                      PipeWire's use of it (back on when earshot quits) and play to it"
@@ -299,7 +302,10 @@ impl TopBar<'_> {
         let midi = if devices.is_empty() {
             "MIDI: none".to_string()
         } else {
-            let names: Vec<&str> = devices.iter().map(|d| d.name.split(':').next().unwrap_or(&d.name)).collect();
+            let names: Vec<&str> = devices
+                .iter()
+                .map(|d| d.name.split(':').next().unwrap_or(&d.name))
+                .collect();
             format!("MIDI: {}", names.join(", "))
         };
         let intent = if devices.is_empty() {
@@ -325,7 +331,9 @@ impl TopBar<'_> {
                         ui.label("No mappings yet: make one in Controller mode.");
                     }
                     for (m, label) in self.mappings {
-                        if ui.radio(current.as_deref() == Some(m.as_str()), label).clicked()
+                        if ui
+                            .radio(current.as_deref() == Some(m.as_str()), label)
+                            .clicked()
                             && current.as_deref() != Some(m.as_str())
                         {
                             cx.send(AppCmd::UseMapping {

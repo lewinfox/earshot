@@ -1072,8 +1072,9 @@ impl Supervisor {
 /// the supervisor decides for a process).
 fn stand_in_refusal(answer: StandIn, expect: &[(String, u32)]) -> Option<String> {
     let hello = json!({ "type": "hello", "protocol": PROTOCOL });
-    answer(&hello).into_iter().find_map(|reply| {
-        match serde_json::from_value::<Reply>(reply) {
+    answer(&hello)
+        .into_iter()
+        .find_map(|reply| match serde_json::from_value::<Reply>(reply) {
             Ok(Reply::Hello {
                 protocol,
                 analysers,
@@ -1087,8 +1088,7 @@ fn stand_in_refusal(answer: StandIn, expect: &[(String, u32)]) -> Option<String>
                 wrong_versions(expect, &analysers)
             }),
             _ => None,
-        }
-    })?
+        })?
 }
 
 /// One of a stand-in worker's messages about a job, as the job hears it.
@@ -1115,9 +1115,7 @@ fn stand_in_msg(reply: serde_json::Value) -> Option<JobMsg> {
         Ok(Reply::Cancelled { .. }) => JobMsg::End(Err(CANCELLED.into())),
         Ok(Reply::Error { error, .. }) => JobMsg::End(Err(error)),
         Ok(Reply::Hello { .. } | Reply::Heartbeat) => return None,
-        Err(e) => JobMsg::End(Err(format!(
-            "the worker sent something unreadable: {e}"
-        ))),
+        Err(e) => JobMsg::End(Err(format!("the worker sent something unreadable: {e}"))),
     })
 }
 
@@ -1312,9 +1310,7 @@ for line in sys.stdin:
     fn answer_as(r: &serde_json::Value, grid_version: u32) -> Vec<serde_json::Value> {
         let id = r["id"].clone();
         let started = json!({"id": id, "type": "started"});
-        let progress = |analyser: &str| {
-            json!({"id": id, "type": "progress", "analyser": analyser, "fraction": 0.5})
-        };
+        let progress = |analyser: &str| json!({"id": id, "type": "progress", "analyser": analyser, "fraction": 0.5});
         let result = |analyser: &str, version: u32, data: serde_json::Value| {
             json!({"id": id, "type": "result", "analyser": analyser, "version": version,
                 "data": data})
@@ -1337,12 +1333,19 @@ for line in sys.stdin:
                 let stem = std::path::Path::new(name)
                     .file_stem()
                     .map_or("track".into(), |s| s.to_string_lossy().into_owned());
-                let (bpm, level) = (r["target_bpm"].as_f64().unwrap(), r["level"].as_f64().unwrap());
+                let (bpm, level) = (
+                    r["target_bpm"].as_f64().unwrap(),
+                    r["level"].as_f64().unwrap(),
+                );
                 let out = PathBuf::from(r["out_dir"].as_str().unwrap())
                     .join(format!("{stem} (straightened {bpm} bpm).wav"));
                 std::fs::copy(wav, &out).expect("copy the wav");
                 let floats = |v: &serde_json::Value| -> Vec<f64> {
-                    v.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect()
+                    v.as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|x| x.as_f64().unwrap())
+                        .collect()
                 };
                 let beats = floats(&r["beats"]);
                 let period = 60.0 / bpm * level;
@@ -1367,22 +1370,34 @@ for line in sys.stdin:
                 vec![
                     started,
                     progress("straighten"),
-                    result("straighten", 1, json!({
+                    result(
+                        "straighten",
+                        1,
+                        json!({
                         "output": out, "bpm": bpm, "level": level, "engine": r["engine"],
                         "grid": {"target_bpm": bpm, "source_beats": beats, "target_beats": target},
-                        "duration": duration, "bitrate_kbps": 320})),
+                        "duration": duration, "bitrate_kbps": 320}),
+                    ),
                     progress("measure"),
-                    result("measure", 1, json!({"analysis": chart_of(&jitter, &down, duration, &[])})),
+                    result(
+                        "measure",
+                        1,
+                        json!({"analysis": chart_of(&jitter, &down, duration, &[])}),
+                    ),
                     done,
                 ]
             }
             "analyse" => vec![
                 started,
                 progress("grid"),
-                result("grid", 3, json!({
+                result(
+                    "grid",
+                    3,
+                    json!({
                     "detector": "fake", "kick_shift_ms": -20.0, "first_beat": 0.5,
                     "grid": {"kind": "constant", "bpm": 124.0, "downbeat": 0.5, "steady": true,
-                        "spread_ms": 1.0, "drift_pct": 0.1}})),
+                        "spread_ms": 1.0, "drift_pct": 0.1}}),
+                ),
                 done,
             ],
             other => vec![json!({"id": id, "type": "error",
@@ -1447,7 +1462,11 @@ for line in sys.stdin:
         }
         let down: Vec<bool> = (0..beats.len()).map(|j| j % 4 == 0).collect();
         let mut c = chart_of(&beats, &down, duration, &[beats[5] + 0.11, beats[17] + 0.2]);
-        let cut = beats.iter().position(|b| *b > duration * 2.0 / 3.0).unwrap() - 1;
+        let cut = beats
+            .iter()
+            .position(|b| *b > duration * 2.0 / 3.0)
+            .unwrap()
+            - 1;
         let curve: Vec<f64> = c["bpm_curve"]
             .as_array()
             .unwrap()

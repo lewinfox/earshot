@@ -22,7 +22,7 @@ use super::panels::deck::{DeckInfo, PendingLoad};
 use super::panels::flow::FlowUi;
 use super::panels::library::browser::Scope;
 use super::panels::library::tracks::take_wanted_art;
-use super::panels::library::{LibraryPane, Level, LoadedFrom, Nav, drag};
+use super::panels::library::{Level, LibraryPane, LoadedFrom, Nav, drag};
 use super::panels::status::{AnalysisSummary, Meter, StatusLine, TopBar};
 use super::panels::{CoreView, Cx, EngineFrame, Panel, PreviewState};
 use super::prefs::{self, UiPrefs};
@@ -34,12 +34,12 @@ use crate::core::collections::{
     CollectionCmd, CollectionId, CollectionKind, Collections, FlowCmd, FlowGraph, Section,
 };
 use crate::core::command::{self, AppCmd, AudioCmd, Command, DeckCmd, PreviewCmd, ViewCmd};
+use crate::core::controller_audio;
 use crate::core::edit;
 use crate::core::history::{DeckNow, History, PlayEvent};
 use crate::core::index::{LibraryCmd, LibraryIndex};
 use crate::core::keymap::{self, Keymap};
 use crate::core::library::{self, Library};
-use crate::core::controller_audio;
 use crate::core::midi::{self, Midi};
 use crate::core::notice::{self, Notices};
 use crate::core::player::{self, AudioSettings, DECKS, Player};
@@ -323,9 +323,7 @@ impl EarshotApp {
         }
         if watching {
             let sink = sink.clone();
-            crate::core::drives::watch(drives_stop.0.clone(), move |d| {
-                sink(Event::Drives(d))
-            });
+            crate::core::drives::watch(drives_stop.0.clone(), move |d| sink(Event::Drives(d)));
         }
         let analyser =
             Analyser::start(sink.clone(), player.clone(), store.clone(), services.worker);
@@ -530,9 +528,17 @@ impl EarshotApp {
     /// Start audio again (on the controller's sound card, if one's connected).
     #[track_caller]
     fn reopen_audio(&mut self) {
-        eprintln!("[init] audio: (re)opening (asked from {})", std::panic::Location::caller());
+        eprintln!(
+            "[init] audio: (re)opening (asked from {})",
+            std::panic::Location::caller()
+        );
         self.preview = None;
-        self.audio = start_audio(&self.player, &self.settings.audio, self.null_audio, &mut self.controller);
+        self.audio = start_audio(
+            &self.player,
+            &self.settings.audio,
+            self.null_audio,
+            &mut self.controller,
+        );
         self.reread_monitor();
     }
 
@@ -574,15 +580,22 @@ impl EarshotApp {
         }
         self.phones_cue_only_at = Some(v);
         let on = learned.all().into_iter().any(|(_, l)| {
-            l.display_only && l.control == crate::core::bus::Control::Master(earshot_engine::MasterParam::HeadMix)
+            l.display_only
+                && l.control
+                    == crate::core::bus::Control::Master(earshot_engine::MasterParam::HeadMix)
         });
-        self.dispatch(Command::Mixer(crate::core::command::MixerCmd::PhonesCueOnly(on)));
+        self.dispatch(Command::Mixer(
+            crate::core::command::MixerCmd::PhonesCueOnly(on),
+        ));
     }
 
     /// (Re)open every MIDI input, e.g. after plugging the controller in.
     #[track_caller]
     fn connect_midi(&mut self) {
-        eprintln!("[init] MIDI: connecting (asked from {})", std::panic::Location::caller());
+        eprintln!(
+            "[init] MIDI: connecting (asked from {})",
+            std::panic::Location::caller()
+        );
         // Close the old ports first so they can be reopened.
         self.midi = Midi::default();
         let lane = self.player.lock().unwrap().midi.clone();
@@ -596,18 +609,28 @@ impl EarshotApp {
             store.find(port, usb, chosen.get(&key).map(String::as_str))
         };
         (self.midi, self.midi_devices) =
-            midi::connect_all(&self.sink, &lane, &learned, &self.lights_monitor, &choose).unwrap_or_else(|e| {
-                eprintln!("MIDI: {e}");
-                (Midi::default(), vec![])
-            });
+            midi::connect_all(&self.sink, &lane, &learned, &self.lights_monitor, &choose)
+                .unwrap_or_else(|e| {
+                    eprintln!("MIDI: {e}");
+                    (Midi::default(), vec![])
+                });
         self.midi_ports = self.midi_devices.iter().map(|p| p.name.clone()).collect();
-        self.mappings = store.models().iter().map(|p| (p.id.key(), p.label())).collect();
+        self.mappings = store
+            .models()
+            .iter()
+            .map(|p| (p.id.key(), p.label()))
+            .collect();
         self.prefs.set_controller(!self.midi_ports.is_empty());
         self.panels.controller.ports = self.midi_ports.clone();
         self.panels.controller.devices = self.midi_devices.clone();
-        self.panels.controller.set_active(self.midi_devices.iter().find_map(|p| p.mapping.clone()));
+        self.panels
+            .controller
+            .set_active(self.midi_devices.iter().find_map(|p| p.mapping.clone()));
         // A controller with a sound card came or went: play to it, or stop.
-        if self.controller.set(controller_audio::find(&self.midi_ports)) {
+        if self
+            .controller
+            .set(controller_audio::find(&self.midi_ports))
+        {
             self.reopen_audio();
         }
     }
@@ -852,12 +875,10 @@ impl EarshotApp {
                 self.prefs.controller_mappings.insert(device, mapping);
                 self.connect_midi();
             }
-            Command::App(AppCmd::TakeControllerAudio) => {
-                match self.controller.force() {
-                    Ok(()) => self.reopen_audio(),
-                    Err(e) => self.controller.error = Some(e),
-                }
-            }
+            Command::App(AppCmd::TakeControllerAudio) => match self.controller.force() {
+                Ok(()) => self.reopen_audio(),
+                Err(e) => self.controller.error = Some(e),
+            },
             Command::App(AppCmd::ControllerShows { control, value }) => {
                 // A button toggles what's shown on each press (the controller keeps
                 // its own state; it starts off, as the controller does).
@@ -1315,8 +1336,7 @@ impl EarshotApp {
             uses: &self.uses,
             loaded: &[],
         };
-        lib.suggest
-            .refresh(&view, &decks, selected);
+        lib.suggest.refresh(&view, &decks, selected);
     }
 
     /// Draw the window, collecting what it asks for.
@@ -1375,9 +1395,11 @@ impl EarshotApp {
                     audio: &self.audio,
                     alerts: &self.hud.alerts,
                     audio_note: self.audio_note.as_ref().map(|(n, _)| n.as_str()),
-                    controller_busy: self.controller.found.as_ref().and_then(|c| {
-                        Some((c.id.as_str(), self.controller.error.as_deref()?))
-                    }),
+                    controller_busy: self
+                        .controller
+                        .found
+                        .as_ref()
+                        .and_then(|c| Some((c.id.as_str(), self.controller.error.as_deref()?))),
                     midi_devices: &self.midi_devices,
                     mappings: &self.mappings,
                     analysis: &self.analysis,

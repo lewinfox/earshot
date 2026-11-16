@@ -602,8 +602,8 @@ impl FxUnit {
             self.echo_c.on.target = 1.0;
             self.releasing = self.releasing.saturating_sub(n);
             if self.releasing == 0 {
-                self.echo_c.on.target = (self.state.enabled && self.state.kind == FxKind::Echo)
-                    as u8 as f64;
+                self.echo_c.on.target =
+                    (self.state.enabled && self.state.kind == FxKind::Echo) as u8 as f64;
             }
         }
         self.trans.process(buf, clock, beats, &mut self.trans_c);

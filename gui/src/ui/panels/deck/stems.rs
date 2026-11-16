@@ -59,18 +59,12 @@ impl DeckUi {
         if !s.stems {
             let Some(track) = s.track_id else {
                 // Nothing loaded: hold the group's place.
-                ui.allocate_exact_size(
-                    vec2(whole, d.double()),
-                    egui::Sense::hover(),
-                );
+                ui.allocate_exact_size(vec2(whole, d.double()), egui::Sense::hover());
                 return;
             };
             if crate::core::outside::is_outside(track) {
                 // Library tracks only, for now.
-                ui.allocate_exact_size(
-                    vec2(whole, d.double()),
-                    egui::Sense::hover(),
-                );
+                ui.allocate_exact_size(vec2(whole, d.double()), egui::Sense::hover());
                 return;
             }
             let job = info.stems_job;
@@ -82,13 +76,9 @@ impl DeckUi {
             };
             let r = ui
                 .add(
-                    HwButton::new(
-                        &label,
-                        THEME.loop_button,
-                        vec2(whole, d.double()),
-                    )
-                    .font(d.px(FONT_LOOP))
-                    .lit(job.is_some()),
+                    HwButton::new(&label, THEME.loop_button, vec2(whole, d.double()))
+                        .font(d.px(FONT_LOOP))
+                        .lit(job.is_some()),
                 )
                 .on_hover_text(match job {
                     Some(_) => "Calculating stems",

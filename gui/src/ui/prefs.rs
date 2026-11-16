@@ -158,9 +158,7 @@ impl UiPrefs {
     /// that hand plays now. Anything else as it is.
     pub fn layered(&self, control: Control) -> Control {
         match control {
-            Control::Deck(d, c) if d.index() < 2 => {
-                Control::Deck(self.active_deck(d.index()), c)
-            }
+            Control::Deck(d, c) if d.index() < 2 => Control::Deck(self.active_deck(d.index()), c),
             other => other,
         }
     }

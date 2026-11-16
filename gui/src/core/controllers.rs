@@ -21,7 +21,8 @@ use std::path::PathBuf;
 use super::midi::{ControllerFile, file_json, from_json};
 
 /// Each bundled file: its maker, its model (`None`: the maker's own file) and its text.
-const BUNDLED: &[(&str, Option<&str>, &str)] = include!(concat!(env!("OUT_DIR"), "/bundled_controllers.rs"));
+const BUNDLED: &[(&str, Option<&str>, &str)] =
+    include!(concat!(env!("OUT_DIR"), "/bundled_controllers.rs"));
 
 /// Where a mapping comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -145,7 +146,13 @@ pub fn device_key(port: &str, usb: Option<&str>) -> String {
 /// A port's name without ALSA's client and port numbers.
 fn port_name(port: &str) -> &str {
     match port.rsplit_once(' ') {
-        Some((head, tail)) if tail.split(':').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())) => head,
+        Some((head, tail))
+            if tail
+                .split(':')
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())) =>
+        {
+            head
+        }
         _ => port,
     }
 }
@@ -187,11 +194,20 @@ impl Store {
             .collect();
         let Some(root) = &self.mine else { return out };
         let mut makers: Vec<PathBuf> = std::fs::read_dir(root)
-            .map(|d| d.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir()).collect())
+            .map(|d| {
+                d.filter_map(Result::ok)
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+                    .collect()
+            })
             .unwrap_or_default();
         makers.sort();
         for dir in makers {
-            let maker = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let maker = dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             let mut files = vec![(None, dir.join(format!("{maker}.json")))];
             let mut models: Vec<PathBuf> = std::fs::read_dir(dir.join("controllers"))
                 .map(|d| d.filter_map(Result::ok).map(|e| e.path()).collect())
@@ -199,12 +215,18 @@ impl Store {
             models.sort();
             for p in models {
                 if p.extension().is_some_and(|e| e == "json") {
-                    let model = p.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                    let model = p
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
                     files.push((Some(model), p));
                 }
             }
             for (model, path) in files {
-                let Ok(text) = std::fs::read_to_string(&path) else { continue };
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
                 let id = MappingId {
                     source: Source::Mine,
                     maker: maker.clone(),
@@ -257,8 +279,18 @@ impl Store {
     /// The models' mappings (not the makers' own files): the user's first, then by
     /// maker and name.
     pub fn models(&self) -> Vec<Profile> {
-        let mut v: Vec<Profile> = self.all().into_iter().filter(|p| p.id.model.is_some()).collect();
-        v.sort_by_key(|p| (std::cmp::Reverse(p.id.source), p.id.maker.clone(), p.label()));
+        let mut v: Vec<Profile> = self
+            .all()
+            .into_iter()
+            .filter(|p| p.id.model.is_some())
+            .collect();
+        v.sort_by_key(|p| {
+            (
+                std::cmp::Reverse(p.id.source),
+                p.id.maker.clone(),
+                p.label(),
+            )
+        });
         v
     }
 
@@ -270,9 +302,9 @@ impl Store {
             if out.iter().any(|(m, _)| *m == p.id.maker) {
                 continue;
             }
-            let named = all
-                .iter()
-                .find(|q| q.id.maker == p.id.maker && q.id.model.is_none() && !q.head.name.is_empty());
+            let named = all.iter().find(|q| {
+                q.id.maker == p.id.maker && q.id.model.is_none() && !q.head.name.is_empty()
+            });
             let name = named.map_or_else(|| p.id.maker.clone(), |q| q.head.name.clone());
             out.push((p.id.maker.clone(), name));
         }
@@ -296,25 +328,35 @@ impl Store {
             return Some(p.clone());
         }
         let usb = usb.map(str::to_ascii_lowercase);
-        let by_usb = |p: &&Profile| usb.as_deref().is_some_and(|u| p.head.usb.iter().any(|x| x.eq_ignore_ascii_case(u)));
+        let by_usb = |p: &&Profile| {
+            usb.as_deref()
+                .is_some_and(|u| p.head.usb.iter().any(|x| x.eq_ignore_ascii_case(u)))
+        };
         let by_name = |p: &&Profile| p.head.names.iter().any(|n| port.contains(n.as_str()));
         let by_maker = |p: &&Profile| {
             let Some(vendor) = usb.as_deref().and_then(|u| u.split(':').next()) else {
                 return false;
             };
-            p.head
-                .usb
-                .iter()
-                .any(|x| x.strip_suffix(":*").is_some_and(|v| v.eq_ignore_ascii_case(vendor)))
+            p.head.usb.iter().any(|x| {
+                x.strip_suffix(":*")
+                    .is_some_and(|v| v.eq_ignore_ascii_case(vendor))
+            })
         };
         for s in [Source::Mine, Source::Bundled] {
-            let models = || all.iter().filter(move |p| p.id.source == s && p.id.model.is_some());
+            let models = || {
+                all.iter()
+                    .filter(move |p| p.id.source == s && p.id.model.is_some())
+            };
             if let Some(p) = models().find(by_usb).or_else(|| models().find(by_name)) {
                 return Some(p.clone());
             }
         }
         for s in [Source::Mine, Source::Bundled] {
-            if let Some(p) = all.iter().filter(|p| p.id.source == s && p.id.model.is_none()).find(by_maker) {
+            if let Some(p) = all
+                .iter()
+                .filter(|p| p.id.source == s && p.id.model.is_none())
+                .find(by_maker)
+            {
                 return Some(p.clone());
             }
         }
@@ -322,7 +364,12 @@ impl Store {
     }
 
     /// Write the user's file for `id`.
-    pub fn save(&self, id: &MappingId, head: &Head, own: &ControllerFile) -> Result<PathBuf, String> {
+    pub fn save(
+        &self,
+        id: &MappingId,
+        head: &Head,
+        own: &ControllerFile,
+    ) -> Result<PathBuf, String> {
         let path = self.path(id).ok_or("a built-in mapping can't be changed")?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -331,7 +378,8 @@ impl Store {
             Ok(serde_json::Value::Object(m)) => m,
             _ => serde_json::Map::new(),
         };
-        std::fs::write(&path, file_json(head, own)).map_err(|e| format!("{}: {e}", path.display()))?;
+        std::fs::write(&path, file_json(head, own))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         Ok(path)
     }
 
@@ -354,7 +402,11 @@ impl Store {
                 .filter(|(k, l)| base.inputs.get(k) != Some(l))
                 .map(|(k, l)| (*k, *l))
                 .collect(),
-            meters: if full.meters == base.meters { vec![] } else { full.meters.clone() },
+            meters: if full.meters == base.meters {
+                vec![]
+            } else {
+                full.meters.clone()
+            },
             start: p.own.start.clone(),
             start_every_ms: p.own.start_every_ms,
             mirror: p.own.mirror.clone(),
@@ -384,25 +436,41 @@ impl Store {
             model: Some(model_slug),
         };
         if self.path(&id).is_some_and(|p| p.exists()) {
-            return Err(format!("you have a mapping called {} already", model.trim()));
+            return Err(format!(
+                "you have a mapping called {} already",
+                model.trim()
+            ));
         }
         let usb = device.and_then(|(_, u)| u).map(str::to_ascii_lowercase);
         let known = self.makers().into_iter().find(|(m, _)| *m == maker_slug);
         // A maker earshot doesn't know: its own file, for what its models share.
         if known.is_none() {
-            let vendor = usb.as_deref().and_then(|u| u.split(':').next()).map(|v| format!("{v}:*"));
+            let vendor = usb
+                .as_deref()
+                .and_then(|u| u.split(':').next())
+                .map(|v| format!("{v}:*"));
             let head = Head {
                 name: maker.trim().to_string(),
                 usb: vendor.into_iter().collect(),
                 names: vec![],
             };
-            self.save(&MappingId { model: None, ..id.clone() }, &head, &ControllerFile::default())?;
+            self.save(
+                &MappingId {
+                    model: None,
+                    ..id.clone()
+                },
+                &head,
+                &ControllerFile::default(),
+            )?;
         }
         let maker_name = known.map_or_else(|| maker.trim().to_string(), |(_, n)| n);
         let head = Head {
             name: format!("{maker_name} {}", model.trim()),
             usb: usb.into_iter().collect(),
-            names: device.map(|(port, _)| port_name(port).to_string()).into_iter().collect(),
+            names: device
+                .map(|(port, _)| port_name(port).to_string())
+                .into_iter()
+                .collect(),
         };
         let own = template.map(|t| t.own.clone()).unwrap_or_default();
         self.save(&id, &head, &own)?;
@@ -412,12 +480,17 @@ impl Store {
 
 /// Maker `maker`'s own file among `read`: the user's if they have one, else the
 /// bundled one.
-fn maker_own<'a>(read: &'a [(MappingId, Head, ControllerFile)], maker: &str) -> Option<&'a ControllerFile> {
+fn maker_own<'a>(
+    read: &'a [(MappingId, Head, ControllerFile)],
+    maker: &str,
+) -> Option<&'a ControllerFile> {
     let of = |s| {
         read.iter()
             .find(|(i, _, _)| i.source == s && i.maker == maker && i.model.is_none())
     };
-    of(Source::Mine).or_else(|| of(Source::Bundled)).map(|(_, _, f)| f)
+    of(Source::Mine)
+        .or_else(|| of(Source::Bundled))
+        .map(|(_, _, f)| f)
 }
 
 /// `top` over `base`: its lines in place of the same messages', its meters and start
@@ -440,7 +513,8 @@ fn merge(mut base: ControllerFile, top: ControllerFile) -> ControllerFile {
 /// A folder of its own for a test's mappings, emptied first.
 #[cfg(test)]
 pub fn test_store(name: &str) -> (Store, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("earshot-controllers-{name}-{}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("earshot-controllers-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     (Store::new(Some(dir.clone())), dir)
 }
@@ -466,7 +540,11 @@ mod tests {
         assert!(BUNDLED.len() >= 2, "build.rs found the files");
         for (maker, model, text) in BUNDLED {
             let (_, own) = from_json(text).unwrap();
-            assert!(own.skipped.is_empty(), "{maker} {model:?}: {:?}", own.skipped);
+            assert!(
+                own.skipped.is_empty(),
+                "{maker} {model:?}: {:?}",
+                own.skipped
+            );
             let lines: serde_json::Value = serde_json::from_str(text).unwrap();
             let n = lines["inputs"].as_array().map_or(0, Vec::len);
             assert_eq!(n, own.inputs.len(), "{maker} {model:?}: a message twice");
@@ -480,10 +558,23 @@ mod tests {
         let s = Store::new(None);
         let port = "DDJ-400:DDJ-400 MIDI 1 20:0";
         let model = |p: Option<Profile>| p.map(|p| p.id.model);
-        assert_eq!(model(s.find("x", Some("2b73:0026"), None)), Some(Some("ddj-400".into())));
-        assert_eq!(model(s.find("x", Some("2B73:0026"), None)), Some(Some("ddj-400".into())));
-        assert_eq!(model(s.find(port, None, None)), Some(Some("ddj-400".into())));
-        assert_eq!(model(s.find("DDJ-SB3 MIDI 1", Some("2b73:ffff"), None)), Some(None), "Pioneer's file");
+        assert_eq!(
+            model(s.find("x", Some("2b73:0026"), None)),
+            Some(Some("ddj-400".into()))
+        );
+        assert_eq!(
+            model(s.find("x", Some("2B73:0026"), None)),
+            Some(Some("ddj-400".into()))
+        );
+        assert_eq!(
+            model(s.find(port, None, None)),
+            Some(Some("ddj-400".into()))
+        );
+        assert_eq!(
+            model(s.find("DDJ-SB3 MIDI 1", Some("2b73:ffff"), None)),
+            Some(None),
+            "Pioneer's file"
+        );
         assert!(s.find("Launchpad", Some("1235:0069"), None).is_none());
         assert!(s.find("Midi Through Port-0", None, None).is_none());
     }
@@ -498,9 +589,21 @@ mod tests {
         assert!(ddj.inputs.len() > pioneer.inputs.len());
         assert_eq!(ddj.start.len(), 1);
         assert_eq!(ddj.meters.len(), 2);
-        assert_eq!(ddj.mirror_of((0x90, 0x0B)), Some((0x90, 0x47)), "PLAY, from Pioneer's");
-        assert_eq!(ddj.mirror_of((0x90, 0x10)), Some((0x90, 0x4C)), "LOOP IN, the DDJ-400's");
-        assert_eq!(ddj.mirror_of((0x97, 0x31)), Some((0x98, 0x31)), "a pad, a channel up");
+        assert_eq!(
+            ddj.mirror_of((0x90, 0x0B)),
+            Some((0x90, 0x47)),
+            "PLAY, from Pioneer's"
+        );
+        assert_eq!(
+            ddj.mirror_of((0x90, 0x10)),
+            Some((0x90, 0x4C)),
+            "LOOP IN, the DDJ-400's"
+        );
+        assert_eq!(
+            ddj.mirror_of((0x97, 0x31)),
+            Some((0x98, 0x31)),
+            "a pad, a channel up"
+        );
         assert_eq!(ddj.mirror_of((0x96, 0x41)), None);
     }
 
@@ -511,19 +614,39 @@ mod tests {
         let (s, dir) = test_store("template");
         let ddj = bundled("pioneer", Some("ddj-400"));
         let port = "DDJ-400:DDJ-400 MIDI 1 20:0";
-        let id = s.create("Pioneer", "My DDJ", Some(&ddj), Some((port, Some("2b73:0026")))).unwrap();
+        let id = s
+            .create(
+                "Pioneer",
+                "My DDJ",
+                Some(&ddj),
+                Some((port, Some("2b73:0026"))),
+            )
+            .unwrap();
         assert_eq!(id.key(), "mine:pioneer/my-ddj");
         assert!(dir.join("pioneer/controllers/my-ddj.json").exists());
-        assert!(!dir.join("pioneer/pioneer.json").exists(), "Pioneer has a file already");
+        assert!(
+            !dir.join("pioneer/pioneer.json").exists(),
+            "Pioneer has a file already"
+        );
         let mine = s.get(&id).unwrap();
         assert!(!mine.read_only());
         assert_eq!(mine.file.inputs, ddj.file.inputs);
         assert_eq!(mine.file.start, ddj.file.start);
         assert_eq!(mine.head.name, "Pioneer DJ My DDJ");
-        assert_eq!(s.find(port, Some("2b73:0026"), None).unwrap().id, id, "mine first");
+        assert_eq!(
+            s.find(port, Some("2b73:0026"), None).unwrap().id,
+            id,
+            "mine first"
+        );
         let chosen = ddj.id.key();
-        assert_eq!(s.find(port, Some("2b73:0026"), Some(&chosen)).unwrap().id, ddj.id);
-        assert!(s.create("Pioneer", "My DDJ", None, None).is_err(), "one of that name");
+        assert_eq!(
+            s.find(port, Some("2b73:0026"), Some(&chosen)).unwrap().id,
+            ddj.id
+        );
+        assert!(
+            s.create("Pioneer", "My DDJ", None, None).is_err(),
+            "one of that name"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -533,16 +656,31 @@ mod tests {
     fn a_new_maker() {
         let (s, dir) = test_store("maker");
         let id = s
-            .create("Acme Audio", "Mixer 1", None, Some(("Acme Mixer 1 24:0", Some("1234:0001"))))
+            .create(
+                "Acme Audio",
+                "Mixer 1",
+                None,
+                Some(("Acme Mixer 1 24:0", Some("1234:0001"))),
+            )
             .unwrap();
         assert_eq!(id.key(), "mine:acme-audio/mixer-1");
-        let maker = s.get(&MappingId { model: None, ..id.clone() }).unwrap();
+        let maker = s
+            .get(&MappingId {
+                model: None,
+                ..id.clone()
+            })
+            .unwrap();
         assert_eq!(maker.head.name, "Acme Audio");
         assert_eq!(maker.head.usb, vec!["1234:*".to_string()]);
         let p = s.get(&id).unwrap();
         assert!(p.file.inputs.is_empty());
         assert_eq!(p.head.names, vec!["Acme Mixer 1".to_string()]);
-        assert_eq!(s.find("Acme Mixer 1 24:0", Some("1234:0001"), None).unwrap().id, id);
+        assert_eq!(
+            s.find("Acme Mixer 1 24:0", Some("1234:0001"), None)
+                .unwrap()
+                .id,
+            id
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -567,9 +705,18 @@ mod tests {
         let p = s.find("DDJ-FLX4:DDJ-FLX4 MIDI 1 24:0", None, None).unwrap();
         assert_eq!(p.id.model.as_deref(), Some("ddj-flx4"));
         assert_eq!(p.file.start_every_ms, Some(200));
-        assert_eq!(p.file.start, vec![vec![0xF0, 0x00, 0x40, 0x05, 0x00, 0x00, 0x04, 0x05, 0x00, 0x50, 0x02, 0xF7]]);
+        assert_eq!(
+            p.file.start,
+            vec![vec![
+                0xF0, 0x00, 0x40, 0x05, 0x00, 0x00, 0x04, 0x05, 0x00, 0x50, 0x02, 0xF7
+            ]]
+        );
         let cmd = |k: (u8, u8)| p.file.inputs.get(&k).map(|l| l.control.name().0);
-        assert_eq!(cmd((0x90, 0x0B)).as_deref(), Some("deck_1_play"), "Pioneer's");
+        assert_eq!(
+            cmd((0x90, 0x0B)).as_deref(),
+            Some("deck_1_play"),
+            "Pioneer's"
+        );
         assert_eq!(cmd((0x97, 0x34)).as_deref(), Some("sampler_9_play"));
         assert_eq!(cmd((0x99, 0x30)).as_deref(), Some("sampler_5_play"));
         assert_eq!(cmd((0x9A, 0x37)).as_deref(), Some("sampler_16_stop"));
@@ -585,12 +732,18 @@ mod tests {
     #[test]
     fn keys_and_names() {
         let id = MappingId::parse("mine:pioneer/flx4").unwrap();
-        assert_eq!((id.source, id.maker.as_str(), id.model.as_deref()), (Source::Mine, "pioneer", Some("flx4")));
+        assert_eq!(
+            (id.source, id.maker.as_str(), id.model.as_deref()),
+            (Source::Mine, "pioneer", Some("flx4"))
+        );
         assert_eq!(id.key(), "mine:pioneer/flx4");
         assert_eq!(MappingId::parse("bundled:pioneer").unwrap().model, None);
         assert!(MappingId::parse("nonsense").is_none());
         assert_eq!(slug(" Pioneer DJ!  FLX4 "), "pioneer-dj-flx4");
-        assert_eq!(device_key("DDJ-400:DDJ-400 MIDI 1 20:0", None), "port:DDJ-400:DDJ-400 MIDI 1");
+        assert_eq!(
+            device_key("DDJ-400:DDJ-400 MIDI 1 20:0", None),
+            "port:DDJ-400:DDJ-400 MIDI 1"
+        );
         assert_eq!(device_key("x", Some("2b73:0026")), "usb:2b73:0026");
     }
 }

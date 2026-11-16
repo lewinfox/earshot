@@ -107,4 +107,3 @@ fn straighten_is_disabled_for_a_bpm_out_of_range() {
     steps(&mut h, 2);
     assert!(!straighten_button(&h).accesskit_node().is_disabled());
 }
-

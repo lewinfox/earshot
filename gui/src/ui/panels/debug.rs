@@ -77,7 +77,11 @@ impl DebugUi {
                      state, this run's log and the settings to a zip file",
                 );
             ui.label("last");
-            ui.add(egui::DragValue::new(&mut self.secs).range(1..=MAX_SECS).suffix(" s"));
+            ui.add(
+                egui::DragValue::new(&mut self.secs)
+                    .range(1..=MAX_SECS)
+                    .suffix(" s"),
+            );
             if b.clicked() {
                 self.exporting = true;
                 *self.exported.lock().unwrap() = None;
@@ -93,7 +97,12 @@ impl DebugUi {
                     // The controller mapping as it is now.
                     let extra = mapping
                         .as_ref()
-                        .map(|m| vec![("controller-mapping.json".to_string(), m.to_json("session").into_bytes())])
+                        .map(|m| {
+                            vec![(
+                                "controller-mapping.json".to_string(),
+                                m.to_json("session").into_bytes(),
+                            )]
+                        })
                         .unwrap_or_default();
                     let dir = data.join("debug");
                     let r = match rec.export(secs, &dir, &info, mapping.as_ref(), extra) {
@@ -108,11 +117,16 @@ impl DebugUi {
             } else if self.exporting
                 && let Some(note) = &*self.exported.lock().unwrap()
             {
-                ui.add(egui::Label::new(RichText::new(note).color(cx.theme.muted)).selectable(true));
+                ui.add(
+                    egui::Label::new(RichText::new(note).color(cx.theme.muted)).selectable(true),
+                );
             }
             ui.separator();
             if ui
-                .add_enabled(self.lights.is_some(), egui::Button::new("Resend start messages"))
+                .add_enabled(
+                    self.lights.is_some(),
+                    egui::Button::new("Resend start messages"),
+                )
                 .on_hover_text(
                     "Send the controller the start messages from its controller file again \
                      (a DDJ-400's asks where its controls are). It's logged and in the \
@@ -135,7 +149,9 @@ impl DebugUi {
                 });
             let dropped = rec.history.lock().unwrap().dropped;
             if dropped > 0 {
-                ui.label(RichText::new(format!("{dropped} block(s) not recorded")).color(cx.theme.warn));
+                ui.label(
+                    RichText::new(format!("{dropped} block(s) not recorded")).color(cx.theme.warn),
+                );
             }
         });
         if busy_repaint(self) {
@@ -285,7 +301,10 @@ impl Spectrogram {
         }
         match &mut self.texture {
             Some(t) => t.set(img, TextureOptions::LINEAR),
-            None => self.texture = Some(ctx.load_texture("debug-spectrogram", img, TextureOptions::LINEAR)),
+            None => {
+                self.texture =
+                    Some(ctx.load_texture("debug-spectrogram", img, TextureOptions::LINEAR))
+            }
         }
         self.texture.as_ref().expect("just set")
     }
@@ -303,7 +322,10 @@ fn column(bins: &[realfft::num_complex::Complex<f32>], rate: u32) -> [Color32; R
         let f1 = 20.0 * (nyquist / 20.0).powf((row + 1) as f32 / ROWS as f32);
         let b0 = (f0 / hz_per_bin) as usize;
         let b1 = ((f1 / hz_per_bin) as usize).max(b0 + 1).min(bins.len());
-        let mag = bins[b0.min(bins.len() - 1)..b1].iter().map(|b| b.norm()).fold(0.0, f32::max);
+        let mag = bins[b0.min(bins.len() - 1)..b1]
+            .iter()
+            .map(|b| b.norm())
+            .fold(0.0, f32::max);
         let db = 20.0 * (mag / full).max(1e-9).log10();
         *c = heat(((db - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0));
     }
@@ -350,7 +372,11 @@ mod tests {
         let col = column(&output, rate);
         let row = |f: f32| ((freq_row(f, rate as f32 / 2.0) * ROWS as f32) as usize).min(ROWS - 1);
         let level = |c: Color32| c.r() as u32 + c.g() as u32 + c.b() as u32;
-        assert!(level(col[row(1000.0)]) > 600, "bright at 1 kHz: {:?}", col[row(1000.0)]);
+        assert!(
+            level(col[row(1000.0)]) > 600,
+            "bright at 1 kHz: {:?}",
+            col[row(1000.0)]
+        );
         assert!(level(col[row(100.0)]) < level(col[row(1000.0)]) / 2);
         assert!(level(col[row(10_000.0)]) < level(col[row(1000.0)]) / 2);
     }

@@ -32,7 +32,9 @@ static MEMORY_SHORT: AtomicBool = AtomicBool::new(false);
 
 /// `MemAvailable` from `/proc/meminfo`'s text, kB.
 pub fn mem_available_kb(meminfo: &str) -> Option<u64> {
-    let rest = meminfo.lines().find_map(|l| l.strip_prefix("MemAvailable:"))?;
+    let rest = meminfo
+        .lines()
+        .find_map(|l| l.strip_prefix("MemAvailable:"))?;
     rest.split_whitespace().next()?.parse().ok()
 }
 

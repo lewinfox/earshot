@@ -126,8 +126,9 @@ fn decks(ui: &mut Ui, env: &ModalEnv) -> Vec<Command> {
     ui.horizontal(|ui| {
         ui.label("Crossfader curve");
         let choices = [
-            Seg::new(XfCurve::ConstantPower, "Smooth")
-                .tip("Each side a little quieter in the middle, so a blend is as loud as one track"),
+            Seg::new(XfCurve::ConstantPower, "Smooth").tip(
+                "Each side a little quieter in the middle, so a blend is as loud as one track",
+            ),
             Seg::new(XfCurve::Sharp, "Sharp")
                 .tip("Both sides full until the middle, for cuts and scratching"),
         ];

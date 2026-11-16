@@ -146,9 +146,13 @@ mod tests {
             });
         });
         let seen = n.clone();
-        let mail = serve("c", || {}, move |by: usize| {
-            seen.fetch_add(by, Relaxed);
-        });
+        let mail = serve(
+            "c",
+            || {},
+            move |by: usize| {
+                seen.fetch_add(by, Relaxed);
+            },
+        );
         mail.send(100);
         assert_eq!((n.load(Relaxed), pending()), (0, 2));
         assert_eq!(run_pending(), 3);

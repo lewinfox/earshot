@@ -108,7 +108,13 @@ impl DeckUi {
     }
 
     /// SYNC, and beside it the sync leader's star, `h` tall.
-    pub(super) fn sync_buttons(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>, h: f32) {
+    pub(super) fn sync_buttons(
+        &mut self,
+        ui: &mut Ui,
+        info: &DeckInfo,
+        out: &mut Vec<Command>,
+        h: f32,
+    ) {
         let s = self.state;
         let following = match s.following.map(deck_letter) {
             Some(l) if s.sync => format!("\nFollowing deck {l}"),
@@ -182,7 +188,13 @@ impl DeckUi {
 
     /// Key down a semitone, the shift (click: back to the track's key), key up: `w`
     /// wide in all, `h` tall.
-    pub(super) fn key_shift_buttons(&mut self, ui: &mut Ui, out: &mut Vec<Command>, w: f32, h: f32) {
+    pub(super) fn key_shift_buttons(
+        &mut self,
+        ui: &mut Ui,
+        out: &mut Vec<Command>,
+        w: f32,
+        h: f32,
+    ) {
         let n = self.state.key_shift;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;

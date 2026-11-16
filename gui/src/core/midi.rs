@@ -43,7 +43,6 @@ pub enum Input {
     Jog(u32),
 }
 
-
 /// Seconds of a record that pass in one turn at 33⅓ rpm.
 const SECS_PER_TURN: f64 = 60.0 / (100.0 / 3.0);
 
@@ -83,7 +82,9 @@ pub fn can_be_display_only(control: Control) -> bool {
 /// Where earshot holds its own control while a display-only knob stands in for it.
 pub fn display_only_value(control: Control) -> Option<f64> {
     match control {
-        Control::Master(MasterParam::Gain | MasterParam::HeadGain) => control.range().map(|r| r.default),
+        Control::Master(MasterParam::Gain | MasterParam::HeadGain) => {
+            control.range().map(|r| r.default)
+        }
         Control::Master(MasterParam::HeadMix | MasterParam::MasterCue) => Some(0.0),
         _ => None,
     }
@@ -204,7 +205,13 @@ impl Learned {
         let partner = self.partner(key, &l);
         for k in std::iter::once(key).chain(partner) {
             if let Some(l) = self.get(k) {
-                self.set(k, Learn { display_only: on, ..l });
+                self.set(
+                    k,
+                    Learn {
+                        display_only: on,
+                        ..l
+                    },
+                );
             }
         }
     }
@@ -323,7 +330,12 @@ pub fn file_json(head: serde_json::Map<String, serde_json::Value>, f: &Controlle
         let start: Vec<String> = f
             .start
             .iter()
-            .map(|m| m.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" "))
+            .map(|m| {
+                m.iter()
+                    .map(|b| format!("{b:02X}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
             .collect();
         file["start"] = json!(start);
     }
@@ -332,12 +344,19 @@ pub fn file_json(head: serde_json::Map<String, serde_json::Value>, f: &Controlle
     }
     file["inputs"] = json!(inputs);
     if !f.mirror.is_empty() {
-        let m: serde_json::Map<String, Value> = f.mirror.iter().map(|(&a, &b)| (two(a), json!(two(b)))).collect();
+        let m: serde_json::Map<String, Value> = f
+            .mirror
+            .iter()
+            .map(|(&a, &b)| (two(a), json!(two(b))))
+            .collect();
         file["mirror"] = Value::Object(m);
     }
     if !f.mirror_status.is_empty() {
-        let m: serde_json::Map<String, Value> =
-            f.mirror_status.iter().map(|(a, b)| (format!("{a:02X}"), json!(format!("{b:02X}")))).collect();
+        let m: serde_json::Map<String, Value> = f
+            .mirror_status
+            .iter()
+            .map(|(a, b)| (format!("{a:02X}"), json!(format!("{b:02X}"))))
+            .collect();
         file["mirror_status"] = Value::Object(m);
     }
     let meters: Vec<Value> = f
@@ -368,7 +387,9 @@ fn two_bytes(text: &str) -> Option<(u8, u8)> {
 
 /// Hex bytes separated by spaces (`"F0 00 40 F7"`).
 fn hex(text: &str) -> Option<Vec<u8>> {
-    text.split_whitespace().map(|b| u8::from_str_radix(b, 16).ok()).collect()
+    text.split_whitespace()
+        .map(|b| u8::from_str_radix(b, 16).ok())
+        .collect()
 }
 
 /// A controller file (see [`Learned::to_json`]): its device name and mapping. A line
@@ -413,7 +434,8 @@ pub fn from_json(text: &str) -> Result<(String, ControllerFile), String> {
     for (i, line) in file.inputs.iter().enumerate() {
         let at = |e: String| format!("input {} ({}): {e}", i + 1, line.message);
         let Some(k) = two_bytes(&line.message) else {
-            out.skipped.push(at("the message isn't two hex bytes".into()));
+            out.skipped
+                .push(at("the message isn't two hex bytes".into()));
             continue;
         };
         let k = key(&[k.0, k.1]).expect("two bytes");
@@ -458,7 +480,8 @@ pub fn from_json(text: &str) -> Result<(String, ControllerFile), String> {
             continue;
         };
         if !(m.amber_at < m.red_at && m.red_at <= 127) {
-            out.skipped.push(at("amber_at must be below red_at, and red_at at most 127"));
+            out.skipped
+                .push(at("amber_at must be below red_at, and red_at at most 127"));
             continue;
         }
         out.meters.push(Meter {
@@ -473,7 +496,9 @@ pub fn from_json(text: &str) -> Result<(String, ControllerFile), String> {
     for m in &file.start {
         match hex(m) {
             Some(b) if !b.is_empty() => out.start.push(b),
-            _ => out.skipped.push(format!("start message {m:?}: not hex bytes")),
+            _ => out
+                .skipped
+                .push(format!("start message {m:?}: not hex bytes")),
         }
     }
     for (from, to) in &file.mirror {
@@ -481,7 +506,9 @@ pub fn from_json(text: &str) -> Result<(String, ControllerFile), String> {
             (Some(f), Some(t)) => {
                 out.mirror.insert(f, t);
             }
-            _ => out.skipped.push(format!("mirror {from:?}: {to:?}: not two hex bytes each")),
+            _ => out
+                .skipped
+                .push(format!("mirror {from:?}: {to:?}: not two hex bytes each")),
         }
     }
     for (from, to) in &file.mirror_status {
@@ -489,7 +516,9 @@ pub fn from_json(text: &str) -> Result<(String, ControllerFile), String> {
             (Some(&[f]), Some(&[t])) => {
                 out.mirror_status.insert(f, t);
             }
-            _ => out.skipped.push(format!("mirror_status {from:?}: {to:?}: not a hex byte each")),
+            _ => out.skipped.push(format!(
+                "mirror_status {from:?}: {to:?}: not a hex byte each"
+            )),
         }
     }
     Ok((file.device, out))
@@ -560,7 +589,10 @@ pub fn connect_all(
     let t0 = std::time::Instant::now();
     let probe = MidiInput::new("earshot-probe").map_err(|e| e.to_string())?;
     let ports = probe.ports();
-    let all: Vec<String> = ports.iter().map(|p| probe.port_name(p).unwrap_or_else(|_| "unknown".into())).collect();
+    let all: Vec<String> = ports
+        .iter()
+        .map(|p| probe.port_name(p).unwrap_or_else(|_| "unknown".into()))
+        .collect();
     eprintln!("[init] MIDI: {} input port(s): {all:?}", all.len());
     let mut names = Vec::new();
     let mut ports_out = Vec::new();
@@ -581,7 +613,11 @@ pub fn connect_all(
         eprintln!(
             "[init] MIDI: {name:?} (USB id {}): mapping {}",
             usb.as_deref().unwrap_or("none"),
-            profile.as_ref().map_or("none".to_string(), |p| format!("{} ({})", p.id.key(), p.label()))
+            profile.as_ref().map_or("none".to_string(), |p| format!(
+                "{} ({})",
+                p.id.key(),
+                p.label()
+            ))
         );
         if let Some(p) = &profile
             && !mapped
@@ -589,12 +625,14 @@ pub fn connect_all(
             learned.replace(p.file.clone());
             mapped = true;
         }
-        let start = profile.as_ref().map_or_else(super::lights::Start::default, |p| {
-            super::lights::Start::new(
-                p.file.start.clone(),
-                p.file.start_every_ms.map(std::time::Duration::from_millis),
-            )
-        });
+        let start = profile
+            .as_ref()
+            .map_or_else(super::lights::Start::default, |p| {
+                super::lights::Start::new(
+                    p.file.start.clone(),
+                    p.file.start_every_ms.map(std::time::Duration::from_millis),
+                )
+            });
         let (sink, lane, learned) = (sink.clone(), lane.clone(), learned.clone());
         let index = names.len();
         match input.connect(
@@ -628,7 +666,11 @@ pub fn connect_all(
         names.len(),
         outputs.len(),
         t0.elapsed().as_secs_f64() * 1000.0,
-        if outputs.is_empty() { "off (no output)" } else { "on" }
+        if outputs.is_empty() {
+            "off (no output)"
+        } else {
+            "on"
+        }
     );
     let lights = (!outputs.is_empty())
         .then(|| super::lights::Lights::start(outputs, learned.clone(), monitor.clone()));
@@ -662,7 +704,9 @@ fn connect_outputs(inputs: &[String], starts: &[super::lights::Start]) -> super:
         let Some(i) = inputs.iter().position(|n| *n == name) else {
             continue;
         };
-        let Ok(output) = MidiOutput::new("earshot") else { continue };
+        let Ok(output) = MidiOutput::new("earshot") else {
+            continue;
+        };
         match output.connect(&port, "earshot-lights") {
             Ok(c) => {
                 eprintln!("[init] MIDI: opened output {name:?}");
@@ -725,13 +769,7 @@ fn translate(bytes: &[u8], learned: &Learned) -> Option<(Control, Option<Command
     Some((l.control, l.control.command(value)))
 }
 
-fn on_message(
-    sink: &Sink,
-    lane: &Lane,
-    bytes: &[u8],
-    learned: &Learned,
-    port: usize,
-) {
+fn on_message(sink: &Sink, lane: &Lane, bytes: &[u8], learned: &Learned, port: usize) {
     let found = translate(bytes, learned);
     // Mapped to nothing: an error, so a button earshot ignores can be tracked down.
     // Once a message (a knob sends a stream); system messages (clock, SysEx) aside.
@@ -886,14 +924,20 @@ mod tests {
         let (_, m) = from_json(bad).unwrap();
         assert_eq!(m.inputs.len(), 1);
         assert_eq!(m.skipped.len(), 2);
-        assert!(m.skipped[0].contains("input 2 (90 0C)") && m.skipped[0].contains("no command deck_1_dance"));
+        assert!(
+            m.skipped[0].contains("input 2 (90 0C)")
+                && m.skipped[0].contains("no command deck_1_dance")
+        );
         assert!(m.skipped[1].contains("input 3 (90)"));
         assert!(from_json("nonsense").is_err());
     }
 
     #[test]
     fn every_entry_maps_to_a_control() {
-        assert!(translate(&[0x90, 0x0B, 0x7F], &Learned::default()).is_none(), "nothing mapped");
+        assert!(
+            translate(&[0x90, 0x0B, 0x7F], &Learned::default()).is_none(),
+            "nothing mapped"
+        );
         let l = Learned::default();
         assert!(l.first_unmapped((0x90, 0x0B)), "logged the first time");
         assert!(!l.first_unmapped((0x90, 0x0B)), "not again");
@@ -1016,11 +1060,20 @@ mod tests {
             ([0x9A, 0x35, 0x7F], SamplerCmd::Stop(slot(13))),
         ] {
             let got = cmd(bytes);
-            assert!(matches!(&got, Some(Command::Sampler(c)) if *c == want), "{bytes:02X?}: {got:?}");
-            assert!(command::direct(got.unwrap()).is_ok(), "{bytes:02X?} goes direct");
+            assert!(
+                matches!(&got, Some(Command::Sampler(c)) if *c == want),
+                "{bytes:02X?}: {got:?}"
+            );
+            assert!(
+                command::direct(got.unwrap()).is_ok(),
+                "{bytes:02X?} goes direct"
+            );
         }
         assert!(cmd([0x87, 0x30, 0x00]).is_none(), "nothing on release");
-        assert!(cmd([0x97, 0x30, 0x00]).is_none(), "nor on a note-on at velocity 0");
+        assert!(
+            cmd([0x97, 0x30, 0x00]).is_none(),
+            "nor on a note-on at velocity 0"
+        );
         let (c, _) = translate(&[0x99, 0x31, 0x7F], &ddj()).unwrap();
         assert_eq!(c.name().0, "sampler_10_play");
         // The SAMPLER mode button still tells the pads page.
@@ -1056,7 +1109,10 @@ mod tests {
         let shift = translate(&[0x91, 0x3F, 0x7F], &ddj()).unwrap();
         assert_eq!(shift.0.name().0, "deck_2_shift");
         assert!(matches!(shift.1, Some(Command::View(ViewCmd::Shift(d, true))) if d == deck(1)));
-        assert!(matches!(cmd([0x81, 0x3F, 0x00]), Some(Command::View(ViewCmd::Shift(_, false)))));
+        assert!(matches!(
+            cmd([0x81, 0x3F, 0x00]),
+            Some(Command::View(ViewCmd::Shift(_, false)))
+        ));
     }
 
     /// The BEAT FX section: CH SELECT puts the effect where it points (moving off a
@@ -1068,9 +1124,18 @@ mod tests {
             Some(Command::Fx(0, c)) => Some(c),
             _ => None,
         };
-        assert_eq!(fx([0x94, 0x10, 0x7F]), Some(FxCmd::Target(FxTarget::Deck(deck(0)))));
-        assert_eq!(fx([0x94, 0x11, 0x7F]), Some(FxCmd::Target(FxTarget::Deck(deck(1)))));
-        assert_eq!(fx([0x94, 0x14, 0x7F]), Some(FxCmd::Target(FxTarget::Master)));
+        assert_eq!(
+            fx([0x94, 0x10, 0x7F]),
+            Some(FxCmd::Target(FxTarget::Deck(deck(0))))
+        );
+        assert_eq!(
+            fx([0x94, 0x11, 0x7F]),
+            Some(FxCmd::Target(FxTarget::Deck(deck(1))))
+        );
+        assert_eq!(
+            fx([0x94, 0x14, 0x7F]),
+            Some(FxCmd::Target(FxTarget::Master))
+        );
         assert_eq!(fx([0x94, 0x10, 0x00]), None);
         assert!(matches!(fx([0x94, 0x47, 0x7F]), Some(FxCmd::Enabled(_))));
         assert_eq!(fx([0x94, 0x43, 0x7F]), Some(FxCmd::Release));
@@ -1089,7 +1154,9 @@ mod tests {
         assert_eq!(fx([0x94, 0x4A, 0x7F]), Some(FxCmd::BeatsStep(-1)));
         assert_eq!(fx([0x94, 0x63, 0x7F]), Some(FxCmd::NextKind));
         assert_eq!(fx([0x94, 0x64, 0x7F]), Some(FxCmd::PrevKind));
-        assert!(matches!(cmd14(0xB4, 0x02, 0x7F, 0x7F), Some(Command::Fx(0, FxCmd::Level(l))) if l == 1.0));
+        assert!(
+            matches!(cmd14(0xB4, 0x02, 0x7F, 0x7F), Some(Command::Fx(0, FxCmd::Level(l))) if l == 1.0)
+        );
     }
 
     /// A display-only knob says where it is, and runs nothing itself.
@@ -1097,15 +1164,27 @@ mod tests {
     fn a_display_only_knob_is_shown_not_applied() {
         let l = Learned::default();
         let c = Control::Master(MasterParam::Gain);
-        let half = |input| Learn { control: c, arg: None, input, display_only: false };
+        let half = |input| Learn {
+            control: c,
+            arg: None,
+            input,
+            display_only: false,
+        };
         l.set((0xB6, 0x08), half(Input::Msb));
         l.set((0xB6, 0x28), half(Input::Lsb));
         // Ticked on one half: both are display only.
         l.set_display_only((0xB6, 0x28), true);
         assert!(l.get((0xB6, 0x08)).unwrap().display_only);
-        assert!(translate(&[0xB6, 0x08, 127], &l).and_then(|t| t.1).is_none());
+        assert!(
+            translate(&[0xB6, 0x08, 127], &l)
+                .and_then(|t| t.1)
+                .is_none()
+        );
         match translate(&[0xB6, 0x28, 127], &l).and_then(|t| t.1) {
-            Some(Command::App(crate::core::command::AppCmd::ControllerShows { control, value })) => {
+            Some(Command::App(crate::core::command::AppCmd::ControllerShows {
+                control,
+                value,
+            })) => {
                 assert_eq!(control, c);
                 assert_eq!(value, 1.0);
             }
@@ -1123,17 +1202,28 @@ mod tests {
         let l = ddj();
         assert!(l.get((0xB6, 0x08)).unwrap().display_only);
         assert!(l.get((0xB6, 0x28)).unwrap().display_only);
-        assert!(l.get((0xB6, 0x0D)).unwrap().display_only, "the headphone level: the DDJ sets it");
+        assert!(
+            l.get((0xB6, 0x0D)).unwrap().display_only,
+            "the headphone level: the DDJ sets it"
+        );
         // HEADPHONES MIXING too: the controller blends its master into the headphones,
         // and earshot's headphone channels carry only the cue.
         assert!(l.get((0xB6, 0x0C)).unwrap().display_only);
         assert!(l.get((0xB6, 0x2C)).unwrap().display_only);
-        assert_eq!(display_only_value(Control::Master(MasterParam::HeadMix)), Some(0.0));
+        assert_eq!(
+            display_only_value(Control::Master(MasterParam::HeadMix)),
+            Some(0.0)
+        );
         // MASTER CUE too: the controller puts the master in the headphones itself.
         assert!(l.get((0x96, 0x63)).unwrap().display_only);
         assert!(matches!(
             translate(&[0x96, 0x63, 0x7F], &l),
-            Some((_, Some(Command::App(crate::core::command::AppCmd::ControllerShows { .. }))))
+            Some((
+                _,
+                Some(Command::App(
+                    crate::core::command::AppCmd::ControllerShows { .. }
+                ))
+            ))
         ));
         // The crossfader can't be: it has no setting that leaves the sound alone.
         l.set_display_only((0xB6, 0x1F), true);
@@ -1172,21 +1262,57 @@ mod tests {
         assert!(a > mid && a - mid < 1e-3, "{a}");
         // The fine half alone, before any coarse half: nothing.
         let learned = ddj();
-        assert!(translate(&[0xB6, 0x37, 5], &learned).and_then(|t| t.1).is_none());
+        assert!(
+            translate(&[0xB6, 0x37, 5], &learned)
+                .and_then(|t| t.1)
+                .is_none()
+        );
         // Two rows on one command, one marked coarse and one fine, are a pair,
         // whatever their numbers; a coarse half alone is a 7-bit knob.
         let l = Learned::default();
         let c = Control::Deck(deck(0), DeckControl::Filter);
-        l.set((0xB6, 0x17), Learn { control: c, arg: None, input: Input::Msb, display_only: false });
+        l.set(
+            (0xB6, 0x17),
+            Learn {
+                control: c,
+                arg: None,
+                input: Input::Msb,
+                display_only: false,
+            },
+        );
         let alone = translate(&[0xB6, 0x17, 127], &l).and_then(|t| t.1);
-        assert!(matches!(alone, Some(Command::Param(_, v)) if v == 1.0), "{alone:?}");
-        l.set((0xB6, 0x40), Learn { control: c, arg: None, input: Input::Lsb, display_only: false });
-        assert_eq!(l.partner((0xB6, 0x17), &l.get((0xB6, 0x17)).unwrap()), Some((0xB6, 0x40)));
-        assert!(translate(&[0xB6, 0x17, 127], &l).and_then(|t| t.1).is_none());
+        assert!(
+            matches!(alone, Some(Command::Param(_, v)) if v == 1.0),
+            "{alone:?}"
+        );
+        l.set(
+            (0xB6, 0x40),
+            Learn {
+                control: c,
+                arg: None,
+                input: Input::Lsb,
+                display_only: false,
+            },
+        );
+        assert_eq!(
+            l.partner((0xB6, 0x17), &l.get((0xB6, 0x17)).unwrap()),
+            Some((0xB6, 0x40))
+        );
+        assert!(
+            translate(&[0xB6, 0x17, 127], &l)
+                .and_then(|t| t.1)
+                .is_none()
+        );
         let both = translate(&[0xB6, 0x40, 127], &l).and_then(|t| t.1);
-        assert!(matches!(both, Some(Command::Param(_, v)) if v == 1.0), "{both:?}");
+        assert!(
+            matches!(both, Some(Command::Param(_, v)) if v == 1.0),
+            "{both:?}"
+        );
         let json = l.to_json("x");
-        assert!(json.contains("\"msb\"") && json.contains("\"lsb\""), "{json}");
+        assert!(
+            json.contains("\"msb\"") && json.contains("\"lsb\""),
+            "{json}"
+        );
         let (_, back) = from_json(&json).unwrap();
         assert_eq!(back.inputs[&(0xB6, 0x40)].input, Input::Lsb);
     }
@@ -1215,7 +1341,8 @@ mod tests {
             Some(Command::Deck(d, DeckCmd::Engine(EngineCmd::Bend { by, .. }))) if d == deck(1) && by > 0.0
         ));
         // With SHIFT the top searches: two ticks forward, 16 times 2/720 of 1.8 s.
-        let Some(Command::Deck(d, DeckCmd::Engine(EngineCmd::Search(by)))) = cmd([0xB1, 0x29, 66]) else {
+        let Some(Command::Deck(d, DeckCmd::Engine(EngineCmd::Search(by)))) = cmd([0xB1, 0x29, 66])
+        else {
             panic!("not a search")
         };
         assert_eq!(d, deck(1));
@@ -1253,4 +1380,3 @@ mod tests {
         }
     }
 }
-

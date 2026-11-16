@@ -40,15 +40,11 @@ impl DeckUi {
                         };
                         let r = ui
                             .add(
-                                HwButton::new(
-                                    &label,
-                                    THEME.hotcue[i],
-                                    vec2(pad_w, d.px(BTN_H)),
-                                )
-                                .font(d.px(FONT_PAD))
-                                .caption_font(d.px(FONT_CAPTION))
-                                .caption(name)
-                                .tinted(set.is_some()),
+                                HwButton::new(&label, THEME.hotcue[i], vec2(pad_w, d.px(BTN_H)))
+                                    .font(d.px(FONT_PAD))
+                                    .caption_font(d.px(FONT_CAPTION))
+                                    .caption(name)
+                                    .tinted(set.is_some()),
                             )
                             .on_hover_text(tip);
                         let slot = i as u8;

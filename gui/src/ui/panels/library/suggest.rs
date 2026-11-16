@@ -88,16 +88,8 @@ impl SuggestUi {
     /// and Prepare's player, or `selected`) or the library changed. A tempo change
     /// alone waits until the tempo has held still for a moment, rather than
     /// re-ranking on every step of a fader sweep.
-    pub fn refresh(
-        &mut self,
-        v: &CoreView,
-        decks: &[DeckNow],
-        selected: Option<TrackId>,
-    ) {
-        let Some(r) = v
-            .history
-            .reference(v.lib, self.source, decks, selected)
-        else {
+    pub fn refresh(&mut self, v: &CoreView, decks: &[DeckNow], selected: Option<TrackId>) {
+        let Some(r) = v.history.reference(v.lib, self.source, decks, selected) else {
             self.reference = None;
             self.list.clear();
             self.computed_for = None;

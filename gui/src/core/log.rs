@@ -9,10 +9,10 @@
 //!
 //! Linux only for the copy (it moves fd 2 onto a pipe); elsewhere stderr is left as is.
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -73,7 +73,10 @@ pub fn path() -> Option<&'static Path> {
 /// lines have been written so far. Release builds keep none.
 pub fn recent() -> (Vec<String>, u64) {
     let lines = RECENT.lock().unwrap_or_else(|e| e.into_inner());
-    (lines.iter().cloned().collect(), WRITTEN.load(Ordering::Relaxed))
+    (
+        lines.iter().cloned().collect(),
+        WRITTEN.load(Ordering::Relaxed),
+    )
 }
 
 /// How many lines have been written so far (debug builds).

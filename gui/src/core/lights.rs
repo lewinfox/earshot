@@ -84,7 +84,9 @@ pub fn light(control: Control, arg: Option<f64>, snap: &EngineSnapshot, pads: &A
                 DeckControl::Play if deck.playing => Light::On,
                 DeckControl::Play => Light::Flash,
                 // Flashing while paused away from the cue point (a press sets it there).
-                DeckControl::Cue if !deck.playing && (deck.position - deck.cue_point).abs() > 0.01 => {
+                DeckControl::Cue
+                    if !deck.playing && (deck.position - deck.cue_point).abs() > 0.01 =>
+                {
                     Light::Flash
                 }
                 DeckControl::Cue => Light::On,
@@ -96,7 +98,10 @@ pub fn light(control: Control, arg: Option<f64>, snap: &EngineSnapshot, pads: &A
                 DeckControl::LoopActiveToggle => on(deck.active_loop.is_some()),
                 DeckControl::BeatLoop(_) => {
                     let beats = arg.unwrap_or(4.0);
-                    flash(looping && loop_beats(deck).is_some_and(|b| (b - beats).abs() < beats * 0.02))
+                    flash(
+                        looping
+                            && loop_beats(deck).is_some_and(|b| (b - beats).abs() < beats * 0.02),
+                    )
                 }
                 DeckControl::Quantize => on(deck.quantize),
                 DeckControl::Keylock => on(deck.keylock),
@@ -118,7 +123,9 @@ pub fn light(control: Control, arg: Option<f64>, snap: &EngineSnapshot, pads: &A
                 // shows it steady at 00; Mixxx sends the same to its SHIFT message
                 // (Release FX), so it doesn't change while SHIFT is held.
                 FxControl::On | FxControl::Release => on(fx.enabled),
-                FxControl::TargetDeck(d) => on(matches!(fx.target, FxTarget::Deck(t) if t.index() == d as usize)),
+                FxControl::TargetDeck(d) => {
+                    on(matches!(fx.target, FxTarget::Deck(t) if t.index() == d as usize))
+                }
                 FxControl::TargetMaster => on(fx.target == FxTarget::Master),
                 FxControl::TempoTap => on(fx.tap_bpm.is_some()),
                 _ => Light::Off,
@@ -151,9 +158,14 @@ pub fn value(light: Light, lit_half: bool) -> u8 {
 fn own_light(control: Control, snap: &EngineSnapshot, pads: &AllPads) -> bool {
     use DeckControl as D;
     match control {
-        Control::Deck(d, D::ModePad { mode, pad, shift: true }) => {
-            pads[d.index()].shift_job(mode, pad as usize, snap.deck(d))
-        }
+        Control::Deck(
+            d,
+            D::ModePad {
+                mode,
+                pad,
+                shift: true,
+            },
+        ) => pads[d.index()].shift_job(mode, pad as usize, snap.deck(d)),
         Control::Deck(_, c) => matches!(
             c,
             D::LoopIn
@@ -178,7 +190,11 @@ fn own_light(control: Control, snap: &EngineSnapshot, pads: &AllPads) -> bool {
         Control::Sampler(_, c) => c == SamplerControl::Play,
         Control::Fx(_, c) => matches!(
             c,
-            FxControl::On | FxControl::Release | FxControl::TargetDeck(_) | FxControl::TargetMaster | FxControl::TempoTap
+            FxControl::On
+                | FxControl::Release
+                | FxControl::TargetDeck(_)
+                | FxControl::TargetMaster
+                | FxControl::TempoTap
         ),
         _ => false,
     }
@@ -187,7 +203,12 @@ fn own_light(control: Control, snap: &EngineSnapshot, pads: &AllPads) -> bool {
 /// Every mapped button's message and value, as they should be now; and each message
 /// its light is mirrored to (its SHIFT note: [`Learned::mirror_of`]) that hasn't a
 /// light of its own, its button's.
-pub fn frame(learned: &Learned, snap: &EngineSnapshot, pads: &AllPads, lit_half: bool) -> BTreeMap<(u8, u8), u8> {
+pub fn frame(
+    learned: &Learned,
+    snap: &EngineSnapshot,
+    pads: &AllPads,
+    lit_half: bool,
+) -> BTreeMap<(u8, u8), u8> {
     // A display-only button is the controller's to light.
     let notes: BTreeMap<(u8, u8), _> = learned
         .all()
@@ -199,8 +220,13 @@ pub fn frame(learned: &Learned, snap: &EngineSnapshot, pads: &AllPads, lit_half:
         .map(|(&k, l)| (k, value(light(l.control, l.arg, snap, pads), lit_half)))
         .collect();
     for (&k, _) in &notes {
-        let Some(twin) = learned.mirror_of(k) else { continue };
-        if notes.get(&twin).is_none_or(|l| !own_light(l.control, snap, pads)) {
+        let Some(twin) = learned.mirror_of(k) else {
+            continue;
+        };
+        if notes
+            .get(&twin)
+            .is_none_or(|l| !own_light(l.control, snap, pads))
+        {
             out.insert(twin, out[&k]);
         }
     }
@@ -225,7 +251,9 @@ pub fn meter_value(vu: f64, meter: &Meter) -> u8 {
         amber_at + ((db - AMBER_DB) / -AMBER_DB * span).round() as u8
     } else {
         let span = amber_at.saturating_sub(1) as f64;
-        ((db - FLOOR_DB) / (AMBER_DB - FLOOR_DB) * span).round().max(0.0) as u8
+        ((db - FLOOR_DB) / (AMBER_DB - FLOOR_DB) * span)
+            .round()
+            .max(0.0) as u8
     }
 }
 
@@ -314,7 +342,12 @@ impl Start {
 /// Each output, with its controller's start messages.
 pub type Outputs = Vec<(MidiOutputConnection, Start)>;
 
-fn send(outputs: &mut Outputs, recorder: &Option<super::debug::Recorder>, (status, data1): (u8, u8), v: u8) {
+fn send(
+    outputs: &mut Outputs,
+    recorder: &Option<super::debug::Recorder>,
+    (status, data1): (u8, u8),
+    v: u8,
+) {
     for (o, _) in outputs.iter_mut() {
         let _ = o.send(&[status, data1, v]);
     }
@@ -391,7 +424,10 @@ fn init(outputs: &mut Outputs, learned: &Learned, monitor: &MonitorSlot) -> BTre
         send(outputs, &recorder, k, v);
     }
     send_start(outputs, &recorder);
-    eprintln!("[init] controller: {} light(s) set, before audio", lights.len());
+    eprintln!(
+        "[init] controller: {} light(s) set, before audio",
+        lights.len()
+    );
     lights
 }
 
@@ -448,7 +484,13 @@ fn hello(outputs: &mut Outputs, recorder: &Option<super::debug::Recorder>, learn
     }
 }
 
-fn run(mut outputs: Outputs, mut sent: BTreeMap<(u8, u8), u8>, learned: &Learned, monitor: &MonitorSlot, stop: &AtomicBool) {
+fn run(
+    mut outputs: Outputs,
+    mut sent: BTreeMap<(u8, u8), u8>,
+    learned: &Learned,
+    monitor: &MonitorSlot,
+    stop: &AtomicBool,
+) {
     let start = Instant::now();
     let mut recorder = None;
     let mut by_hand: Vec<Vec<u8>> = vec![];
@@ -478,7 +520,10 @@ fn run(mut outputs: Outputs, mut sent: BTreeMap<(u8, u8), u8>, learned: &Learned
             }
         }
         // A button no longer mapped: put its light out.
-        for (&k, _) in sent.iter().filter(|(k, v)| **v != 0 && !now.contains_key(k)) {
+        for (&k, _) in sent
+            .iter()
+            .filter(|(k, v)| **v != 0 && !now.contains_key(k))
+        {
             send(&mut outputs, &recorder, k, 0);
         }
         sent = now;
@@ -495,7 +540,10 @@ fn run(mut outputs: Outputs, mut sent: BTreeMap<(u8, u8), u8>, learned: &Learned
 /// out the ones it lit). The ones the controller lights itself (its pad mode buttons)
 /// it keeps lit, as it does after Mixxx.
 fn off_at_exit(sent: &BTreeMap<(u8, u8), u8>) -> Vec<(u8, u8)> {
-    sent.iter().filter(|(_, v)| **v != 0).map(|(k, _)| *k).collect()
+    sent.iter()
+        .filter(|(_, v)| **v != 0)
+        .map(|(k, _)| *k)
+        .collect()
 }
 
 #[cfg(test)]
@@ -524,15 +572,28 @@ mod tests {
     #[test]
     fn play_and_cue_follow_the_transport() {
         let lights = |s: &EngineSnapshot| {
-            [DeckControl::LoopIn, DeckControl::LoopOut, DeckControl::Cue, DeckControl::Play]
-                .map(|c| light(d(c), None, s, &AllPads::default()))
+            [
+                DeckControl::LoopIn,
+                DeckControl::LoopOut,
+                DeckControl::Cue,
+                DeckControl::Play,
+            ]
+            .map(|c| light(d(c), None, s, &AllPads::default()))
         };
         use Light::*;
         let mut s = EngineSnapshot::default();
         assert_eq!(lights(&s), [On, On, Off, Off], "nothing loaded");
-        assert_eq!(light(d(DeckControl::Sync), None, &s, &AllPads::default()), Off, "nothing else lit");
+        assert_eq!(
+            light(d(DeckControl::Sync), None, &s, &AllPads::default()),
+            Off,
+            "nothing else lit"
+        );
         s.decks[0].pfl = true;
-        assert_eq!(light(d(DeckControl::Pfl), None, &s, &AllPads::default()), On, "but headphone cue");
+        assert_eq!(
+            light(d(DeckControl::Pfl), None, &s, &AllPads::default()),
+            On,
+            "but headphone cue"
+        );
         s = loaded();
         assert_eq!(lights(&s), [On, On, On, Flash], "paused on the cue point");
         s.decks[0].playing = true;
@@ -546,36 +607,110 @@ mod tests {
     fn loops_flash_their_buttons() {
         let mut s = loaded();
         s.decks[0].playing = true;
-        assert_eq!(light(d(DeckControl::LoopIn), None, &s, &AllPads::default()), Light::On, "ready");
-        assert_eq!(light(d(DeckControl::Reloop), None, &s, &AllPads::default()), Light::Off);
+        assert_eq!(
+            light(d(DeckControl::LoopIn), None, &s, &AllPads::default()),
+            Light::On,
+            "ready"
+        );
+        assert_eq!(
+            light(d(DeckControl::Reloop), None, &s, &AllPads::default()),
+            Light::Off
+        );
         // LOOP IN pressed: it flashes, LOOP OUT stays lit.
         s.decks[0].loop_in = Some(1.0);
-        assert_eq!(light(d(DeckControl::LoopIn), None, &s, &AllPads::default()), Light::Flash);
-        assert_eq!(light(d(DeckControl::LoopOut), None, &s, &AllPads::default()), Light::On);
+        assert_eq!(
+            light(d(DeckControl::LoopIn), None, &s, &AllPads::default()),
+            Light::Flash
+        );
+        assert_eq!(
+            light(d(DeckControl::LoopOut), None, &s, &AllPads::default()),
+            Light::On
+        );
         // LOOP OUT pressed: a 4-beat loop at 120 BPM (2 s); both flash.
         s.decks[0].loop_out = Some(3.0);
         s.decks[0].loop_active = true;
-        assert_eq!(light(d(DeckControl::LoopIn), None, &s, &AllPads::default()), Light::Flash);
-        assert_eq!(light(d(DeckControl::LoopOut), None, &s, &AllPads::default()), Light::Flash);
-        assert_eq!(light(d(DeckControl::Reloop), None, &s, &AllPads::default()), Light::On);
-        assert_eq!(light(d(DeckControl::BeatLoop(4.0)), Some(4.0), &s, &AllPads::default()), Light::Flash);
-        assert_eq!(light(d(DeckControl::BeatLoop(8.0)), Some(8.0), &s, &AllPads::default()), Light::Off);
+        assert_eq!(
+            light(d(DeckControl::LoopIn), None, &s, &AllPads::default()),
+            Light::Flash
+        );
+        assert_eq!(
+            light(d(DeckControl::LoopOut), None, &s, &AllPads::default()),
+            Light::Flash
+        );
+        assert_eq!(
+            light(d(DeckControl::Reloop), None, &s, &AllPads::default()),
+            Light::On
+        );
+        assert_eq!(
+            light(
+                d(DeckControl::BeatLoop(4.0)),
+                Some(4.0),
+                &s,
+                &AllPads::default()
+            ),
+            Light::Flash
+        );
+        assert_eq!(
+            light(
+                d(DeckControl::BeatLoop(8.0)),
+                Some(8.0),
+                &s,
+                &AllPads::default()
+            ),
+            Light::Off
+        );
     }
 
     #[test]
     fn pads_sync_and_effects() {
         let mut s = loaded();
         s.decks[0].hotcues[2] = Some(5.0);
-        assert_eq!(light(d(DeckControl::Hotcue(2)), None, &s, &AllPads::default()), Light::On);
-        assert_eq!(light(d(DeckControl::HotcueClear(2)), None, &s, &AllPads::default()), Light::On);
-        assert_eq!(light(d(DeckControl::Hotcue(3)), None, &s, &AllPads::default()), Light::Off);
+        assert_eq!(
+            light(d(DeckControl::Hotcue(2)), None, &s, &AllPads::default()),
+            Light::On
+        );
+        assert_eq!(
+            light(
+                d(DeckControl::HotcueClear(2)),
+                None,
+                &s,
+                &AllPads::default()
+            ),
+            Light::On
+        );
+        assert_eq!(
+            light(d(DeckControl::Hotcue(3)), None, &s, &AllPads::default()),
+            Light::Off
+        );
         s.decks[0].sync = true;
-        assert_eq!(light(d(DeckControl::Sync), None, &s, &AllPads::default()), Light::On);
-        assert_eq!(light(d(DeckControl::BeatJump), Some(4.0), &s, &AllPads::default()), Light::Off, "no state");
-        assert_eq!(light(Control::Fx(0, FxControl::On), None, &s, &AllPads::default()), Light::Off);
+        assert_eq!(
+            light(d(DeckControl::Sync), None, &s, &AllPads::default()),
+            Light::On
+        );
+        assert_eq!(
+            light(d(DeckControl::BeatJump), Some(4.0), &s, &AllPads::default()),
+            Light::Off,
+            "no state"
+        );
+        assert_eq!(
+            light(Control::Fx(0, FxControl::On), None, &s, &AllPads::default()),
+            Light::Off
+        );
         s.mixer.fx[0].enabled = true;
-        assert_eq!(light(Control::Fx(0, FxControl::On), None, &s, &AllPads::default()), Light::On, "the controller flashes it");
-        assert_eq!(light(Control::Fx(0, FxControl::Release), None, &s, &AllPads::default()), Light::On);
+        assert_eq!(
+            light(Control::Fx(0, FxControl::On), None, &s, &AllPads::default()),
+            Light::On,
+            "the controller flashes it"
+        );
+        assert_eq!(
+            light(
+                Control::Fx(0, FxControl::Release),
+                None,
+                &s,
+                &AllPads::default()
+            ),
+            Light::On
+        );
     }
 
     /// A sampler pad: dark while its slot is empty, lit with a sound in it, flashing
@@ -587,12 +722,24 @@ mod tests {
         let mut s = EngineSnapshot::default();
         let slot = |i| earshot_engine::SampleSlot::new(i).unwrap();
         let play = |i| Control::Sampler(slot(i), SamplerControl::Play);
-        assert_eq!(light(play(0), None, &s, &AllPads::default()), Light::Off, "empty");
+        assert_eq!(
+            light(play(0), None, &s, &AllPads::default()),
+            Light::Off,
+            "empty"
+        );
         s.sampler[0].loaded = true;
         s.sampler[9].loaded = true;
         s.sampler[9].playing = true;
-        assert_eq!(light(play(0), None, &s, &AllPads::default()), Light::On, "loaded");
-        assert_eq!(light(play(9), None, &s, &AllPads::default()), Light::Flash, "playing");
+        assert_eq!(
+            light(play(0), None, &s, &AllPads::default()),
+            Light::On,
+            "loaded"
+        );
+        assert_eq!(
+            light(play(9), None, &s, &AllPads::default()),
+            Light::Flash,
+            "playing"
+        );
         // On the controller: deck 1's pad 1 lit, deck 2's pad 2 flashing, the rest dark,
         // and the same with SHIFT held.
         for lit_half in [true, false] {
@@ -629,7 +776,10 @@ mod tests {
         let lit: Vec<u8> = frames[0].iter().map(|(_, v)| *v).collect();
         let bits = |b: u8| (0..8).map(move |j| if b & (0x80 >> j) != 0 { 0x7F } else { 0 });
         assert_eq!(lit, bits(b'e').chain(bits(b'a')).collect::<Vec<_>>());
-        assert!(frames[3][8..].iter().all(|(_, v)| *v == 0), "nothing after the t");
+        assert!(
+            frames[3][8..].iter().all(|(_, v)| *v == 0),
+            "nothing after the t"
+        );
     }
 
     /// With no audio (at start-up), every light is set, and the meters show nothing.
@@ -640,7 +790,11 @@ mod tests {
         let none = EngineSnapshot::default();
         let f = frame(&learned, &none, &AllPads::default(), true);
         assert!(f.contains_key(&(0x90, 0x0B)), "play is set");
-        assert!(meters(&learned.meters(), &none).iter().all(|(_, v)| *v == 0));
+        assert!(
+            meters(&learned.meters(), &none)
+                .iter()
+                .all(|(_, v)| *v == 0)
+        );
     }
 
     /// SHIFT held shows the shifted buttons' lights: those without a job of their own
@@ -662,8 +816,16 @@ mod tests {
             ((0x90, 0x0C), (0x90, 0x48), "CUE"),
             ((0x90, 0x58), (0x90, 0x60), "BEAT SYNC"),
             ((0x90, 0x10), (0x90, 0x4C), "LOOP IN"),
-            ((0x97, 0x64), (0x98, 0x64), "beat loop pad 5 (the 4-beat loop)"),
-            ((0x97, 0x40), (0x98, 0x40), "keyboard pad 1, picking (hot cue A set)"),
+            (
+                (0x97, 0x64),
+                (0x98, 0x64),
+                "beat loop pad 5 (the 4-beat loop)",
+            ),
+            (
+                (0x97, 0x40),
+                (0x98, 0x40),
+                "keyboard pad 1, picking (hot cue A set)",
+            ),
             ((0x97, 0x70), (0x98, 0x70), "key shift pad 1"),
         ] {
             assert_eq!(f[&button], 0x7F, "{what} lit");

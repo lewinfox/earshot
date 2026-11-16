@@ -294,7 +294,9 @@ const fn spec(name: &'static str, help: &'static str, kind: Kind) -> ControlSpec
 enum Word {
     Num(f64),
     /// The deck's configured beat jump or loop size (`size`, or `-size` for back).
-    Size { back: bool },
+    Size {
+        back: bool,
+    },
 }
 
 /// A control on a particular deck, the mixer or the library.
@@ -439,14 +441,26 @@ impl FxControl {
             BeatsUp => spec("beats_double", "double the effect's length", Kind::Button),
             Next => spec("effect_next", "next effect", Kind::Button),
             Prev => spec("effect_prev", "previous effect", Kind::Button),
-            Target => spec("channel_next", "effect on the next deck / master", Kind::Button),
+            Target => spec(
+                "channel_next",
+                "effect on the next deck / master",
+                Kind::Button,
+            ),
             TargetDeck(0) => spec("channel_deck_1", "effect on deck 1", Kind::Button),
             TargetDeck(1) => spec("channel_deck_2", "effect on deck 2", Kind::Button),
             TargetDeck(2) => spec("channel_deck_3", "effect on deck 3", Kind::Button),
             TargetDeck(_) => spec("channel_deck_4", "effect on deck 4", Kind::Button),
             TargetMaster => spec("channel_master", "effect on the master mix", Kind::Button),
-            Release => spec("release", "effect off, with the release effect", Kind::Button),
-            TempoAuto => spec("tempo_auto", "effect follows the track's tempo", Kind::Button),
+            Release => spec(
+                "release",
+                "effect off, with the release effect",
+                Kind::Button,
+            ),
+            TempoAuto => spec(
+                "tempo_auto",
+                "effect follows the track's tempo",
+                Kind::Button,
+            ),
             TempoTap => spec("tempo_tap", "tap the effect's tempo", Kind::Button),
         }
     }
@@ -570,7 +584,11 @@ pub enum DeckControl {
     /// A performance pad (0-based) in a pad mode that keeps state of its own
     /// (keyboard, key shift: see `core::pads`), pressed or let go, with SHIFT held
     /// or not. Its own message per mode, as the DDJ-400 sends.
-    ModePad { mode: PadMode, pad: u8, shift: bool },
+    ModePad {
+        mode: PadMode,
+        pad: u8,
+        shift: bool,
+    },
     /// CUE/LOOP CALL ◀ / ▶: go to the memory cue before (after) the playhead; while
     /// looping, halve (double) the loop instead.
     CueJumpPrev,
@@ -666,15 +684,21 @@ impl DeckControl {
                 Continuous(EQ[b.min(2)]),
             ),
             Filter => spec("filter", "filter", Continuous(FILTER)),
-            SaveMemory => spec("cue_save_as_memory", "save the cue (or loop) to memory", Button),
+            SaveMemory => spec(
+                "cue_save_as_memory",
+                "save the cue (or loop) to memory",
+                Button,
+            ),
             CueJumpPrev => spec(
                 "cue_jump_to_prev",
                 "previous memory cue (looping: halve the loop)",
                 Button,
             ),
-            CueJumpNext => {
-                spec("cue_jump_to_next", "next memory cue (looping: double the loop)", Button)
-            }
+            CueJumpNext => spec(
+                "cue_jump_to_next",
+                "next memory cue (looping: double the loop)",
+                Button,
+            ),
             CueDelete => spec("cue_delete", "delete the memory cue just called", Button),
             GridNudge(_) => spec("grid_nudge", "nudge the grid", Button),
             LoadSelected => spec("load_selected", "load the selected track", Button),
@@ -792,14 +816,46 @@ impl DeckControl {
             SetPadMode(PadMode::PadFx1),
             SetPadMode(PadMode::PadFx2),
             SetPadMode(PadMode::KeyShift),
-            ModePad { mode: PadMode::Keyboard, pad: 0, shift: false },
-            ModePad { mode: PadMode::Keyboard, pad: 0, shift: true },
-            ModePad { mode: PadMode::KeyShift, pad: 0, shift: false },
-            ModePad { mode: PadMode::KeyShift, pad: 0, shift: true },
-            ModePad { mode: PadMode::PadFx1, pad: 0, shift: false },
-            ModePad { mode: PadMode::PadFx1, pad: 0, shift: true },
-            ModePad { mode: PadMode::PadFx2, pad: 0, shift: false },
-            ModePad { mode: PadMode::PadFx2, pad: 0, shift: true },
+            ModePad {
+                mode: PadMode::Keyboard,
+                pad: 0,
+                shift: false,
+            },
+            ModePad {
+                mode: PadMode::Keyboard,
+                pad: 0,
+                shift: true,
+            },
+            ModePad {
+                mode: PadMode::KeyShift,
+                pad: 0,
+                shift: false,
+            },
+            ModePad {
+                mode: PadMode::KeyShift,
+                pad: 0,
+                shift: true,
+            },
+            ModePad {
+                mode: PadMode::PadFx1,
+                pad: 0,
+                shift: false,
+            },
+            ModePad {
+                mode: PadMode::PadFx1,
+                pad: 0,
+                shift: true,
+            },
+            ModePad {
+                mode: PadMode::PadFx2,
+                pad: 0,
+                shift: false,
+            },
+            ModePad {
+                mode: PadMode::PadFx2,
+                pad: 0,
+                shift: true,
+            },
             Shift,
         ]
     };
@@ -817,7 +873,9 @@ impl DeckControl {
                 None => (rest, false),
             };
             let n = hot_cue_slot(n)?;
-            return word.is_none().then_some(if clear { HotcueClear(n) } else { Hotcue(n) });
+            return word
+                .is_none()
+                .then_some(if clear { HotcueClear(n) } else { Hotcue(n) });
         }
         Some(match (name, word) {
             ("beat_jump", Some(Word::Size { back })) => {
@@ -833,8 +891,14 @@ impl DeckControl {
             ("grid_nudge", _) => GridNudge(num?),
             ("load_step", _) => LoadStep(num.filter(|n| n.fract() == 0.0 && *n != 0.0)? as i32),
             (
-                "keyboard_pad" | "keyboard_pad_shift" | "key_shift_pad" | "key_shift_pad_shift" | "pad_fx_1_pad"
-                | "pad_fx_1_pad_shift" | "pad_fx_2_pad" | "pad_fx_2_pad_shift",
+                "keyboard_pad"
+                | "keyboard_pad_shift"
+                | "key_shift_pad"
+                | "key_shift_pad_shift"
+                | "pad_fx_1_pad"
+                | "pad_fx_1_pad_shift"
+                | "pad_fx_2_pad"
+                | "pad_fx_2_pad_shift",
                 _,
             ) => {
                 let pad = num.filter(|n| n.fract() == 0.0 && (1.0..=8.0).contains(n))? as u8 - 1;
@@ -874,7 +938,10 @@ impl DeckControl {
         use DeckControl::*;
         let name = self.spec().name;
         match self {
-            Hotcue(n) => (format!("hot_cue_{}", hot_cue_letter(n).to_ascii_lowercase()), None),
+            Hotcue(n) => (
+                format!("hot_cue_{}", hot_cue_letter(n).to_ascii_lowercase()),
+                None,
+            ),
             HotcueClear(n) => (
                 format!("hot_cue_{}_clear", hot_cue_letter(n).to_ascii_lowercase()),
                 None,
@@ -1057,8 +1124,16 @@ impl DeckControl {
             JogTurn => key("jog_turn"),
             JogBend => key("jog_bend"),
             JogSearch => key("jog_search"),
-            SaveMemory | CueJumpPrev | CueJumpNext | CueDelete | LoopActiveToggle
-            | GridNudge(_) | LoadStep(_) | SetPadMode(_) | ModePad { .. } | Shift => None,
+            SaveMemory
+            | CueJumpPrev
+            | CueJumpNext
+            | CueDelete
+            | LoopActiveToggle
+            | GridNudge(_)
+            | LoadStep(_)
+            | SetPadMode(_)
+            | ModePad { .. }
+            | Shift => None,
         }
     }
 }
@@ -1070,13 +1145,11 @@ impl LibraryControl {
             LibraryControl::PaneNext => spec("pane_next", "next pane", Kind::Button),
             LibraryControl::PanePrev => spec("pane_prev", "previous pane", Kind::Button),
             LibraryControl::Search => spec("search", "search", Kind::Button),
-            LibraryControl::RelatedTracks => {
-                spec(
-                    "related_tracks_toggle",
-                    "open the suggestions on their top track, or close them",
-                    Kind::Button,
-                )
-            }
+            LibraryControl::RelatedTracks => spec(
+                "related_tracks_toggle",
+                "open the suggestions on their top track, or close them",
+                Kind::Button,
+            ),
             LibraryControl::Undo => spec("undo", "undo", Kind::Button),
             LibraryControl::Redo => spec("redo", "redo", Kind::Button),
         }
@@ -1236,8 +1309,9 @@ impl Control {
         match self {
             Control::Deck(deck, c) => c.command(deck, value),
             // A toggle, like the decks' headphone cue: a press flips it.
-            Control::Master(MasterParam::MasterCue) => (value > 0.5)
-                .then_some(Command::Mixer(MixerCmd::MasterCue(earshot_engine::Set::Toggle))),
+            Control::Master(MasterParam::MasterCue) => (value > 0.5).then_some(Command::Mixer(
+                MixerCmd::MasterCue(earshot_engine::Set::Toggle),
+            )),
             Control::Master(p) => Some(Command::Param(ParamId::Master(p), value)),
             Control::Fx(u, c) if u < FX_UNITS => c.command(u, value),
             Control::Fx(..) => None,
@@ -1260,9 +1334,10 @@ impl Control {
             Control::Fx(u, c) => (format!("fx_{}_{}", u + 1, c.spec().name), None),
             Control::Library(c) => (format!("library_{}", c.spec().name), None),
             Control::Ui(c) => (format!("ui_{}", c.spec().name), None),
-            Control::Sampler(slot, c) => {
-                (format!("sampler_{}_{}", slot.index() + 1, c.spec().name), None)
-            }
+            Control::Sampler(slot, c) => (
+                format!("sampler_{}_{}", slot.index() + 1, c.spec().name),
+                None,
+            ),
         }
     }
 
@@ -1275,7 +1350,8 @@ impl Control {
             Some("size") => Some(Word::Size { back: false }),
             Some("-size") => Some(Word::Size { back: true }),
             Some(n) => Some(Word::Num(
-                n.parse::<f64>().map_err(|_| format!("{n} isn't a number"))?,
+                n.parse::<f64>()
+                    .map_err(|_| format!("{n} isn't a number"))?,
             )),
         };
         let num = match word {
@@ -1285,7 +1361,11 @@ impl Control {
         let unknown = || format!("no command {name}");
         let numbered = |rest: &str, count: usize| -> Option<(usize, String)> {
             let (n, thing) = rest.split_once('_')?;
-            let n = n.parse::<usize>().ok()?.checked_sub(1).filter(|n| *n < count)?;
+            let n = n
+                .parse::<usize>()
+                .ok()?
+                .checked_sub(1)
+                .filter(|n| *n < count)?;
             Some((n, thing.to_string()))
         };
         let size_only_on_decks = || match word {
@@ -1314,13 +1394,17 @@ impl Control {
         } else if let Some(rest) = name.strip_prefix("fx_") {
             size_only_on_decks()?;
             numbered(rest, FX_UNITS).and_then(|(u, thing)| {
-                let c = FxControl::ALL.into_iter().find(|c| c.spec().name == thing)?;
+                let c = FxControl::ALL
+                    .into_iter()
+                    .find(|c| c.spec().name == thing)?;
                 Some(Control::Fx(u, c))
             })
         } else if let Some(rest) = name.strip_prefix("sampler_") {
             size_only_on_decks()?;
             numbered(rest, SAMPLER_SLOTS).and_then(|(n, thing)| {
-                let c = SamplerControl::ALL.into_iter().find(|c| c.spec().name == thing)?;
+                let c = SamplerControl::ALL
+                    .into_iter()
+                    .find(|c| c.spec().name == thing)?;
                 Some(Control::Sampler(SampleSlot::new(n)?, c))
             })
         } else if let Some(rest) = name.strip_prefix("deck_") {
@@ -1379,7 +1463,11 @@ impl Control {
             }
             Control::Deck(_, DeckControl::BeatLoop(b)) => format!("loop {b} beats"),
             Control::Deck(_, DeckControl::BeatJump) => match arg {
-                Some(b) => format!("beat jump {} {}", b.abs(), if b < 0.0 { "back" } else { "forward" }),
+                Some(b) => format!(
+                    "beat jump {} {}",
+                    b.abs(),
+                    if b < 0.0 { "back" } else { "forward" }
+                ),
                 None => self.spec().help.into(),
             },
             Control::Deck(_, DeckControl::GridNudge(ms)) => format!(
@@ -1388,8 +1476,12 @@ impl Control {
                 if ms < 0.0 { "earlier" } else { "later" }
             ),
             Control::Fx(u, c) => format!("FX{} {}", u + 1, c.spec().help),
-            Control::Sampler(slot, SamplerControl::Play) => format!("play sample {}", slot.index() + 1),
-            Control::Sampler(slot, SamplerControl::Stop) => format!("stop sample {}", slot.index() + 1),
+            Control::Sampler(slot, SamplerControl::Play) => {
+                format!("play sample {}", slot.index() + 1)
+            }
+            Control::Sampler(slot, SamplerControl::Stop) => {
+                format!("stop sample {}", slot.index() + 1)
+            }
             Control::Library(LibraryControl::Browse) => match arg {
                 Some(v) if v < 0.0 => "previous track".into(),
                 Some(_) => "next track".into(),
@@ -1465,7 +1557,10 @@ impl Control {
             return Some(Control::Fx(u, c));
         }
         if group == "[Skin]" {
-            return UiControl::ALL.into_iter().find(|c| c.mixxx() == key).map(Control::Ui);
+            return UiControl::ALL
+                .into_iter()
+                .find(|c| c.mixxx() == key)
+                .map(Control::Ui);
         }
         if let Some(n) = group
             .strip_prefix("[Sampler")
@@ -1512,7 +1607,10 @@ impl Control {
 pub fn command_names() -> Vec<String> {
     let mut all: Vec<Control> = vec![];
     for d in DeckId::first(MAX_DECKS) {
-        for c in DeckControl::ALL.iter().chain(&[DeckControl::LoadSelected, DeckControl::InstantDouble]) {
+        for c in DeckControl::ALL
+            .iter()
+            .chain(&[DeckControl::LoadSelected, DeckControl::InstantDouble])
+        {
             match c {
                 DeckControl::Hotcue(_) => {
                     all.extend((0..HOTCUES as u8).map(|n| Control::Deck(d, DeckControl::Hotcue(n))))
@@ -1531,7 +1629,11 @@ pub fn command_names() -> Vec<String> {
     all.extend(LibraryControl::ALL.iter().map(|c| Control::Library(*c)));
     all.extend(UiControl::ALL.iter().map(|c| Control::Ui(*c)));
     for slot in SampleSlot::all() {
-        all.extend(SamplerControl::ALL.iter().map(|c| Control::Sampler(slot, *c)));
+        all.extend(
+            SamplerControl::ALL
+                .iter()
+                .map(|c| Control::Sampler(slot, *c)),
+        );
     }
     let mut names: Vec<String> = vec![];
     for c in all {
@@ -1553,7 +1655,9 @@ fn value_doc(c: Control) -> String {
         Control::Deck(_, GridNudge(_)) => "milliseconds (negative: earlier)".into(),
         Control::Deck(_, LoadStep(_)) => "tracks (negative: previous)".into(),
         Control::Deck(_, ModePad { .. }) => "the pad, 1 to 8".into(),
-        Control::Deck(_, JogTurn | JogBend | JogSearch) => "seconds of track (negative: back)".into(),
+        Control::Deck(_, JogTurn | JogBend | JogSearch) => {
+            "seconds of track (negative: back)".into()
+        }
         Control::Library(LibraryControl::Browse) => "rows (negative: up)".into(),
         _ => match c.spec().kind {
             Kind::Button => "pressed (1) or let go (0)".into(),
@@ -1578,7 +1682,9 @@ pub fn commands_markdown() -> String {
          jump or loop size.\n",
     );
     let mut table = |title: &str, rows: Vec<(String, String, String)>| {
-        out.push_str(&format!("\n## {title}\n\n| Command | Number | What it does |\n|---|---|---|\n"));
+        out.push_str(&format!(
+            "\n## {title}\n\n| Command | Number | What it does |\n|---|---|---|\n"
+        ));
         for (name, value, help) in rows {
             out.push_str(&format!("| `{name}` | {value} | {help} |\n"));
         }
@@ -1596,7 +1702,12 @@ pub fn commands_markdown() -> String {
             let pattern = match c {
                 DeckControl::Hotcue(_) => Some("deck_N_hot_cue_X".to_string()),
                 DeckControl::HotcueClear(_) => Some("deck_N_hot_cue_X_clear".to_string()),
-                _ => Some(Control::Deck(d, c).name().0.replacen("deck_1_", "deck_N_", 1)),
+                _ => Some(
+                    Control::Deck(d, c)
+                        .name()
+                        .0
+                        .replacen("deck_1_", "deck_N_", 1),
+                ),
             };
             row(Control::Deck(d, c), pattern)
         })
@@ -1610,7 +1721,10 @@ pub fn commands_markdown() -> String {
     );
     table(
         "Mixer: `mixer_`",
-        MASTER.iter().map(|(p, _)| row(Control::Master(*p), None)).collect(),
+        MASTER
+            .iter()
+            .map(|(p, _)| row(Control::Master(*p), None))
+            .collect(),
     );
     table(
         &format!("Effect units: `fx_N_`, N = 1 to {FX_UNITS}"),
@@ -1624,11 +1738,17 @@ pub fn commands_markdown() -> String {
     );
     table(
         "Library: `library_`",
-        LibraryControl::ALL.iter().map(|&c| row(Control::Library(c), None)).collect(),
+        LibraryControl::ALL
+            .iter()
+            .map(|&c| row(Control::Library(c), None))
+            .collect(),
     );
     table(
         "What's on screen: `ui_`",
-        UiControl::ALL.iter().map(|&c| row(Control::Ui(c), None)).collect(),
+        UiControl::ALL
+            .iter()
+            .map(|&c| row(Control::Ui(c), None))
+            .collect(),
     );
     let first = SampleSlot::new(0).expect("slot 1");
     table(
@@ -1636,7 +1756,11 @@ pub fn commands_markdown() -> String {
         SamplerControl::ALL
             .iter()
             .map(|&c| {
-                let name = Control::Sampler(first, c).name().0.replacen("sampler_1_", "sampler_N_", 1);
+                let name =
+                    Control::Sampler(first, c)
+                        .name()
+                        .0
+                        .replacen("sampler_1_", "sampler_N_", 1);
                 row(Control::Sampler(first, c), Some(name))
             })
             .collect(),
@@ -1904,7 +2028,11 @@ mod tests {
         all.extend(LibraryControl::ALL.iter().map(|c| Control::Library(*c)));
         all.extend(UiControl::ALL.iter().map(|c| Control::Ui(*c)));
         for slot in SampleSlot::all() {
-            all.extend(SamplerControl::ALL.iter().map(|c| Control::Sampler(slot, *c)));
+            all.extend(
+                SamplerControl::ALL
+                    .iter()
+                    .map(|c| Control::Sampler(slot, *c)),
+            );
         }
         for c in all {
             let (name, word) = c.name();
@@ -1950,7 +2078,11 @@ mod tests {
         assert!(parse("deck_1_play", Some("size")).is_err());
         assert!(parse("mixer_crossfader", Some("size")).is_err());
         assert!(parse("deck_1_hot_cue_a", Some("2")).is_err());
-        assert!(parse("deck_1_beat_jump", Some("x")).unwrap_err().contains("isn't a number"));
+        assert!(
+            parse("deck_1_beat_jump", Some("x"))
+                .unwrap_err()
+                .contains("isn't a number")
+        );
     }
 
     /// `docs/commands.md` is the registry as it is.

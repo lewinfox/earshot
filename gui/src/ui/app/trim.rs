@@ -9,7 +9,6 @@ use crate::core::view::Tool;
 use crate::ui::panels::deck::wave::Layer;
 use crate::ui::panels::trim::TrimPoints;
 
-
 impl EarshotApp {
     pub(super) fn trim_cmd(&mut self, c: TrimCmd) {
         match c {

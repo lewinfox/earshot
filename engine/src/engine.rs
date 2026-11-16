@@ -12,8 +12,8 @@ use std::time::Instant;
 
 use crate::beatgrid::Beatgrid;
 use crate::command::{
-    ChannelParam, Command, DeckCmd, DeckId, DeckState, EngineState, HOTCUES, HotcueMode, XfCurve,
-    LoadedTrack, LoopState, MAX_DECKS, MasterParam, ParamId, Press, PreviewCmd, XfSide,
+    ChannelParam, Command, DeckCmd, DeckId, DeckState, EngineState, HOTCUES, HotcueMode,
+    LoadedTrack, LoopState, MAX_DECKS, MasterParam, ParamId, Press, PreviewCmd, XfCurve, XfSide,
 };
 use crate::decode::TrackAudio;
 use crate::dsp::{self, Limiter, Smoothed};
@@ -1398,14 +1398,22 @@ impl Renderer {
             let cued = any_pfl || self.master_cue;
             for c in 0..2 {
                 let m = self.master[2 * f + c];
-                let mut cue = if any_pfl { 0.8 * self.cue[2 * f + c] } else { 0.0 };
+                let mut cue = if any_pfl {
+                    0.8 * self.cue[2 * f + c]
+                } else {
+                    0.0
+                };
                 let heard = if self.phones_cue_only {
                     cue
                 } else {
                     if self.master_cue {
                         cue += m;
                     }
-                    if cued { to_cue * cue + to_master * m } else { 0.0 }
+                    if cued {
+                        to_cue * cue + to_master * m
+                    } else {
+                        0.0
+                    }
                 };
                 self.phones[2 * f + c] = head * heard;
             }
@@ -1490,9 +1498,7 @@ impl Renderer {
     /// loaded deck (one playing without sync, then one stopped without sync, then
     /// a playing synced one). `None` for the chosen leader itself.
     fn leader_for(&self, d: usize) -> Option<usize> {
-        let ok = |l: usize| {
-            l != d && l < self.live && self.decks[l].track.is_some()
-        };
+        let ok = |l: usize| l != d && l < self.live && self.decks[l].track.is_some();
         if let Some(l) = self.sync_leader.map(DeckId::index) {
             if l == d {
                 return None;
@@ -2284,11 +2290,17 @@ mod tests {
         assert!(rig.pos(0) - before > 0.7, "the track played on");
         // The tone peaks at 0.5; the meter has been falling since the sound stopped.
         assert!(rig.snap().decks[0].vu < 0.25, "the meter shows the effect");
-        assert!(!rig.snap().mixer.fx[0].enabled, "the effect unit is its own");
+        assert!(
+            !rig.snap().mixer.fx[0].enabled,
+            "the effect unit is its own"
+        );
         rig.deck(0, DeckCmd::PadFx(None));
         rig.run(0.1);
         assert_eq!(rig.snap().decks[0].pad_fx, None);
-        assert!(peak(&record(&mut rig, 0.2)) > 0.3, "let go: the track again");
+        assert!(
+            peak(&record(&mut rig, 0.2)) > 0.3,
+            "let go: the track again"
+        );
     }
 
     /// A pad echo rings on after the pad is let go, even with the deck stopped. The
@@ -2436,7 +2448,11 @@ mod tests {
         }
         let noise = |t: f64| {
             (0.3 * (t * 440.0 * std::f64::consts::TAU).sin()
-                + 0.2 * ((t * 48_000.0) as u64).wrapping_mul(2654435761).rem_euclid(1000) as f64 / 1000.0
+                + 0.2
+                    * ((t * 48_000.0) as u64)
+                        .wrapping_mul(2654435761)
+                        .rem_euclid(1000) as f64
+                    / 1000.0
                 - 0.1) as f32
         };
         for decks in [2usize, 4] {
@@ -2603,26 +2619,45 @@ mod tests {
             grid: first.grid.clone(),
             ..*first
         });
-        rig.send(Command::Load { deck: id(0), track: first });
+        rig.send(Command::Load {
+            deck: id(0),
+            track: first,
+        });
         rig.deck(0, DeckCmd::Rate(0.04));
         rig.deck(0, DeckCmd::Keylock(Set::On));
         rig.deck(0, DeckCmd::KeyShift(2.0));
         rig.deck(0, DeckCmd::Play(Set::On));
         rig.run(1.0);
         let before = rig.pos(0);
-        rig.send(Command::Load { deck: id(1), track: copy });
-        rig.send(Command::InstantDouble { from: id(0), to: id(1), generation: 2 });
+        rig.send(Command::Load {
+            deck: id(1),
+            track: copy,
+        });
+        rig.send(Command::InstantDouble {
+            from: id(0),
+            to: id(1),
+            generation: 2,
+        });
         rig.run(0.5);
         let s = rig.snap();
         let (a, b) = (&s.decks[0], &s.decks[1]);
         assert!(b.playing);
         assert_eq!((b.rate, b.keylock, b.key_shift), (0.04, true, 2.0));
-        assert!((a.position - b.position).abs() < 1e-9, "{} vs {}", a.position, b.position);
+        assert!(
+            (a.position - b.position).abs() < 1e-9,
+            "{} vs {}",
+            a.position,
+            b.position
+        );
         assert!(a.position > before + 0.4);
 
         // Other audio on deck 2: nothing copied.
         rig.load(1, 100.0, 100.0);
-        rig.send(Command::InstantDouble { from: id(0), to: id(1), generation: 1 });
+        rig.send(Command::InstantDouble {
+            from: id(0),
+            to: id(1),
+            generation: 1,
+        });
         rig.run(0.1);
         assert!(!rig.snap().decks[1].playing);
     }
@@ -2644,24 +2679,40 @@ mod tests {
                     grid: first.grid.clone(),
                     ..*first
                 });
-                rig.send(Command::Load { deck: id(0), track: first });
+                rig.send(Command::Load {
+                    deck: id(0),
+                    track: first,
+                });
                 rig.deck(0, DeckCmd::Rate(rate));
-                rig.deck(0, DeckCmd::Keylock(if keylock { Set::On } else { Set::Off }));
+                rig.deck(
+                    0,
+                    DeckCmd::Keylock(if keylock { Set::On } else { Set::Off }),
+                );
                 rig.deck(0, DeckCmd::Play(Set::On));
                 rig.run(1.0);
-                rig.send(Command::Load { deck: id(1), track: copy });
-                rig.send(Command::InstantDouble { from: id(0), to: id(1), generation: 2 });
+                rig.send(Command::Load {
+                    deck: id(1),
+                    track: copy,
+                });
+                rig.send(Command::InstantDouble {
+                    from: id(0),
+                    to: id(1),
+                    generation: 2,
+                });
                 rig.channel(1 - heard, ChannelParam::Volume, 0.0);
                 rig.run(0.5);
                 record(&mut rig, 1.0)
             };
             let (x, y) = (mk(0), mk(1));
             assert!(peak(&x) > 0.1, "heard");
-            let err = x.iter().zip(&y).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+            let err = x
+                .iter()
+                .zip(&y)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f32::max);
             assert!(err < 1e-6, "keylock {keylock}, rate {rate}: off by {err}");
         }
     }
-
 
     /// A machine that can't keep up is noticed and the app told; the sound is left
     /// as it is (keylock, the effects).
@@ -2792,7 +2843,10 @@ mod tests {
         assert!((rig.pos(0) - 12.0).abs() < 1e-6, "{}", rig.pos(0));
         rig.deck(0, DeckCmd::Search(-100.0));
         rig.run(0.0);
-        assert!(rig.pos(0) >= -LEAD_IN - 1e-6, "no further back than the lead-in");
+        assert!(
+            rig.pos(0) >= -LEAD_IN - 1e-6,
+            "no further back than the lead-in"
+        );
     }
 
     #[test]
@@ -2897,7 +2951,11 @@ mod tests {
             assert!((s.loop_out.unwrap() - (lin + 1.0)).abs() < 1e-6, "{s:?}");
             // 1.25 beats in: 0.625 s past the start.
             let want = lin + (before - lin) % 1.0;
-            assert!((s.position - want).abs() < 0.02, "halve {halve}: {} vs {want}", s.position);
+            assert!(
+                (s.position - want).abs() < 0.02,
+                "halve {halve}: {} vs {want}",
+                s.position
+            );
         }
     }
 
@@ -3032,7 +3090,11 @@ mod tests {
     fn a_jog_bend_is_smooth() {
         // The largest jump from one sample to the next, beyond what a 440 Hz tone at
         // its level has (0.5 * TAU * 440 / SR, about 0.031).
-        let roughness = |x: &[f32]| x.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
+        let roughness = |x: &[f32]| {
+            x.windows(2)
+                .map(|w| (w[1] - w[0]).abs())
+                .fold(0.0, f32::max)
+        };
         for (keylock, shift) in [(false, 0.0), (true, 0.0), (false, 3.0)] {
             let mut rig = Rig::new();
             load_fn(&mut rig, 0, 20.0, sine(440.0));
@@ -3044,11 +3106,20 @@ mod tests {
             let steady = roughness(&record(&mut rig, 0.3));
             let mut bent = vec![];
             for _ in 0..60 {
-                rig.deck(0, DeckCmd::HandMove { by: 0.005, at: Instant::now() });
+                rig.deck(
+                    0,
+                    DeckCmd::HandMove {
+                        by: 0.005,
+                        at: Instant::now(),
+                    },
+                );
                 bent.extend(record(&mut rig, 0.006));
             }
             let bent = roughness(&bent);
-            assert!(bent < steady * 1.3, "keylock {keylock}, shift {shift}: steady {steady}, bent {bent}");
+            assert!(
+                bent < steady * 1.3,
+                "keylock {keylock}, shift {shift}: steady {steady}, bent {bent}"
+            );
         }
     }
 
@@ -3487,7 +3558,10 @@ mod tests {
         rig.run(0.5);
         let p = peaks(&rig.out, 4);
         assert!(p[0] > 0.1, "the master has deck 1: {p:?}");
-        assert!((p[2] - p[0]).abs() < 0.02, "the headphones hear the master: {p:?}");
+        assert!(
+            (p[2] - p[0]).abs() < 0.02,
+            "the headphones hear the master: {p:?}"
+        );
     }
 
     /// A DDJ-400 blends the headphones itself: earshot's headphones carry only the
@@ -3517,7 +3591,10 @@ mod tests {
         rig.run(0.5);
         let alone = peaks(&rig.out, 4);
         assert!(alone[0] < 0.001, "nothing on air: {alone:?}");
-        assert!((alone[2] - both[2]).abs() < 0.02, "deck 2 only: {both:?} then {alone:?}");
+        assert!(
+            (alone[2] - both[2]).abs() < 0.02,
+            "deck 2 only: {both:?} then {alone:?}"
+        );
         rig.deck(1, DeckCmd::Pfl(Set::Off));
         rig.run(0.5);
         assert!(peaks(&rig.out, 4)[2] < 0.001, "nothing cued: silent");
@@ -3530,7 +3607,11 @@ mod tests {
         rig.deck(0, DeckCmd::Play(Set::On));
         rig.master(MasterParam::HeadMix, 1.0); // all master side
         rig.run(0.3);
-        assert_eq!(peaks(&rig.out, 4)[2], 0.0, "nothing cued: silent, whatever the mix");
+        assert_eq!(
+            peaks(&rig.out, 4)[2],
+            0.0,
+            "nothing cued: silent, whatever the mix"
+        );
         rig.master(MasterParam::HeadMix, 0.0); // the cue side only
         // Over a second, so each reading spans two beats of the track.
         let heard = |rig: &mut Rig| {
@@ -3547,7 +3628,10 @@ mod tests {
         let both = heard(&mut rig);
         assert!(channel > 0.01 && master > 0.01, "{channel} {master}");
         // As on a DJ mixer, both add up at full level.
-        assert!(both > channel.max(master) * 1.2, "{both} vs {channel} / {master}");
+        assert!(
+            both > channel.max(master) * 1.2,
+            "{both} vs {channel} / {master}"
+        );
         rig.send(Command::MasterCue(Set::Toggle));
         rig.run(0.05);
         assert!(!rig.snap().mixer.master_cue);
@@ -3620,14 +3704,20 @@ mod tests {
         assert_eq!((g(0.0, 0), g(0.0, 1)), (1.0, 1.0));
         assert_eq!((g(-1.0, 0), g(1.0, 1)), (1.0, 1.0));
         assert!(g(1.0, 0).abs() < 1e-12 && g(-1.0, 1).abs() < 1e-12);
-        assert!((g(0.5, 0) - 0.5f64.sqrt()).abs() < 1e-12, "halfway over: -3 dB");
+        assert!(
+            (g(0.5, 0) - 0.5f64.sqrt()).abs() < 1e-12,
+            "halfway over: -3 dB"
+        );
     }
 
     #[test]
     fn the_constant_power_crossfader_keeps_the_total_power() {
         let g = |x, side| xf_gain(XfCurve::ConstantPower, x, side);
         let h = 0.5f64.sqrt();
-        assert!((g(0.0, 0) - h).abs() < 1e-12 && (g(0.0, 1) - h).abs() < 1e-12, "-3 dB each");
+        assert!(
+            (g(0.0, 0) - h).abs() < 1e-12 && (g(0.0, 1) - h).abs() < 1e-12,
+            "-3 dB each"
+        );
         assert!((g(-1.0, 0) - 1.0).abs() < 1e-12 && g(-1.0, 1).abs() < 1e-12);
         assert!((g(1.0, 1) - 1.0).abs() < 1e-12 && g(1.0, 0).abs() < 1e-12);
         for x in [-0.8, -0.3, 0.2, 0.7] {
@@ -3999,13 +4089,19 @@ mod tests {
             audio: Some(flat(0.2, 1.0)),
         }));
         rig.run(0.05);
-        assert!(peaks(&rig.out, 4).iter().all(|p| *p == 0.0), "loaded, not played");
+        assert!(
+            peaks(&rig.out, 4).iter().all(|p| *p == 0.0),
+            "loaded, not played"
+        );
         assert!(rig.snap().sampler[0].loaded && !rig.snap().sampler[0].playing);
         // One slot, with no deck loaded at all: on the master, not the headphones.
         rig.send(Command::Sampler(SamplerCmd::Play(sample(0))));
         rig.run(0.1);
         let one = peaks(&rig.out, 4);
-        assert!((one[0] - 0.3).abs() < 0.01 && (one[1] - 0.3).abs() < 0.01, "{one:?}");
+        assert!(
+            (one[0] - 0.3).abs() < 0.01 && (one[1] - 0.3).abs() < 0.01,
+            "{one:?}"
+        );
         assert!(one[2] == 0.0 && one[3] == 0.0, "nothing cued: {one:?}");
         assert!(rig.snap().sampler[0].playing);
         // Two at once add up.
@@ -4071,7 +4167,10 @@ mod tests {
         fresh.send(Command::Sampler(SamplerCmd::Play(sample(2))));
         fresh.run(0.2);
         let s = fresh.snap().sampler;
-        assert!(s[2].loaded && s[2].looping && s[2].playing, "still going round");
+        assert!(
+            s[2].loaded && s[2].looping && s[2].playing,
+            "still going round"
+        );
         assert!((s[2].volume - 0.5).abs() < 1e-9);
         assert!(s[3].loaded && !s[3].looping && s[3].volume == 1.0);
         // 0.4 at half volume: a quarter gain.

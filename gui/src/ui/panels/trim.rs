@@ -167,7 +167,10 @@ impl Panel for TrimPanel<'_> {
                 .on_hover_text("Play the last few seconds before the end")
                 .clicked()
             {
-                cx.send((target(cx), EngineCmd::Seek((tab.end - LEAD_IN).max(tab.start))));
+                cx.send((
+                    target(cx),
+                    EngineCmd::Seek((tab.end - LEAD_IN).max(tab.start)),
+                ));
                 cx.send((target(cx), EngineCmd::Play(Set::On)));
             }
             if ui

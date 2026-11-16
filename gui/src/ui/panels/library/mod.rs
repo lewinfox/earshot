@@ -344,7 +344,10 @@ impl LibraryPane {
                 (Level::Sources, Nav::Next) => {
                     if let Some(first) = rows.first() {
                         self.tree_to(first.key.clone(), cx);
-                    } else if !matches!(source, None | Some(Source::Program(_) | Source::Library(_))) {
+                    } else if !matches!(
+                        source,
+                        None | Some(Source::Program(_) | Source::Library(_))
+                    ) {
                         // Manage, a stick: nothing to step through. (A library not read
                         // yet: nothing until it has its tree.)
                         self.level = Level::Inside;
@@ -389,8 +392,8 @@ impl LibraryPane {
                     None => self.level = Level::Sources,
                 },
                 (Level::List, Nav::Next) => {
-                    let suggestions = cx.prefs.flow_tab()
-                        || cx.prefs.layout().aside == Some(Aside::Suggestions);
+                    let suggestions =
+                        cx.prefs.flow_tab() || cx.prefs.layout().aside == Some(Aside::Suggestions);
                     if self.focused_pane != Pane::Suggest && suggestions {
                         self.into_list(Pane::Suggest);
                     }
@@ -419,11 +422,7 @@ impl LibraryPane {
 
     /// Out of a list or a Flow: to the tree row it came from, or the sources.
     fn back_out(&mut self, tree: bool) {
-        self.level = if tree {
-            Level::Tree
-        } else {
-            Level::Sources
-        };
+        self.level = if tree { Level::Tree } else { Level::Sources };
     }
 
     /// The focused list's focused track: what "load selected" loads and the
@@ -578,7 +577,12 @@ impl LibraryPane {
                 let before = self.external.nav_cursor.clone();
                 self.external.pane(ui, source, &cx.core, cx.out);
                 // A row clicked: the knob is there.
-                if let Some(node) = self.external.nav_cursor.clone().filter(|n| Some(n) != before.as_ref()) {
+                if let Some(node) = self
+                    .external
+                    .nav_cursor
+                    .clone()
+                    .filter(|n| Some(n) != before.as_ref())
+                {
                     self.level = Level::Tree;
                     self.tree_cursor = Some(TreeKey::Node(node));
                 }

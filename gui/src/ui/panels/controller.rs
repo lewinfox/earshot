@@ -173,7 +173,9 @@ impl ControllerUi {
         // two messages each move (a coarse one and a fine one, alternating), so a
         // message joins either of the newest two rows.
         if let Some(last) = self.log.iter_mut().take(2).find(|r| {
-            r.port == m.port && r.bytes.get(..2) == m.bytes.get(..2) && r.bytes.len() == m.bytes.len()
+            r.port == m.port
+                && r.bytes.get(..2) == m.bytes.get(..2)
+                && r.bytes.len() == m.bytes.len()
         }) {
             last.count += 1;
             last.at = m.at;
@@ -214,7 +216,15 @@ impl ControllerUi {
             .get(key)
             .map_or_else(|| midi::guess_input(key, control), |l| l.input);
         let display_only = self.learned.get(key).is_some_and(|l| l.display_only);
-        self.learned.set(key, Learn { control, arg, input, display_only });
+        self.learned.set(
+            key,
+            Learn {
+                control,
+                arg,
+                input,
+                display_only,
+            },
+        );
     }
 
     /// Change the number after a mapped command (`-4`, `size`). False if the command
@@ -300,7 +310,6 @@ impl ControllerUi {
         self.wizard = None;
         Ok(cmd)
     }
-
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -475,73 +484,103 @@ fn wizard(ui: &mut Ui, t: &mut ControllerUi, cx: &mut Cx) {
     let r = egui::Modal::new(egui::Id::new("new-mapping")).show(ui.ctx(), |ui| {
         ui.set_width(420.0);
         ui.heading("New mapping");
-        egui::Grid::new("new-mapping-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-            ui.label("Manufacturer");
-            let shown = if w.new_maker {
-                "New…".to_string()
-            } else {
-                w.maker
-                    .as_ref()
-                    .and_then(|m| makers.iter().find(|(k, _)| k == m))
-                    .map_or("Pick one".to_string(), |(_, n)| n.clone())
-            };
-            egui::ComboBox::from_id_salt("wizard-maker").selected_text(shown).width(240.0).show_ui(ui, |ui| {
-                for (k, n) in &makers {
-                    if ui.selectable_label(!w.new_maker && w.maker.as_ref() == Some(k), n).clicked() {
-                        w.maker = Some(k.clone());
-                        w.new_maker = false;
-                        w.template = None;
-                    }
-                }
-                if ui.selectable_label(w.new_maker, "New…").clicked() {
-                    w.new_maker = true;
-                    w.maker = None;
-                    w.template = None;
-                }
-            });
-            ui.end_row();
-            if w.new_maker {
-                ui.label("Its name");
-                ui.add(egui::TextEdit::singleline(&mut w.maker_name).hint_text("Pioneer DJ").desired_width(240.0));
-                ui.end_row();
-            } else if let Some(maker) = &w.maker {
-                ui.label("Start from");
-                let theirs: Vec<&Profile> = models.iter().filter(|p| p.id.maker == *maker).collect();
-                let shown = w
-                    .template
-                    .as_ref()
-                    .and_then(|k| theirs.iter().find(|p| p.id.key() == *k))
-                    .map_or("Empty".to_string(), |p| p.label());
-                egui::ComboBox::from_id_salt("wizard-template").selected_text(shown).width(240.0).show_ui(ui, |ui| {
-                    if ui.selectable_label(w.template.is_none(), "Empty").clicked() {
-                        w.template = None;
-                    }
-                    for p in &theirs {
-                        let k = p.id.key();
-                        if ui.selectable_label(w.template.as_ref() == Some(&k), p.label()).clicked() {
-                            w.template = Some(k);
+        egui::Grid::new("new-mapping-grid")
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Manufacturer");
+                let shown = if w.new_maker {
+                    "New…".to_string()
+                } else {
+                    w.maker
+                        .as_ref()
+                        .and_then(|m| makers.iter().find(|(k, _)| k == m))
+                        .map_or("Pick one".to_string(), |(_, n)| n.clone())
+                };
+                egui::ComboBox::from_id_salt("wizard-maker")
+                    .selected_text(shown)
+                    .width(240.0)
+                    .show_ui(ui, |ui| {
+                        for (k, n) in &makers {
+                            if ui
+                                .selectable_label(!w.new_maker && w.maker.as_ref() == Some(k), n)
+                                .clicked()
+                            {
+                                w.maker = Some(k.clone());
+                                w.new_maker = false;
+                                w.template = None;
+                            }
                         }
-                    }
-                });
+                        if ui.selectable_label(w.new_maker, "New…").clicked() {
+                            w.new_maker = true;
+                            w.maker = None;
+                            w.template = None;
+                        }
+                    });
                 ui.end_row();
-            }
-            ui.label("Model");
-            ui.add(egui::TextEdit::singleline(&mut w.model_name).hint_text("DDJ-FLX4").desired_width(240.0));
-            ui.end_row();
-            ui.label("MIDI device");
-            let shown = w.device.and_then(|i| devices.get(i)).map_or("None".to_string(), Clone::clone);
-            egui::ComboBox::from_id_salt("wizard-device").selected_text(shown).width(240.0).show_ui(ui, |ui| {
-                if ui.selectable_label(w.device.is_none(), "None").clicked() {
-                    w.device = None;
+                if w.new_maker {
+                    ui.label("Its name");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut w.maker_name)
+                            .hint_text("Pioneer DJ")
+                            .desired_width(240.0),
+                    );
+                    ui.end_row();
+                } else if let Some(maker) = &w.maker {
+                    ui.label("Start from");
+                    let theirs: Vec<&Profile> =
+                        models.iter().filter(|p| p.id.maker == *maker).collect();
+                    let shown = w
+                        .template
+                        .as_ref()
+                        .and_then(|k| theirs.iter().find(|p| p.id.key() == *k))
+                        .map_or("Empty".to_string(), |p| p.label());
+                    egui::ComboBox::from_id_salt("wizard-template")
+                        .selected_text(shown)
+                        .width(240.0)
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(w.template.is_none(), "Empty").clicked() {
+                                w.template = None;
+                            }
+                            for p in &theirs {
+                                let k = p.id.key();
+                                if ui
+                                    .selectable_label(w.template.as_ref() == Some(&k), p.label())
+                                    .clicked()
+                                {
+                                    w.template = Some(k);
+                                }
+                            }
+                        });
+                    ui.end_row();
                 }
-                for (i, d) in devices.iter().enumerate() {
-                    if ui.selectable_label(w.device == Some(i), d).clicked() {
-                        w.device = Some(i);
-                    }
-                }
+                ui.label("Model");
+                ui.add(
+                    egui::TextEdit::singleline(&mut w.model_name)
+                        .hint_text("DDJ-FLX4")
+                        .desired_width(240.0),
+                );
+                ui.end_row();
+                ui.label("MIDI device");
+                let shown = w
+                    .device
+                    .and_then(|i| devices.get(i))
+                    .map_or("None".to_string(), Clone::clone);
+                egui::ComboBox::from_id_salt("wizard-device")
+                    .selected_text(shown)
+                    .width(240.0)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(w.device.is_none(), "None").clicked() {
+                            w.device = None;
+                        }
+                        for (i, d) in devices.iter().enumerate() {
+                            if ui.selectable_label(w.device == Some(i), d).clicked() {
+                                w.device = Some(i);
+                            }
+                        }
+                    });
+                ui.end_row();
             });
-            ui.end_row();
-        });
         ui.label(
             RichText::new(
                 "The device uses this mapping from now on. A mapping that starts from another \
@@ -612,12 +651,10 @@ fn sorted(t: &ControllerUi, mut keys: Vec<(u8, u8)>) -> Vec<(u8, u8)> {
             1 => seen.map(|s| Cell::Num(s.value as f64)),
             2 => seen.map(|s| Cell::Num(s.count as f64)),
             3 => l.map(|l| Cell::Text(l.control.name().0)),
-            4 => l
-                .filter(|l| l.control.takes_number())
-                .map(|l| match l.arg {
-                    Some(a) => Cell::Num(a),
-                    None => Cell::Text(word(&l)),
-                }),
+            4 => l.filter(|l| l.control.takes_number()).map(|l| match l.arg {
+                Some(a) => Cell::Num(a),
+                None => Cell::Text(word(&l)),
+            }),
             5 => l.map(|l| Cell::Text(reading_name(l.input).to_string())),
             _ => l.map(|l| Cell::Num(l.display_only as u8 as f64)),
         }
@@ -800,7 +837,10 @@ fn command_picker(
             )
             .request_focus();
             ui.separator();
-            if ui.selectable_label(current.is_none(), "— (nothing)").clicked() {
+            if ui
+                .selectable_label(current.is_none(), "— (nothing)")
+                .clicked()
+            {
                 t.learned.remove(key);
                 t.search.clear();
                 ui.close();
@@ -1069,7 +1109,13 @@ mod tests {
         t.map_to((0xB5, 0x10), "mixer_crossfader");
         let l = t.learned.get((0xB5, 0x10)).unwrap();
         assert_eq!(l.input, Input::Cc);
-        t.learned.set((0xB5, 0x10), Learn { input: Input::Jog(720), ..l });
+        t.learned.set(
+            (0xB5, 0x10),
+            Learn {
+                input: Input::Jog(720),
+                ..l
+            },
+        );
         t.map_to((0xB5, 0x10), "deck_2_scratch");
         assert_eq!(t.learned.get((0xB5, 0x10)).unwrap().input, Input::Jog(720));
 
@@ -1084,7 +1130,10 @@ mod tests {
     fn a_new_mapping_is_saved_as_it_changes() {
         let (_, dir) = crate::core::controllers::test_store("panel");
         let ddj = crate::core::controllers::bundled("pioneer", Some("ddj-400"));
-        let mut t = ControllerUi { mine: Some(dir.clone()), ..Default::default() };
+        let mut t = ControllerUi {
+            mine: Some(dir.clone()),
+            ..Default::default()
+        };
         t.learned.replace(ddj.file.clone());
         t.set_active(Some(ddj.clone()));
         assert!(!t.editable(), "built-in");
@@ -1095,17 +1144,27 @@ mod tests {
             model_name: "Mine".into(),
             ..Default::default()
         });
-        assert!(t.create().unwrap().is_none(), "no device: nothing for the app");
+        assert!(
+            t.create().unwrap().is_none(),
+            "no device: nothing for the app"
+        );
         assert!(t.wizard.is_none());
         assert!(t.editable(), "the new one is the user's");
-        assert_eq!(t.learned.all().len(), ddj.file.inputs.len(), "a copy of the DDJ-400's");
+        assert_eq!(
+            t.learned.all().len(),
+            ddj.file.inputs.len(),
+            "a copy of the DDJ-400's"
+        );
 
         t.map_to((0x92, 0x01), "deck_1_play");
         t.keep_mapping();
         let path = dir.join("pioneer/controllers/mine.json");
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains("\"92 01\""), "the new line is saved");
-        assert!(!saved.contains("\"90 0B\""), "PLAY is Pioneer's line, not saved again");
+        assert!(
+            !saved.contains("\"90 0B\""),
+            "PLAY is Pioneer's line, not saved again"
+        );
         let back = t.store().get(&t.active.as_ref().unwrap().id).unwrap();
         assert_eq!(back.file.inputs.len(), ddj.file.inputs.len() + 1);
         let _ = std::fs::remove_dir_all(dir);
@@ -1124,9 +1183,21 @@ mod tests {
         t.on_midi(msg(&[0xB6, 0x37, 3]));
         let coarse = t.learned.get((0xB6, 0x17)).unwrap();
         assert_eq!(coarse.input, Input::Cc);
-        t.learned.set((0xB6, 0x17), Learn { input: Input::Msb, ..coarse });
+        t.learned.set(
+            (0xB6, 0x17),
+            Learn {
+                input: Input::Msb,
+                ..coarse
+            },
+        );
         let fine = t.learned.get((0xB6, 0x37)).unwrap();
-        t.learned.set((0xB6, 0x37), Learn { input: Input::Lsb, ..fine });
+        t.learned.set(
+            (0xB6, 0x37),
+            Learn {
+                input: Input::Lsb,
+                ..fine
+            },
+        );
         let coarse = t.learned.get((0xB6, 0x17)).unwrap();
         assert_eq!(t.learned.partner((0xB6, 0x17), &coarse), Some((0xB6, 0x37)));
         assert!(t.keys().contains(&(0xB6, 0x37)), "both rows stay");
@@ -1178,8 +1249,14 @@ mod tests {
 
     #[test]
     fn messages_in_words() {
-        assert_eq!(named(&[0x90, 0x0B, 0x7F]), "90 0B 7F  note on  ch 1  #11  = 127");
-        assert_eq!(named(&[0xB6, 0x40, 0x01]), "B6 40 01  CC       ch 7  #64  = 1");
+        assert_eq!(
+            named(&[0x90, 0x0B, 0x7F]),
+            "90 0B 7F  note on  ch 1  #11  = 127"
+        );
+        assert_eq!(
+            named(&[0xB6, 0x40, 0x01]),
+            "B6 40 01  CC       ch 7  #64  = 1"
+        );
         assert_eq!(named_key(0x97, 0x00), "97 00  note     ch 8  #0");
         assert_eq!(named_key(0xB0, 0x13), "B0 13  CC       ch 1  #19");
         assert_eq!(named(&[0x90]), "90");
@@ -1190,7 +1267,10 @@ mod tests {
     fn typed_messages_are_checked() {
         assert_eq!(parse_send("90 0b 7F"), Ok(vec![0x90, 0x0B, 0x7F]));
         assert_eq!(parse_send("C0 05"), Ok(vec![0xC0, 0x05]));
-        assert_eq!(parse_send(" F0 00 40 F7 "), Ok(vec![0xF0, 0x00, 0x40, 0xF7]));
+        assert_eq!(
+            parse_send(" F0 00 40 F7 "),
+            Ok(vec![0xF0, 0x00, 0x40, 0xF7])
+        );
         assert!(parse_send("").is_err());
         assert!(parse_send("90 0B").unwrap_err().contains("2 data byte"));
         assert!(parse_send("90 0B 80").unwrap_err().contains("00 to 7F"));
@@ -1198,5 +1278,4 @@ mod tests {
         assert!(parse_send("F0 00 40").unwrap_err().contains("F7"));
         assert!(parse_send("90 zz 7F").unwrap_err().contains("zz"));
     }
-
 }

@@ -39,9 +39,9 @@ pub use self::waveform::{WavePanel, zoomed};
 use self::wave::{DeckWave, Grid, Layer, Marks, Overlay};
 use crate::core::bus::{Control, DeckControl};
 use crate::core::command::{Command, DeckCmd, ViewCmd};
+use crate::core::pads::DeckPads;
 use crate::core::store::TrackCues;
 use crate::core::track::Track;
-use crate::core::pads::DeckPads;
 use crate::core::view::PadMode;
 use crate::ui::panels::library::drag;
 use crate::ui::panels::{Cx, Panel};
@@ -205,7 +205,9 @@ impl Dims {
 
     /// The jog ring's own scale: it and all in it are drawn bigger than the rest.
     fn ring(self) -> Dims {
-        Dims { k: self.k * design::JOG_SCALE }
+        Dims {
+            k: self.k * design::JOG_SCALE,
+        }
     }
 }
 
@@ -582,7 +584,11 @@ impl DeckUi {
         // its width: the frame, the tempo fader, the controls, the tabs and the least
         // gap between.
         let fader_w = if tempo_fader { TEMPO_W + 8.0 } else { 0.0 };
-        let least = if compact { Dims::compact() } else { Dims::full() };
+        let least = if compact {
+            Dims::compact()
+        } else {
+            Dims::full()
+        };
         let extra = (height - min_height(compact)).max(0.0);
         let mut k = Dims::for_row(least.controls_h() + extra).k;
         if self.fit.is_some_and(|(w, _)| w != width) {
@@ -687,7 +693,6 @@ impl DeckUi {
             self.send(out, DeckCmd::Load(id));
         }
     }
-
 
     /// The deck number, title and times; with `buttons`, also SYNC, ★, Q and KEY (when
     /// there's no tempo fader to sit over). Right-click the title: "Show in library".
@@ -1031,7 +1036,6 @@ pub struct DeckLayout {
 }
 
 /// A Perform deck.
-
 
 pub struct DeckPanel<'a> {
     pub deck: &'a mut DeckUi,

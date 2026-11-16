@@ -170,7 +170,8 @@ fn unit_row(ui: &mut Ui, shared: Option<&EngineSnapshot>, unit: usize, out: &mut
     if release != state.release {
         out.push(Command::Fx(unit, FxCmd::ReleaseKind(release)));
     }
-    let r = button(ui, "REL", ON_W).on_hover_text("Release: the effect goes off, and the release effect rings out");
+    let r = button(ui, "REL", ON_W)
+        .on_hover_text("Release: the effect goes off, and the release effect rings out");
     press(ui, &r, FxControl::Release, out);
 }
 
