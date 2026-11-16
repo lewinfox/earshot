@@ -11,6 +11,7 @@ pub mod bus;
 pub mod collections;
 pub mod command;
 pub mod controller_audio;
+pub mod debug;
 pub mod drives;
 pub mod edit;
 #[allow(dead_code)] // searched by the Vibe suggestion feature to come; tests use it

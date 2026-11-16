@@ -261,6 +261,7 @@ fn parse_line(line: &str) -> Result<Binding, String> {
         "perform" => Some(Mode::Perform),
         "prepare" => Some(Mode::Prepare),
         "controller" => Some(Mode::Controller),
+        "debug" if cfg!(debug_assertions) => Some(Mode::Debug),
         "any" => None,
         m => return Err(format!("unknown mode {m}")),
     };

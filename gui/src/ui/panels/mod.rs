@@ -5,6 +5,7 @@
 //! `dispatch` carries out after the frame.
 
 pub mod controller;
+pub mod debug;
 pub mod deck;
 pub mod export;
 pub mod flow;

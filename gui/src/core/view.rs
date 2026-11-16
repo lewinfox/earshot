@@ -31,6 +31,9 @@ pub enum Mode {
     /// Perform's decks over the library and a controller's mapping, for setting up and
     /// testing a MIDI controller.
     Controller,
+    /// Debug builds only: the decks over the log, a spectrogram of the output, and an
+    /// export of the last seconds of it all, for reporting a problem.
+    Debug,
 }
 
 impl Mode {
@@ -40,13 +43,14 @@ impl Mode {
             Mode::Perform => "Perform",
             Mode::Prepare => "Prepare",
             Mode::Controller => "Controller",
+            Mode::Debug => "Debug",
         }
     }
 
-    /// The mode whose keymap bindings it uses: Controller uses Perform's.
+    /// The mode whose keymap bindings it uses: Controller and Debug use Perform's.
     pub fn keys(self) -> Mode {
         match self {
-            Mode::Controller => Mode::Perform,
+            Mode::Controller | Mode::Debug => Mode::Perform,
             m => m,
         }
     }

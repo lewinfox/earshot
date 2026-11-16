@@ -177,6 +177,7 @@ impl TopBar<'_> {
                     Mode::Prepare => "Prepare",
                     Mode::Perform => "Perform",
                     Mode::Controller => "Controller",
+                    Mode::Debug => "Debug",
                 })
                 .width(90.0)
                 .show_ui(ui, |ui| {
@@ -186,6 +187,12 @@ impl TopBar<'_> {
                         .on_hover_text("Two or four decks and the mixer");
                     ui.selectable_value(&mut mode, Mode::Controller, "Controller")
                         .on_hover_text("Perform's decks, with a MIDI controller's mapping to test");
+                    if cfg!(debug_assertions) {
+                        ui.selectable_value(&mut mode, Mode::Debug, "Debug").on_hover_text(
+                            "The log, a spectrogram of the output, and an export for reporting a \
+                             problem (debug builds only)",
+                        );
+                    }
                 });
             if mode != cx.prefs.mode {
                 cx.send(ViewCmd::SetMode(mode));

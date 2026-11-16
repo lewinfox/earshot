@@ -2,6 +2,7 @@
 //! MIDI log and the windows; the mode's view draws the rest of the window.
 
 pub mod controller;
+pub mod debug;
 pub mod perform;
 pub mod prepare;
 
@@ -36,6 +37,8 @@ pub struct Panels {
     pub trim: TrimUi,
     /// Controller mode's tabs.
     pub controller: ControllerUi,
+    /// Debug mode's log, spectrogram and export.
+    pub debug: super::panels::debug::DebugUi,
 }
 
 impl Panels {
@@ -49,6 +52,7 @@ impl Panels {
             stems: StemsUi::default(),
             trim: TrimUi::default(),
             controller: ControllerUi::default(),
+            debug: Default::default(),
         }
     }
 }
@@ -59,6 +63,9 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
         Mode::Perform => perform::show(ctx, panels, cx),
         Mode::Prepare => prepare::show(ctx, panels, cx),
         Mode::Controller => controller::show(ctx, panels, cx),
+        // Only reachable in a debug build; a release build left in it shows Perform.
+        Mode::Debug if cfg!(debug_assertions) => debug::show(ctx, panels, cx),
+        Mode::Debug => perform::show(ctx, panels, cx),
     }
 }
 
