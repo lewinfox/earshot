@@ -12,7 +12,7 @@ use crate::core::keymap::Origin;
 use crate::core::view::{SettingsTab, StemMode, ViewCmd};
 use crate::ui::theme::THEME;
 use crate::ui::widgets::{Button, Seg, Slider, muted, segmented};
-use earshot_engine::HotcueMode;
+use earshot_engine::{HotcueMode, XfCurve};
 
 /// The window's title, which is also its id.
 pub const TITLE: &str = "Settings";
@@ -121,6 +121,24 @@ fn decks(ui: &mut Ui, env: &ModalEnv) -> Vec<Command> {
         ui,
         "On a playing deck a hot cue always jumps there and plays on. Applies to every \
          deck and Prepare's player.",
+    );
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label("Crossfader curve");
+        let choices = [
+            Seg::new(XfCurve::ConstantPower, "Smooth")
+                .tip("Each side a little quieter in the middle, so a blend is as loud as one track"),
+            Seg::new(XfCurve::Sharp, "Sharp")
+                .tip("Both sides full until the middle, for cuts and scratching"),
+        ];
+        if let Some(c) = segmented(ui, env.xf_curve, &choices) {
+            out.push(Command::App(AppCmd::XfCurve(c)));
+        }
+    });
+    muted(
+        ui,
+        "Sharp: two tracks in the middle are louder than one, and a track doubled on both \
+         decks twice as loud.",
     );
     ui.add_space(8.0);
     let mut cue = env.cue_first_beat;

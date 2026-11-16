@@ -140,6 +140,14 @@ impl Player {
         }
     }
 
+    /// Prime the key-lock shifter again before the next block, as after a jump. Two
+    /// players doing this at the same place and speed then play the same samples.
+    pub fn restart_keylock(&mut self) {
+        if let Some(s) = &mut self.shifter {
+            s.idle();
+        }
+    }
+
     /// The hand goes on the record (`true`) or comes off, at `now` (the engine's
     /// clock). Let go, a playing deck carries on at its speed.
     pub fn hand(&mut self, on: bool, now: f64) {

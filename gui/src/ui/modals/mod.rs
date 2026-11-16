@@ -32,6 +32,7 @@ pub struct ModalEnv<'a> {
     pub audio: &'a Result<OutputInfo, String>,
     pub routing: Routing,
     pub hotcue_mode: earshot_engine::HotcueMode,
+    pub xf_curve: earshot_engine::XfCurve,
     pub cue_first_beat: bool,
     pub load_while_playing: bool,
     pub auto_hide_mixer: bool,

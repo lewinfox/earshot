@@ -557,6 +557,8 @@ pub enum DeckControl {
     GridNudge(f64),
     /// Load the track selected in the library.
     LoadSelected,
+    /// Instant doubles: load the other deck's track, playing in step with it.
+    InstantDouble,
     /// Load the previous (-1) or next (1) track in the library's focused list.
     LoadStep(i32),
     /// The controller's pads are in this mode now (its pad mode buttons): the deck's
@@ -673,6 +675,11 @@ impl DeckControl {
             CueDelete => spec("cue_delete", "delete the memory cue just called", Button),
             GridNudge(_) => spec("grid_nudge", "nudge the grid", Button),
             LoadSelected => spec("load_selected", "load the selected track", Button),
+            InstantDouble => spec(
+                "instant_double",
+                "instant doubles: the other deck's track, in step with it",
+                Button,
+            ),
             LoadStep(_) => spec("load_step", "load the next track", Button),
             Shift => spec("shift", "shift (held)", Button),
             SetPadMode(m) => spec(
@@ -845,7 +852,7 @@ impl DeckControl {
             (_, Some(Word::Size { .. })) => return None,
             _ => *Self::ALL
                 .iter()
-                .chain(&[LoadSelected])
+                .chain(&[LoadSelected, InstantDouble])
                 .find(|c| c.spec().name == name && !c.parametrised() && !c.sized())?,
         })
     }
@@ -971,6 +978,7 @@ impl DeckControl {
             CueDelete => on_press(DeckCmd::DeleteCalledMemory),
             GridNudge(ms) => on_press(DeckCmd::Grid(GridOp::Nudge(ms))),
             LoadSelected if pressed => Some(Command::View(ViewCmd::LoadSelected(deck))),
+            InstantDouble if pressed => Some(Command::View(ViewCmd::InstantDouble(deck))),
             LoadStep(n) if pressed => Some(Command::View(ViewCmd::LoadAdjacent(deck, n))),
             SetPadMode(m) if pressed => Some(Command::View(ViewCmd::PadMode(deck, m))),
             Shift => Some(Command::View(ViewCmd::Shift(deck, pressed))),
@@ -1037,6 +1045,7 @@ impl DeckControl {
             // ours, so a MIDI knob maps onto it the same way.
             Filter => Some((MixxxGroup::QuickEffect, "super1".into())),
             LoadSelected => key("LoadSelectedTrack"),
+            InstantDouble => None,
             // Mixxx's mappings scratch through script functions; these names are
             // earshot's own, for MIDI mappings.
             Vinyl => key("vinyl"),
@@ -1482,7 +1491,7 @@ impl Control {
         } else {
             *DeckControl::ALL
                 .iter()
-                .chain(&[DeckControl::LoadSelected])
+                .chain(&[DeckControl::LoadSelected, DeckControl::InstantDouble])
                 .filter(|c| !c.parametrised())
                 .find(|c| c.mixxx().is_some_and(|(g, k)| g == kind && k == key))?
         };
@@ -1495,7 +1504,7 @@ impl Control {
 pub fn command_names() -> Vec<String> {
     let mut all: Vec<Control> = vec![];
     for d in DeckId::first(MAX_DECKS) {
-        for c in DeckControl::ALL.iter().chain(&[DeckControl::LoadSelected]) {
+        for c in DeckControl::ALL.iter().chain(&[DeckControl::LoadSelected, DeckControl::InstantDouble]) {
             match c {
                 DeckControl::Hotcue(_) => {
                     all.extend((0..HOTCUES as u8).map(|n| Control::Deck(d, DeckControl::Hotcue(n))))
@@ -1573,7 +1582,7 @@ pub fn commands_markdown() -> String {
     let d = DeckId::new(0).expect("deck 1");
     let deck_rows = DeckControl::ALL
         .iter()
-        .chain(&[DeckControl::LoadSelected])
+        .chain(&[DeckControl::LoadSelected, DeckControl::InstantDouble])
         .filter(|c| !c.sized())
         .map(|&c| {
             let pattern = match c {
@@ -1876,6 +1885,7 @@ mod tests {
             for c in DeckControl::ALL.iter().chain(&[
                 DeckControl::Hotcue(7),
                 DeckControl::LoadSelected,
+                DeckControl::InstantDouble,
                 DeckControl::LoadStep(-1),
             ]) {
                 all.push(Control::Deck(d, *c));
