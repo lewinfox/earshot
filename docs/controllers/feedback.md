@@ -171,7 +171,9 @@ monotonic clock:
 
 - **On connect:** run `init`, then trigger every output and connection once, so
   the device shows the real state at once. Some controllers also answer a SysEx
-  query with their knob positions; the DDJ-400's `init` sends one. Soft takeover
+  query with their knob positions; the DDJ-400's `init` sends one. Send it before
+  audio starts or once audio has settled, never just after: see
+  [ddj-400-chirp.md](ddj-400-chirp.md). Soft takeover
   ignores those first values until the knobs are moved, as Mixxx does.
 - **On disconnect or quit:** run `shutdown`, which turns the LEDs off, before
   closing the port.

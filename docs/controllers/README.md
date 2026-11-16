@@ -19,6 +19,8 @@ you can plug in a controller, press everything, and read what's missing.
 - **[capture.md](capture.md)**: controllers with no mapping. Detecting the
   model, guided and free capture in a new Configure mode, guesses from Mixxx's
   mappings, and a GitHub issue for adding support.
+- **[ddj-400-chirp.md](ddj-400-chirp.md)**: why asking a DDJ-400 for its knob
+  positions as audio starts made its headphones chirp, and how earshot waits now.
 - **`tools/`**: the two scripts that measured all this. Rerun them after a Mixxx
   update (see the top of mixxx-controls.md). They read `~/git/mixxx` and
   `/usr/share/mixxx/controllers` and write only the tables in mixxx-controls.md.
