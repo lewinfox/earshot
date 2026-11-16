@@ -19,6 +19,7 @@ use crate::decode::TrackAudio;
 use crate::dsp::{self, Limiter, Smoothed};
 use crate::fx::{BeatClock, FALLBACK_BPM, FX_UNITS, FxCmd, FxTarget, FxUnit, FxUnitState};
 use crate::keylock::KEY_SHIFT_MAX;
+use crate::load::LoadWatch;
 use crate::pad_fx::PadFxSlot;
 use crate::processor::{Channel, KNOB_SECS, MasterChain};
 use crate::sampler::{SampleSlot, Sampler};
@@ -997,6 +998,14 @@ pub struct Renderer {
     clock_offset: Option<f64>,
     /// Rendered only when asked, not as time passes ([`Renderer::set_stepped`]).
     stepped: bool,
+    /// Nothing waits for the audio ([`Renderer::set_untimed`]).
+    untimed: bool,
+    /// Whether the audio is behind, from how long callbacks take.
+    load: LoadWatch,
+    /// Tests: the load each callback reports, in place of the time it really took
+    /// (which depends on the machine running them).
+    #[cfg(test)]
+    test_load: f32,
     /// Tests render faster than real time: they set this to have callbacks come at the
     /// times they would in real time ([`Renderer::moment`]).
     #[cfg(test)]
@@ -1091,6 +1100,10 @@ impl Renderer {
             epoch: Instant::now(),
             clock_offset: None,
             stepped: false,
+            untimed: false,
+            load: LoadWatch::default(),
+            #[cfg(test)]
+            test_load: 0.0,
             #[cfg(test)]
             simulated_time: false,
         };
@@ -1164,6 +1177,44 @@ impl Renderer {
         if elapsed * 10 > budget_ns * 8 {
             s.slow_callbacks.fetch_add(1, Relaxed);
         }
+        let load = self.load_of(elapsed, budget_ns);
+        let was = self.load.behind();
+        let behind = self.load.callback(load, total as f64 / self.sample_rate);
+        if behind != was {
+            self.stats.behind.store(behind, Relaxed);
+        }
+    }
+
+    /// The share of its time a callback used, for [`LoadWatch`]: nothing when no
+    /// sound card is waiting for the audio.
+    #[cfg(not(test))]
+    fn load_of(&self, elapsed_ns: u64, budget_ns: u64) -> f32 {
+        if self.untimed || self.stepped || budget_ns == 0 {
+            0.0
+        } else {
+            (elapsed_ns as f64 / budget_ns as f64) as f32
+        }
+    }
+
+    /// Tests say what the load is.
+    #[cfg(test)]
+    fn load_of(&self, _elapsed_ns: u64, _budget_ns: u64) -> f32 {
+        let _ = self.untimed;
+        self.test_load
+    }
+
+    /// The audio thread ran up against the real-time limit ([`crate::realtime`]):
+    /// the audio is behind, without waiting to see the load. Called on the audio
+    /// thread, before the callback's render.
+    pub(crate) fn overran(&mut self) {
+        self.load.overrun();
+        self.stats.behind.store(self.load.behind(), Relaxed);
+    }
+
+    /// No sound card is waiting for the audio (the null output): how long a callback
+    /// takes doesn't matter, and the audio is never behind.
+    pub(crate) fn set_untimed(&mut self) {
+        self.untimed = true;
     }
 
     /// The engine's clock now, seconds.
@@ -2357,6 +2408,64 @@ mod tests {
         move |t| 0.5 * (std::f64::consts::TAU * hz * t).sin() as f32
     }
 
+    /// Measurement, not a test: what a block costs. `cargo test --release -p
+    /// earshot-engine cost_of_a_block -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn cost_of_a_block() {
+        use crate::pad_fx::{PadFx, PadFxKind};
+        fn time(rig: &mut Rig, what: &str) {
+            rig.run(2.0);
+            let mut t: Vec<f64> = (0..3000)
+                .map(|_| {
+                    let t0 = std::time::Instant::now();
+                    rig.r.process(&mut rig.out, 4);
+                    t0.elapsed().as_secs_f64() * 1e6
+                })
+                .collect();
+            t.sort_by(|a, b| a.total_cmp(b));
+            let mean = t.iter().sum::<f64>() / t.len() as f64;
+            let budget = 256.0 / SR as f64 * 1e6;
+            println!(
+                "{what:<44} mean {mean:7.1} us ({:4.1} %)  p99 {:7.1}  max {:7.1} ({:4.1} %)",
+                100.0 * mean / budget,
+                t[t.len() * 99 / 100],
+                t[t.len() - 1],
+                100.0 * t[t.len() - 1] / budget
+            );
+        }
+        let noise = |t: f64| {
+            (0.3 * (t * 440.0 * std::f64::consts::TAU).sin()
+                + 0.2 * ((t * 48_000.0) as u64).wrapping_mul(2654435761).rem_euclid(1000) as f64 / 1000.0
+                - 0.1) as f32
+        };
+        for decks in [2usize, 4] {
+            let mut rig = Rig::with_decks(decks);
+            for d in 0..decks {
+                load_fn(&mut rig, d, 120.0, noise);
+            }
+            time(&mut rig, &format!("{decks} decks loaded, stopped"));
+            for d in 0..decks {
+                rig.deck(d, DeckCmd::Play(Set::On));
+            }
+            time(&mut rig, "  playing at 1.0");
+            for d in 0..decks {
+                rig.deck(d, DeckCmd::Rate(0.08));
+            }
+            time(&mut rig, "  playing at 1.08, no keylock");
+            for d in 0..decks {
+                rig.deck(d, DeckCmd::Keylock(Set::On));
+            }
+            time(&mut rig, "  + keylock");
+            rig.r.fx[0].apply(FxCmd::Enabled(Set::On));
+            time(&mut rig, "  + the effect unit");
+            for d in 0..decks {
+                rig.deck(d, DeckCmd::PadFx(Some(PadFx::new(PadFxKind::Reverb, 1.0))));
+            }
+            time(&mut rig, "  + pad reverb on every deck");
+        }
+    }
+
     #[test]
     fn keylock_keeps_the_key_at_another_tempo() {
         for (keylock, want) in [(false, 440.0 * 1.08), (true, 440.0)] {
@@ -2551,6 +2660,52 @@ mod tests {
             let err = x.iter().zip(&y).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
             assert!(err < 1e-6, "keylock {keylock}, rate {rate}: off by {err}");
         }
+    }
+
+
+    /// A machine that can't keep up is noticed and the app told; the sound is left
+    /// as it is (keylock, the effects).
+    #[test]
+    fn sustained_load_is_reported_as_behind_and_changes_nothing_in_the_sound() {
+        use crate::pad_fx::{PadFx, PadFxKind};
+        let mut rig = Rig::new();
+        load_fn(&mut rig, 0, 60.0, sine(440.0));
+        rig.deck(0, DeckCmd::Keylock(Set::On));
+        rig.deck(0, DeckCmd::Rate(0.08));
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.r.fx[0].apply(FxCmd::Enabled(Set::On));
+        rig.run(1.0);
+        let behind = |rig: &Rig| rig.monitor.stats().behind.load(Relaxed);
+        assert!(!behind(&rig), "room to spare");
+
+        // One slow callback, then a few: not sustained.
+        rig.r.test_load = 0.95;
+        rig.run(0.05);
+        rig.r.test_load = 0.2;
+        rig.run(1.0);
+        assert!(!behind(&rig));
+
+        rig.r.test_load = 0.9;
+        rig.run(1.0);
+        assert!(behind(&rig));
+        rig.deck(1, DeckCmd::PadFx(Some(PadFx::new(PadFxKind::Reverb, 1.0))));
+        rig.run(0.5);
+        assert!(rig.snap().mixer.fx[0].enabled, "the effect unit stays on");
+        assert!(rig.snap().decks[1].pad_fx.is_some(), "and the pad effect");
+        rig.r.fx[0].apply(FxCmd::Enabled(Set::Off));
+        rig.deck(1, DeckCmd::PadFx(None));
+        rig.run(3.0);
+        let f = frequency(&record(&mut rig, 1.0));
+        assert!((f - 440.0).abs() < 2.0, "keylock as ever: {f:.1} Hz");
+
+        // Room for long enough: no longer behind.
+        rig.r.test_load = 0.1;
+        rig.run(crate::load::RECOVER_SECS + 0.5);
+        assert!(!behind(&rig));
+
+        // The real-time limit: behind at once.
+        rig.r.overran();
+        assert!(behind(&rig));
     }
 
     #[test]

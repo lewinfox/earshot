@@ -39,8 +39,22 @@ pub struct Meter<'a> {
     pub memory: Option<crate::core::log::Memory>,
 }
 
+/// Something the user should know about while it lasts: a pill in the top bar.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Alert {
+    pub text: String,
+    /// The tooltip: what it means and what to do.
+    pub tip: String,
+    /// Red, not amber.
+    pub serious: bool,
+}
+
 pub struct TopBar<'a> {
     pub audio: &'a Result<OutputInfo, String>,
+    /// The machine can't keep up, and what the audio is doing about it: real time
+    /// lost, keylock on its lighter setting, a low-power profile (`EarshotApp::
+    /// watch_strain`).
+    pub alerts: &'a [Alert],
     /// The audio stalled and was restarted, or keeps stalling (`core::audio_watch`).
     pub audio_note: Option<&'a str>,
     /// The controller's sound card (its name) couldn't be opened, and why: with a
@@ -96,6 +110,14 @@ impl TopBar<'_> {
         ui.add_space(6.0);
         self.midi_pill(ui, cx);
         self.audio_pill(ui, cx);
+        for a in self.alerts {
+            let intent = if a.serious {
+                Intent::Danger
+            } else {
+                Intent::Warning
+            };
+            ui.add(Pill::new(&a.text, intent)).on_hover_text(&a.tip);
+        }
         self.analysis_pill(ui, cx);
     }
 

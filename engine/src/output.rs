@@ -13,6 +13,7 @@ use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig, SupportedBufferS
 
 use crate::engine::{PhonesRoute, Renderer};
 use crate::phones_out::Aligner;
+use crate::realtime::Overrun;
 use crate::snapshot::Stats;
 
 #[derive(Debug, Clone, Default)]
@@ -162,6 +163,8 @@ pub fn start(
     if opts.null {
         return Ok(start_null(opts.buffer_frames.unwrap_or(256), make_renderer));
     }
+    // The streams' threads run at real-time priority: survive running past its limit.
+    crate::realtime::install();
     let (info_tx, info_rx) = mpsc::channel();
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let opts2 = opts.clone();
@@ -439,11 +442,17 @@ fn phones_stream(
     let (tx, rx) = rtrb::RingBuffer::new(master.sample_rate as usize * 2);
     let route = Arc::new(PhonesRoute::default());
     let mut aligner = Aligner::new(rx, chunk, route.clone(), stats.clone());
+    let mut overrun = Overrun::new();
+    let rt_stats = stats.clone();
     let err_stats = stats;
     let stream = device
         .build_output_stream(
             config,
             move |data: &mut [f32], _| {
+                // Up against the real-time limit (either stream's thread): a break.
+                if overrun.check() {
+                    rt_stats.overruns.fetch_add(1, Relaxed);
+                }
                 crate::dsp::flush_denormals();
                 aligner.process(data, channels as usize)
             },
@@ -473,11 +482,19 @@ where
     // Conversion scratch, allocated up front; grows only if the backend hands us a
     // bigger buffer than it promised (which would be an allocation on the audio thread).
     let mut scratch = vec![0f32; 8192 * channels];
+    let mut overrun = Overrun::new();
     let err_stats = stats.clone();
     device
         .build_output_stream(
             config,
             move |data: &mut [T], _| {
+                // Up against the real-time limit: this thread takes a moment's break,
+                // which keeps it real-time and the app alive. Only atomics and that:
+                // the app does the logging when it sees the count.
+                if overrun.check() {
+                    stats.overruns.fetch_add(1, Relaxed);
+                    renderer.overran();
+                }
                 crate::dsp::flush_denormals();
                 if scratch.len() < data.len() {
                     scratch.resize(data.len(), 0.0);
@@ -531,6 +548,7 @@ fn start_null(
         .name("earshot-null-audio".into())
         .spawn(move || {
             let mut renderer = make_renderer(RATE);
+            renderer.set_untimed();
             let mut buf = vec![0f32; frames as usize * 4];
             let period = Duration::from_secs_f64(frames as f64 / RATE as f64);
             let mut next = Instant::now();

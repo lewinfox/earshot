@@ -18,3 +18,5 @@ triple_buffer = "9.0.0"
 # PipeWire keeps their clocks together.
 [target.'cfg(target_os = "linux")'.dependencies]
 cpal = { version = "0.18.2", features = ["realtime-dbus", "pipewire"] }
+# Handling SIGXCPU and stepping down from real-time priority (src/realtime.rs).
+libc = "0.2.190"

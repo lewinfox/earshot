@@ -265,6 +265,18 @@ struct Hud {
     /// logged.
     phones_short: u64,
     phones_realigns: u64,
+    /// The machine can't keep up (`EarshotApp::watch_strain`): the audio is behind
+    /// (and how often it has run up against the real-time limit), and the system is
+    /// holding the CPU back; as last seen (and logged), and the top bar's pills for
+    /// them.
+    overruns: u64,
+    behind: bool,
+    power: Option<crate::core::power::Warning>,
+    /// Too little memory is left for the analysis worker (`power::memory_short`).
+    memory_short: bool,
+    /// Any of those: analysis and stems wait, and tracks get quick grids meanwhile.
+    low_resource: bool,
+    alerts: Vec<crate::ui::panels::status::Alert>,
     last: Option<Instant>,
 }
 
@@ -966,6 +978,15 @@ impl EarshotApp {
             Command::Export(c) => self.export_cmd(c),
             Command::TempoLock(TempoLockCmd::Listen { version, at }) => self.listen(version, at),
             Command::TempoLock(c) => self.tempo_lock.run(c),
+            // Stems are the heaviest thing there is to work out: not while the machine
+            // is short of resources (`watch_strain`).
+            Command::Stems(crate::core::stems::StemsCmd::Calculate(_)) if self.hud.low_resource => {
+                self.notify(
+                    notice::Level::Warning,
+                    "Stems will have to wait: the computer is short of resources, and the \
+                     audio comes first",
+                );
+            }
             Command::Stems(c) => self.stems.run(c),
             Command::Trim(c) => self.trim_cmd(c),
             Command::Collection(c) => self.collection_cmd(c),
@@ -1332,6 +1353,7 @@ impl EarshotApp {
                 }
                 TopBar {
                     audio: &self.audio,
+                    alerts: &self.hud.alerts,
                     audio_note: self.audio_note.as_ref().map(|(n, _)| n.as_str()),
                     controller_busy: self.controller.found.as_ref().and_then(|c| {
                         Some((c.id.as_str(), self.controller.error.as_deref()?))

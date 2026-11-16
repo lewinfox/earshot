@@ -347,6 +347,20 @@ impl Stems {
         }
     }
 
+    /// Stop every job (the machine can't keep up with the audio). How many there
+    /// were.
+    pub fn cancel_all(&self) -> usize {
+        let tracks: Vec<TrackId> = {
+            let running = self.shared.running.lock().unwrap();
+            let live = running.iter().filter(|(_, r)| !r.status.cancelling);
+            live.map(|(t, _)| *t).collect()
+        };
+        for &t in &tracks {
+            self.shared.cancel(t);
+        }
+        tracks.len()
+    }
+
     /// `track`'s job, if it has one.
     pub fn status(&self, track: TrackId) -> Option<Status> {
         let running = self.shared.running.lock().unwrap();

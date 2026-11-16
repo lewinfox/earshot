@@ -262,8 +262,8 @@ pub type QuickAnalyser = Mailbox<Vec<i64>>;
 /// work. Send it what `StoreEvent::NewTracks` lists. What's waiting when the app
 /// closes isn't kept: those tracks stay unanalysed until the user analyses them.
 ///
-/// Low-resource mode (#22) doesn't hold this back: quick analysis is what still
-/// runs then.
+/// A machine short of resources doesn't hold this back (`Analyser::set_held`): quick
+/// analysis is what still runs then, for the tracks whose full analysis has to wait.
 pub fn start_quick_analyser(store: Store) -> QuickAnalyser {
     background::serve("earshot-quick", idle_priority, move |tracks: Vec<i64>| {
         for id in tracks {
