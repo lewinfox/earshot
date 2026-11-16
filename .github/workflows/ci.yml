@@ -1,5 +1,8 @@
 # Tests for every pull request into main or develop: the Rust workspace (`make test`) and the
 # Python worker (`make test-worker`). Tests that need a real track stay #[ignore]d.
+#
+# The Rust tests run on Linux and macOS (the platforms earshot ships for; Windows
+# builds but isn't tested yet). The worker is pure Python and runs on Linux only.
 
 name: ci
 
@@ -17,18 +20,29 @@ env:
 
 jobs:
   rust:
-    name: Rust tests
-    runs-on: ubuntu-latest
+    name: Rust tests (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-latest
+          - name: macos
+            os: macos-14 # Apple silicon, as the release builds
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
 
-      # The same build packages as the release's Linux build.
+      # The same build packages as the release's Linux build. macOS needs none.
       - name: Linux packages
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
