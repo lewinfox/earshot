@@ -6,6 +6,31 @@ Mixxx's XML and JS at runtime, run the JS in an embedded QuickJS, and pass every
 doesn't have yet become harmless stubs that log once. Start with the logging, so
 you can plug in a controller, press everything, and read what's missing.
 
+## Controller files
+
+Everything earshot knows about a particular controller is in a JSON file under
+`gui/controllers/`, compiled into the app. Nothing else in the code names a
+controller.
+
+- **Layout:** a maker's file is `gui/controllers/<maker>/<maker>.json`; a model's
+  is `gui/controllers/<maker>/controllers/<model>.json`. Add a file to `FILES` in
+  `gui/src/core/controllers.rs`.
+- **Layers:** a model's file `extends` its maker's. The one on top wins, message
+  by message; its `meters` and `start` replace the ones under it if it has any.
+  `pioneer.json` holds only what Mixxx's mappings show all Pioneer DDJs share.
+- **Matching** (at connect, per MIDI port):
+  1. **USB id** (`"usb": ["2b73:0026"]`), from the port's ALSA card on Linux.
+  2. **Port name** (`"names": ["DDJ-400"]`), anywhere else, or with no USB id.
+  3. **The maker alone** (`"usb": ["2b73:*"]`): an unknown Pioneer gets the
+     shared lines.
+- **Fields:** `inputs` and `meters` as in a draft; `start` (messages sent after
+  the start-up lights, e.g. the DDJ-400's position query); `mirror` and
+  `mirror_status` (where else a button's light goes: its SHIFT note, or every note
+  a channel up).
+- **The draft** (`controller-draft.json` in the data folder) still replaces the
+  file's inputs and meters when it's there. Lines it can't read are left out and
+  logged, and the draft as it was is copied beside it first.
+
 ## The docs
 
 - **[mixxx-controls.md](mixxx-controls.md)**: every Mixxx control, what earshot
@@ -96,7 +121,7 @@ earshot would have.
    - Do the option maths (14-bit, relative, invert, soft takeover).
    - Add the names and aliases for what earshot already does.
    - Add XML `<output>`s for LEDs.
-   - Replace the hardcoded DDJ-400 table in `gui/src/core/midi.rs`.
+   - The hardcoded DDJ-400 table is gone: it's `gui/controllers/` now (#38).
    - Result: 12 XML-only mappings work fully. A DDJ-400 gets its mixer, pads,
      loops, load and button LEDs.
 2. **JS.**

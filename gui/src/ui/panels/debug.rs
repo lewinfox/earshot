@@ -27,7 +27,7 @@ pub struct DebugUi {
     pub recorder: Option<Recorder>,
     /// What the app knows that a report should carry (audio device, settings).
     pub info: String,
-    /// The controller lights' slot, to ask a DDJ-400 where its controls are.
+    /// The controller lights' slot, to resend the controllers' start messages.
     pub lights: Option<crate::core::lights::MonitorSlot>,
     /// The controller mapping, to name what each message does.
     pub mapping: Option<crate::core::midi::Learned>,
@@ -112,16 +112,16 @@ impl DebugUi {
             }
             ui.separator();
             if ui
-                .add_enabled(self.lights.is_some(), egui::Button::new("Ask DDJ for positions"))
+                .add_enabled(self.lights.is_some(), egui::Button::new("Resend start messages"))
                 .on_hover_text(
-                    "Send a DDJ-400 the SysEx asking where its controls are (Mixxx sends it at \
-                     start; earshot doesn't, as it left the headphones chirping). For testing \
-                     when it upsets the unit; it's logged and in the export's MIDI.",
+                    "Send the controller the start messages from its controller file again \
+                     (a DDJ-400's asks where its controls are). It's logged and in the \
+                     export's MIDI.",
                 )
                 .clicked()
                 && let Some(l) = &self.lights
             {
-                l.lock().unwrap().ask_report = true;
+                l.lock().unwrap().resend_start = true;
             }
             ui.separator();
             let channels = rec.history.lock().unwrap().channels;

@@ -1,13 +1,14 @@
 //! Controller mode's Mapping and History tabs, for mapping a controller by pressing
 //! its buttons.
 //!
-//! Mapping lists every message the session knows: the ones mapped (a DDJ-400 starts
-//! from the built-in table; anything else from nothing) and every one pressed since.
+//! Mapping lists every message the session knows: the ones mapped (a controller with
+//! a file in `gui/controllers/` starts from it; anything else from nothing) and every
+//! one pressed since.
 //! Pressing something runs its command, adds its message to the list if it's new, and
 //! scrolls the list to it. Each row's command can be picked from a list, and takes
 //! effect at once. The mapping is kept as a draft file as it changes, and read back
 //! when earshot starts, so work in progress survives a restart. "New mapping" starts
-//! again: empty, from a built-in profile, or from a controller file. "Save JSON…"
+//! again: empty, from a bundled controller file, or from a file of your own. "Save JSON…"
 //! writes the lot as a controller file, to go in the repo.
 //!
 //! History is the stream of messages as they came in, newest first.
@@ -227,11 +228,42 @@ impl ControllerUi {
         let Ok(text) = std::fs::read_to_string(path) else {
             return;
         };
+        // Lines this build can't read are left out, and the draft would be written
+        // back without them: a copy of it is kept first.
+        let keep_copy = |why: &str| {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let copy = path.with_file_name(format!(
+                "{}.{why}-{secs}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            match std::fs::copy(path, &copy) {
+                Ok(_) => copy.display().to_string(),
+                Err(e) => format!("(no copy kept: {e})"),
+            }
+        };
         match midi::from_json(&text) {
-            Ok((_, map)) => self.learned.replace(map),
+            Ok((_, map)) => {
+                if !map.skipped.is_empty() {
+                    let copy = keep_copy("skipped-lines");
+                    for s in &map.skipped {
+                        eprintln!("ERROR controller draft: left out {s}");
+                    }
+                    *self.saved.lock().unwrap() = Some(format!(
+                        "{} line(s) of the draft couldn't be read and were left out (see the \
+                         log); the draft as it was is kept in {copy}",
+                        map.skipped.len()
+                    ));
+                }
+                self.learned.replace(map)
+            }
             Err(e) => {
-                *self.saved.lock().unwrap() =
-                    Some(format!("The draft ({}) couldn't be read: {e}", path.display()))
+                let copy = keep_copy("unreadable");
+                *self.saved.lock().unwrap() = Some(format!(
+                    "The draft ({}) couldn't be read: {e}. It's kept in {copy}",
+                    path.display()
+                ))
             }
         }
         self.draft_version = self.learned.version();
@@ -398,7 +430,7 @@ impl Panel for MappingPanel<'_> {
                     asked = Some(NewFrom::Empty);
                 }
                 for (i, (name, _)) in midi::profiles().iter().enumerate() {
-                    if ui.button(*name).clicked() {
+                    if ui.button(name.as_str()).clicked() {
                         asked = Some(NewFrom::Profile(i));
                     }
                 }

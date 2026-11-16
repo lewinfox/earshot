@@ -11,6 +11,7 @@ pub mod bus;
 pub mod collections;
 pub mod command;
 pub mod controller_audio;
+pub mod controllers;
 pub mod debug;
 pub mod drives;
 pub mod edit;
