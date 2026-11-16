@@ -147,6 +147,9 @@ pub struct ControllerFile {
     /// Sent to the controller as it starts, after its lights (a DDJ-400's question
     /// where its controls are: `core::lights`).
     pub start: Vec<Vec<u8>>,
+    /// Send the start messages again this often (ms) while connected: a controller
+    /// that stops talking without them (a DDJ-FLX4).
+    pub start_every_ms: Option<u64>,
     /// A button's light is also sent to these messages: the note the same button
     /// sends with SHIFT held, so its light doesn't change while SHIFT is.
     pub mirror: BTreeMap<(u8, u8), (u8, u8)>,
@@ -324,6 +327,9 @@ pub fn file_json(head: serde_json::Map<String, serde_json::Value>, f: &Controlle
             .collect();
         file["start"] = json!(start);
     }
+    if let Some(ms) = f.start_every_ms {
+        file["start_every_ms"] = json!(ms);
+    }
     file["inputs"] = json!(inputs);
     if !f.mirror.is_empty() {
         let m: serde_json::Map<String, Value> = f.mirror.iter().map(|(&a, &b)| (two(a), json!(two(b)))).collect();
@@ -379,6 +385,7 @@ pub fn from_json(text: &str) -> Result<(String, ControllerFile), String> {
         meters: Vec<MeterLine>,
         #[serde(default)]
         start: Vec<String>,
+        start_every_ms: Option<u64>,
         #[serde(default)]
         mirror: BTreeMap<String, String>,
         #[serde(default)]
@@ -462,6 +469,7 @@ pub fn from_json(text: &str) -> Result<(String, ControllerFile), String> {
             red_at: m.red_at,
         });
     }
+    out.start_every_ms = file.start_every_ms.filter(|&ms| ms > 0);
     for m in &file.start {
         match hex(m) {
             Some(b) if !b.is_empty() => out.start.push(b),
@@ -581,7 +589,12 @@ pub fn connect_all(
             learned.replace(p.file.clone());
             mapped = true;
         }
-        let start = profile.as_ref().map(|p| p.file.start.clone()).unwrap_or_default();
+        let start = profile.as_ref().map_or_else(super::lights::Start::default, |p| {
+            super::lights::Start::new(
+                p.file.start.clone(),
+                p.file.start_every_ms.map(std::time::Duration::from_millis),
+            )
+        });
         let (sink, lane, learned) = (sink.clone(), lane.clone(), learned.clone());
         let index = names.len();
         match input.connect(
@@ -639,7 +652,7 @@ pub struct Port {
 
 /// The output ports named like the inputs that opened (a controller's two halves),
 /// each with its input's start messages (`starts`, by input).
-fn connect_outputs(inputs: &[String], starts: &[Vec<Vec<u8>>]) -> Vec<(midir::MidiOutputConnection, Vec<Vec<u8>>)> {
+fn connect_outputs(inputs: &[String], starts: &[super::lights::Start]) -> super::lights::Outputs {
     let Ok(probe) = MidiOutput::new("earshot-probe") else {
         return vec![];
     };
