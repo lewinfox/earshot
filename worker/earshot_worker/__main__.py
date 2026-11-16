@@ -57,6 +57,7 @@ def _lowest_priority():
 
 _lowest_priority()
 
+from . import device  # noqa: E402,F401  (before anything imports torch)
 import heapq  # noqa: E402
 import itertools  # noqa: E402
 import json  # noqa: E402
