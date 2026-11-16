@@ -284,6 +284,12 @@ pub struct Stats {
     pub phones_realigns: AtomicU64,
     /// Frames queued for the headphones (smoothed): how far behind the master they are.
     pub phones_level: AtomicU64,
+    /// Times an audio thread ran up against the real-time limit and took a moment's
+    /// break to stay inside it ([`crate::realtime`]).
+    pub overruns: AtomicU64,
+    /// Making the sound is using most of the time there is ([`crate::load`]): the
+    /// app holds its background work back.
+    pub behind: AtomicBool,
     /// Someone has the output tap ([`crate::Engine::take_output_tap`]): copy what goes
     /// to the device into it.
     pub tapping: AtomicBool,

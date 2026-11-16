@@ -136,6 +136,9 @@ pub struct JobQueue {
     seq: u64,
     /// A deck is playing: background work runs one track at a time.
     pub playing: bool,
+    /// The machine is short of resources (`Analyser::set_held`): no lane starts
+    /// anything. What's waiting stays queued, and runs once there's room again.
+    pub held: bool,
     /// Background lanes allowed at once.
     pub background_cap: usize,
 }
@@ -148,6 +151,7 @@ impl JobQueue {
             lanes: HashMap::new(),
             seq: 0,
             playing: false,
+            held: false,
             background_cap: background_cap.max(1),
         }
     }
@@ -270,7 +274,7 @@ impl JobQueue {
 
     /// Whether this lane may start something now (whether or not there's work).
     pub fn may_take(&self, lane: Lane) -> bool {
-        if self.lanes.contains_key(&lane) {
+        if self.held || self.lanes.contains_key(&lane) {
             return false;
         }
         match lane {
@@ -659,5 +663,18 @@ mod tests {
         q.playing = true;
         q.finish(Lane::Background(1));
         assert!(!q.may_take(Lane::Background(0)) && !q.may_take(Lane::Background(1)));
+    }
+
+    #[test]
+    fn held_nothing_starts_and_the_work_waits_until_there_is_room() {
+        let mut q = JobQueue::new(2);
+        q.request(1, &grid(Background, Want::Missing, Mode::Static), None);
+        q.request(2, &grid(Asked, Want::Force, Mode::Static), None);
+        q.held = true;
+        assert!(!q.may_take(Lane::Deck) && !q.may_take(Lane::Background(0)));
+        assert!(q.take(Lane::Deck).is_none() && q.take(Lane::Background(0)).is_none());
+        assert!(q.has(1) && q.has(2), "still queued");
+        q.held = false;
+        assert_eq!(q.take(Lane::Background(0)).map(|b| b.track), Some(2));
     }
 }

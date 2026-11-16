@@ -34,6 +34,7 @@ pub mod notice;
 pub mod outside;
 pub mod pads;
 pub mod player;
+pub mod power;
 pub mod query;
 pub mod sampler;
 pub mod selection;

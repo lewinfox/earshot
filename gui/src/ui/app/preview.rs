@@ -10,6 +10,9 @@ impl EarshotApp {
             self.lib
                 .analyser
                 .queue(id, None, false, false, AnalysisMode::Static);
+            if self.hud.low_resource {
+                self.quick.send(vec![id]);
+            }
         }
         let decoding = Arc::new(AtomicBool::new(true));
         self.preview = Some(Preview {

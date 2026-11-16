@@ -16,6 +16,8 @@ fn main() -> eframe::Result {
     if let Err(e) = core::log::start(&core::services::data_dir()) {
         eprintln!("not logging to a file: {e}");
     }
+    // Whether the system is holding the CPU back (a low-power profile), for the top bar.
+    core::power::watch();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("earshot")
