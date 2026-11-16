@@ -26,6 +26,8 @@ const TABS: [(SettingsTab, &str); 4] = [
 
 /// The analysis tab's facts, gathered by the shell.
 pub struct AnalysisEnv<'a> {
+    /// New tracks get a quick grid.
+    pub quick_new: bool,
     /// Background workers allowed at once now.
     pub workers: usize,
     /// The most there can be (the CPU cores).
@@ -184,6 +186,18 @@ fn decks(ui: &mut Ui, env: &ModalEnv) -> Vec<Command> {
 
 fn analysis(ui: &mut Ui, env: &AnalysisEnv) -> Vec<Command> {
     let mut out = vec![];
+    let mut quick = env.quick_new;
+    if ui
+        .checkbox(&mut quick, "Quick-analyse new tracks")
+        .changed()
+    {
+        out.push(Command::App(AppCmd::QuickAnalyseNew(quick)));
+    }
+    muted(
+        ui,
+        "A track new to the library gets a quick grid in the background: one steady          tempo, in a moment, shown amber in the status column. The full analysis is          yours to run (right-click, Analyse) and replaces it.",
+    );
+    ui.separator();
     let mut n = env.workers;
     ui.add(Slider::new(
         "Background workers",

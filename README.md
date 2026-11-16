@@ -91,14 +91,17 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   *Load to deck A/B*, drag it onto a deck, or `Shift+←`/`Shift+→`. Right-click →
   *Preview in headphones* plays it on the headphones only (on the main output if the
   headphones are off, e.g. a laptop with no controller).
-- **Analysis**: loading a track with no beatgrid starts analysis in the background. It
-  plays at once, and a moment later gets a *quick grid*: one steady tempo worked out
-  in a fraction of a second by signal processing (ported from
-  [ClubCraft](https://github.com/beneaze/ClubCraft), MIT), or a placeholder from its
-  BPM tag if the quick grid isn't sure. The deck switches to the analysed grid when
-  it's done. Right-click a track → *Analyse*, or a folder →
-  *Analyse unanalysed tracks*, to do it ahead of time. Like Rekordbox there are two
-  modes:
+- **Analysis**: a track new to the library gets a *quick grid* in the background: one
+  steady tempo worked out in a fraction of a second by signal processing (ported from
+  [ClubCraft](https://github.com/beneaze/ClubCraft), MIT). It's saved, so the track
+  has a BPM and a grid on a deck straight away (*Menu → Settings… → Analysis →
+  Quick-analyse new tracks* turns this off). The full analysis is yours to run:
+  right-click a track → *Analyse*, or a folder → *Analyse unanalysed tracks*. It
+  replaces the quick grid, as fixing the grid by hand does. A track with no grid at
+  all (the quick grid wasn't sure of it, or the setting was off) is analysed in the
+  background when it's loaded: it plays at once, on a quick grid or a placeholder from
+  its BPM tag, and the deck switches to the analysed grid when it's done. Like
+  Rekordbox there are two modes:
   - **Static** (the default): one steady tempo for the whole track, preferring whole
     numbers, in about 3–5 s. A fast tempo pass over the whole track, then Beat This!'s
     small model on five 15 s excerpts for the phase and the downbeat
@@ -107,8 +110,10 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
     follows a drifting tempo (live drummers); about 15–30 s.
 
   Static analysis flags tracks whose tempo seems to drift with an amber ≈; right-click
-  → *Analyse (dynamic)* for those. The dot by each track shows the state (green =
-  analysed, amber = queued or running, red = failed; hover for the error). Four tracks
+  → *Analyse (dynamic)* for those. The status column shows the state (green dot =
+  fully analysed, amber dot = quick grid only, amber ring or percentage = queued or
+  running, red = failed, drifting or marked as needing attention; hover for the
+  reason). Four tracks
   analyse at a time (`EARSHOT_ANALYSIS_JOBS` to change); a track you load onto a deck
   jumps the queue. Grid edits on a deck are saved and are never overwritten by
   automatic analysis (an explicit *Analyse* does overwrite them).

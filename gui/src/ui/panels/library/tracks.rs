@@ -134,6 +134,10 @@ pub fn status_mark(ui: &mut Ui, t: &Track, state: Option<&AnalysisState>) {
             Mark::Dot(THEME.ok),
             "Beatgrid analysed (static: one steady tempo)".into(),
         ),
+        None if t.quick() => (
+            Mark::Dot(THEME.warn),
+            "Quick grid only: right-click, Analyse for the full analysis".into(),
+        ),
         None => (Mark::None, "Not analysed".into()),
     };
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());

@@ -1293,10 +1293,12 @@ fn bpm_cell(ui: &mut Ui, c: &mut Cell) {
     let text = RichText::new(bpm).color(THEME.muted);
     ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
         ui.add(
-            egui::Label::new(if t.analysed() { text } else { text.italics() }).selectable(false),
+            egui::Label::new(if t.has_grid() { text } else { text.italics() }).selectable(false),
         )
         .on_hover_text(if t.analysed() {
             "Analysed"
+        } else if t.quick() {
+            "From the quick grid (not fully analysed)"
         } else {
             "From the file's tag (not analysed)"
         });
