@@ -159,15 +159,6 @@ impl DeckUi {
             PadMode::Keyboard | PadMode::KeyShift => self.mode_pad_face(mode, i),
             PadMode::PadFx1 | PadMode::PadFx2 => self.pad_fx_face(mode, i, false),
             PadMode::Sampler => self.sampler_pad(i, false),
-            _ => Pad {
-                label: String::new(),
-                caption: None,
-                colour: THEME.line,
-                tinted: false,
-                tip: "Not in earshot yet".into(),
-                control: None,
-                value: 0.0,
-            },
         }
     }
 
