@@ -310,6 +310,12 @@ impl Hold {
         Some(c.device.clone())
     }
 
+    /// Let the card go (quitting, after audio has closed): PipeWire may have it back.
+    pub fn release(&mut self) {
+        self.reservation = None;
+        self.forced = None;
+    }
+
     /// Turn the card's PipeWire profile off (the top bar's button), until the
     /// controller goes or earshot quits.
     pub fn force(&mut self) -> Result<(), String> {
