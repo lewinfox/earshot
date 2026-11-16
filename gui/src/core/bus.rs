@@ -338,6 +338,7 @@ impl SamplerControl {
     }
 
     /// Mixxx's key, in `[SamplerN]`.
+    #[allow(dead_code)] // Mixxx names: for reading Mixxx mappings; nothing does yet
     fn mixxx(self) -> &'static str {
         match self {
             SamplerControl::Play => "cue_gotoandplay",
@@ -377,6 +378,7 @@ impl UiControl {
     }
 
     /// Mixxx's `[Skin]` key.
+    #[allow(dead_code)] // Mixxx names: for reading Mixxx mappings; nothing does yet
     fn mixxx(self) -> &'static str {
         match self {
             UiControl::LibraryMaximize => "show_maximized_library",
@@ -475,6 +477,7 @@ impl FxControl {
 
     /// Mixxx's key, in `[EffectRack1_EffectUnitN]`. Mixxx has no beat lengths or
     /// targets to cycle; those names are earshot's own.
+    #[allow(dead_code)] // Mixxx names: for reading Mixxx mappings; nothing does yet
     fn mixxx(self) -> &'static str {
         match self {
             FxControl::On => "enabled",
@@ -1005,6 +1008,7 @@ impl DeckControl {
 
     /// Mixxx's key for this control and the group it's in (relative to the deck's
     /// `[ChannelN]`).
+    #[allow(dead_code)] // Mixxx names: for reading Mixxx mappings; nothing does yet
     fn mixxx(self) -> Option<(MixxxGroup, String)> {
         use DeckControl::*;
         let key = |k: &str| Some((MixxxGroup::Channel, k.to_string()));
@@ -1132,6 +1136,7 @@ const MASTER: [(MasterParam, &str); 6] = [
 
 /// Which Mixxx group a deck control is in.
 #[derive(Clone, Copy, PartialEq)]
+#[allow(dead_code)] // Mixxx names: for reading Mixxx mappings; nothing does yet
 enum MixxxGroup {
     /// `[Channel1]`, or `[PreviewDeck1]` for Prepare's player.
     Channel,
@@ -1141,6 +1146,7 @@ enum MixxxGroup {
     QuickEffect,
 }
 
+#[allow(dead_code)] // Mixxx names: for reading Mixxx mappings; nothing does yet
 impl MixxxGroup {
     fn name(self, deck: DeckId) -> String {
         let channel = format!("[Channel{}]", deck.index() + 1);
@@ -1400,6 +1406,7 @@ impl Control {
     }
 
     /// Mixxx's `[Group]` and key for this control.
+    #[allow(dead_code)] // Mixxx names: for reading Mixxx mappings; nothing does yet
     pub fn mixxx(self) -> Option<(String, String)> {
         match self {
             Control::Deck(deck, c) => {
@@ -1439,6 +1446,7 @@ impl Control {
     }
 
     /// The control behind a Mixxx `[Group] key`.
+    #[allow(dead_code)] // Mixxx names: for reading Mixxx mappings; nothing does yet
     pub fn from_mixxx(group: &str, key: &str) -> Option<Control> {
         if group == "[Master]" {
             let p = MASTER.iter().find(|(_, k)| *k == key)?.0;

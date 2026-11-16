@@ -57,6 +57,16 @@ mod linux {
     use super::*;
     use std::process::Command;
 
+    /// The USB `vendor:product` id (`2b73:0026`) of the device MIDI port `port` is
+    /// on, from its ALSA card.
+    pub fn usb_id(port: &str) -> Option<String> {
+        let client = port_client(port)?;
+        let seq = alsa::Seq::open(None, None, false).ok()?;
+        let card = seq.get_any_client_info(client).ok()?.get_card().ok()?;
+        let id = std::fs::read_to_string(format!("/proc/asound/card{card}/usbid")).ok()?;
+        Some(id.trim().to_ascii_lowercase())
+    }
+
     /// The sound card of the first of these MIDI ports that's on a card that plays
     /// audio.
     pub fn find(ports: &[String]) -> Option<ControllerAudio> {
@@ -248,7 +258,7 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{ForcedOff, Reservation, card_state, find, force_off, reserve};
+pub use linux::{ForcedOff, Reservation, card_state, find, force_off, reserve, usb_id};
 
 #[cfg(not(target_os = "linux"))]
 mod other {
@@ -256,6 +266,9 @@ mod other {
     pub struct Reservation;
     pub struct ForcedOff;
     pub fn find(_: &[String]) -> Option<ControllerAudio> {
+        None
+    }
+    pub fn usb_id(_: &str) -> Option<String> {
         None
     }
     pub fn reserve(_: &ControllerAudio) -> Result<Reservation, String> {
@@ -270,7 +283,7 @@ mod other {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub use other::{ForcedOff, Reservation, card_state, find, force_off, reserve};
+pub use other::{ForcedOff, Reservation, card_state, find, force_off, reserve, usb_id};
 
 /// The connected controller's sound card, its reservation, whether its PipeWire
 /// profile was turned off, and why earshot couldn't open it (if it couldn't).

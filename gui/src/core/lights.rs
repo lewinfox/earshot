@@ -11,20 +11,21 @@
 //! lit while its slot has a sound, and flashes while it plays (`core::sampler`); with
 //! SHIFT (stop) it shows the same.
 //!
-//! While SHIFT is held the DDJ-400 shows its shifted buttons' lights (SHIFT + PLAY
-//! is its own message, with its own light). A shifted button that does nothing of its
-//! own in earshot, or has no light of its own (SHIFT + BEAT SYNC: tempo range), gets
-//! its unshifted twin's light, so SHIFT leaves the lights alone; only the ones whose
-//! job changes (SHIFT + a hot cue pad clears it, keyboard mode's page pads) show their
-//! own. See `shift_twin`.
+//! While SHIFT is held a controller may show its shifted buttons' lights (on a
+//! DDJ-400, SHIFT + PLAY is its own message, with its own light). The controller file
+//! says which message each light is mirrored to (`mirror`, `mirror_status`). One
+//! that does nothing of its own in earshot, or has no light of its own (SHIFT + BEAT
+//! SYNC: tempo range), gets its button's light, so SHIFT leaves the lights alone; only
+//! the ones whose job changes (SHIFT + a hot cue pad clears it, keyboard mode's page
+//! pads) show their own.
 //!
 //! A controller's channel level meters (the mapping's `meters`) take one number each,
 //! 0 to 127, and the controller lights its LEDs from it. They show each deck's level
 //! before its fader, with the same colours as earshot's meters: red only over full
 //! scale ([`meter_value`]).
 //!
-//! When earshot quits (or the controller is reconnected) every mapped light goes out,
-//! and the meters drop to nothing.
+//! When earshot quits (or the controller is reconnected) the lights that are on go
+//! out, and the meters drop to nothing.
 //!
 //! A thread works out every mapped button's light from the engine's latest state,
 //! 20 times a second, and sends only the ones that changed. The controller can't
@@ -183,31 +184,9 @@ fn own_light(control: Control, snap: &EngineSnapshot, pads: &AllPads) -> bool {
     }
 }
 
-/// A DDJ-400 button's message with SHIFT held: on a deck's channel, PLAY, CUE, LOOP
-/// IN / OUT, RELOOP/EXIT, BEAT SYNC and CHANNEL CUE each send another note (Mixxx's
-/// mapping); a pad sends the same note a channel up.
-pub fn shift_twin((status, data1): (u8, u8)) -> Option<(u8, u8)> {
-    match status {
-        0x90 | 0x91 => {
-            let shifted = match data1 {
-                0x0B => 0x47, // PLAY/PAUSE
-                0x0C => 0x48, // CUE
-                0x10 => 0x4C, // LOOP IN
-                0x11 => 0x4E, // LOOP OUT
-                0x4D => 0x50, // RELOOP/EXIT
-                0x58 => 0x60, // BEAT SYNC
-                0x54 => 0x68, // CHANNEL CUE
-                _ => return None,
-            };
-            Some((status, shifted))
-        }
-        0x97 | 0x99 => Some((status + 1, data1)),
-        _ => None,
-    }
-}
-
-/// Every mapped button's message and value, as they should be now; and each shifted
-/// twin without a light of its own, its button's (see `shift_twin`).
+/// Every mapped button's message and value, as they should be now; and each message
+/// its light is mirrored to (its SHIFT note: [`Learned::mirror_of`]) that hasn't a
+/// light of its own, its button's.
 pub fn frame(learned: &Learned, snap: &EngineSnapshot, pads: &AllPads, lit_half: bool) -> BTreeMap<(u8, u8), u8> {
     // A display-only button is the controller's to light.
     let notes: BTreeMap<(u8, u8), _> = learned
@@ -220,7 +199,7 @@ pub fn frame(learned: &Learned, snap: &EngineSnapshot, pads: &AllPads, lit_half:
         .map(|(&k, l)| (k, value(light(l.control, l.arg, snap, pads), lit_half)))
         .collect();
     for (&k, _) in &notes {
-        let Some(twin) = shift_twin(k) else { continue };
+        let Some(twin) = learned.mirror_of(k) else { continue };
         if notes.get(&twin).is_none_or(|l| !own_light(l.control, snap, pads)) {
             out.insert(twin, out[&k]);
         }
@@ -267,9 +246,12 @@ pub type MonitorSlot = Arc<Mutex<LightsState>>;
 pub struct LightsState {
     pub monitor: Option<Monitor>,
     pub pads: AllPads,
-    /// Send a DDJ-400 [`super::midi::DDJ400_REPORT`] on the next tick (Debug mode's
+    /// Send the controllers their start messages again on the next tick (Debug mode's
     /// button).
-    pub ask_report: bool,
+    pub resend_start: bool,
+    /// Messages to send the controllers as they are, on the next tick (Controller
+    /// mode's Send tab). Each is logged.
+    pub send: Vec<Vec<u8>>,
     /// Debug builds: the recorder, told every message sent.
     pub recorder: Option<super::debug::Recorder>,
 }
@@ -287,8 +269,8 @@ pub struct Lights {
 }
 
 impl Lights {
-    /// `outputs`: each port, and whether it's a DDJ-400's.
-    pub fn start(mut outputs: Vec<(MidiOutputConnection, bool)>, learned: Learned, monitor: MonitorSlot) -> Lights {
+    /// `outputs`: each port, with its controller's start messages.
+    pub fn start(mut outputs: Outputs, learned: Learned, monitor: MonitorSlot) -> Lights {
         let sent = init(&mut outputs, &learned, &monitor);
         let stop = Arc::new(AtomicBool::new(false));
         let quit = stop.clone();
@@ -309,7 +291,8 @@ impl Drop for Lights {
     }
 }
 
-type Outputs = Vec<(MidiOutputConnection, bool)>;
+/// Each output, with its controller's start messages.
+type Outputs = Vec<(MidiOutputConnection, Vec<Vec<u8>>)>;
 
 fn send(outputs: &mut Outputs, recorder: &Option<super::debug::Recorder>, (status, data1): (u8, u8), v: u8) {
     for (o, _) in outputs.iter_mut() {
@@ -320,17 +303,36 @@ fn send(outputs: &mut Outputs, recorder: &Option<super::debug::Recorder>, (statu
     }
 }
 
-/// Ask each DDJ-400 where its knobs, faders and switches are.
-fn ask_report(outputs: &mut Outputs, recorder: &Option<super::debug::Recorder>) {
+/// Send each controller the start messages from its controller file (a DDJ-400's:
+/// the question where its controls are).
+fn send_start(outputs: &mut Outputs, recorder: &Option<super::debug::Recorder>) {
     let mut sent = 0;
-    for (o, ddj) in outputs.iter_mut() {
-        if *ddj && o.send(&super::midi::DDJ400_REPORT).is_ok() {
-            sent += 1;
+    for (o, start) in outputs.iter_mut() {
+        for m in start.iter() {
+            if o.send(m).is_ok() {
+                sent += 1;
+            }
+            if let Some(r) = recorder {
+                r.note_midi(true, m);
+            }
         }
     }
-    eprintln!("[midi] sent the position query to {sent} DDJ-400(s)");
+    eprintln!("[midi] sent {sent} start message(s)");
+}
+
+/// A message typed in Controller mode's Send tab, to every output, logged.
+fn send_by_hand(outputs: &mut Outputs, recorder: &Option<super::debug::Recorder>, m: &[u8]) {
+    let hex: Vec<String> = m.iter().map(|b| format!("{b:02X}")).collect();
+    let mut sent = 0;
+    for (o, _) in outputs.iter_mut() {
+        match o.send(m) {
+            Ok(()) => sent += 1,
+            Err(e) => eprintln!("[midi] sending {} by hand: {e}", hex.join(" ")),
+        }
+    }
+    eprintln!("[midi] sent by hand: {} (to {sent} port(s))", hex.join(" "));
     if let Some(r) = recorder {
-        r.note_midi(true, &super::midi::DDJ400_REPORT);
+        r.note_midi(true, m);
     }
 }
 
@@ -349,7 +351,7 @@ fn init(outputs: &mut Outputs, learned: &Learned, monitor: &MonitorSlot) -> BTre
     for (&k, &v) in &lights {
         send(outputs, &recorder, k, v);
     }
-    ask_report(outputs, &recorder);
+    send_start(outputs, &recorder);
     eprintln!("[init] controller: {} light(s) set, before audio", lights.len());
     lights
 }
@@ -410,15 +412,20 @@ fn hello(outputs: &mut Outputs, recorder: &Option<super::debug::Recorder>, learn
 fn run(mut outputs: Outputs, mut sent: BTreeMap<(u8, u8), u8>, learned: &Learned, monitor: &MonitorSlot, stop: &AtomicBool) {
     let start = Instant::now();
     let mut recorder = None;
+    let mut by_hand: Vec<Vec<u8>> = vec![];
     while !stop.load(Ordering::Relaxed) {
         let (snap, pads, ask) = {
             let mut s = monitor.lock().unwrap();
             recorder.clone_from(&s.recorder);
-            let ask = std::mem::take(&mut s.ask_report);
+            let ask = std::mem::take(&mut s.resend_start);
+            by_hand = std::mem::take(&mut s.send);
             (s.monitor.as_ref().map(|m| m.snapshot()), s.pads, ask)
         };
         if ask {
-            ask_report(&mut outputs, &recorder);
+            send_start(&mut outputs, &recorder);
+        }
+        for m in by_hand.drain(..) {
+            send_by_hand(&mut outputs, &recorder, &m);
         }
         let lit_half = (start.elapsed().as_millis() / FLASH.as_millis()) % 2 == 0;
         // No audio (it's reopening): as at start-up, the decks empty.
@@ -536,7 +543,7 @@ mod tests {
     #[test]
     fn sampler_pads_show_loaded_and_playing() {
         let learned = Learned::default();
-        learned.seed_ddj400();
+        learned.seed_bundled("ddj-400");
         let mut s = EngineSnapshot::default();
         let slot = |i| earshot_engine::SampleSlot::new(i).unwrap();
         let play = |i| Control::Sampler(slot(i), SamplerControl::Play);
@@ -574,7 +581,7 @@ mod tests {
     #[test]
     fn the_pads_spell_earshot() {
         let learned = Learned::default();
-        learned.seed_ddj400();
+        learned.seed_bundled("ddj-400");
         let pads = hotcue_pads(&learned);
         assert_eq!(pads.len(), 2);
         let frames = hello_frames(&pads);
@@ -589,7 +596,7 @@ mod tests {
     #[test]
     fn start_up_lights_are_set_with_no_audio() {
         let learned = Learned::default();
-        learned.seed_ddj400();
+        learned.seed_bundled("ddj-400");
         let none = EngineSnapshot::default();
         let f = frame(&learned, &none, &AllPads::default(), true);
         assert!(f.contains_key(&(0x90, 0x0B)), "play is set");
@@ -601,7 +608,7 @@ mod tests {
     #[test]
     fn shift_leaves_the_lights_alone_but_for_changed_jobs() {
         let learned = Learned::default();
-        learned.seed_ddj400();
+        learned.seed_bundled("ddj-400");
         let mut s = loaded();
         s.decks[0].playing = true;
         s.decks[0].sync = true;
@@ -628,7 +635,7 @@ mod tests {
         assert_eq!(f[&(0x98, 0x76)], 0x7F, "SHIFT + key shift pad 7");
         assert_eq!(f[&(0x97, 0x76)], 0x7F, "key shift pad 7");
         // A shifted button with no light of its own (SHIFT + BEAT SYNC: tempo range).
-        let rows = r#"{"device":"DDJ-400","inputs":[{"command":"deck_1_beat_sync","message":"90 58"},{"command":"deck_1_tempo_range_next","message":"90 60"}]}"#;
+        let rows = r#"{"device":"DDJ-400","inputs":[{"command":"deck_1_beat_sync","message":"90 58"},{"command":"deck_1_tempo_range_next","message":"90 60"}],"mirror":{"90 58":"90 60"}}"#;
         let learned = Learned::default();
         learned.replace(crate::core::midi::from_json(rows).unwrap().1);
         let f = frame(&learned, &s, &AllPads::default(), true);

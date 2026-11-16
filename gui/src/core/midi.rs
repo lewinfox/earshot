@@ -3,9 +3,8 @@
 //! each message runs. The Mapping tab edits it while it runs, and saves it as a
 //! controller file.
 //!
-//! When a DDJ-400 is connected the mapping starts from a built-in table, written in
-//! Mixxx's `[Group] key` names and turned into registry controls
-//! ([`Control::from_mixxx`]); any other controller starts with nothing mapped.
+//! A controller earshot has a file for (`core::controllers`: matched by its USB id or
+//! port name) starts from that file; any other starts with nothing mapped.
 //!
 //! A message becomes a [`Command`]: one the engine can take as it is goes straight to
 //! it on MIDI's own ring ([`Lane`]), without the player lock; anything else (a beat
@@ -47,215 +46,6 @@ pub enum Input {
 
 /// Seconds of a record that pass in one turn at 33⅓ rpm.
 const SECS_PER_TURN: f64 = 60.0 / (100.0 / 3.0);
-
-struct Mapping {
-    status: u8,
-    data1: u8,
-    control: Control,
-    /// The number after the command's name (`deck_1_beat_jump -1`).
-    arg: Option<f64>,
-    input: Input,
-}
-
-/// The DDJ-400's two decks, its mixer and browse knob, in Mixxx's names.
-fn ddj400_names() -> Vec<(u8, u8, String, String, Input)> {
-    let mut v = vec![];
-    let mut m = |status, data1: u8, group: &str, key: &str, input| {
-        v.push((status, data1, group.to_string(), key.to_string(), input));
-        // A 14-bit control's fine half: the coarse one + 32, on this unit.
-        if input == Input::Msb {
-            v.push((status, data1 + 32, group.to_string(), key.to_string(), Input::Lsb));
-        }
-    };
-    // The controller has two decks, on MIDI channels 1 and 2.
-    for d in 0..2u8 {
-        let g = format!("[Channel{}]", d + 1);
-        let (note, cc) = (0x90 + d, 0xB0 + d);
-        m(note, 0x0B, &g, "play", Input::Note);
-        m(note, 0x0C, &g, "cue_default", Input::Note);
-        m(note, 0x58, &g, "sync_enabled", Input::Note);
-        m(note, 0x54, &g, "pfl", Input::Note);
-        m(note, 0x10, &g, "loop_in", Input::Note);
-        m(note, 0x11, &g, "loop_out", Input::Note);
-        m(note, 0x4D, &g, "reloop_toggle", Input::Note);
-        // Tempo slider: as Mixxx's mapping reads it, a raw 0 is the slowest end (the
-        // top of the fader is minus on Pioneer gear).
-        // 14-bit: each sends its fine half on its control + 32.
-        m(cc, 0x00, &g, "rate", Input::Msb);
-        m(cc, 0x13, &g, "volume", Input::Msb);
-        m(cc, 0x04, &g, "pregain", Input::Msb);
-        let eq = format!("[EqualizerRack1_{g}_Effect1]");
-        m(cc, 0x07, &eq, "parameter3", Input::Msb);
-        m(cc, 0x0B, &eq, "parameter2", Input::Msb);
-        m(cc, 0x0F, &eq, "parameter1", Input::Msb);
-        m(0xB6, 0x17 + d, &format!("[QuickEffectRack1_{g}]"), "super1", Input::Msb);
-        // The jog wheel (Mixxx's mapping, 720 ticks a turn): its top touched, the top
-        // turned while touched (scratch in vinyl mode), the top turned untouched (still
-        // spinning) and the side turned (both bend).
-        m(note, 0x36, &g, "jog_touch", Input::Note);
-        m(cc, 0x22, &g, "jog_turn", Input::Jog(720));
-        m(cc, 0x23, &g, "jog_bend", Input::Jog(720));
-        m(cc, 0x21, &g, "jog_bend", Input::Jog(720));
-        // The top turned with SHIFT held: search (its touch, 0x67, does nothing).
-        m(cc, 0x29, &g, "jog_search", Input::Jog(720));
-        // Performance pads in hot cue mode, unshifted / shifted.
-        for k in 0..8u8 {
-            let n = k + 1;
-            m(
-                0x97 + 2 * d,
-                k,
-                &g,
-                &format!("hotcue_{n}_activate"),
-                Input::Note,
-            );
-            m(
-                0x98 + 2 * d,
-                k,
-                &g,
-                &format!("hotcue_{n}_clear"),
-                Input::Note,
-            );
-        }
-        m(0x96, 0x46 + d, &g, "LoadSelectedTrack", Input::Note);
-    }
-    m(0xB6, 0x1F, "[Master]", "crossfader", Input::Msb);
-    // MASTER LEVEL: the controller sets its own output level, so it's display only
-    // (see `ddj400_map`). Mixxx's mapping leaves it out.
-    m(0xB6, 0x08, "[Master]", "gain", Input::Msb);
-    m(0xB6, 0x0C, "[Master]", "headMix", Input::Msb);
-    m(0xB6, 0x0D, "[Master]", "headGain", Input::Msb);
-    m(0xB4, 0x02, "[EffectRack1_EffectUnit1]", "mix", Input::Msb);
-    m(0xB6, 0x40, "[Library]", "MoveVertical", Input::Relative);
-    // BROWSE pressed, and with Shift.
-    m(0x96, 0x41, "[Library]", "MoveFocusForward", Input::Note);
-    m(0x96, 0x42, "[Library]", "MoveFocusBackward", Input::Note);
-    v
-}
-
-/// The DDJ-400's pads in beat loop and beat jump mode (each mode's pads send their
-/// own notes), and its Shift buttons, in earshot's names. From Mixxx's DDJ-400
-/// mapping: pads 1-8 on notes 0x60-0x67 (loops) and 0x20-0x27 (jumps); keyboard
-/// (0x40-0x47), key shift (0x70-0x77), pad FX 1 (0x10-0x17) and pad FX 2 (0x50-0x57) from
-/// rekordbox's, with SHIFT a channel up; the sampler's (0x30-0x37: slots 1-8 on deck 1's
-/// pads, 9-16 on deck 2's; SHIFT stops the slot) from rekordbox's too; deck 1 on
-/// 0x97, deck 2 on 0x99; on each deck's channel, Shift on 0x3F and CUE/LOOP CALL on
-/// 0x51 / 0x53 (with Shift: 0x3E / 0x3D), Shift + RELOOP/EXIT on 0x50, BEAT SYNC
-/// held on 0x5C and LOOP IN held (4-beat loop) on 0x14 (both seen from the unit), and
-/// the pad mode buttons (from rekordbox's table). The BEAT FX section, on 0x94: CH SELECT
-/// 1 / 2 / MASTER on 0x10 / 0x11 / 0x14, ON/OFF on 0x47 (with Shift, Release FX:
-/// 0x43), BEAT ◀ ▶ on 0x4A / 0x4B and BEAT FX SELECT on 0x63 (with Shift, the previous
-/// effect: 0x64).
-fn ddj400_pads() -> Vec<(u8, u8, String, Option<f64>)> {
-    let mut v = vec![];
-    for (data1, name) in [
-        (0x10, "fx_1_channel_deck_1"),
-        (0x11, "fx_1_channel_deck_2"),
-        (0x14, "fx_1_channel_master"),
-        (0x47, "fx_1_on"),
-        (0x43, "fx_1_release"),
-        (0x4A, "fx_1_beats_halve"),
-        (0x4B, "fx_1_beats_double"),
-        (0x63, "fx_1_effect_next"),
-        (0x64, "fx_1_effect_prev"),
-    ] {
-        v.push((0x94, data1, name.to_string(), None));
-    }
-    // MASTER CUE (seen from the unit): display only, the controller does it itself.
-    v.push((0x96, 0x63, "mixer_master_headphone_cue".to_string(), None));
-    // Related tracks and the library maximised (mapped on the unit).
-    v.push((0x96, 0x68, "library_related_tracks_toggle".to_string(), None));
-    v.push((0x96, 0x7A, "ui_library_maximize_toggle".to_string(), None));
-    for (d, status) in [(1, 0x90u8), (2, 0x91)] {
-        v.push((status, 0x3F, format!("deck_{d}_shift"), None));
-        // The next tempo range (mapped on the unit).
-        v.push((status, 0x60, format!("deck_{d}_tempo_range_next"), None));
-        // CUE/LOOP CALL ◀ ▶, and with Shift: delete / save a memory cue.
-        v.push((status, 0x51, format!("deck_{d}_cue_jump_to_prev"), None));
-        v.push((status, 0x53, format!("deck_{d}_cue_jump_to_next"), None));
-        v.push((status, 0x3E, format!("deck_{d}_cue_delete"), None));
-        v.push((status, 0x3D, format!("deck_{d}_cue_save_as_memory"), None));
-        // SHIFT + RELOOP/EXIT: active loop.
-        v.push((status, 0x50, format!("deck_{d}_loop_active_toggle"), None));
-        // BEAT SYNC held: sync master. LOOP IN held: a 4-beat loop.
-        v.push((status, 0x5C, format!("deck_{d}_sync_set_master"), None));
-        v.push((status, 0x14, format!("deck_{d}_beat_loop"), Some(4.0)));
-        // The pad mode buttons (with Shift: the mode printed under each), from
-        // rekordbox's DDJ-400 table. The pads send each mode's own notes, so these
-        // only tell the pads page what the pads do now.
-        for (data1, mode) in [
-            (0x1B, "hot_cue"),
-            (0x69, "keyboard"),
-            (0x6D, "beat_loop"),
-            (0x1E, "pad_fx_1"),
-            (0x20, "beat_jump"),
-            (0x6B, "pad_fx_2"),
-            (0x22, "sampler"),
-            (0x6F, "key_shift"),
-        ] {
-            v.push((status, data1, format!("deck_{d}_set_pad_mode_{mode}"), None));
-        }
-    }
-    for (d, status) in [(1, 0x97u8), (2, 0x99)] {
-        for (i, beats) in [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0].into_iter().enumerate() {
-            v.push((status, 0x60 + i as u8, format!("deck_{d}_beat_loop"), Some(beats)));
-        }
-        for (i, beats) in [-1.0, 1.0, -2.0, 2.0, -4.0, 4.0, -8.0, 8.0].into_iter().enumerate() {
-            v.push((status, 0x20 + i as u8, format!("deck_{d}_beat_jump"), Some(beats)));
-        }
-        // Keyboard and key shift mode's pads (0x40-0x47, 0x70-0x77), and with SHIFT
-        // (the next channel up), from rekordbox's table.
-        for i in 0..8u8 {
-            let n = Some((i + 1) as f64);
-            v.push((status, 0x40 + i, format!("deck_{d}_keyboard_pad"), n));
-            v.push((status + 1, 0x40 + i, format!("deck_{d}_keyboard_pad_shift"), n));
-            v.push((status, 0x70 + i, format!("deck_{d}_key_shift_pad"), n));
-            v.push((status + 1, 0x70 + i, format!("deck_{d}_key_shift_pad_shift"), n));
-            // Pad FX 1 and 2's pads (0x10-0x17, 0x50-0x57), likewise.
-            v.push((status, 0x10 + i, format!("deck_{d}_pad_fx_1_pad"), n));
-            v.push((status + 1, 0x10 + i, format!("deck_{d}_pad_fx_1_pad_shift"), n));
-            v.push((status, 0x50 + i, format!("deck_{d}_pad_fx_2_pad"), n));
-            v.push((status + 1, 0x50 + i, format!("deck_{d}_pad_fx_2_pad_shift"), n));
-        }
-        // Sampler mode's pads (0x30-0x37): deck 1's play slots 1-8, deck 2's 9-16;
-        // with SHIFT (the next channel up) they stop them. From rekordbox's table.
-        for i in 0..8u8 {
-            let slot = (d - 1) * 8 + i + 1;
-            v.push((status, 0x30 + i, format!("sampler_{slot}_play"), None));
-            v.push((status + 1, 0x30 + i, format!("sampler_{slot}_stop"), None));
-        }
-    }
-    v
-}
-
-fn ddj400() -> Vec<Mapping> {
-    let mixxx = ddj400_names()
-        .into_iter()
-        .filter_map(|(status, data1, group, key, input)| {
-            let Some(control) = Control::from_mixxx(&group, &key) else {
-                eprintln!("MIDI: no control {group} {key}");
-                return None;
-            };
-            Some(Mapping {
-                status,
-                data1,
-                control,
-                arg: None,
-                input,
-            })
-        });
-    let pads = ddj400_pads().into_iter().filter_map(|(status, data1, name, beats)| {
-        let word = beats.map(|b| b.to_string());
-        let (control, arg) = Control::parse(&name, word.as_deref()).ok()?;
-        Some(Mapping {
-            status,
-            data1,
-            control,
-            arg,
-            input: Input::Note,
-        })
-    });
-    mixxx.chain(pads).collect()
-}
 
 /// A message's key: its status byte (a note-off counted as a note-on) and first data
 /// byte, which together say which control on the controller sent it.
@@ -322,9 +112,9 @@ struct Session {
     meters: Vec<Meter>,
     /// Messages that came in mapped to nothing, already logged (once each a run).
     unmapped: std::collections::HashSet<(u8, u8)>,
-    /// The built-in table has been put in once, or a mapping was loaded (so the
-    /// table isn't added on top).
-    seeded: bool,
+    /// The connected controller's lights that go to more than one message (from its
+    /// controller file: [`ControllerFile::mirror`]).
+    mirror: ControllerFile,
     /// Counts changes, so whoever keeps a copy (the draft file) knows when to.
     version: u64,
     /// Each 14-bit control's MSB, as last sent (by its message), waiting for the
@@ -348,11 +138,33 @@ pub struct Meter {
     pub red_at: u8,
 }
 
-/// Everything a controller file holds: what each message runs, and the meters.
+/// Everything a controller file holds: what each message runs, the meters, what's
+/// sent as it starts, and which lights go to more than one message.
 #[derive(Clone, Debug, Default)]
 pub struct ControllerFile {
     pub inputs: Map,
     pub meters: Vec<Meter>,
+    /// Sent to the controller as it starts, after its lights (a DDJ-400's question
+    /// where its controls are: `core::lights`).
+    pub start: Vec<Vec<u8>>,
+    /// A button's light is also sent to these messages: the note the same button
+    /// sends with SHIFT held, so its light doesn't change while SHIFT is.
+    pub mirror: BTreeMap<(u8, u8), (u8, u8)>,
+    /// Likewise for every note on a channel (`97` → `98`: a DDJ-400's pads, whose
+    /// SHIFT notes are a channel up).
+    pub mirror_status: BTreeMap<u8, u8>,
+    /// Lines that couldn't be read, and why: they were left out.
+    pub skipped: Vec<String>,
+}
+
+impl ControllerFile {
+    /// The other message `key`'s light also goes to, if any.
+    pub fn mirror_of(&self, key: (u8, u8)) -> Option<(u8, u8)> {
+        self.mirror
+            .get(&key)
+            .copied()
+            .or_else(|| self.mirror_status.get(&key.0).map(|&s| (s, key.1)))
+    }
 }
 
 impl Learned {
@@ -400,17 +212,22 @@ impl Learned {
         s.version += 1;
     }
 
-    pub fn clear(&self) {
-        self.replace(ControllerFile::default());
-    }
-
-    /// Put `m` in place of the whole mapping.
+    /// Put mapping `m` in place of the whole mapping, its lights' mirrors too.
     pub fn replace(&self, m: ControllerFile) {
         let mut s = self.0.lock().unwrap();
+        s.mirror = ControllerFile {
+            mirror: m.mirror,
+            mirror_status: m.mirror_status,
+            ..Default::default()
+        };
         s.map = m.inputs;
         s.meters = m.meters;
-        s.seeded = true;
         s.version += 1;
+    }
+
+    /// The other message `key`'s light also goes to, if any.
+    pub fn mirror_of(&self, key: (u8, u8)) -> Option<(u8, u8)> {
+        self.0.lock().unwrap().mirror.mirror_of(key)
     }
 
     /// A message with `key` came in and nothing's mapped to it: true the first time
@@ -434,89 +251,138 @@ impl Learned {
         s.map.iter().map(|(k, l)| (*k, *l)).collect()
     }
 
-    /// Start from the built-in DDJ-400 table, the first time one is connected (unless
-    /// a mapping was loaded first).
-    pub(super) fn seed_ddj400(&self) {
-        let mut s = self.0.lock().unwrap();
-        if std::mem::replace(&mut s.seeded, true) {
-            return;
-        }
-        let m = ddj400_mapping();
-        for (k, l) in m.inputs {
-            s.map.entry(k).or_insert(l);
-        }
-        if s.meters.is_empty() {
-            s.meters = m.meters;
-        }
-        s.version += 1;
+    /// Tests: the bundled mapping for model `model` (`ddj-400`).
+    #[cfg(test)]
+    pub fn seed_bundled(&self, model: &str) {
+        self.replace(super::controllers::bundled("pioneer", Some(model)).file);
     }
 
-    /// The controller file for these bindings, as JSON. A line says only what a
-    /// message runs; how its value reads is left out where the message says it (a
-    /// note is a button, a CC a knob or fader).
-    pub fn to_json(&self, device: &str) -> String {
-        use serde_json::{Value, json};
-        let inputs: Vec<Value> = self
-            .all()
-            .into_iter()
-            .map(|((status, data1), l)| {
-                let (name, word) = l.control.name();
-                let mut o = serde_json::Map::new();
-                o.insert("message".into(), json!(format!("{status:02X} {data1:02X}")));
-                o.insert("command".into(), json!(name));
-                if let Some(w) = word.or_else(|| l.arg.map(|a| a.to_string())) {
-                    o.insert("value".into(), json!(w));
-                }
-                if l.display_only {
-                    o.insert("display_only".into(), json!(true));
-                }
-                if l.input != default_input(status) {
-                    let (input, ticks) = match l.input {
-                        Input::Note => ("button", None),
-                        Input::Cc => ("absolute", None),
-                        Input::Msb => ("msb", None),
-                        Input::Lsb => ("lsb", None),
-                        Input::Relative => ("relative", None),
-                        Input::Jog(t) => ("jog", Some(t)),
-                    };
-                    o.insert("input".into(), json!(input));
-                    if let Some(t) = ticks {
-                        o.insert("ticks".into(), json!(t));
-                    }
-                }
-                Value::Object(o)
-            })
-            .collect();
-        let mut file = json!({ "device": device, "inputs": inputs });
-        let meters: Vec<Value> = self
-            .meters()
-            .iter()
-            .map(|m| {
-                json!({
-                    "deck": m.deck.index() + 1,
-                    "message": format!("{:02X} {:02X}", m.status, m.data1),
-                    "amber_at": m.amber_at,
-                    "red_at": m.red_at,
-                })
-            })
-            .collect();
-        if !meters.is_empty() {
-            file["meters"] = json!(meters);
+    /// The mapping as a controller file: its lines, meters and mirrors.
+    pub fn file(&self) -> ControllerFile {
+        let s = self.0.lock().unwrap();
+        ControllerFile {
+            inputs: s.map.clone(),
+            meters: s.meters.clone(),
+            mirror: s.mirror.mirror.clone(),
+            mirror_status: s.mirror.mirror_status.clone(),
+            ..Default::default()
         }
-        serde_json::to_string_pretty(&file).expect("JSON") + "\n"
+    }
+
+    /// The controller file for these bindings, as JSON.
+    pub fn to_json(&self, device: &str) -> String {
+        let mut head = serde_json::Map::new();
+        head.insert("device".into(), serde_json::json!(device));
+        file_json(head, &self.file())
     }
 }
 
-/// A controller file (see [`Learned::to_json`]): its device name and mapping. Errors
-/// say which input is wrong.
+/// A controller file as JSON: `head` first (its name, USB ids, …), then its lines
+/// (a line says only what a message runs; how its value reads is left out where the
+/// message says it: a note is a button, a CC a knob or fader), meters, start messages
+/// and mirrors (each left out if there are none).
+pub fn file_json(head: serde_json::Map<String, serde_json::Value>, f: &ControllerFile) -> String {
+    use serde_json::{Value, json};
+    let two = |(a, b): (u8, u8)| format!("{a:02X} {b:02X}");
+    let inputs: Vec<Value> = f
+        .inputs
+        .iter()
+        .map(|(&(status, data1), l)| {
+            let (name, word) = l.control.name();
+            let mut o = serde_json::Map::new();
+            o.insert("message".into(), json!(two((status, data1))));
+            o.insert("command".into(), json!(name));
+            if let Some(w) = word.or_else(|| l.arg.map(|a| a.to_string())) {
+                o.insert("value".into(), json!(w));
+            }
+            if l.display_only {
+                o.insert("display_only".into(), json!(true));
+            }
+            if l.input != default_input(status) {
+                let (input, ticks) = match l.input {
+                    Input::Note => ("button", None),
+                    Input::Cc => ("absolute", None),
+                    Input::Msb => ("msb", None),
+                    Input::Lsb => ("lsb", None),
+                    Input::Relative => ("relative", None),
+                    Input::Jog(t) => ("jog", Some(t)),
+                };
+                o.insert("input".into(), json!(input));
+                if let Some(t) = ticks {
+                    o.insert("ticks".into(), json!(t));
+                }
+            }
+            Value::Object(o)
+        })
+        .collect();
+    let mut file = Value::Object(head);
+    if !f.start.is_empty() {
+        let start: Vec<String> = f
+            .start
+            .iter()
+            .map(|m| m.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" "))
+            .collect();
+        file["start"] = json!(start);
+    }
+    file["inputs"] = json!(inputs);
+    if !f.mirror.is_empty() {
+        let m: serde_json::Map<String, Value> = f.mirror.iter().map(|(&a, &b)| (two(a), json!(two(b)))).collect();
+        file["mirror"] = Value::Object(m);
+    }
+    if !f.mirror_status.is_empty() {
+        let m: serde_json::Map<String, Value> =
+            f.mirror_status.iter().map(|(a, b)| (format!("{a:02X}"), json!(format!("{b:02X}")))).collect();
+        file["mirror_status"] = Value::Object(m);
+    }
+    let meters: Vec<Value> = f
+        .meters
+        .iter()
+        .map(|m| {
+            json!({
+                "deck": m.deck.index() + 1,
+                "message": two((m.status, m.data1)),
+                "amber_at": m.amber_at,
+                "red_at": m.red_at,
+            })
+        })
+        .collect();
+    if !meters.is_empty() {
+        file["meters"] = json!(meters);
+    }
+    serde_json::to_string_pretty(&file).expect("JSON") + "\n"
+}
+
+/// Two hex bytes (`"90 0B"`).
+fn two_bytes(text: &str) -> Option<(u8, u8)> {
+    match hex(text)?[..] {
+        [a, b] => Some((a, b)),
+        _ => None,
+    }
+}
+
+/// Hex bytes separated by spaces (`"F0 00 40 F7"`).
+fn hex(text: &str) -> Option<Vec<u8>> {
+    text.split_whitespace().map(|b| u8::from_str_radix(b, 16).ok()).collect()
+}
+
+/// A controller file (see [`Learned::to_json`]): its device name and mapping. A line
+/// that can't be read is left out, and listed with why in `skipped`; only a file
+/// that isn't JSON at all is an error.
 pub fn from_json(text: &str) -> Result<(String, ControllerFile), String> {
     #[derive(serde::Deserialize)]
     struct File {
         #[serde(default)]
         device: String,
+        #[serde(default)]
         inputs: Vec<Line>,
         #[serde(default)]
         meters: Vec<MeterLine>,
+        #[serde(default)]
+        start: Vec<String>,
+        #[serde(default)]
+        mirror: BTreeMap<String, String>,
+        #[serde(default)]
+        mirror_status: BTreeMap<String, String>,
     }
     #[derive(serde::Deserialize)]
     struct MeterLine {
@@ -536,20 +402,21 @@ pub fn from_json(text: &str) -> Result<(String, ControllerFile), String> {
         display_only: bool,
     }
     let file: File = serde_json::from_str(text).map_err(|e| e.to_string())?;
-    let mut map = Map::new();
+    let mut out = ControllerFile::default();
     for (i, line) in file.inputs.iter().enumerate() {
         let at = |e: String| format!("input {} ({}): {e}", i + 1, line.message);
-        let bytes: Vec<u8> = line
-            .message
-            .split_whitespace()
-            .map(|b| u8::from_str_radix(b, 16))
-            .collect::<Result<_, _>>()
-            .map_err(|_| at("the message isn't two hex bytes".into()))?;
-        let [status, data1] = bytes[..] else {
-            return Err(at("the message isn't two hex bytes".into()));
+        let Some(k) = two_bytes(&line.message) else {
+            out.skipped.push(at("the message isn't two hex bytes".into()));
+            continue;
         };
-        let k = key(&[status, data1]).expect("two bytes");
-        let (control, arg) = Control::parse(&line.command, line.value.as_deref()).map_err(at)?;
+        let k = key(&[k.0, k.1]).expect("two bytes");
+        let (control, arg) = match Control::parse(&line.command, line.value.as_deref()) {
+            Ok(c) => c,
+            Err(e) => {
+                out.skipped.push(at(e));
+                continue;
+            }
+        };
         let input = match line.input.as_deref() {
             None => default_input(k.0),
             Some("button") => Input::Note,
@@ -558,9 +425,12 @@ pub fn from_json(text: &str) -> Result<(String, ControllerFile), String> {
             Some("lsb") => Input::Lsb,
             Some("relative") => Input::Relative,
             Some("jog") => Input::Jog(line.ticks.unwrap_or(720)),
-            Some(x) => return Err(at(format!("no input kind {x}"))),
+            Some(x) => {
+                out.skipped.push(at(format!("no input kind {x}")));
+                continue;
+            }
         };
-        map.insert(
+        out.inputs.insert(
             k,
             Learn {
                 control,
@@ -570,27 +440,21 @@ pub fn from_json(text: &str) -> Result<(String, ControllerFile), String> {
             },
         );
     }
-    let mut meters = vec![];
     for (i, m) in file.meters.iter().enumerate() {
         let at = |e: &str| format!("meter {} ({}): {e}", i + 1, m.message);
-        let bytes: Vec<u8> = m
-            .message
-            .split_whitespace()
-            .map(|b| u8::from_str_radix(b, 16))
-            .collect::<Result<_, _>>()
-            .map_err(|_| at("the message isn't two hex bytes"))?;
-        let [status, data1] = bytes[..] else {
-            return Err(at("the message isn't two hex bytes"));
+        let Some((status, data1)) = two_bytes(&m.message) else {
+            out.skipped.push(at("the message isn't two hex bytes"));
+            continue;
         };
-        let deck = m
-            .deck
-            .checked_sub(1)
-            .and_then(DeckId::new)
-            .ok_or_else(|| at("no such deck"))?;
+        let Some(deck) = m.deck.checked_sub(1).and_then(DeckId::new) else {
+            out.skipped.push(at("no such deck"));
+            continue;
+        };
         if !(m.amber_at < m.red_at && m.red_at <= 127) {
-            return Err(at("amber_at must be below red_at, and red_at at most 127"));
+            out.skipped.push(at("amber_at must be below red_at, and red_at at most 127"));
+            continue;
         }
-        meters.push(Meter {
+        out.meters.push(Meter {
             deck,
             status,
             data1,
@@ -598,52 +462,29 @@ pub fn from_json(text: &str) -> Result<(String, ControllerFile), String> {
             red_at: m.red_at,
         });
     }
-    Ok((file.device, ControllerFile { inputs: map, meters }))
-}
-
-/// Mappings earshot knows without a file, to start a new one from.
-pub fn profiles() -> Vec<(&'static str, ControllerFile)> {
-    vec![("Pioneer DDJ-400 (built-in)", ddj400_mapping())]
-}
-
-/// The built-in DDJ-400 table, with its two channel meters: controller 0x02 on
-/// channel 1 (deck 1) and 2 (deck 2). Measured on the unit: the first amber LED
-/// comes on at 87, red at 119.
-fn ddj400_mapping() -> ControllerFile {
-    let meters = [(0, 0xB0), (1, 0xB1)]
-        .map(|(d, status)| Meter {
-            deck: DeckId::new(d).expect("a deck"),
-            status,
-            data1: 0x02,
-            amber_at: 87,
-            red_at: 119,
-        })
-        .to_vec();
-    ControllerFile {
-        inputs: ddj400_map(),
-        meters,
+    for m in &file.start {
+        match hex(m) {
+            Some(b) if !b.is_empty() => out.start.push(b),
+            _ => out.skipped.push(format!("start message {m:?}: not hex bytes")),
+        }
     }
-}
-
-/// The built-in DDJ-400 table as a mapping.
-fn ddj400_map() -> Map {
-    ddj400()
-        .into_iter()
-        .map(|mp| {
-            let l = Learn {
-                control: mp.control,
-                arg: mp.arg,
-                input: mp.input,
-                display_only: matches!(
-                    mp.control,
-                    Control::Master(
-                        MasterParam::Gain | MasterParam::HeadGain | MasterParam::HeadMix | MasterParam::MasterCue
-                    )
-                ),
-            };
-            ((mp.status, mp.data1), l)
-        })
-        .collect()
+    for (from, to) in &file.mirror {
+        match (two_bytes(from), two_bytes(to)) {
+            (Some(f), Some(t)) => {
+                out.mirror.insert(f, t);
+            }
+            _ => out.skipped.push(format!("mirror {from:?}: {to:?}: not two hex bytes each")),
+        }
+    }
+    for (from, to) in &file.mirror_status {
+        match (hex(from).as_deref(), hex(to).as_deref()) {
+            (Some(&[f]), Some(&[t])) => {
+                out.mirror_status.insert(f, t);
+            }
+            _ => out.skipped.push(format!("mirror_status {from:?}: {to:?}: not a hex byte each")),
+        }
+    }
+    Ok((file.device, out))
 }
 
 /// How a message reads unless a binding says otherwise: a note is a button, anything
@@ -706,13 +547,18 @@ pub fn connect_all(
     lane: &Lane,
     learned: &Learned,
     monitor: &super::lights::MonitorSlot,
-) -> Result<(Midi, Vec<String>), String> {
+    choose: &dyn Fn(&str, Option<&str>) -> Option<super::controllers::Profile>,
+) -> Result<(Midi, Vec<Port>), String> {
     let t0 = std::time::Instant::now();
     let probe = MidiInput::new("earshot-probe").map_err(|e| e.to_string())?;
     let ports = probe.ports();
     let all: Vec<String> = ports.iter().map(|p| probe.port_name(p).unwrap_or_else(|_| "unknown".into())).collect();
     eprintln!("[init] MIDI: {} input port(s): {all:?}", all.len());
     let mut names = Vec::new();
+    let mut ports_out = Vec::new();
+    let mut mapped = false;
+    // Each open port's start messages, from its controller file.
+    let mut starts = Vec::new();
     let mut connections = Vec::new();
     for port in &ports {
         let name = probe.port_name(port).unwrap_or_else(|_| "unknown".into());
@@ -720,9 +566,22 @@ pub fn connect_all(
             continue;
         }
         let input = MidiInput::new("earshot").map_err(|e| e.to_string())?;
-        if name.contains("DDJ-400") {
-            learned.seed_ddj400();
+        // Which mapping this controller gets (`core::controllers`). The first port
+        // with one sets the session's mapping.
+        let usb = super::controller_audio::usb_id(&name);
+        let profile = choose(&name, usb.as_deref());
+        eprintln!(
+            "[init] MIDI: {name:?} (USB id {}): mapping {}",
+            usb.as_deref().unwrap_or("none"),
+            profile.as_ref().map_or("none".to_string(), |p| format!("{} ({})", p.id.key(), p.label()))
+        );
+        if let Some(p) = &profile
+            && !mapped
+        {
+            learned.replace(p.file.clone());
+            mapped = true;
         }
+        let start = profile.as_ref().map(|p| p.file.start.clone()).unwrap_or_default();
         let (sink, lane, learned) = (sink.clone(), lane.clone(), learned.clone());
         let index = names.len();
         match input.connect(
@@ -734,12 +593,23 @@ pub fn connect_all(
             Ok(c) => {
                 eprintln!("[init] MIDI: opened input {name:?}");
                 connections.push(c);
+                ports_out.push(Port {
+                    name: name.clone(),
+                    usb,
+                    mapping: profile,
+                });
                 names.push(name);
+                starts.push(start);
             }
             Err(e) => eprintln!("[init] MIDI: could not open {name}: {e}"),
         }
     }
-    let outputs = connect_outputs(&names);
+    // No controller with a mapping: nothing mapped (pressing things shows them in
+    // Controller mode, to map them).
+    if !mapped {
+        learned.replace(ControllerFile::default());
+    }
+    let outputs = connect_outputs(&names, &starts);
     eprintln!(
         "[init] MIDI: {} input(s), {} output(s) open after {:.1} ms; lights {}",
         names.len(),
@@ -754,38 +624,36 @@ pub fn connect_all(
             _connections: connections,
             _lights: lights,
         },
-        names,
+        ports_out,
     ))
 }
 
-/// Asks a DDJ-400 where its knobs, faders and switches are. Sent at start-up before
-/// audio starts, as Mixxx's mapping does (`core::lights`); Debug mode can send it on
-/// demand too.
-pub const DDJ400_REPORT: [u8; 12] = [0xF0, 0x00, 0x40, 0x05, 0x00, 0x00, 0x02, 0x06, 0x00, 0x03, 0x01, 0xF7];
+/// An open MIDI input: its name, its device's USB id (if it has one), and the mapping
+/// it got.
+#[derive(Clone, Debug)]
+pub struct Port {
+    pub name: String,
+    pub usb: Option<String>,
+    pub mapping: Option<super::controllers::Profile>,
+}
 
 /// The output ports named like the inputs that opened (a controller's two halves),
-/// and whether each is a DDJ-400's.
-///
-/// A DDJ-400 isn't asked where its controls are. Mixxx's mapping sends it a SysEx
-/// for that (F0 00 40 05 00 00 02 06 00 03 01 F7), but sent by earshot it left the
-/// unit's headphone mix chirping, now and then, until it was unplugged (it arrived
-/// the day that started, and six runs without it were clean). Earshot learns each
-/// control's place when it's first moved.
-fn connect_outputs(inputs: &[String]) -> Vec<(midir::MidiOutputConnection, bool)> {
+/// each with its input's start messages (`starts`, by input).
+fn connect_outputs(inputs: &[String], starts: &[Vec<Vec<u8>>]) -> Vec<(midir::MidiOutputConnection, Vec<Vec<u8>>)> {
     let Ok(probe) = MidiOutput::new("earshot-probe") else {
         return vec![];
     };
     let mut out = vec![];
     for port in probe.ports() {
         let name = probe.port_name(&port).unwrap_or_default();
-        if !inputs.contains(&name) {
+        let Some(i) = inputs.iter().position(|n| *n == name) else {
             continue;
-        }
+        };
         let Ok(output) = MidiOutput::new("earshot") else { continue };
         match output.connect(&port, "earshot-lights") {
             Ok(c) => {
                 eprintln!("[init] MIDI: opened output {name:?}");
-                out.push((c, name.contains("DDJ-400")));
+                out.push((c, starts[i].clone()));
             }
             Err(e) => eprintln!("MIDI: could not open {name} for its lights: {e}"),
         }
@@ -899,7 +767,7 @@ mod tests {
 
     fn ddj() -> Learned {
         let l = Learned::default();
-        l.seed_ddj400();
+        l.seed_bundled("ddj-400");
         l
     }
 
@@ -916,7 +784,7 @@ mod tests {
         translate(&[status, n + 32, fine], &learned)?.1
     }
 
-    /// A DDJ-400 starts from the built-in table, once; any binding can be changed,
+    /// A DDJ-400 starts from its controller file, once; any binding can be changed,
     /// and a button can send a fixed value.
     #[test]
     fn the_session_mapping() {
@@ -976,12 +844,9 @@ mod tests {
             serde_json::json!({ "message": "B0 22", "command": "deck_2_scratch", "input": "jog", "ticks": 720 })
         );
         assert_eq!(line("B0 13")["command"], "deck_1_channel_fader");
-        // Unmapped: does nothing. Cleared, it stays cleared on the next connect.
+        // Unmapped: does nothing.
         learned.remove((0x90, 0x0B));
         assert!(run(&[0x90, 0x0B, 0x7F]).is_none());
-        learned.clear();
-        learned.seed_ddj400();
-        assert!(learned.all().is_empty());
     }
 
     /// A saved file reads back as the same mapping; a bad line says which.
@@ -991,25 +856,30 @@ mod tests {
         let v = learned.version();
         let (device, map) = from_json(&learned.to_json("DDJ-400")).unwrap();
         assert_eq!(device, "DDJ-400");
-        assert_eq!(map.inputs, ddj400_map());
-        assert_eq!(map.meters, ddj400_mapping().meters, "the meters too");
+        let bundled = super::super::controllers::bundled("pioneer", Some("ddj-400")).file;
+        assert_eq!(map.inputs, bundled.inputs);
+        assert_eq!(map.meters, bundled.meters, "the meters too");
+        assert_eq!(map.mirror, bundled.mirror, "and the mirrors");
+        assert_eq!(map.mirror_status, bundled.mirror_status);
         let fresh = Learned::default();
         fresh.replace(map);
         assert!(fresh.version() > 0);
-        fresh.seed_ddj400();
-        assert_eq!(fresh.all().len(), ddj400_map().len(), "not seeded on top");
         assert_eq!(learned.version(), v);
+        // A line that can't be read is left out, and says which and why; the rest
+        // stays.
         let bad = r#"{"inputs": [{"message": "90 0B", "command": "deck_1_play"},
-                                 {"message": "90 0C", "command": "deck_1_dance"}]}"#;
-        let e = from_json(bad).unwrap_err();
-        assert!(e.contains("input 2 (90 0C)") && e.contains("no command deck_1_dance"), "{e}");
-        assert!(from_json(r#"{"inputs": [{"message": "90", "command": "deck_1_play"}]}"#).is_err());
+                                 {"message": "90 0C", "command": "deck_1_dance"},
+                                 {"message": "90", "command": "deck_1_play"}]}"#;
+        let (_, m) = from_json(bad).unwrap();
+        assert_eq!(m.inputs.len(), 1);
+        assert_eq!(m.skipped.len(), 2);
+        assert!(m.skipped[0].contains("input 2 (90 0C)") && m.skipped[0].contains("no command deck_1_dance"));
+        assert!(m.skipped[1].contains("input 3 (90)"));
         assert!(from_json("nonsense").is_err());
     }
 
     #[test]
     fn every_entry_maps_to_a_control() {
-        assert_eq!(ddj400().len(), ddj400_names().len() + ddj400_pads().len());
         assert!(translate(&[0x90, 0x0B, 0x7F], &Learned::default()).is_none(), "nothing mapped");
         let l = Learned::default();
         assert!(l.first_unmapped((0x90, 0x0B)), "logged the first time");
@@ -1109,20 +979,13 @@ mod tests {
                 "{bytes:02X?}"
             );
         }
-        // Every pad of both banks is mapped, with and without SHIFT, on both decks,
-        // and no note is mapped twice.
-        let pads = ddj400_pads();
-        let fx = pads.iter().filter(|(_, _, name, _)| name.contains("_pad_fx_") && !name.contains("set_pad_mode"));
+        // Every pad of both banks is mapped, with and without SHIFT, on both decks.
+        let all = ddj().all();
+        let fx = all.iter().filter(|(_, l)| {
+            let name = l.control.name().0;
+            name.contains("_pad_fx_") && !name.contains("set_pad_mode")
+        });
         assert_eq!(fx.count(), 2 * 2 * 2 * 8);
-        let all = ddj400();
-        for (i, a) in all.iter().enumerate() {
-            assert!(
-                !all[..i].iter().any(|b| (b.status, b.data1) == (a.status, a.data1)),
-                "{:02X} {:02X} mapped twice",
-                a.status,
-                a.data1
-            );
-        }
     }
 
     /// Sampler mode's pads play slots 1-8 (deck 1) and 9-16 (deck 2), straight to the
@@ -1377,3 +1240,4 @@ mod tests {
         }
     }
 }
+

@@ -68,6 +68,9 @@ pub struct UiPrefs {
     /// time a controller connects it starts hidden.
     #[serde(skip)]
     pub mixer_with_controller: bool,
+    /// The mapping chosen for each MIDI device (the MIDI pill): a
+    /// `controllers::device_key` to a `controllers::MappingId::key`.
+    pub controller_mappings: std::collections::BTreeMap<String, String>,
 }
 
 /// View > Text size's sizes, which Ctrl +/- step through, with their names.
@@ -103,6 +106,7 @@ impl Default for UiPrefs {
             pretend_controller: false,
             layers: [false; 2],
             mixer_with_controller: false,
+            controller_mappings: Default::default(),
         }
     }
 }

@@ -1,0 +1,228 @@
+{
+  "name": "Pioneer DJ",
+  "about": "What Pioneer's DDJ controllers share (per Mixxx's mappings for the DDJ-400, FLX4, 200, SB, SB2, SB3 and SX): each deck on its own channel (notes 9n, controls Bn), the mixer on channel 7, 14-bit faders and knobs (fine half on the control + 0x20), SHIFT on 3F, and the SHIFT notes of PLAY, CUE and the headphone CUE. A model's own file extends this one.",
+  "usb": [
+    "2b73:*"
+  ],
+  "inputs": [
+    {
+      "command": "deck_1_play",
+      "message": "90 0B"
+    },
+    {
+      "command": "deck_1_cue",
+      "message": "90 0C"
+    },
+    {
+      "command": "deck_1_scratch_hold",
+      "message": "90 36"
+    },
+    {
+      "command": "deck_1_shift",
+      "message": "90 3F"
+    },
+    {
+      "command": "deck_1_headphone_cue",
+      "message": "90 54"
+    },
+    {
+      "command": "deck_1_beat_sync",
+      "message": "90 58"
+    },
+    {
+      "command": "deck_2_play",
+      "message": "91 0B"
+    },
+    {
+      "command": "deck_2_cue",
+      "message": "91 0C"
+    },
+    {
+      "command": "deck_2_scratch_hold",
+      "message": "91 36"
+    },
+    {
+      "command": "deck_2_shift",
+      "message": "91 3F"
+    },
+    {
+      "command": "deck_2_headphone_cue",
+      "message": "91 54"
+    },
+    {
+      "command": "deck_2_beat_sync",
+      "message": "91 58"
+    },
+    {
+      "command": "library_pane_next",
+      "message": "96 41"
+    },
+    {
+      "command": "library_pane_prev",
+      "message": "96 42"
+    },
+    {
+      "command": "deck_1_tempo",
+      "input": "msb",
+      "message": "B0 00"
+    },
+    {
+      "command": "deck_1_trim",
+      "input": "msb",
+      "message": "B0 04"
+    },
+    {
+      "command": "deck_1_eq_high",
+      "input": "msb",
+      "message": "B0 07"
+    },
+    {
+      "command": "deck_1_eq_mid",
+      "input": "msb",
+      "message": "B0 0B"
+    },
+    {
+      "command": "deck_1_eq_low",
+      "input": "msb",
+      "message": "B0 0F"
+    },
+    {
+      "command": "deck_1_channel_fader",
+      "input": "msb",
+      "message": "B0 13"
+    },
+    {
+      "command": "deck_1_tempo",
+      "input": "lsb",
+      "message": "B0 20"
+    },
+    {
+      "command": "deck_1_trim",
+      "input": "lsb",
+      "message": "B0 24"
+    },
+    {
+      "command": "deck_1_eq_high",
+      "input": "lsb",
+      "message": "B0 27"
+    },
+    {
+      "command": "deck_1_eq_mid",
+      "input": "lsb",
+      "message": "B0 2B"
+    },
+    {
+      "command": "deck_1_eq_low",
+      "input": "lsb",
+      "message": "B0 2F"
+    },
+    {
+      "command": "deck_1_channel_fader",
+      "input": "lsb",
+      "message": "B0 33"
+    },
+    {
+      "command": "deck_2_tempo",
+      "input": "msb",
+      "message": "B1 00"
+    },
+    {
+      "command": "deck_2_trim",
+      "input": "msb",
+      "message": "B1 04"
+    },
+    {
+      "command": "deck_2_eq_high",
+      "input": "msb",
+      "message": "B1 07"
+    },
+    {
+      "command": "deck_2_eq_mid",
+      "input": "msb",
+      "message": "B1 0B"
+    },
+    {
+      "command": "deck_2_eq_low",
+      "input": "msb",
+      "message": "B1 0F"
+    },
+    {
+      "command": "deck_2_channel_fader",
+      "input": "msb",
+      "message": "B1 13"
+    },
+    {
+      "command": "deck_2_tempo",
+      "input": "lsb",
+      "message": "B1 20"
+    },
+    {
+      "command": "deck_2_trim",
+      "input": "lsb",
+      "message": "B1 24"
+    },
+    {
+      "command": "deck_2_eq_high",
+      "input": "lsb",
+      "message": "B1 27"
+    },
+    {
+      "command": "deck_2_eq_mid",
+      "input": "lsb",
+      "message": "B1 2B"
+    },
+    {
+      "command": "deck_2_eq_low",
+      "input": "lsb",
+      "message": "B1 2F"
+    },
+    {
+      "command": "deck_2_channel_fader",
+      "input": "lsb",
+      "message": "B1 33"
+    },
+    {
+      "command": "deck_1_filter",
+      "input": "msb",
+      "message": "B6 17"
+    },
+    {
+      "command": "deck_2_filter",
+      "input": "msb",
+      "message": "B6 18"
+    },
+    {
+      "command": "mixer_crossfader",
+      "input": "msb",
+      "message": "B6 1F"
+    },
+    {
+      "command": "deck_1_filter",
+      "input": "lsb",
+      "message": "B6 37"
+    },
+    {
+      "command": "deck_2_filter",
+      "input": "lsb",
+      "message": "B6 38"
+    },
+    {
+      "command": "mixer_crossfader",
+      "input": "lsb",
+      "message": "B6 3F"
+    },
+    {
+      "command": "library_browse",
+      "input": "relative",
+      "message": "B6 40"
+    }
+  ],
+  "mirror": {
+    "90 0B": "90 47",
+    "90 0C": "90 48",
+    "90 54": "90 68",
+    "91 0B": "91 47",
+    "91 0C": "91 48",
+    "91 54": "91 68"
+  }
+}
