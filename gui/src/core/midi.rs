@@ -758,9 +758,9 @@ pub fn connect_all(
     ))
 }
 
-/// Asks a DDJ-400 where its knobs, faders and switches are (Mixxx's mapping sends it
-/// on start). Not sent at start (see [`connect_outputs`]); Debug mode can send it on
-/// demand, to test when it upsets the unit.
+/// Asks a DDJ-400 where its knobs, faders and switches are. Sent at start-up before
+/// audio starts, as Mixxx's mapping does (`core::lights`); Debug mode can send it on
+/// demand too.
 pub const DDJ400_REPORT: [u8; 12] = [0xF0, 0x00, 0x40, 0x05, 0x00, 0x00, 0x02, 0x06, 0x00, 0x03, 0x01, 0xF7];
 
 /// The output ports named like the inputs that opened (a controller's two halves),
@@ -1367,10 +1367,13 @@ mod tests {
     }
 
     #[test]
-    fn sending_without_audio_fails_quietly() {
-        // No engine yet: the lane has no ring, and says so instead of blocking.
+    fn sending_without_audio_waits_for_it() {
+        // No engine yet (the controller answers before audio starts): the lane keeps
+        // the commands, a bounded number, for the engine to come, without blocking.
         let lane = Lane::default();
-        let c = command::direct(cmd([0x90, 0x0B, 0x7F]).unwrap()).unwrap();
-        assert!(lane.send(c).is_err());
+        for _ in 0..command::LANE_WAITING + 10 {
+            let c = command::direct(cmd([0x90, 0x0B, 0x7F]).unwrap()).unwrap();
+            assert!(lane.send(c).is_ok());
+        }
     }
 }

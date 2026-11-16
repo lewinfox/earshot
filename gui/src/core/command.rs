@@ -222,19 +222,49 @@ pub fn direct(cmd: Command) -> Result<EngineCommand, Command> {
 
 /// A thread's own command ring into the engine (see `Engine::sender`). The lock is only
 /// shared with an audio restart, which puts the new engine's ring in.
+///
+/// While there's no engine (before audio starts, or while it reopens) commands wait,
+/// the latest [`LANE_WAITING`] of them, and go to the next engine: a controller tells
+/// earshot where its knobs are before audio starts.
 #[derive(Clone, Default)]
-pub struct Lane(Arc<Mutex<Option<CommandSender>>>);
+pub struct Lane(Arc<Mutex<LaneInner>>);
+
+#[derive(Default)]
+struct LaneInner {
+    sender: Option<CommandSender>,
+    waiting: std::collections::VecDeque<EngineCommand>,
+}
+
+/// How many commands a [`Lane`] keeps while there's no engine.
+pub const LANE_WAITING: usize = 512;
 
 impl Lane {
     pub fn send(&self, cmd: EngineCommand) -> Result<(), String> {
-        match self.0.lock().unwrap().as_mut() {
+        let mut l = self.0.lock().unwrap();
+        match l.sender.as_mut() {
             Some(s) => s.send(cmd),
-            None => Err("audio is not running".into()),
+            None => {
+                if l.waiting.len() == LANE_WAITING {
+                    l.waiting.pop_front();
+                }
+                l.waiting.push_back(cmd);
+                Ok(())
+            }
         }
     }
 
+    /// The engine's ring (`None`: it's gone); what waited goes to a new one.
     pub fn set(&self, sender: Option<CommandSender>) {
-        *self.0.lock().unwrap() = sender;
+        let mut l = self.0.lock().unwrap();
+        l.sender = sender;
+        let LaneInner { sender, waiting } = &mut *l;
+        if let Some(s) = sender {
+            for cmd in waiting.drain(..) {
+                if let Err(e) = s.send(cmd) {
+                    eprintln!("MIDI: {e}");
+                }
+            }
+        }
     }
 }
 

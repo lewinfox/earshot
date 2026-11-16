@@ -274,7 +274,13 @@ pub struct LightsState {
     pub recorder: Option<super::debug::Recorder>,
 }
 
-/// The lights thread; dropping it puts every light out and stops it.
+/// The lights thread; dropping it puts out the lights earshot lit, and stops it.
+///
+/// Start-up and quitting follow Mixxx, which a DDJ-400 is happy with: nothing is sent
+/// while the sound card starts or stops. Started before audio, it sets every light
+/// (to how things are with no audio yet) and asks a DDJ-400 where its controls are,
+/// before it returns; once audio runs only the lights that change are sent. Dropped
+/// after audio has closed, it puts out only the lights that are on.
 pub struct Lights {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -282,12 +288,13 @@ pub struct Lights {
 
 impl Lights {
     /// `outputs`: each port, and whether it's a DDJ-400's.
-    pub fn start(outputs: Vec<(MidiOutputConnection, bool)>, learned: Learned, monitor: MonitorSlot) -> Lights {
+    pub fn start(mut outputs: Vec<(MidiOutputConnection, bool)>, learned: Learned, monitor: MonitorSlot) -> Lights {
+        let sent = init(&mut outputs, &learned, &monitor);
         let stop = Arc::new(AtomicBool::new(false));
         let quit = stop.clone();
         let thread = std::thread::Builder::new()
             .name("midi-lights".into())
-            .spawn(move || run(outputs, &learned, &monitor, &quit))
+            .spawn(move || run(outputs, sent, &learned, &monitor, &quit))
             .ok();
         Lights { stop, thread }
     }
@@ -302,21 +309,107 @@ impl Drop for Lights {
     }
 }
 
-fn run(mut outputs: Vec<(MidiOutputConnection, bool)>, learned: &Learned, monitor: &MonitorSlot, stop: &AtomicBool) {
-    let start = Instant::now();
-    let mut sent: BTreeMap<(u8, u8), u8> = BTreeMap::new();
-    let mut recorder = None;
-    let send = |outputs: &mut Vec<(MidiOutputConnection, bool)>,
-                recorder: &Option<super::debug::Recorder>,
-                (status, data1): (u8, u8),
-                v: u8| {
-        for (o, _) in outputs.iter_mut() {
-            let _ = o.send(&[status, data1, v]);
+type Outputs = Vec<(MidiOutputConnection, bool)>;
+
+fn send(outputs: &mut Outputs, recorder: &Option<super::debug::Recorder>, (status, data1): (u8, u8), v: u8) {
+    for (o, _) in outputs.iter_mut() {
+        let _ = o.send(&[status, data1, v]);
+    }
+    if let Some(r) = recorder {
+        r.note_midi(true, &[status, data1, v]);
+    }
+}
+
+/// Ask each DDJ-400 where its knobs, faders and switches are.
+fn ask_report(outputs: &mut Outputs, recorder: &Option<super::debug::Recorder>) {
+    let mut sent = 0;
+    for (o, ddj) in outputs.iter_mut() {
+        if *ddj && o.send(&super::midi::DDJ400_REPORT).is_ok() {
+            sent += 1;
         }
-        if let Some(r) = recorder {
-            r.note_midi(true, &[status, data1, v]);
-        }
+    }
+    eprintln!("[midi] sent the position query to {sent} DDJ-400(s)");
+    if let Some(r) = recorder {
+        r.note_midi(true, &super::midi::DDJ400_REPORT);
+    }
+}
+
+/// The controller's start-up, before audio starts: every light as things are with no
+/// audio (the decks empty, the meters at nothing), then the question where its
+/// controls are (last, as Mixxx's DDJ-400 mapping does). What was sent.
+fn init(outputs: &mut Outputs, learned: &Learned, monitor: &MonitorSlot) -> BTreeMap<(u8, u8), u8> {
+    let (pads, recorder) = {
+        let s = monitor.lock().unwrap();
+        (s.pads, s.recorder.clone())
     };
+    hello(outputs, &recorder, learned);
+    let none = EngineSnapshot::default();
+    let mut lights = frame(learned, &none, &pads, true);
+    lights.extend(meters(&learned.meters(), &none));
+    for (&k, &v) in &lights {
+        send(outputs, &recorder, k, v);
+    }
+    ask_report(outputs, &recorder);
+    eprintln!("[init] controller: {} light(s) set, before audio", lights.len());
+    lights
+}
+
+/// What the hot cue pads spell as the controller starts, in binary: a letter on each
+/// deck's eight pads (the first pad the highest bit), the next letters after a moment.
+const HELLO: &[u8] = b"earshot";
+const HELLO_STEP: Duration = Duration::from_millis(150);
+
+/// Each deck's eight hot cue pads, as mapped, for the first two decks that have any.
+fn hotcue_pads(learned: &Learned) -> Vec<[Option<(u8, u8)>; 8]> {
+    let mut decks: BTreeMap<usize, [Option<(u8, u8)>; 8]> = BTreeMap::new();
+    for (k, l) in learned.all() {
+        if l.input != Input::Note || l.display_only {
+            continue;
+        }
+        if let Control::Deck(d, DeckControl::Hotcue(n)) = l.control
+            && n < 8
+        {
+            decks.entry(d.index()).or_default()[n as usize].get_or_insert(k);
+        }
+    }
+    decks.into_values().take(2).collect()
+}
+
+/// The frames of [`HELLO`]: each pad's light, frame by frame.
+fn hello_frames(decks: &[[Option<(u8, u8)>; 8]]) -> Vec<Vec<((u8, u8), u8)>> {
+    if decks.is_empty() {
+        return vec![];
+    }
+    HELLO
+        .chunks(decks.len())
+        .map(|letters| {
+            let mut f = vec![];
+            for (i, pads) in decks.iter().enumerate() {
+                let b = letters.get(i).copied().unwrap_or(0);
+                for (j, k) in pads.iter().enumerate() {
+                    if let Some(k) = k {
+                        f.push((*k, if b & (0x80 >> j) != 0 { 0x7F } else { 0 }));
+                    }
+                }
+            }
+            f
+        })
+        .collect()
+}
+
+/// Spell [`HELLO`] on the pads (a moment before audio starts).
+fn hello(outputs: &mut Outputs, recorder: &Option<super::debug::Recorder>, learned: &Learned) {
+    for f in hello_frames(&hotcue_pads(learned)) {
+        for (k, v) in f {
+            send(outputs, recorder, k, v);
+        }
+        std::thread::sleep(HELLO_STEP);
+    }
+}
+
+fn run(mut outputs: Outputs, mut sent: BTreeMap<(u8, u8), u8>, learned: &Learned, monitor: &MonitorSlot, stop: &AtomicBool) {
+    let start = Instant::now();
+    let mut recorder = None;
     while !stop.load(Ordering::Relaxed) {
         let (snap, pads, ask) = {
             let mut s = monitor.lock().unwrap();
@@ -325,26 +418,13 @@ fn run(mut outputs: Vec<(MidiOutputConnection, bool)>, learned: &Learned, monito
             (s.monitor.as_ref().map(|m| m.snapshot()), s.pads, ask)
         };
         if ask {
-            let mut sent = 0;
-            for (o, ddj) in outputs.iter_mut() {
-                if *ddj && o.send(&super::midi::DDJ400_REPORT).is_ok() {
-                    sent += 1;
-                }
-            }
-            eprintln!("[midi] sent the position query to {sent} DDJ-400(s)");
-            if let Some(r) = &recorder {
-                r.note_midi(true, &super::midi::DDJ400_REPORT);
-            }
+            ask_report(&mut outputs, &recorder);
         }
         let lit_half = (start.elapsed().as_millis() / FLASH.as_millis()) % 2 == 0;
-        let now = match snap {
-            Some(s) => {
-                let mut f = frame(learned, &s, &pads, lit_half);
-                f.extend(meters(&learned.meters(), &s));
-                f
-            }
-            None => BTreeMap::new(),
-        };
+        // No audio (it's reopening): as at start-up, the decks empty.
+        let s = snap.unwrap_or_default();
+        let mut now = frame(learned, &s, &pads, lit_half);
+        now.extend(meters(&learned.meters(), &s));
         for (&k, &v) in &now {
             if sent.get(&k) != Some(&v) {
                 send(&mut outputs, &recorder, k, v);
@@ -357,26 +437,18 @@ fn run(mut outputs: Vec<(MidiOutputConnection, bool)>, learned: &Learned, monito
         sent = now;
         std::thread::sleep(TICK);
     }
-    // Every mapped button's light out, not only the ones lit here: the controller
-    // lights some itself (its pad mode buttons), and shouldn't be left lit.
-    for k in off_at_exit(learned, &sent) {
+    let off = off_at_exit(&sent);
+    for &k in &off {
         send(&mut outputs, &recorder, k, 0);
     }
+    eprintln!("[midi] {} light(s) put out on closing", off.len());
 }
 
-/// The lights to put out on leaving: every mapped button's, every level meter (to
-/// nothing), and any lit here since.
-fn off_at_exit(learned: &Learned, sent: &BTreeMap<(u8, u8), u8>) -> std::collections::BTreeSet<(u8, u8)> {
-    let mapped = learned
-        .all()
-        .into_iter()
-        .filter(|(_, l)| l.input == Input::Note && !l.display_only)
-        .map(|(k, _)| k);
-    let meters = learned.meters().into_iter().map(|m| (m.status, m.data1));
-    mapped
-        .chain(meters)
-        .chain(sent.iter().filter(|(_, v)| **v != 0).map(|(k, _)| *k))
-        .collect()
+/// The lights to put out on leaving: only those on (as Mixxx's DDJ-400 mapping puts
+/// out the ones it lit). The ones the controller lights itself (its pad mode buttons)
+/// it keeps lit, as it does after Mixxx.
+fn off_at_exit(sent: &BTreeMap<(u8, u8), u8>) -> Vec<(u8, u8)> {
+    sent.iter().filter(|(_, v)| **v != 0).map(|(k, _)| *k).collect()
 }
 
 #[cfg(test)]
@@ -487,22 +559,41 @@ mod tests {
         }
     }
 
+    /// Only the lights on go out at exit: Mixxx sends a DDJ-400 a short list, and a
+    /// burst of every mapped button can leave it deaf (#42).
     #[test]
-    fn every_mapped_light_goes_out_at_exit() {
+    fn only_lit_lights_go_out_at_exit() {
+        let mut sent = BTreeMap::new();
+        sent.insert((0x90, 0x0B), 0x7F); // a play button, lit
+        sent.insert((0x90, 0x0C), 0x00); // a cue button, off
+        sent.insert((0xB0, 0x02), 0x40); // a level meter, showing
+        assert_eq!(off_at_exit(&sent), vec![(0x90, 0x0B), (0xB0, 0x02)]);
+    }
+
+    /// The pads spell "earshot" a letter a deck: "e" (0x65) then "a" (0x61) first.
+    #[test]
+    fn the_pads_spell_earshot() {
         let learned = Learned::default();
         learned.seed_ddj400();
-        let mut sent = BTreeMap::new();
-        // Something lit here that's since been unmapped still goes out.
-        sent.insert((0x90, 0x7E), 0x7F);
-        let off = off_at_exit(&learned, &sent);
-        assert!(off.contains(&(0x90, 0x69)), "a pad mode button, never lit by earshot");
-        assert!(off.contains(&(0x97, 0x44)), "a keyboard pad");
-        assert!(off.contains(&(0x90, 0x7E)));
-        assert!(off.contains(&(0xB0, 0x02)) && off.contains(&(0xB1, 0x02)), "the level meters");
-        assert!(
-            !off.iter().any(|&(s, d)| s & 0xF0 == 0xB0 && d != 0x02),
-            "knobs have no lights"
-        );
+        let pads = hotcue_pads(&learned);
+        assert_eq!(pads.len(), 2);
+        let frames = hello_frames(&pads);
+        assert_eq!(frames.len(), 4, "ea rs ho t");
+        let lit: Vec<u8> = frames[0].iter().map(|(_, v)| *v).collect();
+        let bits = |b: u8| (0..8).map(move |j| if b & (0x80 >> j) != 0 { 0x7F } else { 0 });
+        assert_eq!(lit, bits(b'e').chain(bits(b'a')).collect::<Vec<_>>());
+        assert!(frames[3][8..].iter().all(|(_, v)| *v == 0), "nothing after the t");
+    }
+
+    /// With no audio (at start-up), every light is set, and the meters show nothing.
+    #[test]
+    fn start_up_lights_are_set_with_no_audio() {
+        let learned = Learned::default();
+        learned.seed_ddj400();
+        let none = EngineSnapshot::default();
+        let f = frame(&learned, &none, &AllPads::default(), true);
+        assert!(f.contains_key(&(0x90, 0x0B)), "play is set");
+        assert!(meters(&learned.meters(), &none).iter().all(|(_, v)| *v == 0));
     }
 
     /// SHIFT held shows the shifted buttons' lights: those without a job of their own

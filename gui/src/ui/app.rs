@@ -92,8 +92,6 @@ pub struct EarshotApp {
     null_audio: bool,
     midi: Midi,
     midi_ports: Vec<String>,
-    /// The controller's start-up after audio and MIDI are open (`core::controller_init`).
-    controller_init: crate::core::controller_init::ControllerInit,
     /// Send track ids here to load their cover art.
     art_loader: crate::core::background::Mailbox<i64>,
     /// Nudge after a scan: works out audio hashes the files' tags didn't have.
@@ -300,8 +298,10 @@ impl EarshotApp {
         if services.midi {
             controller.set(controller_audio::find(&midi::port_names()));
         }
-        let audio = start_audio(&player, &settings.audio, services.null_audio, &mut controller);
-        let monitor = player.lock().unwrap().monitor();
+        // Audio starts once the app is built, after the controller (`EarshotApp::
+        // start_up`).
+        let audio = Err("audio hasn't started yet".to_string());
+        let monitor = None;
 
         let drives_stop = crate::core::drives::StopOnDrop::default();
         // The two that watch the world by the clock (the sound card, the USB sticks)
@@ -394,7 +394,6 @@ impl EarshotApp {
             null_audio: services.null_audio,
             midi: Midi::default(),
             midi_ports: vec![],
-            controller_init: Default::default(),
             art_loader,
             hasher,
             quick,
@@ -434,6 +433,17 @@ impl EarshotApp {
             settle_until: None,
             deck_options_restored: false,
         };
+        if cfg!(debug_assertions) {
+            let rec = crate::core::debug::Recorder::start();
+            app.lights_monitor.lock().unwrap().recorder = Some(rec.clone());
+            app.panels.debug.recorder = Some(rec);
+            app.panels.debug.mapping = Some(app.panels.controller.learned.clone());
+            app.panels.debug.lights = Some(app.lights_monitor.clone());
+        }
+        // The controller mapping in progress, as it was last run.
+        app.panels.controller.draft = Some(data_dir.join(crate::ui::panels::controller::DRAFT_FILE));
+        app.panels.controller.load_draft();
+        app.start_up(services.midi);
         app.lib.store.send(StoreCmd::ListSources);
         app.lib.store.send(StoreCmd::StartSession);
         let ranges = app.settings.tempo_ranges.clone();
@@ -444,14 +454,6 @@ impl EarshotApp {
         let _ = player::set_xf_curve(&app.player, app.settings.xf_curve);
         let _ = player::set_fx_decks(&app.player, app.prefs.decks().len());
         player::set_cue_first_beat(&app.player, app.settings.cue_first_beat);
-        if cfg!(debug_assertions) {
-            let rec = crate::core::debug::Recorder::start();
-            app.lights_monitor.lock().unwrap().recorder = Some(rec.clone());
-            app.panels.debug.recorder = Some(rec);
-            app.panels.debug.mapping = Some(app.panels.controller.learned.clone());
-            app.panels.debug.lights = Some(app.lights_monitor.clone());
-            app.feed_recorder();
-        }
         app.start_sampler();
         let options = app.settings.deck_options.clone();
         for (i, o) in options.into_iter().enumerate().take(session::SLOTS) {
@@ -487,26 +489,44 @@ impl EarshotApp {
                 app.lib.store.send(StoreCmd::UpdateSource(s));
             }
         }
-        // The controller mapping in progress, as it was last run.
-        app.panels.controller.draft = Some(data_dir.join(crate::ui::panels::controller::DRAFT_FILE));
-        app.panels.controller.load_draft();
-        // Start-up: audio is open by now; then MIDI; then the controller's own
-        // start-up, once audio has settled (`init_controller`, each frame).
-        app.controller_init.audio_started(Instant::now());
-        if services.midi {
-            app.connect_midi();
-        }
         Ok(app)
+    }
+
+    /// Start-up, in Mixxx's order, which a DDJ-400 is happy with: the controller first
+    /// (MIDI open, its lights set, asked where its controls are: `core::lights`), then
+    /// audio. Nothing goes to the controller while its sound card starts.
+    fn start_up(&mut self, midi: bool) {
+        if midi {
+            self.connect_midi(); // opens audio itself if the controller has a sound card
+        }
+        if self.player.lock().unwrap().engine.is_none() {
+            self.reopen_audio();
+        }
+    }
+
+    /// Quitting, in Mixxx's order: audio closed and the controller's sound card let go
+    /// first, then the controller's lights put out and MIDI closed.
+    fn shut_down(&mut self) {
+        eprintln!("[exit] audio: closing");
+        self.preview = None;
+        self.monitor = None;
+        self.lights_monitor.lock().unwrap().monitor = None;
+        {
+            let mut p = self.player.lock().unwrap();
+            p.midi.set(None);
+            p.engine = None;
+        }
+        self.controller.release();
+        eprintln!("[exit] MIDI: closing");
+        self.midi = Midi::default();
     }
 
     /// Start audio again (on the controller's sound card, if one's connected).
     #[track_caller]
     fn reopen_audio(&mut self) {
-        eprintln!("[init] audio: reopening (asked from {})", std::panic::Location::caller());
+        eprintln!("[init] audio: (re)opening (asked from {})", std::panic::Location::caller());
         self.preview = None;
         self.audio = start_audio(&self.player, &self.settings.audio, self.null_audio, &mut self.controller);
-        // Nothing's asked of the controller until this has settled.
-        self.controller_init.audio_started(Instant::now());
         self.reread_monitor();
     }
 
@@ -570,30 +590,6 @@ impl EarshotApp {
         // A controller with a sound card came or went: play to it, or stop.
         if self.controller.set(controller_audio::find(&self.midi_ports)) {
             self.reopen_audio();
-        }
-        self.controller_init.midi_connected();
-        eprintln!(
-            "[init] controller: will ask a DDJ-400 where its controls are once audio has run {:?}",
-            crate::core::controller_init::SETTLE
-        );
-    }
-
-    /// The controller's start-up, the last step after audio and MIDI are open: once
-    /// audio has run for `controller_init::SETTLE` (never as it starts: a DDJ-400
-    /// asked then can leave its headphones chirping), ask a DDJ-400 where its
-    /// controls are. Called each frame; does each step once, when it's due.
-    fn init_controller(&mut self, ctx: &egui::Context) {
-        use crate::core::controller_init::Step;
-        match self.controller_init.step(Instant::now()) {
-            Step::Idle => {}
-            Step::Wait(d) => ctx.request_repaint_after(d),
-            Step::Ask { audio_for } => {
-                eprintln!(
-                    "[init] controller: asking a DDJ-400 where its controls are (audio running {:.1} s)",
-                    audio_for.as_secs_f64()
-                );
-                self.lights_monitor.lock().unwrap().ask_report = true;
-            }
         }
     }
 
@@ -1421,10 +1417,9 @@ impl EarshotApp {
 }
 
 impl eframe::App for EarshotApp {
-    /// Close the MIDI ports first, so the controller's lights go out (see
-    /// `core::lights`) rather than staying as they were.
+    /// Audio closed, then the controller (`shut_down`).
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.midi = Midi::default();
+        self.shut_down();
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -1438,7 +1433,6 @@ impl eframe::App for EarshotApp {
         self.sync_tempo_lock();
         self.sync_trim();
         self.sync_phones_cue_only();
-        self.init_controller(ctx);
         self.send_active_loops();
         // Background analysis holds back while a deck plays, in every mode.
         let playing = self
