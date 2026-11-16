@@ -379,7 +379,7 @@ impl EarshotApp {
         let decks = &self.panels.decks;
         let deck = deck.unwrap_or_else(|| match self.prefs.mode {
             Mode::Prepare => self.prefs.target(),
-            Mode::Perform | Mode::Controller => DeckId::first(self.prefs.decks().len())
+            Mode::Perform | Mode::Controller | Mode::Debug => DeckId::first(self.prefs.decks().len())
                 .find(|d| !decks[d.index()].playing())
                 .unwrap_or(DeckId::new(0).expect("deck 1")),
         });

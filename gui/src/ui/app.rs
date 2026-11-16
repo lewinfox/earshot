@@ -361,7 +361,7 @@ impl EarshotApp {
             rx,
             lights_monitor: Arc::new(std::sync::Mutex::new(crate::core::lights::LightsState {
                 monitor: monitor.clone(),
-                pads: Default::default(),
+                ..Default::default()
             })),
             phones_cue_only_at: None,
             monitor,
@@ -427,6 +427,14 @@ impl EarshotApp {
         let _ = player::set_fx_decks(&app.player, app.prefs.decks().len());
         player::set_cue_first_beat(&app.player, app.settings.cue_first_beat);
         app.start_sampler();
+        if cfg!(debug_assertions) {
+            let rec = crate::core::debug::Recorder::start();
+            app.lights_monitor.lock().unwrap().recorder = Some(rec.clone());
+            app.panels.debug.recorder = Some(rec);
+            app.panels.debug.lights = Some(app.lights_monitor.clone());
+            app.panels.debug.mapping = Some(app.panels.controller.learned.clone());
+            app.feed_recorder();
+        }
         let options = app.settings.deck_options.clone();
         for (i, o) in options.into_iter().enumerate().take(session::SLOTS) {
             let deck = session::slot(i);
@@ -483,6 +491,24 @@ impl EarshotApp {
         self.lights_monitor.lock().unwrap().monitor = self.monitor.clone();
         self.frame.snap = self.monitor.as_ref().map(|m| m.snapshot());
         self.phones_cue_only_at = None;
+        self.feed_recorder();
+    }
+
+    /// Debug builds: give the recorder the (new) engine's output and state.
+    fn feed_recorder(&mut self) {
+        let Some(rec) = &self.panels.debug.recorder else {
+            return;
+        };
+        let tap = self
+            .player
+            .lock()
+            .unwrap()
+            .engine
+            .as_mut()
+            .and_then(|e| e.take_output_tap());
+        let mut feed = rec.feed.lock().unwrap();
+        feed.tap = tap;
+        feed.monitor = self.monitor.clone();
     }
 
     /// A mapping whose headphone mix is display only (a DDJ-400's: the controller
@@ -1238,6 +1264,16 @@ impl EarshotApp {
                 .filter_map(|d| p.session(d).track_id.map(|t| (t, d)))
                 .collect()
         };
+        if self.prefs.mode == Mode::Debug {
+            // What an export says about this run, as it is now.
+            self.panels.debug.info = format!(
+                "earshot {} (debug build)\naudio: {:#?}\nsettings: {:#?}\ndecks shown: {}\n",
+                env!("CARGO_PKG_VERSION"),
+                self.audio,
+                self.settings,
+                self.prefs.decks().len(),
+            );
+        }
         let mut cx = Cx {
             core: CoreView {
                 lib: &self.index,

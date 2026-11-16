@@ -690,6 +690,7 @@ impl LibraryPane {
             Mode::Perform => format!("{name}-perform"),
             Mode::Prepare => format!("{name}-prepare"),
             Mode::Controller => format!("{name}-controller"),
+            Mode::Debug => format!("{name}-debug"),
         };
         let mut items: Vec<StackItem<Source>> = VIEWS.into_iter().collect();
         items.extend(self.external.stack_items(&cx.core));

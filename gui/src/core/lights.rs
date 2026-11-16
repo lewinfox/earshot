@@ -18,7 +18,13 @@
 //! job changes (SHIFT + a hot cue pad clears it, keyboard mode's page pads) show their
 //! own. See `shift_twin`.
 //!
-//! When earshot quits (or the controller is reconnected) every mapped light goes out.
+//! A controller's channel level meters (the mapping's `meters`) take one number each,
+//! 0 to 127, and the controller lights its LEDs from it. They show each deck's level
+//! before its fader, with the same colours as earshot's meters: red only over full
+//! scale ([`meter_value`]).
+//!
+//! When earshot quits (or the controller is reconnected) every mapped light goes out,
+//! and the meters drop to nothing.
 //!
 //! A thread works out every mapped button's light from the engine's latest state,
 //! 20 times a second, and sends only the ones that changed. The controller can't
@@ -34,7 +40,7 @@ use earshot_engine::{EngineSnapshot, FxTarget, Monitor};
 use midir::MidiOutputConnection;
 
 use super::bus::{Control, DeckControl, FxControl, SamplerControl};
-use super::midi::{Input, Learned};
+use super::midi::{Input, Learned, Meter};
 use super::pads::AllPads;
 
 /// How a light shows.
@@ -222,6 +228,36 @@ pub fn frame(learned: &Learned, snap: &EngineSnapshot, pads: &AllPads, lit_half:
     out
 }
 
+/// The value for a channel level `vu` (linear peak, 1 = full scale) on `meter`,
+/// lighting its LEDs as earshot's own meters do (`ui::widgets::meter`): green from
+/// -32 dB, amber above -6 dB, red only above full scale.
+pub fn meter_value(vu: f64, meter: &Meter) -> u8 {
+    const FLOOR_DB: f64 = -32.0;
+    const AMBER_DB: f64 = -6.0;
+    let (amber_at, red_at) = (meter.amber_at, meter.red_at);
+    if vu <= 0.0 {
+        return 0;
+    }
+    let db = 20.0 * vu.log10();
+    if db > 0.0 {
+        127
+    } else if db > AMBER_DB {
+        let span = (red_at - 1 - amber_at) as f64;
+        amber_at + ((db - AMBER_DB) / -AMBER_DB * span).round() as u8
+    } else {
+        let span = amber_at.saturating_sub(1) as f64;
+        ((db - FLOOR_DB) / (AMBER_DB - FLOOR_DB) * span).round().max(0.0) as u8
+    }
+}
+
+/// Each meter's message and value now.
+pub fn meters(meters: &[Meter], snap: &EngineSnapshot) -> Vec<((u8, u8), u8)> {
+    meters
+        .iter()
+        .map(|m| ((m.status, m.data1), meter_value(snap.deck(m.deck).vu, m)))
+        .collect()
+}
+
 /// Where the lights thread reads the engine's state and the decks' pads. The app
 /// puts the engine's monitor here (again when the sound card is reopened), and the
 /// pads whenever one is pressed.
@@ -231,6 +267,10 @@ pub type MonitorSlot = Arc<Mutex<LightsState>>;
 pub struct LightsState {
     pub monitor: Option<Monitor>,
     pub pads: AllPads,
+    /// Ask a DDJ-400 where its controls are, on the next tick (Debug mode's export).
+    pub ask_report: bool,
+    /// Debug builds: the recorder, told every message sent.
+    pub recorder: Option<super::debug::Recorder>,
 }
 
 /// The lights thread; dropping it puts every light out and stops it.
@@ -240,7 +280,9 @@ pub struct Lights {
 }
 
 impl Lights {
-    pub fn start(outputs: Vec<MidiOutputConnection>, learned: Learned, monitor: MonitorSlot) -> Lights {
+    /// `outputs`: each port, and whether it's a DDJ-400's (which can be asked where
+    /// its controls are).
+    pub fn start(outputs: Vec<(MidiOutputConnection, bool)>, learned: Learned, monitor: MonitorSlot) -> Lights {
         let stop = Arc::new(AtomicBool::new(false));
         let quit = stop.clone();
         let thread = std::thread::Builder::new()
@@ -260,32 +302,55 @@ impl Drop for Lights {
     }
 }
 
-fn run(mut outputs: Vec<MidiOutputConnection>, learned: &Learned, monitor: &MonitorSlot, stop: &AtomicBool) {
+fn run(mut outputs: Vec<(MidiOutputConnection, bool)>, learned: &Learned, monitor: &MonitorSlot, stop: &AtomicBool) {
     let start = Instant::now();
     let mut sent: BTreeMap<(u8, u8), u8> = BTreeMap::new();
-    let send = |outputs: &mut Vec<MidiOutputConnection>, (status, data1): (u8, u8), v: u8| {
-        for o in outputs.iter_mut() {
+    let mut recorder = None;
+    let send = |outputs: &mut Vec<(MidiOutputConnection, bool)>,
+                recorder: &Option<super::debug::Recorder>,
+                (status, data1): (u8, u8),
+                v: u8| {
+        for (o, _) in outputs.iter_mut() {
             let _ = o.send(&[status, data1, v]);
+        }
+        if let Some(r) = recorder {
+            r.note_midi(true, &[status, data1, v]);
         }
     };
     while !stop.load(Ordering::Relaxed) {
-        let (snap, pads) = {
-            let s = monitor.lock().unwrap();
-            (s.monitor.as_ref().map(|m| m.snapshot()), s.pads)
+        let (snap, pads, ask) = {
+            let mut s = monitor.lock().unwrap();
+            recorder.clone_from(&s.recorder);
+            let ask = std::mem::take(&mut s.ask_report);
+            (s.monitor.as_ref().map(|m| m.snapshot()), s.pads, ask)
         };
+        if ask {
+            for (o, ddj) in outputs.iter_mut() {
+                if *ddj {
+                    let _ = o.send(&super::midi::DDJ400_REPORT);
+                }
+            }
+            if let Some(r) = &recorder {
+                r.note_midi(true, &super::midi::DDJ400_REPORT);
+            }
+        }
         let lit_half = (start.elapsed().as_millis() / FLASH.as_millis()) % 2 == 0;
         let now = match snap {
-            Some(s) => frame(learned, &s, &pads, lit_half),
+            Some(s) => {
+                let mut f = frame(learned, &s, &pads, lit_half);
+                f.extend(meters(&learned.meters(), &s));
+                f
+            }
             None => BTreeMap::new(),
         };
         for (&k, &v) in &now {
             if sent.get(&k) != Some(&v) {
-                send(&mut outputs, k, v);
+                send(&mut outputs, &recorder, k, v);
             }
         }
         // A button no longer mapped: put its light out.
         for (&k, _) in sent.iter().filter(|(k, v)| **v != 0 && !now.contains_key(k)) {
-            send(&mut outputs, k, 0);
+            send(&mut outputs, &recorder, k, 0);
         }
         sent = now;
         std::thread::sleep(TICK);
@@ -293,18 +358,23 @@ fn run(mut outputs: Vec<MidiOutputConnection>, learned: &Learned, monitor: &Moni
     // Every mapped button's light out, not only the ones lit here: the controller
     // lights some itself (its pad mode buttons), and shouldn't be left lit.
     for k in off_at_exit(learned, &sent) {
-        send(&mut outputs, k, 0);
+        send(&mut outputs, &recorder, k, 0);
     }
 }
 
-/// The lights to put out on leaving: every mapped button's, and any lit here since.
+/// The lights to put out on leaving: every mapped button's, every level meter (to
+/// nothing), and any lit here since.
 fn off_at_exit(learned: &Learned, sent: &BTreeMap<(u8, u8), u8>) -> std::collections::BTreeSet<(u8, u8)> {
     let mapped = learned
         .all()
         .into_iter()
         .filter(|(_, l)| l.input == Input::Note && !l.display_only)
         .map(|(k, _)| k);
-    mapped.chain(sent.iter().filter(|(_, v)| **v != 0).map(|(k, _)| *k)).collect()
+    let meters = learned.meters().into_iter().map(|m| (m.status, m.data1));
+    mapped
+        .chain(meters)
+        .chain(sent.iter().filter(|(_, v)| **v != 0).map(|(k, _)| *k))
+        .collect()
 }
 
 #[cfg(test)]
@@ -426,7 +496,11 @@ mod tests {
         assert!(off.contains(&(0x90, 0x69)), "a pad mode button, never lit by earshot");
         assert!(off.contains(&(0x97, 0x44)), "a keyboard pad");
         assert!(off.contains(&(0x90, 0x7E)));
-        assert!(!off.iter().any(|(s, _)| s & 0xF0 == 0xB0), "knobs have no lights");
+        assert!(off.contains(&(0xB0, 0x02)) && off.contains(&(0xB1, 0x02)), "the level meters");
+        assert!(
+            !off.iter().any(|&(s, d)| s & 0xF0 == 0xB0 && d != 0x02),
+            "knobs have no lights"
+        );
     }
 
     /// SHIFT held shows the shifted buttons' lights: those without a job of their own
@@ -474,5 +548,32 @@ mod tests {
         assert_eq!(value(Light::Flash, false), 0x00);
         assert_eq!(value(Light::On, false), 0x7F);
         assert_eq!(value(Light::Off, true), 0x00);
+    }
+
+    #[test]
+    fn meters_follow_the_level_in_decibels() {
+        let m = Meter {
+            deck: deck(1),
+            status: 0xB1,
+            data1: 0x02,
+            amber_at: 87,
+            red_at: 119,
+        };
+        let v = |d: f64| meter_value(10f64.powf(d / 20.0), &m);
+        assert_eq!(meter_value(0.0, &m), 0);
+        assert_eq!(v(-40.0), 0);
+        assert_eq!(v(-6.01), 86, "green up to -6 dB");
+        assert_eq!(v(-5.99), 87, "amber above it");
+        assert_eq!(v(0.0), 118, "full scale isn't red");
+        assert_eq!(v(0.01), 127, "red only over it");
+        let mut last = 0;
+        for i in 0..=400 {
+            let x = v(-40.0 + i as f64 * 0.1);
+            assert!(x >= last, "rises with the level");
+            last = x;
+        }
+        let mut s = EngineSnapshot::default();
+        s.decks[1].vu = 2.0;
+        assert_eq!(meters(&[m], &s), [((0xB1, 0x02), 127)]);
     }
 }

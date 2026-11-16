@@ -28,6 +28,8 @@ pub struct UiPrefs {
     pub prepare: Layout,
     /// Controller mode's layout.
     pub controller_view: Layout,
+    /// Debug mode's layout.
+    pub debug_view: Layout,
     /// Real seconds of waveform either side of the playhead, shared by every deck.
     pub wave_zoom: f64,
     /// The text size, as a multiple of normal (see [`crate::ui::theme::fs`]).
@@ -87,6 +89,7 @@ impl Default for UiPrefs {
             perform: Layout::default(),
             prepare: Layout::default(),
             controller_view: Layout::default(),
+            debug_view: Layout::default(),
             wave_zoom: 4.0,
             ui_scale: 1.0,
             deck_count: 2,
@@ -213,6 +216,7 @@ impl UiPrefs {
             Mode::Perform => &self.perform,
             Mode::Prepare => &self.prepare,
             Mode::Controller => &self.controller_view,
+            Mode::Debug => &self.debug_view,
         }
     }
 
@@ -226,6 +230,7 @@ impl UiPrefs {
             Mode::Perform => &mut self.perform,
             Mode::Prepare => &mut self.prepare,
             Mode::Controller => &mut self.controller_view,
+            Mode::Debug => &mut self.debug_view,
         }
     }
 }

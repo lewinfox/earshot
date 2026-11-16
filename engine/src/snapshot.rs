@@ -290,6 +290,13 @@ pub struct Stats {
     /// Making the sound is using most of the time there is ([`crate::load`]): the
     /// app holds its background work back.
     pub behind: AtomicBool,
+    /// Someone has the output tap ([`crate::Engine::take_output_tap`]): copy what goes
+    /// to the device into it.
+    pub tapping: AtomicBool,
+    /// The device's channels, as the tap's samples are interleaved.
+    pub tap_channels: AtomicU64,
+    /// Blocks the tap had no room for (whoever reads it fell behind).
+    pub tap_dropped: AtomicU64,
 }
 
 impl Stats {

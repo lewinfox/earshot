@@ -23,7 +23,7 @@ use egui_extras::{Column, TableBuilder};
 use super::{Cx, Panel};
 use crate::core::bus::{self, Control};
 use crate::core::command::AppCmd;
-use crate::core::midi::{self, Input, Learn, Learned, Map, MidiMsg};
+use crate::core::midi::{self, Input, Learn, Learned, MidiMsg};
 
 /// The draft file's name, in earshot's data folder.
 pub const DRAFT_FILE: &str = "controller-draft.json";
@@ -102,7 +102,7 @@ pub struct ControllerUi {
     /// A new mapping asked for, waiting for "replace the current one?".
     confirm_new: Option<NewFrom>,
     /// A controller file read in the open dialog's thread, to put in.
-    opened: Arc<Mutex<Option<Map>>>,
+    opened: Arc<Mutex<Option<midi::ControllerFile>>>,
 }
 
 /// A command as the history shows it: its name, then its fixed word if any.
