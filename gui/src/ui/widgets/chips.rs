@@ -16,7 +16,14 @@ pub fn key_chip_sized(ui: &mut Ui, k: Camelot, size: f32) {
     let galley = ui
         .painter()
         .layout_no_wrap(text, FontId::proportional(size), THEME.ink);
-    let (rect, _) = ui.allocate_exact_size(galley.size() + vec2(10.0, 2.0), Sense::hover());
+    // Every chip as wide as the widest key ("12B"), so "8A" lines up with "11B".
+    let widest = ui
+        .painter()
+        .layout_no_wrap("12B".into(), FontId::proportional(size), THEME.ink)
+        .size()
+        .x;
+    let size = vec2(galley.size().x.max(widest), galley.size().y);
+    let (rect, _) = ui.allocate_exact_size(size + vec2(10.0, 2.0), Sense::hover());
     ui.painter()
         .rect_filled(rect, CornerRadius::same(4), util::key_colour(k));
     ui.painter()
