@@ -173,10 +173,12 @@ pub fn start(
                 Ok((streams, info)) => {
                     for s in &streams {
                         if let Err(e) = s.play() {
+                            eprintln!("[init] audio: the stream didn't start: {e}");
                             let _ = info_tx.send(Err(e.to_string()));
                             return;
                         }
                     }
+                    eprintln!("[init] audio: playing on {} ({} Hz, {} channel(s), {})", info.device, info.sample_rate, info.channels, info.sample_format);
                     let _ = info_tx.send(Ok(info));
                     let _ = stop_rx.recv(); // park until the handle is dropped
                     drop(streams);
@@ -241,19 +243,37 @@ pub fn is_direct(device: Option<&str>) -> bool {
     device.is_some_and(|d| d.starts_with("alsa:"))
 }
 
+/// A step of opening the sound card, for the log (`[init]`), with the time since
+/// the open began.
+fn step(t0: std::time::Instant, what: &str) {
+    eprintln!("[init] audio +{:.1} ms: {what}", t0.elapsed().as_secs_f64() * 1000.0);
+}
+
 fn build_stream(
     opts: &OutputOptions,
     stats: Arc<Stats>,
     make_renderer: impl FnOnce(u32) -> Renderer + Send + 'static,
 ) -> Result<(Vec<cpal::Stream>, OutputInfo), String> {
+    let t0 = std::time::Instant::now();
     let direct = is_direct(opts.device.as_deref());
+    step(
+        t0,
+        &format!(
+            "opening {:?} ({}), buffer {:?}, headphones device {:?}",
+            opts.device,
+            if direct { "ALSA directly" } else { "the default host" },
+            opts.buffer_frames,
+            opts.phones_device
+        ),
+    );
     let host = if direct {
         alsa_host()?
     } else {
         cpal::default_host()
     };
-    let device = find_device(&host, opts.device.as_deref())?;
+    let device = find_device(&host, opts.device.as_deref()).inspect_err(|e| step(t0, &format!("no device: {e}")))?;
     let name = device_name(&device);
+    step(t0, &format!("found device {name:?} (id {:?})", device.id().map(|i| i.to_string())));
 
     // Prefer 4+ channels (master + headphones), 44.1/48 kHz, float samples. Of the
     // rates, the one the system runs at (PipeWire's 48 kHz, CoreAudio's or Windows'
@@ -262,7 +282,10 @@ fn build_stream(
     let native = if pipewire_running() && !direct {
         Some(PIPEWIRE_RATE)
     } else {
-        device.default_output_config().ok().map(|c| c.sample_rate())
+        // Opens the card to ask (and closes it again).
+        let c = device.default_output_config();
+        step(t0, &format!("asked its default setup (an open and close): {c:?}"));
+        c.ok().map(|c| c.sample_rate())
     };
     let rate_score = |rate: u32| match (Some(rate) == native, rate) {
         (true, _) => 0,
@@ -276,10 +299,29 @@ fn build_stream(
         _ => 9,
     };
     let mut best: Option<(i32, cpal::SupportedStreamConfig)> = None;
-    for range in device
+    // Opens the card to ask (and closes it again).
+    let ranges: Vec<_> = device
         .supported_output_configs()
-        .map_err(|e| e.to_string())?
-    {
+        .map_err(|e| {
+            step(t0, &format!("couldn't list its setups: {e}"));
+            e.to_string()
+        })?
+        .collect();
+    step(t0, &format!("listed its setups (an open and close): {} of them", ranges.len()));
+    for r in &ranges {
+        step(
+            t0,
+            &format!(
+                "  can do {:?}, {} channel(s), {}-{} Hz, buffer {:?}",
+                r.sample_format(),
+                r.channels(),
+                r.min_sample_rate(),
+                r.max_sample_rate(),
+                r.buffer_size()
+            ),
+        );
+    }
+    for range in ranges {
         if rank(range.sample_format()) == 9 {
             continue;
         }
@@ -319,6 +361,17 @@ fn build_stream(
         phones: None,
         phones_error: None,
     };
+    step(
+        t0,
+        &format!(
+            "chose {:?}, {} channel(s), {} Hz, buffer {:?} (asked {:?})",
+            supported.sample_format(),
+            config.channels,
+            config.sample_rate,
+            config.buffer_size,
+            opts.buffer_frames
+        ),
+    );
     let mut renderer = make_renderer(config.sample_rate);
     // The headphones' device first: if it can't be had, they stay on the master's.
     let mut streams = vec![];
@@ -335,12 +388,15 @@ fn build_stream(
             }
         }
     }
+    step(t0, "opening the stream (the open that plays)");
     let stream = match supported.sample_format() {
         SampleFormat::F32 => build::<f32>(&device, config, renderer, stats),
         SampleFormat::I32 => build::<i32>(&device, config, renderer, stats),
         SampleFormat::I16 => build::<i16>(&device, config, renderer, stats),
         f => return Err(format!("unsupported sample format {f:?}")),
-    }?;
+    }
+    .inspect_err(|e| step(t0, &format!("the stream didn't open: {e}")))?;
+    step(t0, "stream open");
     // The master's stream first, so it's the one that starts the engine.
     streams.insert(0, stream);
     Ok((streams, info))
@@ -434,7 +490,11 @@ where
             },
             move |err| {
                 if err.kind() == cpal::ErrorKind::Xrun {
-                    err_stats.xruns.fetch_add(1, Relaxed);
+                    // Logged, not only counted: the first few, then every hundredth.
+                    let n = err_stats.xruns.fetch_add(1, Relaxed) + 1;
+                    if n <= 10 || n % 100 == 0 {
+                        eprintln!("audio: xrun {n} (the sound card ran short)");
+                    }
                 } else {
                     eprintln!("audio stream error: {err}");
                 }

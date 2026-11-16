@@ -227,7 +227,8 @@ pub type MonitorSlot = Arc<Mutex<LightsState>>;
 pub struct LightsState {
     pub monitor: Option<Monitor>,
     pub pads: AllPads,
-    /// Ask a DDJ-400 where its controls are, on the next tick (Debug mode's export).
+    /// Send a DDJ-400 [`super::midi::DDJ400_REPORT`] on the next tick (Debug mode's
+    /// button).
     pub ask_report: bool,
     /// Debug builds: the recorder, told every message sent.
     pub recorder: Option<super::debug::Recorder>,
@@ -240,8 +241,7 @@ pub struct Lights {
 }
 
 impl Lights {
-    /// `outputs`: each port, and whether it's a DDJ-400's (which can be asked where
-    /// its controls are).
+    /// `outputs`: each port, and whether it's a DDJ-400's.
     pub fn start(outputs: Vec<(MidiOutputConnection, bool)>, learned: Learned, monitor: MonitorSlot) -> Lights {
         let stop = Arc::new(AtomicBool::new(false));
         let quit = stop.clone();
@@ -285,11 +285,13 @@ fn run(mut outputs: Vec<(MidiOutputConnection, bool)>, learned: &Learned, monito
             (s.monitor.as_ref().map(|m| m.snapshot()), s.pads, ask)
         };
         if ask {
+            let mut sent = 0;
             for (o, ddj) in outputs.iter_mut() {
-                if *ddj {
-                    let _ = o.send(&super::midi::DDJ400_REPORT);
+                if *ddj && o.send(&super::midi::DDJ400_REPORT).is_ok() {
+                    sent += 1;
                 }
             }
+            eprintln!("[midi] sent the position query to {sent} DDJ-400(s)");
             if let Some(r) = &recorder {
                 r.note_midi(true, &super::midi::DDJ400_REPORT);
             }

@@ -89,6 +89,8 @@ pub struct EarshotApp {
     null_audio: bool,
     midi: Midi,
     midi_ports: Vec<String>,
+    /// The controller's start-up after audio and MIDI are open (`core::controller_init`).
+    controller_init: crate::core::controller_init::ControllerInit,
     /// Send track ids here to load their cover art.
     art_loader: crate::core::background::Mailbox<i64>,
     /// Nudge after a scan: works out audio hashes the files' tags didn't have.
@@ -180,13 +182,28 @@ fn start_audio(
         player.lock().unwrap().routing = None;
         // PipeWire may take a moment to close the card after letting it go.
         let mut why = String::new();
-        for _ in 0..10 {
+        let card = controller.found.as_ref().map(|c| c.card);
+        let t0 = Instant::now();
+        for attempt in 1..=10 {
+            eprintln!(
+                "[init] audio: attempt {attempt} at +{:.0} ms; the card's playback now: {}",
+                t0.elapsed().as_secs_f64() * 1000.0,
+                card.map(controller_audio::card_state).unwrap_or_default()
+            );
             match player::start_engine(player, &opts) {
                 Ok(info) => {
+                    eprintln!(
+                        "[init] audio: open on attempt {attempt} after {:.0} ms; the card's playback now: {}",
+                        t0.elapsed().as_secs_f64() * 1000.0,
+                        card.map(controller_audio::card_state).unwrap_or_default()
+                    );
                     controller.error = None;
                     return Ok(info);
                 }
-                Err(e) => why = e,
+                Err(e) => {
+                    eprintln!("[init] audio: attempt {attempt} failed: {e}");
+                    why = e
+                }
             }
             if !why.to_lowercase().contains("busy") {
                 break;
@@ -356,6 +373,7 @@ impl EarshotApp {
             null_audio: services.null_audio,
             midi: Midi::default(),
             midi_ports: vec![],
+            controller_init: Default::default(),
             art_loader,
             hasher,
             tempo_lock,
@@ -406,8 +424,8 @@ impl EarshotApp {
             let rec = crate::core::debug::Recorder::start();
             app.lights_monitor.lock().unwrap().recorder = Some(rec.clone());
             app.panels.debug.recorder = Some(rec);
-            app.panels.debug.lights = Some(app.lights_monitor.clone());
             app.panels.debug.mapping = Some(app.panels.controller.learned.clone());
+            app.panels.debug.lights = Some(app.lights_monitor.clone());
             app.feed_recorder();
         }
         let options = app.settings.deck_options.clone();
@@ -447,6 +465,9 @@ impl EarshotApp {
         // The controller mapping in progress, as it was last run.
         app.panels.controller.draft = Some(data_dir.join(crate::ui::panels::controller::DRAFT_FILE));
         app.panels.controller.load_draft();
+        // Start-up: audio is open by now; then MIDI; then the controller's own
+        // start-up, once audio has settled (`init_controller`, each frame).
+        app.controller_init.audio_started(Instant::now());
         if services.midi {
             app.connect_midi();
         }
@@ -454,9 +475,13 @@ impl EarshotApp {
     }
 
     /// Start audio again (on the controller's sound card, if one's connected).
+    #[track_caller]
     fn reopen_audio(&mut self) {
+        eprintln!("[init] audio: reopening (asked from {})", std::panic::Location::caller());
         self.preview = None;
         self.audio = start_audio(&self.player, &self.settings.audio, self.null_audio, &mut self.controller);
+        // Nothing's asked of the controller until this has settled.
+        self.controller_init.audio_started(Instant::now());
         self.reread_monitor();
     }
 
@@ -504,7 +529,9 @@ impl EarshotApp {
     }
 
     /// (Re)open every MIDI input, e.g. after plugging the controller in.
+    #[track_caller]
     fn connect_midi(&mut self) {
+        eprintln!("[init] MIDI: connecting (asked from {})", std::panic::Location::caller());
         // Close the old ports first so they can be reopened.
         self.midi = Midi::default();
         let lane = self.player.lock().unwrap().midi.clone();
@@ -518,6 +545,30 @@ impl EarshotApp {
         // A controller with a sound card came or went: play to it, or stop.
         if self.controller.set(controller_audio::find(&self.midi_ports)) {
             self.reopen_audio();
+        }
+        self.controller_init.midi_connected();
+        eprintln!(
+            "[init] controller: will ask a DDJ-400 where its controls are once audio has run {:?}",
+            crate::core::controller_init::SETTLE
+        );
+    }
+
+    /// The controller's start-up, the last step after audio and MIDI are open: once
+    /// audio has run for `controller_init::SETTLE` (never as it starts: a DDJ-400
+    /// asked then can leave its headphones chirping), ask a DDJ-400 where its
+    /// controls are. Called each frame; does each step once, when it's due.
+    fn init_controller(&mut self, ctx: &egui::Context) {
+        use crate::core::controller_init::Step;
+        match self.controller_init.step(Instant::now()) {
+            Step::Idle => {}
+            Step::Wait(d) => ctx.request_repaint_after(d),
+            Step::Ask { audio_for } => {
+                eprintln!(
+                    "[init] controller: asking a DDJ-400 where its controls are (audio running {:.1} s)",
+                    audio_for.as_secs_f64()
+                );
+                self.lights_monitor.lock().unwrap().ask_report = true;
+            }
         }
     }
 
@@ -1319,6 +1370,7 @@ impl eframe::App for EarshotApp {
         self.sync_tempo_lock();
         self.sync_trim();
         self.sync_phones_cue_only();
+        self.init_controller(ctx);
         self.send_active_loops();
         // Background analysis holds back while a deck plays, in every mode.
         let playing = self
