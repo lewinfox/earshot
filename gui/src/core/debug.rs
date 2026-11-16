@@ -192,8 +192,8 @@ fn controller_text(
         }
     }
     let mut out = String::from(
-        "Controls: the newest value the controller sent for each message (a DDJ-400 is asked \
-         to report all of them just before an export), and what it's mapped to.\n\n",
+        "Controls: the newest value the controller sent for each message (each control once \
+         it's been moved; the controller isn't asked), and what it's mapped to.\n\n",
     );
     for ((s, d), (v, t)) in &latest {
         let mapped = mapping.and_then(|m| m.get((*s, *d))).map_or("-".to_string(), |l| {

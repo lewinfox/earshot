@@ -60,20 +60,66 @@ mod linux {
     /// The sound card of the first of these MIDI ports that's on a card that plays
     /// audio.
     pub fn find(ports: &[String]) -> Option<ControllerAudio> {
-        let seq = alsa::Seq::open(None, None, false).ok()?;
-        ports.iter().filter_map(|p| port_client(p)).find_map(|client| {
-            let card = seq.get_any_client_info(client).ok()?.get_card().ok()?;
+        eprintln!("[init] controller: looking for a sound card behind MIDI ports {ports:?}");
+        let seq = match alsa::Seq::open(None, None, false) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[init] controller: can't open the ALSA sequencer: {e}");
+                return None;
+            }
+        };
+        let found = ports.iter().find_map(|p| {
+            let Some(client) = port_client(p) else {
+                eprintln!("[init] controller: {p:?}: no client number in its name");
+                return None;
+            };
+            let card = match seq.get_any_client_info(client).map(|i| i.get_card()) {
+                Ok(Ok(card)) => card,
+                other => {
+                    eprintln!("[init] controller: {p:?} (client {client}): not on a card: {other:?}");
+                    return None;
+                }
+            };
             let dir = std::path::PathBuf::from(format!("/proc/asound/card{card}"));
             if !dir.join("pcm0p").exists() {
+                eprintln!("[init] controller: {p:?} is on card {card}, which doesn't play audio");
                 return None;
             }
             let id = std::fs::read_to_string(dir.join("id")).ok()?.trim().to_string();
+            eprintln!("[init] controller: {p:?} is on card {card} ({id}); its playback now: {}", card_state(card));
             Some(ControllerAudio {
                 card,
                 device: format!("alsa:hw:CARD={id},DEV=0"),
                 id,
             })
-        })
+        });
+        if found.is_none() {
+            eprintln!("[init] controller: no MIDI port is on a card that plays audio");
+        }
+        found
+    }
+
+    /// Card `card`'s playback as ALSA reports it right now: closed, or how it's open
+    /// (state, owner, format, rate, buffer), for the log.
+    pub fn card_state(card: i32) -> String {
+        let sub = format!("/proc/asound/card{card}/pcm0p/sub0");
+        let read = |f: &str| std::fs::read_to_string(format!("{sub}/{f}")).unwrap_or_default();
+        let status = read("status");
+        if status.trim() == "closed" || status.is_empty() {
+            return status.trim().to_string();
+        }
+        let pick = |text: &str, keys: &[&str]| {
+            text.lines()
+                .filter(|l| keys.iter().any(|k| l.starts_with(k)))
+                .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        format!(
+            "{}; {}",
+            pick(&status, &["state", "owner_pid"]),
+            pick(&read("hw_params"), &["format", "channels", "rate", "period_size", "buffer_size"])
+        )
     }
 
     /// Holds the card's reservation (see the module doc) until dropped.
@@ -107,6 +153,22 @@ mod linux {
 
     /// Take the card's reservation, asking whoever holds it (PipeWire) to let go.
     pub fn reserve(c: &ControllerAudio) -> Result<Reservation, String> {
+        let t0 = std::time::Instant::now();
+        eprintln!("[init] controller: asking for {} (card {}); its playback now: {}", c.id, c.card, card_state(c.card));
+        let r = reserve_inner(c);
+        eprintln!(
+            "[init] controller: reservation after {:.1} ms: {}; its playback now: {}",
+            t0.elapsed().as_secs_f64() * 1000.0,
+            match &r {
+                Ok(_) => "ours".to_string(),
+                Err(e) => format!("refused: {e}"),
+            },
+            card_state(c.card)
+        );
+        r
+    }
+
+    fn reserve_inner(c: &ControllerAudio) -> Result<Reservation, String> {
         use zbus::fdo::{RequestNameFlags, RequestNameReply};
         let e = |e: zbus::Error| e.to_string();
         let name = format!("org.freedesktop.ReserveDevice1.Audio{}", c.card);
@@ -121,7 +183,9 @@ mod linux {
             dbus.request_name(wanted.clone(), flags.into())
                 .map_err(|x| x.to_string())
         };
-        match ask(RequestNameFlags::DoNotQueue)? {
+        let first = ask(RequestNameFlags::DoNotQueue)?;
+        eprintln!("[init] controller: D-Bus name {name}: {first:?}");
+        match first {
             RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner => {}
             _ => {
                 let holder = zbus::blocking::Proxy::new(
@@ -132,6 +196,7 @@ mod linux {
                 )
                 .map_err(e)?;
                 let released: bool = holder.call("RequestRelease", &(i32::MAX)).map_err(e)?;
+                eprintln!("[init] controller: asked its holder (PipeWire) to let go: {released}");
                 if !released {
                     return Err(format!("the program using {} wouldn't let it go", c.id));
                 }
@@ -183,7 +248,7 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{ForcedOff, Reservation, find, force_off, reserve};
+pub use linux::{ForcedOff, Reservation, card_state, find, force_off, reserve};
 
 #[cfg(not(target_os = "linux"))]
 mod other {
@@ -196,13 +261,16 @@ mod other {
     pub fn reserve(_: &ControllerAudio) -> Result<Reservation, String> {
         Ok(Reservation)
     }
+    pub fn card_state(_: i32) -> String {
+        String::new()
+    }
     pub fn force_off(_: &ControllerAudio) -> Result<ForcedOff, String> {
         Err("only on Linux".into())
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub use other::{ForcedOff, Reservation, find, force_off, reserve};
+pub use other::{ForcedOff, Reservation, card_state, find, force_off, reserve};
 
 /// The connected controller's sound card, its reservation, whether its PipeWire
 /// profile was turned off, and why earshot couldn't open it (if it couldn't).
@@ -223,6 +291,7 @@ impl Hold {
         if found == self.found {
             return false;
         }
+        eprintln!("[init] controller: sound card was {:?}, now {:?}", self.found, found);
         *self = Hold { found, ..Hold::default() };
         true
     }

@@ -227,8 +227,6 @@ pub type MonitorSlot = Arc<Mutex<LightsState>>;
 pub struct LightsState {
     pub monitor: Option<Monitor>,
     pub pads: AllPads,
-    /// Ask a DDJ-400 where its controls are, on the next tick (Debug mode's export).
-    pub ask_report: bool,
     /// Debug builds: the recorder, told every message sent.
     pub recorder: Option<super::debug::Recorder>,
 }
@@ -240,9 +238,7 @@ pub struct Lights {
 }
 
 impl Lights {
-    /// `outputs`: each port, and whether it's a DDJ-400's (which can be asked where
-    /// its controls are).
-    pub fn start(outputs: Vec<(MidiOutputConnection, bool)>, learned: Learned, monitor: MonitorSlot) -> Lights {
+    pub fn start(outputs: Vec<MidiOutputConnection>, learned: Learned, monitor: MonitorSlot) -> Lights {
         let stop = Arc::new(AtomicBool::new(false));
         let quit = stop.clone();
         let thread = std::thread::Builder::new()
@@ -262,15 +258,15 @@ impl Drop for Lights {
     }
 }
 
-fn run(mut outputs: Vec<(MidiOutputConnection, bool)>, learned: &Learned, monitor: &MonitorSlot, stop: &AtomicBool) {
+fn run(mut outputs: Vec<MidiOutputConnection>, learned: &Learned, monitor: &MonitorSlot, stop: &AtomicBool) {
     let start = Instant::now();
     let mut sent: BTreeMap<(u8, u8), u8> = BTreeMap::new();
     let mut recorder = None;
-    let send = |outputs: &mut Vec<(MidiOutputConnection, bool)>,
+    let send = |outputs: &mut Vec<MidiOutputConnection>,
                 recorder: &Option<super::debug::Recorder>,
                 (status, data1): (u8, u8),
                 v: u8| {
-        for (o, _) in outputs.iter_mut() {
+        for o in outputs.iter_mut() {
             let _ = o.send(&[status, data1, v]);
         }
         if let Some(r) = recorder {
@@ -278,22 +274,11 @@ fn run(mut outputs: Vec<(MidiOutputConnection, bool)>, learned: &Learned, monito
         }
     };
     while !stop.load(Ordering::Relaxed) {
-        let (snap, pads, ask) = {
-            let mut s = monitor.lock().unwrap();
+        let (snap, pads) = {
+            let s = monitor.lock().unwrap();
             recorder.clone_from(&s.recorder);
-            let ask = std::mem::take(&mut s.ask_report);
-            (s.monitor.as_ref().map(|m| m.snapshot()), s.pads, ask)
+            (s.monitor.as_ref().map(|m| m.snapshot()), s.pads)
         };
-        if ask {
-            for (o, ddj) in outputs.iter_mut() {
-                if *ddj {
-                    let _ = o.send(&super::midi::DDJ400_REPORT);
-                }
-            }
-            if let Some(r) = &recorder {
-                r.note_midi(true, &super::midi::DDJ400_REPORT);
-            }
-        }
         let lit_half = (start.elapsed().as_millis() / FLASH.as_millis()) % 2 == 0;
         let now = match snap {
             Some(s) => frame(learned, &s, &pads, lit_half),

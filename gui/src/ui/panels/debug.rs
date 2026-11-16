@@ -21,16 +21,12 @@ const ROWS: usize = 256;
 const FLOOR_DB: f32 = -100.0;
 /// Log lines shown.
 const LOG_LINES: usize = 500;
-/// How long an export waits for the controller's report (it asks first).
-const REPORT_WAIT_MS: u64 = 700;
 
 pub struct DebugUi {
     /// The recorder (debug builds); `None` and the mode shows nothing.
     pub recorder: Option<Recorder>,
     /// What the app knows that a report should carry (audio device, settings).
     pub info: String,
-    /// The controller lights' slot, to ask a DDJ-400 for a report before exporting.
-    pub lights: Option<crate::core::lights::MonitorSlot>,
     /// The controller mapping, to name what each message does.
     pub mapping: Option<crate::core::midi::Learned>,
     /// Seconds an export holds.
@@ -50,7 +46,6 @@ impl Default for DebugUi {
         DebugUi {
             recorder: None,
             info: String::new(),
-            lights: None,
             mapping: None,
             secs: 30,
             pair: 0,
@@ -83,10 +78,6 @@ impl DebugUi {
             if b.clicked() {
                 self.exporting = true;
                 *self.exported.lock().unwrap() = None;
-                // The controller's answers arrive while the export waits.
-                if let Some(l) = &self.lights {
-                    l.lock().unwrap().ask_report = true;
-                }
                 let (rec, secs, info, done, mapping) = (
                     rec.clone(),
                     self.secs,
@@ -102,7 +93,6 @@ impl DebugUi {
                         .map(|b| vec![(draft.to_string(), b)])
                         .unwrap_or_default();
                     let dir = data.join("debug");
-                    std::thread::sleep(std::time::Duration::from_millis(REPORT_WAIT_MS));
                     let r = match rec.export(secs, &dir, &info, mapping.as_ref(), extra) {
                         Ok(p) => format!("Exported to {}", p.display()),
                         Err(e) => format!("Export failed: {e}"),

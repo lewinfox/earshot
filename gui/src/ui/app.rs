@@ -180,13 +180,28 @@ fn start_audio(
         player.lock().unwrap().routing = None;
         // PipeWire may take a moment to close the card after letting it go.
         let mut why = String::new();
-        for _ in 0..10 {
+        let card = controller.found.as_ref().map(|c| c.card);
+        let t0 = Instant::now();
+        for attempt in 1..=10 {
+            eprintln!(
+                "[init] audio: attempt {attempt} at +{:.0} ms; the card's playback now: {}",
+                t0.elapsed().as_secs_f64() * 1000.0,
+                card.map(controller_audio::card_state).unwrap_or_default()
+            );
             match player::start_engine(player, &opts) {
                 Ok(info) => {
+                    eprintln!(
+                        "[init] audio: open on attempt {attempt} after {:.0} ms; the card's playback now: {}",
+                        t0.elapsed().as_secs_f64() * 1000.0,
+                        card.map(controller_audio::card_state).unwrap_or_default()
+                    );
                     controller.error = None;
                     return Ok(info);
                 }
-                Err(e) => why = e,
+                Err(e) => {
+                    eprintln!("[init] audio: attempt {attempt} failed: {e}");
+                    why = e
+                }
             }
             if !why.to_lowercase().contains("busy") {
                 break;
@@ -406,7 +421,6 @@ impl EarshotApp {
             let rec = crate::core::debug::Recorder::start();
             app.lights_monitor.lock().unwrap().recorder = Some(rec.clone());
             app.panels.debug.recorder = Some(rec);
-            app.panels.debug.lights = Some(app.lights_monitor.clone());
             app.panels.debug.mapping = Some(app.panels.controller.learned.clone());
             app.feed_recorder();
         }
@@ -454,7 +468,9 @@ impl EarshotApp {
     }
 
     /// Start audio again (on the controller's sound card, if one's connected).
+    #[track_caller]
     fn reopen_audio(&mut self) {
+        eprintln!("[init] audio: reopening (asked from {})", std::panic::Location::caller());
         self.preview = None;
         self.audio = start_audio(&self.player, &self.settings.audio, self.null_audio, &mut self.controller);
         self.reread_monitor();
@@ -504,7 +520,9 @@ impl EarshotApp {
     }
 
     /// (Re)open every MIDI input, e.g. after plugging the controller in.
+    #[track_caller]
     fn connect_midi(&mut self) {
+        eprintln!("[init] MIDI: connecting (asked from {})", std::panic::Location::caller());
         // Close the old ports first so they can be reopened.
         self.midi = Midi::default();
         let lane = self.player.lock().unwrap().midi.clone();
