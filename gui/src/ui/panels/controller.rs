@@ -50,6 +50,7 @@ pub enum ControllerTab {
     #[default]
     Mapping,
     History,
+    Send,
     Library,
 }
 
@@ -104,6 +105,14 @@ pub struct ControllerUi {
     confirm_new: Option<NewFrom>,
     /// A controller file read in the open dialog's thread, to put in.
     opened: Arc<Mutex<Option<midi::ControllerFile>>>,
+    /// The controller lights' slot, to send messages typed in the Send tab (the app
+    /// sets it).
+    pub lights: Option<crate::core::lights::MonitorSlot>,
+    /// What's typed in the Send tab, why it isn't a message (if it isn't), and the
+    /// messages sent from it, newest first.
+    send_text: String,
+    send_error: Option<String>,
+    sent: VecDeque<Vec<u8>>,
 }
 
 /// A command as the history shows it: its name, then its fixed word if any.
@@ -772,6 +781,112 @@ fn number_field(ui: &mut Ui, t: &mut ControllerUi, key: (u8, u8), l: &Learn) {
     }
 }
 
+/// How many messages the Send tab keeps to send again.
+const SENT_ROWS: usize = 30;
+
+/// Hex bytes typed in the Send tab (`90 0B 7F`, `F0 00 40 F7`) as a message, or why
+/// they aren't one: a short message needs a status byte and its data, a SysEx starts
+/// F0 and ends F7.
+pub fn parse_send(text: &str) -> Result<Vec<u8>, String> {
+    let bytes: Vec<u8> = text
+        .split_whitespace()
+        .map(|b| u8::from_str_radix(b, 16).map_err(|_| format!("{b:?} isn't a hex byte")))
+        .collect::<Result<_, _>>()?;
+    match bytes[..] {
+        [] => Err("type the message's bytes in hex, e.g. 90 0B 7F".into()),
+        [0xF0, .., 0xF7] => Ok(bytes),
+        [0xF0, ..] => Err("a SysEx ends with F7".into()),
+        [s, ..] if s < 0x80 => Err("the first byte is a status byte: 80 to FF".into()),
+        [s, ref data @ ..] => {
+            // How many data bytes the status takes.
+            let want = match s & 0xF0 {
+                0xC0 | 0xD0 => 1,
+                0xF0 => data.len(),
+                _ => 2,
+            };
+            if data.len() != want {
+                return Err(format!("{s:02X} takes {want} data byte(s)"));
+            }
+            if data.iter().any(|&d| d > 0x7F) {
+                return Err("data bytes are 00 to 7F".into());
+            }
+            Ok(bytes)
+        }
+    }
+}
+
+/// The Send tab: type a message, send it to the controller (for testing what a
+/// message does). Each one sent is logged (`core::lights`).
+pub struct SendPanel<'a> {
+    pub tab: &'a mut ControllerUi,
+}
+
+impl SendPanel<'_> {
+    fn send(t: &mut ControllerUi, bytes: Vec<u8>) {
+        if let Some(l) = &t.lights {
+            l.lock().unwrap().send.push(bytes.clone());
+        }
+        t.sent.retain(|b| *b != bytes);
+        t.sent.push_front(bytes);
+        t.sent.truncate(SENT_ROWS);
+    }
+}
+
+impl Panel for SendPanel<'_> {
+    fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let t = &mut *self.tab;
+        if t.ports.is_empty() {
+            ui.label(RichText::new("No controller is connected.").color(cx.theme.muted));
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.label("Message (hex)");
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut t.send_text)
+                    .hint_text("90 0B 7F")
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(320.0),
+            );
+            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if ui.button("Send").clicked() || enter {
+                match parse_send(&t.send_text) {
+                    Ok(b) => {
+                        t.send_error = None;
+                        Self::send(t, b);
+                    }
+                    Err(e) => t.send_error = Some(e),
+                }
+                if enter {
+                    field.request_focus();
+                }
+            }
+        });
+        if let Some(e) = &t.send_error {
+            ui.label(RichText::new(e).color(cx.theme.warn));
+        }
+        ui.label(
+            RichText::new(
+                "Sent to every open controller port, and logged. A light earshot drives \
+                 stays as sent until earshot's own value for it changes.",
+            )
+            .color(cx.theme.muted),
+        );
+        ui.separator();
+        let mut again = None;
+        for b in &t.sent {
+            ui.horizontal(|ui| {
+                if ui.small_button("Send again").clicked() {
+                    again = Some(b.clone());
+                }
+                ui.label(RichText::new(hex(b)).monospace());
+            });
+        }
+        if let Some(b) = again {
+            Self::send(t, b);
+        }
+    }
+}
+
 pub struct HistoryPanel<'a> {
     pub tab: &'a mut ControllerUi,
 }
@@ -1011,4 +1126,19 @@ mod tests {
         assert_eq!(named_key(0xB0, 0x13), "B0 13  CC       ch 1  #19");
         assert_eq!(named(&[0x90]), "90");
     }
+
+    /// The Send tab reads hex bytes as one message, and says what's wrong otherwise.
+    #[test]
+    fn typed_messages_are_checked() {
+        assert_eq!(parse_send("90 0b 7F"), Ok(vec![0x90, 0x0B, 0x7F]));
+        assert_eq!(parse_send("C0 05"), Ok(vec![0xC0, 0x05]));
+        assert_eq!(parse_send(" F0 00 40 F7 "), Ok(vec![0xF0, 0x00, 0x40, 0xF7]));
+        assert!(parse_send("").is_err());
+        assert!(parse_send("90 0B").unwrap_err().contains("2 data byte"));
+        assert!(parse_send("90 0B 80").unwrap_err().contains("00 to 7F"));
+        assert!(parse_send("0B 7F").unwrap_err().contains("status"));
+        assert!(parse_send("F0 00 40").unwrap_err().contains("F7"));
+        assert!(parse_send("90 zz 7F").unwrap_err().contains("zz"));
+    }
+
 }

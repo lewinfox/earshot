@@ -249,6 +249,9 @@ pub struct LightsState {
     /// Send the controllers their start messages again on the next tick (Debug mode's
     /// button).
     pub resend_start: bool,
+    /// Messages to send the controllers as they are, on the next tick (Controller
+    /// mode's Send tab). Each is logged.
+    pub send: Vec<Vec<u8>>,
     /// Debug builds: the recorder, told every message sent.
     pub recorder: Option<super::debug::Recorder>,
 }
@@ -315,6 +318,22 @@ fn send_start(outputs: &mut Outputs, recorder: &Option<super::debug::Recorder>) 
         }
     }
     eprintln!("[midi] sent {sent} start message(s)");
+}
+
+/// A message typed in Controller mode's Send tab, to every output, logged.
+fn send_by_hand(outputs: &mut Outputs, recorder: &Option<super::debug::Recorder>, m: &[u8]) {
+    let hex: Vec<String> = m.iter().map(|b| format!("{b:02X}")).collect();
+    let mut sent = 0;
+    for (o, _) in outputs.iter_mut() {
+        match o.send(m) {
+            Ok(()) => sent += 1,
+            Err(e) => eprintln!("[midi] sending {} by hand: {e}", hex.join(" ")),
+        }
+    }
+    eprintln!("[midi] sent by hand: {} (to {sent} port(s))", hex.join(" "));
+    if let Some(r) = recorder {
+        r.note_midi(true, m);
+    }
 }
 
 /// The controller's start-up, before audio starts: every light as things are with no
@@ -393,15 +412,20 @@ fn hello(outputs: &mut Outputs, recorder: &Option<super::debug::Recorder>, learn
 fn run(mut outputs: Outputs, mut sent: BTreeMap<(u8, u8), u8>, learned: &Learned, monitor: &MonitorSlot, stop: &AtomicBool) {
     let start = Instant::now();
     let mut recorder = None;
+    let mut by_hand: Vec<Vec<u8>> = vec![];
     while !stop.load(Ordering::Relaxed) {
         let (snap, pads, ask) = {
             let mut s = monitor.lock().unwrap();
             recorder.clone_from(&s.recorder);
             let ask = std::mem::take(&mut s.resend_start);
+            by_hand = std::mem::take(&mut s.send);
             (s.monitor.as_ref().map(|m| m.snapshot()), s.pads, ask)
         };
         if ask {
             send_start(&mut outputs, &recorder);
+        }
+        for m in by_hand.drain(..) {
+            send_by_hand(&mut outputs, &recorder, &m);
         }
         let lit_half = (start.elapsed().as_millis() / FLASH.as_millis()) % 2 == 0;
         // No audio (it's reopening): as at start-up, the decks empty.

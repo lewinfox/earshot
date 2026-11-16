@@ -440,6 +440,7 @@ impl EarshotApp {
             app.panels.debug.mapping = Some(app.panels.controller.learned.clone());
             app.panels.debug.lights = Some(app.lights_monitor.clone());
         }
+        app.panels.controller.lights = Some(app.lights_monitor.clone());
         // The controller mapping in progress, as it was last run.
         app.panels.controller.draft = Some(data_dir.join(crate::ui::panels::controller::DRAFT_FILE));
         app.panels.controller.load_draft();
