@@ -1,11 +1,11 @@
-# Tests for every pull request into main: the Rust workspace (`make test`) and the
+# Tests for every pull request into main or develop: the Rust workspace (`make test`) and the
 # Python worker (`make test-worker`). Tests that need a real track stay #[ignore]d.
 
 name: ci
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 # A new push to the same PR cancels the run still going for the old one.
 concurrency:
