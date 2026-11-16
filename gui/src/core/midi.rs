@@ -161,8 +161,13 @@ fn ddj400_pads() -> Vec<(u8, u8, String, Option<f64>)> {
     }
     // MASTER CUE (seen from the unit): display only, the controller does it itself.
     v.push((0x96, 0x63, "mixer_master_headphone_cue".to_string(), None));
+    // Related tracks and the library maximised (mapped on the unit).
+    v.push((0x96, 0x68, "library_related_tracks_toggle".to_string(), None));
+    v.push((0x96, 0x7A, "ui_library_maximize_toggle".to_string(), None));
     for (d, status) in [(1, 0x90u8), (2, 0x91)] {
         v.push((status, 0x3F, format!("deck_{d}_shift"), None));
+        // The next tempo range (mapped on the unit).
+        v.push((status, 0x60, format!("deck_{d}_tempo_range_next"), None));
         // CUE/LOOP CALL ◀ ▶, and with Shift: delete / save a memory cue.
         v.push((status, 0x51, format!("deck_{d}_cue_jump_to_prev"), None));
         v.push((status, 0x53, format!("deck_{d}_cue_jump_to_next"), None));
@@ -623,7 +628,9 @@ fn ddj400_map() -> Map {
                 input: mp.input,
                 display_only: matches!(
                     mp.control,
-                    Control::Master(MasterParam::Gain | MasterParam::HeadMix | MasterParam::MasterCue)
+                    Control::Master(
+                        MasterParam::Gain | MasterParam::HeadGain | MasterParam::HeadMix | MasterParam::MasterCue
+                    )
                 ),
             };
             ((mp.status, mp.data1), l)
@@ -1194,15 +1201,15 @@ mod tests {
         assert!(back.inputs[&(0xB6, 0x08)].display_only && back.inputs[&(0xB6, 0x28)].display_only);
     }
 
-    /// A DDJ-400's MASTER LEVEL and HEADPHONES MIXING are display only from the start
-    /// (the controller does both itself); only the output levels and the headphone mix
+    /// A DDJ-400's MASTER LEVEL, HEADPHONES LEVEL and HEADPHONES MIXING are display
+    /// only from the start (the controller does them itself); only the output levels and the headphone mix
     /// can be display only.
     #[test]
     fn the_ddj_master_level_is_display_only() {
         let l = ddj();
         assert!(l.get((0xB6, 0x08)).unwrap().display_only);
         assert!(l.get((0xB6, 0x28)).unwrap().display_only);
-        assert!(!l.get((0xB6, 0x0D)).unwrap().display_only, "headphone level stays live");
+        assert!(l.get((0xB6, 0x0D)).unwrap().display_only, "the headphone level: the DDJ sets it");
         // HEADPHONES MIXING too: the controller blends its master into the headphones,
         // and earshot's headphone channels carry only the cue.
         assert!(l.get((0xB6, 0x0C)).unwrap().display_only);
