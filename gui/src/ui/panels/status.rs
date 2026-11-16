@@ -60,7 +60,10 @@ pub struct TopBar<'a> {
     /// The controller's sound card (its name) couldn't be opened, and why: with a
     /// button to take it from PipeWire.
     pub controller_busy: Option<(&'a str, &'a str)>,
-    pub midi_ports: &'a [String],
+    /// The open MIDI inputs, with the mapping each got.
+    pub midi_devices: &'a [crate::core::midi::Port],
+    /// Every mapping there is (its key and name), to pick one from.
+    pub mappings: &'a [(String, String)],
     pub analysis: &'a AnalysisSummary,
     /// The jobs running and queued, for the jobs pill.
     pub jobs: &'a [Running],
@@ -288,24 +291,62 @@ impl TopBar<'_> {
     }
 
     /// The MIDI controllers connected. Clicked, reconnect.
+    /// "MIDI: <device>"; clicked, each device's mapping to pick from (remembered
+    /// for the device), and reconnect.
     fn midi_pill(&self, ui: &mut Ui, cx: &mut Cx) {
-        let midi = if self.midi_ports.is_empty() {
+        use crate::core::controllers::device_key;
+        let devices = self.midi_devices;
+        let midi = if devices.is_empty() {
             "MIDI: none".to_string()
         } else {
-            format!("MIDI: {}", self.midi_ports.join(", "))
+            let names: Vec<&str> = devices.iter().map(|d| d.name.split(':').next().unwrap_or(&d.name)).collect();
+            format!("MIDI: {}", names.join(", "))
         };
-        let intent = if self.midi_ports.is_empty() {
+        let intent = if devices.is_empty() {
             Intent::Neutral
         } else {
             Intent::Success
         };
-        if ui
+        let pill = ui
             .add(Pill::new(&midi, intent))
-            .on_hover_text("Click to reconnect MIDI")
-            .clicked()
-        {
-            cx.send(AppCmd::ReconnectMidi);
-        }
+            .on_hover_text("Click to pick each controller's mapping, or reconnect MIDI");
+        egui::Popup::menu(&pill)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_min_width(260.0);
+                if devices.is_empty() {
+                    ui.label("No MIDI device is connected.");
+                }
+                for d in devices {
+                    ui.label(egui::RichText::new(&d.name).strong());
+                    let current = d.mapping.as_ref().map(|p| p.id.key());
+                    let key = device_key(&d.name, d.usb.as_deref());
+                    if self.mappings.is_empty() {
+                        ui.label("No mappings yet: make one in Controller mode.");
+                    }
+                    for (m, label) in self.mappings {
+                        if ui.radio(current.as_deref() == Some(m.as_str()), label).clicked()
+                            && current.as_deref() != Some(m.as_str())
+                        {
+                            cx.send(AppCmd::UseMapping {
+                                device: key.clone(),
+                                mapping: m.clone(),
+                            });
+                            ui.close();
+                        }
+                    }
+                    if let Some(p) = &d.mapping
+                        && p.id.model.is_none()
+                    {
+                        ui.label(format!("Now: {} (shared lines only)", p.label()));
+                    }
+                    ui.separator();
+                }
+                if ui.button("Reconnect MIDI").clicked() {
+                    cx.send(AppCmd::ReconnectMidi);
+                    ui.close();
+                }
+            });
     }
 
     /// "CPU" and a bar: green, amber from half, red from 80 % (where a callback

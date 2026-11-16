@@ -152,6 +152,9 @@ pub use super::view::ViewCmd;
 pub enum AppCmd {
     /// Close and reopen every MIDI input, e.g. after plugging the controller in.
     ReconnectMidi,
+    /// Use mapping `mapping` (a `controllers::MappingId::key`) for the MIDI device
+    /// `device` (a `controllers::device_key`) from now on, and remember it.
+    UseMapping { device: String, mapping: String },
     /// Make PipeWire let go of the controller's sound card (turn its profile off),
     /// and play to the card.
     TakeControllerAudio,

@@ -1,6 +1,5 @@
 {
   "name": "Pioneer DDJ-400",
-  "extends": "pioneer",
   "about": "The DDJ-400. Its pads are on channels 8 (deck 1) and 10 (deck 2), with SHIFT a channel up; each pad mode sends its own notes. Display only: MASTER LEVEL, the headphone level and mix, and MASTER CUE, which the unit does itself. From Mixxx's and rekordbox's DDJ-400 tables, and the unit.",
   "usb": [
     "2b73:0026"

@@ -8,28 +8,37 @@ you can plug in a controller, press everything, and read what's missing.
 
 ## Controller files
 
-Everything earshot knows about a particular controller is in a JSON file under
-`gui/controllers/`, compiled into the app. Nothing else in the code names a
-controller.
+Everything earshot knows about a particular controller is in a JSON mapping file.
+Nothing else in the code names a controller.
 
-- **Layout:** a maker's file is `gui/controllers/<maker>/<maker>.json`; a model's
-  is `gui/controllers/<maker>/controllers/<model>.json`. Add a file to `FILES` in
-  `gui/src/core/controllers.rs`.
-- **Layers:** a model's file `extends` its maker's. The one on top wins, message
-  by message; its `meters` and `start` replace the ones under it if it has any.
-  `pioneer.json` holds only what Mixxx's mappings show all Pioneer DDJs share.
-- **Matching** (at connect, per MIDI port):
-  1. **USB id** (`"usb": ["2b73:0026"]`), from the port's ALSA card on Linux.
-  2. **Port name** (`"names": ["DDJ-400"]`), anywhere else, or with no USB id.
-  3. **The maker alone** (`"usb": ["2b73:*"]`): an unknown Pioneer gets the
+- **Two places, one layout:** a maker's file `<maker>/<maker>.json`, its models'
+  `<maker>/controllers/<model>.json`.
+  - **Built-in:** `gui/controllers/`, found by `gui/build.rs` and compiled in. Read
+    only in the app; change them in the repo.
+  - **Your own:** `controllers/` in the data folder. Made with Controller mode's
+    "New mapping…", saved as you edit (only the lines that differ from the
+    maker's file).
+- **A model builds on its maker:** the maker's file (yours if you have one, else
+  the built-in one) with the model's on top, message by message; the model's
+  `meters` and `start` replace the maker's if it has any. `pioneer.json` holds only
+  what Mixxx's mappings show all Pioneer DDJs share.
+- **Which mapping a device gets** (at connect, per MIDI port):
+  1. The one picked for it from the MIDI pill (remembered per device: USB id, else
+     port name).
+  2. One of yours, by **USB id** (`"usb": ["2b73:0026"]`, from the port's ALSA card
+     on Linux), then by **port name** (`"names": ["DDJ-400"]`).
+  3. A built-in one, likewise.
+  4. Its **maker's file** alone (`"usb": ["2b73:*"]`): an unknown Pioneer gets the
      shared lines.
-- **Fields:** `inputs` and `meters` as in a draft; `start` (messages sent after
-  the start-up lights, e.g. the DDJ-400's position query); `mirror` and
-  `mirror_status` (where else a button's light goes: its SHIFT note, or every note
-  a channel up).
-- **The draft** (`controller-draft.json` in the data folder) still replaces the
-  file's inputs and meters when it's there. Lines it can't read are left out and
-  logged, and the draft as it was is copied beside it first.
+- **Fields:** `name`, `usb`, `names`; `inputs` and `meters`; `start` (messages sent
+  after the start-up lights, e.g. the DDJ-400's position query); `mirror` and
+  `mirror_status` (where else a button's light goes: the DDJ keeps a separate light
+  for each SHIFT note and shows those while SHIFT is held, so each light is sent to
+  both).
+- **New mapping…:** pick the maker (or a new one: name it, and it gets an empty
+  maker file), what to start from (one of that maker's mappings, copied, or empty),
+  the model's name and the MIDI device. The device uses it from then on.
+- A line that can't be read is left out and logged; the rest of the file loads.
 
 ## The docs
 

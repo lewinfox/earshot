@@ -6,7 +6,7 @@
 //! one pressed since.
 //! Pressing something runs its command, adds its message to the list if it's new, and
 //! scrolls the list to it. Each row's command can be picked from a list, and takes
-//! effect at once. The mapping is kept as a draft file as it changes, and read back
+//! effect at once. A mapping of the user's is saved as it changes
 //! when earshot starts, so work in progress survives a restart. "New mapping" starts
 //! again: empty, from a bundled controller file, or from a file of your own. "Save JSON…"
 //! writes the lot as a controller file, to go in the repo.
@@ -24,19 +24,22 @@ use egui_extras::{Column, TableBuilder};
 use super::{Cx, Panel};
 use crate::core::bus::{self, Control};
 use crate::core::command::AppCmd;
+use crate::core::controllers::{Profile, Store};
 use crate::core::midi::{self, Input, Learn, Learned, MidiMsg};
 
-/// The draft file's name, in earshot's data folder.
-pub const DRAFT_FILE: &str = "controller-draft.json";
-
-/// Where a new mapping starts from.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum NewFrom {
-    Empty,
-    /// One of [`midi::profiles`].
-    Profile(usize),
-    /// A controller file, picked in a dialog.
-    File,
+/// The "New mapping" wizard's answers so far.
+#[derive(Default)]
+struct Wizard {
+    /// The maker picked (its folder name); `None` with `new_maker` for a new one.
+    maker: Option<String>,
+    new_maker: bool,
+    maker_name: String,
+    model_name: String,
+    /// The mapping to start from (a model's key); `None`: empty.
+    template: Option<String>,
+    /// The MIDI device it's for (by its place in the list); `None`: none yet.
+    device: Option<usize>,
+    error: Option<String>,
 }
 
 /// How many history rows to keep.
@@ -97,14 +100,16 @@ pub struct ControllerUi {
     paused: bool,
     /// What saving or opening a file came to (from the dialogs' threads).
     saved: Arc<Mutex<Option<String>>>,
-    /// The draft file, kept as the mapping changes (the app sets it).
-    pub draft: Option<PathBuf>,
-    /// The mapping's version when the draft was last written.
-    draft_version: u64,
-    /// A new mapping asked for, waiting for "replace the current one?".
-    confirm_new: Option<NewFrom>,
-    /// A controller file read in the open dialog's thread, to put in.
-    opened: Arc<Mutex<Option<midi::ControllerFile>>>,
+    /// The open MIDI inputs, with each one's USB id and mapping (the app sets it).
+    pub devices: Vec<midi::Port>,
+    /// The user's mappings folder (the app sets it; `None`: only the built-in ones).
+    pub mine: Option<PathBuf>,
+    /// The mapping being shown and edited (the connected controller's); `None`: none.
+    active: Option<Profile>,
+    /// The mapping's version when it was last saved.
+    saved_version: u64,
+    /// "New mapping", while it's open.
+    wizard: Option<Wizard>,
     /// The controller lights' slot, to send messages typed in the Send tab (the app
     /// sets it).
     pub lights: Option<crate::core::lights::MonitorSlot>,
@@ -230,101 +235,71 @@ impl ControllerUi {
         }
     }
 
-    /// Read the draft back, if there is one: the mapping as it was when earshot last
-    /// ran. Call before the ports open (so a DDJ-400's table isn't put on top).
-    pub fn load_draft(&mut self) {
-        let Some(path) = &self.draft else { return };
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return;
-        };
-        // Lines this build can't read are left out, and the draft would be written
-        // back without them: a copy of it is kept first.
-        let keep_copy = |why: &str| {
-            let secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs());
-            let copy = path.with_file_name(format!(
-                "{}.{why}-{secs}",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            ));
-            match std::fs::copy(path, &copy) {
-                Ok(_) => copy.display().to_string(),
-                Err(e) => format!("(no copy kept: {e})"),
-            }
-        };
-        match midi::from_json(&text) {
-            Ok((_, map)) => {
-                if !map.skipped.is_empty() {
-                    let copy = keep_copy("skipped-lines");
-                    for s in &map.skipped {
-                        eprintln!("ERROR controller draft: left out {s}");
-                    }
-                    *self.saved.lock().unwrap() = Some(format!(
-                        "{} line(s) of the draft couldn't be read and were left out (see the \
-                         log); the draft as it was is kept in {copy}",
-                        map.skipped.len()
-                    ));
-                }
-                self.learned.replace(map)
-            }
-            Err(e) => {
-                let copy = keep_copy("unreadable");
-                *self.saved.lock().unwrap() = Some(format!(
-                    "The draft ({}) couldn't be read: {e}. It's kept in {copy}",
-                    path.display()
-                ))
-            }
-        }
-        self.draft_version = self.learned.version();
+    fn store(&self) -> Store {
+        Store::new(self.mine.clone())
     }
 
-    /// Write the draft if the mapping changed since it was last written.
-    fn keep_draft(&mut self) {
+    /// The connected controller's mapping (already in `learned`), now shown and
+    /// edited.
+    pub fn set_active(&mut self, p: Option<Profile>) {
+        self.active = p;
+        self.saved_version = self.learned.version();
+    }
+
+    /// The mapping can be changed: it's the user's own.
+    fn editable(&self) -> bool {
+        self.active.as_ref().is_some_and(|p| !p.read_only())
+    }
+
+    /// Save the mapping if it's the user's and changed since it was last saved.
+    fn keep_mapping(&mut self) {
         let v = self.learned.version();
-        if v == self.draft_version {
+        if v == self.saved_version {
             return;
         }
-        self.draft_version = v;
-        let Some(path) = &self.draft else { return };
-        if let Err(e) = std::fs::write(path, self.learned.to_json(&self.device())) {
-            *self.saved.lock().unwrap() = Some(format!("Couldn't keep the draft: {e}"));
+        self.saved_version = v;
+        let Some(p) = self.active.as_ref().filter(|p| !p.read_only()) else {
+            return;
+        };
+        let store = self.store();
+        let own = store.own_part(p, &self.learned.file());
+        if let Err(e) = store.save(&p.id, &p.head, &own) {
+            *self.saved.lock().unwrap() = Some(format!("Couldn't save the mapping: {e}"));
         }
     }
 
-    /// Start a new mapping, in place of the current one.
-    fn start_new(&mut self, from: NewFrom, ctx: &egui::Context) {
-        match from {
-            NewFrom::Empty => self.learned.clear(),
-            NewFrom::Profile(i) => {
-                if let Some((_, map)) = midi::profiles().into_iter().nth(i) {
-                    self.learned.replace(map);
-                }
-            }
-            NewFrom::File => {
-                let (opened, note, ctx) = (self.opened.clone(), self.saved.clone(), ctx.clone());
-                std::thread::spawn(move || {
-                    let Some(path) = rfd::FileDialog::new()
-                        .set_title("Start from a controller file")
-                        .add_filter("JSON", &["json"])
-                        .pick_file()
-                    else {
-                        return;
-                    };
-                    let read = std::fs::read_to_string(&path).map_err(|e| e.to_string());
-                    match read.and_then(|t| midi::from_json(&t)) {
-                        Ok((_, map)) => {
-                            *opened.lock().unwrap() = Some(map);
-                            *note.lock().unwrap() = Some(format!("Started from {}", path.display()));
-                        }
-                        Err(e) => {
-                            *note.lock().unwrap() =
-                                Some(format!("Couldn't read {}: {e}", path.display()))
-                        }
-                    }
-                    ctx.request_repaint();
-                });
-            }
-        }
+    /// Make the mapping the wizard describes, and use it: here and now, or for its
+    /// device from now on (the command for the app to run, returned).
+    fn create(&mut self) -> Result<Option<AppCmd>, String> {
+        let w = self.wizard.as_ref().ok_or("no wizard")?;
+        let store = self.store();
+        let maker = if w.new_maker {
+            w.maker_name.clone()
+        } else {
+            w.maker.clone().ok_or("pick a manufacturer")?
+        };
+        let template = w
+            .template
+            .as_deref()
+            .and_then(crate::core::controllers::MappingId::parse)
+            .and_then(|id| store.get(&id));
+        let device = w.device.and_then(|i| self.devices.get(i));
+        let id = store.create(
+            &maker,
+            &w.model_name,
+            template.as_ref(),
+            device.map(|d| (d.name.as_str(), d.usb.as_deref())),
+        )?;
+        let cmd = device.map(|d| AppCmd::UseMapping {
+            device: crate::core::controllers::device_key(&d.name, d.usb.as_deref()),
+            mapping: id.key(),
+        });
+        let p = store.get(&id).ok_or("the new mapping didn't read back")?;
+        self.learned.replace(p.file.clone());
+        self.set_active(Some(p));
+        *self.saved.lock().unwrap() = store.path(&id).map(|p| format!("Made {}", p.display()));
+        self.wizard = None;
+        Ok(cmd)
     }
 
     fn device(&self) -> String {
@@ -425,55 +400,59 @@ impl Panel for MappingPanel<'_> {
                 cx.send(AppCmd::ReconnectMidi);
             }
             ui.add_space(16.0);
-            ui.label(format!("{mapped} mapped"));
+            ui.label("Mapping:");
+            match &t.active {
+                Some(p) => {
+                    ui.label(RichText::new(p.label()).strong());
+                }
+                None => {
+                    ui.label(RichText::new("none").color(cx.theme.muted));
+                }
+            }
+            ui.label(format!("({mapped} mapped)"));
+            if ui
+                .button("New mapping…")
+                .on_hover_text("Make a mapping of your own: empty, or starting from one there is")
+                .clicked()
+            {
+                let maker = t.active.as_ref().map(|p| p.id.maker.clone());
+                let template = t.active.as_ref().filter(|p| p.id.model.is_some()).map(|p| p.id.key());
+                t.wizard = Some(Wizard {
+                    maker,
+                    template,
+                    device: (!t.devices.is_empty()).then_some(0),
+                    ..Default::default()
+                });
+            }
             if ui
                 .add_enabled(mapped > 0, egui::Button::new("Save JSON…"))
-                .on_hover_text("Write this mapping as a controller file")
+                .on_hover_text("Write this mapping, as it's used, to a file of your choosing")
                 .clicked()
             {
                 save(t, ui.ctx());
-            }
-            let mut asked = None;
-            ui.menu_button("New mapping", |ui| {
-                if ui.button("Empty").on_hover_text("Map the controller from scratch").clicked() {
-                    asked = Some(NewFrom::Empty);
-                }
-                for (i, (name, _)) in midi::profiles().iter().enumerate() {
-                    if ui.button(name.as_str()).clicked() {
-                        asked = Some(NewFrom::Profile(i));
-                    }
-                }
-                if ui.button("From a file…").on_hover_text("A saved controller file").clicked() {
-                    asked = Some(NewFrom::File);
-                }
-            })
-            .response
-            .on_hover_text("Start again, empty or from a mapping (this one is replaced)");
-            if let Some(from) = asked {
-                if mapped > 0 {
-                    t.confirm_new = Some(from);
-                } else {
-                    t.start_new(from, ui.ctx());
-                }
             }
             if let Some(note) = t.saved.lock().unwrap().as_ref() {
                 ui.label(RichText::new(note).color(cx.theme.muted));
             }
         });
-        ui.label(
-            RichText::new(
-                "Press, turn or move anything on the controller: it runs its command, and \
-                 its message shows here. Pick the command it should run.",
-            )
-            .color(cx.theme.muted),
-        );
+        let hint = match &t.active {
+            Some(p) if p.read_only() => {
+                "A built-in mapping can't be changed. To change it, make a New mapping that starts from it."
+            }
+            Some(_) => {
+                "Press, turn or move anything on the controller: it runs its command, and its \
+                 message shows here. Pick the command it should run. Changes are saved as you go."
+            }
+            None => {
+                "No mapping for this controller. Press things to see their messages, and make a \
+                 New mapping to map them."
+            }
+        };
+        ui.label(RichText::new(hint).color(cx.theme.muted));
         ui.separator();
         mapping_table(ui, t, cx);
-        confirm_new(ui, t, mapped);
-        if let Some(map) = t.opened.lock().unwrap().take() {
-            t.learned.replace(map);
-        }
-        t.keep_draft();
+        wizard(ui, t, cx);
+        t.keep_mapping();
         let now = Instant::now();
         if t.seen.values().any(|s| now - s.at < FLASH) {
             ui.ctx().request_repaint_after(Duration::from_millis(50));
@@ -481,33 +460,126 @@ impl Panel for MappingPanel<'_> {
     }
 }
 
-/// "Replace the current mapping?", while a new one is asked for.
-fn confirm_new(ui: &mut Ui, t: &mut ControllerUi, mapped: usize) {
-    let Some(from) = t.confirm_new else { return };
-    let r = egui::Modal::new(egui::Id::new("confirm-new-mapping")).show(ui.ctx(), |ui| {
-        ui.heading("Start a new mapping?");
-        ui.label(format!(
-            "The current one ({mapped} mapped) is replaced. Save JSON first to keep it."
-        ));
+/// "New mapping": the maker (or a new one), what to start from, the model's name and
+/// the device.
+fn wizard(ui: &mut Ui, t: &mut ControllerUi, cx: &mut Cx) {
+    if t.wizard.is_none() {
+        return;
+    }
+    let store = t.store();
+    let makers = store.makers();
+    let models = store.models();
+    let devices: Vec<String> = t.devices.iter().map(|d| d.name.clone()).collect();
+    let mut create = false;
+    let mut cancel = false;
+    let w = t.wizard.as_mut().expect("open");
+    let r = egui::Modal::new(egui::Id::new("new-mapping")).show(ui.ctx(), |ui| {
+        ui.set_width(420.0);
+        ui.heading("New mapping");
+        egui::Grid::new("new-mapping-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+            ui.label("Manufacturer");
+            let shown = if w.new_maker {
+                "New…".to_string()
+            } else {
+                w.maker
+                    .as_ref()
+                    .and_then(|m| makers.iter().find(|(k, _)| k == m))
+                    .map_or("Pick one".to_string(), |(_, n)| n.clone())
+            };
+            egui::ComboBox::from_id_salt("wizard-maker").selected_text(shown).width(240.0).show_ui(ui, |ui| {
+                for (k, n) in &makers {
+                    if ui.selectable_label(!w.new_maker && w.maker.as_ref() == Some(k), n).clicked() {
+                        w.maker = Some(k.clone());
+                        w.new_maker = false;
+                        w.template = None;
+                    }
+                }
+                if ui.selectable_label(w.new_maker, "New…").clicked() {
+                    w.new_maker = true;
+                    w.maker = None;
+                    w.template = None;
+                }
+            });
+            ui.end_row();
+            if w.new_maker {
+                ui.label("Its name");
+                ui.add(egui::TextEdit::singleline(&mut w.maker_name).hint_text("Pioneer DJ").desired_width(240.0));
+                ui.end_row();
+            } else if let Some(maker) = &w.maker {
+                ui.label("Start from");
+                let theirs: Vec<&Profile> = models.iter().filter(|p| p.id.maker == *maker).collect();
+                let shown = w
+                    .template
+                    .as_ref()
+                    .and_then(|k| theirs.iter().find(|p| p.id.key() == *k))
+                    .map_or("Empty".to_string(), |p| p.label());
+                egui::ComboBox::from_id_salt("wizard-template").selected_text(shown).width(240.0).show_ui(ui, |ui| {
+                    if ui.selectable_label(w.template.is_none(), "Empty").clicked() {
+                        w.template = None;
+                    }
+                    for p in &theirs {
+                        let k = p.id.key();
+                        if ui.selectable_label(w.template.as_ref() == Some(&k), p.label()).clicked() {
+                            w.template = Some(k);
+                        }
+                    }
+                });
+                ui.end_row();
+            }
+            ui.label("Model");
+            ui.add(egui::TextEdit::singleline(&mut w.model_name).hint_text("DDJ-FLX4").desired_width(240.0));
+            ui.end_row();
+            ui.label("MIDI device");
+            let shown = w.device.and_then(|i| devices.get(i)).map_or("None".to_string(), Clone::clone);
+            egui::ComboBox::from_id_salt("wizard-device").selected_text(shown).width(240.0).show_ui(ui, |ui| {
+                if ui.selectable_label(w.device.is_none(), "None").clicked() {
+                    w.device = None;
+                }
+                for (i, d) in devices.iter().enumerate() {
+                    if ui.selectable_label(w.device == Some(i), d).clicked() {
+                        w.device = Some(i);
+                    }
+                }
+            });
+            ui.end_row();
+        });
+        ui.label(
+            RichText::new(
+                "The device uses this mapping from now on. A mapping that starts from another \
+                 is a copy: changing one leaves the other alone.",
+            )
+            .color(cx.theme.muted),
+        );
+        if let Some(e) = &w.error {
+            ui.label(RichText::new(e).color(cx.theme.warn));
+        }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.button("Start new").clicked() {
-                Some(true)
-            } else if ui.button("Cancel").clicked() {
-                Some(false)
-            } else {
-                None
+            let ready = !w.model_name.trim().is_empty()
+                && (w.maker.is_some() || (w.new_maker && !w.maker_name.trim().is_empty()));
+            if ui.add_enabled(ready, egui::Button::new("Create")).clicked() {
+                create = true;
             }
-        })
-        .inner
+            if ui.button("Cancel").clicked() {
+                cancel = true;
+            }
+        });
     });
-    match r.inner.or(r.should_close().then_some(false)) {
-        Some(true) => {
-            t.confirm_new = None;
-            t.start_new(from, ui.ctx());
+    if cancel || r.should_close() {
+        t.wizard = None;
+    } else if create {
+        match t.create() {
+            Ok(cmd) => {
+                if let Some(c) = cmd {
+                    cx.send(c);
+                }
+            }
+            Err(e) => {
+                if let Some(w) = t.wizard.as_mut() {
+                    w.error = Some(e);
+                }
+            }
         }
-        Some(false) => t.confirm_new = None,
-        None => {}
     }
 }
 
@@ -587,6 +659,7 @@ fn sorted(t: &ControllerUi, mut keys: Vec<(u8, u8)>) -> Vec<(u8, u8)> {
 }
 
 fn mapping_table(ui: &mut Ui, t: &mut ControllerUi, cx: &mut Cx) {
+    let editable = t.editable();
     let keys = sorted(t, t.keys());
     if keys.is_empty() {
         ui.label(RichText::new("Nothing yet.").color(cx.theme.muted));
@@ -658,13 +731,24 @@ fn mapping_table(ui: &mut Ui, t: &mut ControllerUi, cx: &mut Cx) {
                         ui.monospace(s.count.to_string());
                     }
                 });
-                row.col(|ui| command_picker(ui, t, key, l, &names, cx));
                 row.col(|ui| {
+                    if !editable {
+                        ui.disable();
+                    }
+                    command_picker(ui, t, key, l, &names, cx)
+                });
+                row.col(|ui| {
+                    if !editable {
+                        ui.disable();
+                    }
                     if let Some(l) = l.filter(|l| l.control.takes_number()) {
                         number_field(ui, t, key, &l);
                     }
                 });
                 row.col(|ui| {
+                    if !editable {
+                        ui.disable();
+                    }
                     let Some(l) = l else { return };
                     egui::ComboBox::from_id_salt(("reads", key))
                         .selected_text(reading_name(l.input))
@@ -689,6 +773,9 @@ fn mapping_table(ui: &mut Ui, t: &mut ControllerUi, cx: &mut Cx) {
                 });
                 // Display only: for an output level the controller sets itself.
                 row.col(|ui| {
+                    if !editable {
+                        ui.disable();
+                    }
                     let Some(l) = l.filter(|l| crate::core::midi::can_be_display_only(l.control)) else {
                         return;
                     };
@@ -1015,42 +1102,37 @@ mod tests {
         assert!(json.contains("\"deck_2_scratch\""), "{json}");
     }
 
-    /// The mapping is kept as a draft as it changes, and read back on the next run;
-    /// a new mapping starts from nothing or a profile.
+    /// A built-in mapping can't be edited; a new one made from it can, and is saved
+    /// as it changes (only what differs from the maker's file).
     #[test]
-    fn drafts_survive_a_restart() {
-        let dir = std::env::temp_dir().join(format!("earshot-draft-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(DRAFT_FILE);
-        let _ = std::fs::remove_file(&path);
-        let ctx = egui::Context::default();
+    fn a_new_mapping_is_saved_as_it_changes() {
+        let (_, dir) = crate::core::controllers::test_store("panel");
+        let ddj = crate::core::controllers::bundled("pioneer", Some("ddj-400"));
+        let mut t = ControllerUi { mine: Some(dir.clone()), ..Default::default() };
+        t.learned.replace(ddj.file.clone());
+        t.set_active(Some(ddj.clone()));
+        assert!(!t.editable(), "built-in");
 
-        let mut t = ControllerUi { draft: Some(path.clone()), ..Default::default() };
-        t.load_draft();
-        assert!(t.learned.all().is_empty(), "no draft yet");
-        t.on_midi(msg(&[0x92, 0x01, 0x7F]));
+        t.wizard = Some(Wizard {
+            maker: Some("pioneer".into()),
+            template: Some(ddj.id.key()),
+            model_name: "Mine".into(),
+            ..Default::default()
+        });
+        assert!(t.create().unwrap().is_none(), "no device: nothing for the app");
+        assert!(t.wizard.is_none());
+        assert!(t.editable(), "the new one is the user's");
+        assert_eq!(t.learned.all().len(), ddj.file.inputs.len(), "a copy of the DDJ-400's");
+
         t.map_to((0x92, 0x01), "deck_1_play");
-        t.keep_draft();
-        assert!(path.exists());
-
-        let mut again = ControllerUi { draft: Some(path.clone()), ..Default::default() };
-        again.load_draft();
-        assert_eq!(again.learned.all(), t.learned.all());
-
-        again.start_new(NewFrom::Profile(0), &ctx);
-        assert!(again.learned.all().len() > 50, "the DDJ-400's table");
-        again.start_new(NewFrom::Empty, &ctx);
-        assert!(again.learned.all().is_empty());
-        again.keep_draft();
-        let mut third = ControllerUi { draft: Some(path.clone()), ..Default::default() };
-        third.load_draft();
-        assert!(third.learned.all().is_empty(), "the empty one was kept");
-
-        std::fs::write(&path, "nonsense").unwrap();
-        let mut broken = ControllerUi { draft: Some(path), ..Default::default() };
-        broken.load_draft();
-        assert!(broken.saved.lock().unwrap().as_ref().unwrap().contains("couldn't be read"));
-        std::fs::remove_dir_all(&dir).unwrap();
+        t.keep_mapping();
+        let path = dir.join("pioneer/controllers/mine.json");
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("\"92 01\""), "the new line is saved");
+        assert!(!saved.contains("\"90 0B\""), "PLAY is Pioneer's line, not saved again");
+        let back = t.store().get(&t.active.as_ref().unwrap().id).unwrap();
+        assert_eq!(back.file.inputs.len(), ddj.file.inputs.len() + 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Shift + pad: the list goes to Shift, then the pad, and stays on the pad when

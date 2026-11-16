@@ -90,10 +90,10 @@ impl DebugUi {
                 );
                 let data = crate::core::services::data_dir();
                 std::thread::spawn(move || {
-                    // The controller mapping as it is now, if there's one.
-                    let draft = super::controller::DRAFT_FILE;
-                    let extra = std::fs::read(data.join(draft))
-                        .map(|b| vec![(draft.to_string(), b)])
+                    // The controller mapping as it is now.
+                    let extra = mapping
+                        .as_ref()
+                        .map(|m| vec![("controller-mapping.json".to_string(), m.to_json("session").into_bytes())])
                         .unwrap_or_default();
                     let dir = data.join("debug");
                     let r = match rec.export(secs, &dir, &info, mapping.as_ref(), extra) {

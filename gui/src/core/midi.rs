@@ -112,9 +112,6 @@ struct Session {
     meters: Vec<Meter>,
     /// Messages that came in mapped to nothing, already logged (once each a run).
     unmapped: std::collections::HashSet<(u8, u8)>,
-    /// A controller file has been put in once, or a mapping was loaded (so the
-    /// file isn't added on top).
-    seeded: bool,
     /// The connected controller's lights that go to more than one message (from its
     /// controller file: [`ControllerFile::mirror`]).
     mirror: ControllerFile,
@@ -215,24 +212,16 @@ impl Learned {
         s.version += 1;
     }
 
-    pub fn clear(&self) {
-        self.replace(ControllerFile::default());
-    }
-
-    /// Put `m` in place of the whole mapping. Its lights' mirrors too, if it has
-    /// any (a draft doesn't: they come from the controller's file).
+    /// Put mapping `m` in place of the whole mapping, its lights' mirrors too.
     pub fn replace(&self, m: ControllerFile) {
         let mut s = self.0.lock().unwrap();
-        if !m.mirror.is_empty() || !m.mirror_status.is_empty() {
-            s.mirror = ControllerFile {
-                mirror: m.mirror,
-                mirror_status: m.mirror_status,
-                ..Default::default()
-            };
-        }
+        s.mirror = ControllerFile {
+            mirror: m.mirror,
+            mirror_status: m.mirror_status,
+            ..Default::default()
+        };
         s.map = m.inputs;
         s.meters = m.meters;
-        s.seeded = true;
         s.version += 1;
     }
 
@@ -262,87 +251,105 @@ impl Learned {
         s.map.iter().map(|(k, l)| (*k, *l)).collect()
     }
 
-    /// Tests: seed from bundled controller file `id`.
+    /// Tests: the bundled mapping for model `model` (`ddj-400`).
     #[cfg(test)]
-    pub fn seed_bundled(&self, id: &str) {
-        self.seed(&super::controllers::resolve(id).unwrap().file);
+    pub fn seed_bundled(&self, model: &str) {
+        self.replace(super::controllers::bundled("pioneer", Some(model)).file);
     }
 
-    /// A controller with file `m` connected: its lights' mirrors from the file, and
-    /// its mapping, the first time (unless a mapping was loaded first: the draft).
-    pub fn seed(&self, m: &ControllerFile) {
-        let mut s = self.0.lock().unwrap();
-        s.mirror = ControllerFile {
-            mirror: m.mirror.clone(),
-            mirror_status: m.mirror_status.clone(),
+    /// The mapping as a controller file: its lines, meters and mirrors.
+    pub fn file(&self) -> ControllerFile {
+        let s = self.0.lock().unwrap();
+        ControllerFile {
+            inputs: s.map.clone(),
+            meters: s.meters.clone(),
+            mirror: s.mirror.mirror.clone(),
+            mirror_status: s.mirror.mirror_status.clone(),
             ..Default::default()
-        };
-        if std::mem::replace(&mut s.seeded, true) {
-            return;
         }
-        for (k, l) in &m.inputs {
-            s.map.entry(*k).or_insert(*l);
-        }
-        if s.meters.is_empty() {
-            s.meters = m.meters.clone();
-        }
-        s.version += 1;
     }
 
-    /// The controller file for these bindings, as JSON. A line says only what a
-    /// message runs; how its value reads is left out where the message says it (a
-    /// note is a button, a CC a knob or fader).
+    /// The controller file for these bindings, as JSON.
     pub fn to_json(&self, device: &str) -> String {
-        use serde_json::{Value, json};
-        let inputs: Vec<Value> = self
-            .all()
-            .into_iter()
-            .map(|((status, data1), l)| {
-                let (name, word) = l.control.name();
-                let mut o = serde_json::Map::new();
-                o.insert("message".into(), json!(format!("{status:02X} {data1:02X}")));
-                o.insert("command".into(), json!(name));
-                if let Some(w) = word.or_else(|| l.arg.map(|a| a.to_string())) {
-                    o.insert("value".into(), json!(w));
-                }
-                if l.display_only {
-                    o.insert("display_only".into(), json!(true));
-                }
-                if l.input != default_input(status) {
-                    let (input, ticks) = match l.input {
-                        Input::Note => ("button", None),
-                        Input::Cc => ("absolute", None),
-                        Input::Msb => ("msb", None),
-                        Input::Lsb => ("lsb", None),
-                        Input::Relative => ("relative", None),
-                        Input::Jog(t) => ("jog", Some(t)),
-                    };
-                    o.insert("input".into(), json!(input));
-                    if let Some(t) = ticks {
-                        o.insert("ticks".into(), json!(t));
-                    }
-                }
-                Value::Object(o)
-            })
-            .collect();
-        let mut file = json!({ "device": device, "inputs": inputs });
-        let meters: Vec<Value> = self
-            .meters()
-            .iter()
-            .map(|m| {
-                json!({
-                    "deck": m.deck.index() + 1,
-                    "message": format!("{:02X} {:02X}", m.status, m.data1),
-                    "amber_at": m.amber_at,
-                    "red_at": m.red_at,
-                })
-            })
-            .collect();
-        if !meters.is_empty() {
-            file["meters"] = json!(meters);
-        }
-        serde_json::to_string_pretty(&file).expect("JSON") + "\n"
+        let mut head = serde_json::Map::new();
+        head.insert("device".into(), serde_json::json!(device));
+        file_json(head, &self.file())
     }
+}
+
+/// A controller file as JSON: `head` first (its name, USB ids, …), then its lines
+/// (a line says only what a message runs; how its value reads is left out where the
+/// message says it: a note is a button, a CC a knob or fader), meters, start messages
+/// and mirrors (each left out if there are none).
+pub fn file_json(head: serde_json::Map<String, serde_json::Value>, f: &ControllerFile) -> String {
+    use serde_json::{Value, json};
+    let two = |(a, b): (u8, u8)| format!("{a:02X} {b:02X}");
+    let inputs: Vec<Value> = f
+        .inputs
+        .iter()
+        .map(|(&(status, data1), l)| {
+            let (name, word) = l.control.name();
+            let mut o = serde_json::Map::new();
+            o.insert("message".into(), json!(two((status, data1))));
+            o.insert("command".into(), json!(name));
+            if let Some(w) = word.or_else(|| l.arg.map(|a| a.to_string())) {
+                o.insert("value".into(), json!(w));
+            }
+            if l.display_only {
+                o.insert("display_only".into(), json!(true));
+            }
+            if l.input != default_input(status) {
+                let (input, ticks) = match l.input {
+                    Input::Note => ("button", None),
+                    Input::Cc => ("absolute", None),
+                    Input::Msb => ("msb", None),
+                    Input::Lsb => ("lsb", None),
+                    Input::Relative => ("relative", None),
+                    Input::Jog(t) => ("jog", Some(t)),
+                };
+                o.insert("input".into(), json!(input));
+                if let Some(t) = ticks {
+                    o.insert("ticks".into(), json!(t));
+                }
+            }
+            Value::Object(o)
+        })
+        .collect();
+    let mut file = Value::Object(head);
+    if !f.start.is_empty() {
+        let start: Vec<String> = f
+            .start
+            .iter()
+            .map(|m| m.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" "))
+            .collect();
+        file["start"] = json!(start);
+    }
+    file["inputs"] = json!(inputs);
+    if !f.mirror.is_empty() {
+        let m: serde_json::Map<String, Value> = f.mirror.iter().map(|(&a, &b)| (two(a), json!(two(b)))).collect();
+        file["mirror"] = Value::Object(m);
+    }
+    if !f.mirror_status.is_empty() {
+        let m: serde_json::Map<String, Value> =
+            f.mirror_status.iter().map(|(a, b)| (format!("{a:02X}"), json!(format!("{b:02X}")))).collect();
+        file["mirror_status"] = Value::Object(m);
+    }
+    let meters: Vec<Value> = f
+        .meters
+        .iter()
+        .map(|m| {
+            json!({
+                "deck": m.deck.index() + 1,
+                "message": two((m.status, m.data1)),
+                "amber_at": m.amber_at,
+                "red_at": m.red_at,
+            })
+        })
+        .collect();
+    if !meters.is_empty() {
+        file["meters"] = json!(meters);
+    }
+    serde_json::to_string_pretty(&file).expect("JSON") + "\n"
 }
 
 /// Two hex bytes (`"90 0B"`).
@@ -480,15 +487,6 @@ pub fn from_json(text: &str) -> Result<(String, ControllerFile), String> {
     Ok((file.device, out))
 }
 
-/// Mappings earshot knows without a file, to start a new one from.
-pub fn profiles() -> Vec<(String, ControllerFile)> {
-    super::controllers::all()
-        .into_iter()
-        .filter(|p| !p.usb.iter().all(|u| u.ends_with(":*")))
-        .map(|p| (format!("{} (built-in)", p.name), p.file))
-        .collect()
-}
-
 /// How a message reads unless a binding says otherwise: a note is a button, anything
 /// else a knob or fader.
 fn default_input(status: u8) -> Input {
@@ -549,13 +547,16 @@ pub fn connect_all(
     lane: &Lane,
     learned: &Learned,
     monitor: &super::lights::MonitorSlot,
-) -> Result<(Midi, Vec<String>), String> {
+    choose: &dyn Fn(&str, Option<&str>) -> Option<super::controllers::Profile>,
+) -> Result<(Midi, Vec<Port>), String> {
     let t0 = std::time::Instant::now();
     let probe = MidiInput::new("earshot-probe").map_err(|e| e.to_string())?;
     let ports = probe.ports();
     let all: Vec<String> = ports.iter().map(|p| probe.port_name(p).unwrap_or_else(|_| "unknown".into())).collect();
     eprintln!("[init] MIDI: {} input port(s): {all:?}", all.len());
     let mut names = Vec::new();
+    let mut ports_out = Vec::new();
+    let mut mapped = false;
     // Each open port's start messages, from its controller file.
     let mut starts = Vec::new();
     let mut connections = Vec::new();
@@ -565,18 +566,22 @@ pub fn connect_all(
             continue;
         }
         let input = MidiInput::new("earshot").map_err(|e| e.to_string())?;
-        // Which controller this is, from its controller file (`core::controllers`).
+        // Which mapping this controller gets (`core::controllers`). The first port
+        // with one sets the session's mapping.
         let usb = super::controller_audio::usb_id(&name);
-        let profile = super::controllers::find(&name, usb.as_deref());
+        let profile = choose(&name, usb.as_deref());
         eprintln!(
-            "[init] MIDI: {name:?} (USB id {}): controller file {}",
+            "[init] MIDI: {name:?} (USB id {}): mapping {}",
             usb.as_deref().unwrap_or("none"),
-            profile.as_ref().map_or("none".to_string(), |p| format!("{} ({})", p.id, p.name))
+            profile.as_ref().map_or("none".to_string(), |p| format!("{} ({})", p.id.key(), p.label()))
         );
-        if let Some(p) = &profile {
-            learned.seed(&p.file);
+        if let Some(p) = &profile
+            && !mapped
+        {
+            learned.replace(p.file.clone());
+            mapped = true;
         }
-        let start = profile.map(|p| p.file.start).unwrap_or_default();
+        let start = profile.as_ref().map(|p| p.file.start.clone()).unwrap_or_default();
         let (sink, lane, learned) = (sink.clone(), lane.clone(), learned.clone());
         let index = names.len();
         match input.connect(
@@ -588,11 +593,21 @@ pub fn connect_all(
             Ok(c) => {
                 eprintln!("[init] MIDI: opened input {name:?}");
                 connections.push(c);
+                ports_out.push(Port {
+                    name: name.clone(),
+                    usb,
+                    mapping: profile,
+                });
                 names.push(name);
                 starts.push(start);
             }
             Err(e) => eprintln!("[init] MIDI: could not open {name}: {e}"),
         }
+    }
+    // No controller with a mapping: nothing mapped (pressing things shows them in
+    // Controller mode, to map them).
+    if !mapped {
+        learned.replace(ControllerFile::default());
     }
     let outputs = connect_outputs(&names, &starts);
     eprintln!(
@@ -609,8 +624,17 @@ pub fn connect_all(
             _connections: connections,
             _lights: lights,
         },
-        names,
+        ports_out,
     ))
+}
+
+/// An open MIDI input: its name, its device's USB id (if it has one), and the mapping
+/// it got.
+#[derive(Clone, Debug)]
+pub struct Port {
+    pub name: String,
+    pub usb: Option<String>,
+    pub mapping: Option<super::controllers::Profile>,
 }
 
 /// The output ports named like the inputs that opened (a controller's two halves),
@@ -820,12 +844,9 @@ mod tests {
             serde_json::json!({ "message": "B0 22", "command": "deck_2_scratch", "input": "jog", "ticks": 720 })
         );
         assert_eq!(line("B0 13")["command"], "deck_1_channel_fader");
-        // Unmapped: does nothing. Cleared, it stays cleared on the next connect.
+        // Unmapped: does nothing.
         learned.remove((0x90, 0x0B));
         assert!(run(&[0x90, 0x0B, 0x7F]).is_none());
-        learned.clear();
-        learned.seed_bundled("ddj-400");
-        assert!(learned.all().is_empty());
     }
 
     /// A saved file reads back as the same mapping; a bad line says which.
@@ -835,14 +856,14 @@ mod tests {
         let v = learned.version();
         let (device, map) = from_json(&learned.to_json("DDJ-400")).unwrap();
         assert_eq!(device, "DDJ-400");
-        let bundled = super::super::controllers::resolve("ddj-400").unwrap().file;
+        let bundled = super::super::controllers::bundled("pioneer", Some("ddj-400")).file;
         assert_eq!(map.inputs, bundled.inputs);
         assert_eq!(map.meters, bundled.meters, "the meters too");
+        assert_eq!(map.mirror, bundled.mirror, "and the mirrors");
+        assert_eq!(map.mirror_status, bundled.mirror_status);
         let fresh = Learned::default();
         fresh.replace(map);
         assert!(fresh.version() > 0);
-        fresh.seed_bundled("ddj-400");
-        assert_eq!(fresh.all().len(), bundled.inputs.len(), "not seeded on top");
         assert_eq!(learned.version(), v);
         // A line that can't be read is left out, and says which and why; the rest
         // stays.

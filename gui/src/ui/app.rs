@@ -92,6 +92,10 @@ pub struct EarshotApp {
     null_audio: bool,
     midi: Midi,
     midi_ports: Vec<String>,
+    /// The open MIDI inputs, each with its device's USB id and the mapping it got.
+    midi_devices: Vec<midi::Port>,
+    /// Every mapping there is (its key and name), for the MIDI pill's list.
+    mappings: Vec<(String, String)>,
     /// Send track ids here to load their cover art.
     art_loader: crate::core::background::Mailbox<i64>,
     /// Nudge after a scan: works out audio hashes the files' tags didn't have.
@@ -394,6 +398,8 @@ impl EarshotApp {
             null_audio: services.null_audio,
             midi: Midi::default(),
             midi_ports: vec![],
+            midi_devices: vec![],
+            mappings: vec![],
             art_loader,
             hasher,
             quick,
@@ -441,9 +447,8 @@ impl EarshotApp {
             app.panels.debug.lights = Some(app.lights_monitor.clone());
         }
         app.panels.controller.lights = Some(app.lights_monitor.clone());
-        // The controller mapping in progress, as it was last run.
-        app.panels.controller.draft = Some(data_dir.join(crate::ui::panels::controller::DRAFT_FILE));
-        app.panels.controller.load_draft();
+        // The user's own controller mappings (`core::controllers`).
+        app.panels.controller.mine = Some(data_dir.join("controllers"));
         app.start_up(services.midi);
         app.lib.store.send(StoreCmd::ListSources);
         app.lib.store.send(StoreCmd::StartSession);
@@ -582,12 +587,25 @@ impl EarshotApp {
         self.midi = Midi::default();
         let lane = self.player.lock().unwrap().midi.clone();
         let learned = self.panels.controller.learned.clone();
-        (self.midi, self.midi_ports) = midi::connect_all(&self.sink, &lane, &learned, &self.lights_monitor).unwrap_or_else(|e| {
-            eprintln!("MIDI: {e}");
-            (Midi::default(), vec![])
-        });
+        // Each controller's mapping: the one chosen for it before (the MIDI pill), else
+        // the best match (`core::controllers`).
+        let store = crate::core::controllers::Store::new(self.panels.controller.mine.clone());
+        let chosen = self.prefs.controller_mappings.clone();
+        let choose = |port: &str, usb: Option<&str>| {
+            let key = crate::core::controllers::device_key(port, usb);
+            store.find(port, usb, chosen.get(&key).map(String::as_str))
+        };
+        (self.midi, self.midi_devices) =
+            midi::connect_all(&self.sink, &lane, &learned, &self.lights_monitor, &choose).unwrap_or_else(|e| {
+                eprintln!("MIDI: {e}");
+                (Midi::default(), vec![])
+            });
+        self.midi_ports = self.midi_devices.iter().map(|p| p.name.clone()).collect();
+        self.mappings = store.models().iter().map(|p| (p.id.key(), p.label())).collect();
         self.prefs.set_controller(!self.midi_ports.is_empty());
         self.panels.controller.ports = self.midi_ports.clone();
+        self.panels.controller.devices = self.midi_devices.clone();
+        self.panels.controller.set_active(self.midi_devices.iter().find_map(|p| p.mapping.clone()));
         // A controller with a sound card came or went: play to it, or stop.
         if self.controller.set(controller_audio::find(&self.midi_ports)) {
             self.reopen_audio();
@@ -829,6 +847,11 @@ impl EarshotApp {
         match cmd {
             Command::View(v) => self.view_cmd(v),
             Command::App(AppCmd::ReconnectMidi) => self.connect_midi(),
+            Command::App(AppCmd::UseMapping { device, mapping }) => {
+                eprintln!("MIDI: {device} uses mapping {mapping} from now on");
+                self.prefs.controller_mappings.insert(device, mapping);
+                self.connect_midi();
+            }
             Command::App(AppCmd::TakeControllerAudio) => {
                 match self.controller.force() {
                     Ok(()) => self.reopen_audio(),
@@ -1355,7 +1378,8 @@ impl EarshotApp {
                     controller_busy: self.controller.found.as_ref().and_then(|c| {
                         Some((c.id.as_str(), self.controller.error.as_deref()?))
                     }),
-                    midi_ports: &self.midi_ports,
+                    midi_devices: &self.midi_devices,
+                    mappings: &self.mappings,
                     analysis: &self.analysis,
                     jobs: &jobs,
                     hud: Meter {

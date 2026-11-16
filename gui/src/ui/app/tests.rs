@@ -2889,6 +2889,12 @@ fn controller_mode_has_the_decks_and_its_tabs() {
     steps(&mut h, 5);
     assert!(h.query_all_by_label("CUE").count() >= 2, "the decks");
     assert!(h.query_all_by_label("Save JSON…").count() > 0, "the Mapping tab");
+    // A mapping of the user's, to edit (a built-in one can't be).
+    let (store, dir) = crate::core::controllers::test_store("controller-mode");
+    let id = store.create("Test", "Pad", None, None).unwrap();
+    let c = &mut h.state_mut().panels.controller;
+    c.mine = Some(dir.clone());
+    c.set_active(store.get(&id));
     h.state_mut().panels.controller.on_midi(MidiMsg {
         port: 0,
         bytes: vec![0x90, 0x0B, 0x7F],
