@@ -1252,7 +1252,14 @@ impl Control {
             self,
             Control::Deck(
                 _,
-                BeatJump | JumpBack | JumpForward | Loop | BeatLoop(_) | GridNudge(_) | LoadStep(_)
+                BeatJump
+                    | JumpBack
+                    | JumpForward
+                    | Loop
+                    | BeatLoop(_)
+                    | GridNudge(_)
+                    | LoadStep(_)
+                    | ModePad { .. }
             ) | Control::Library(LibraryControl::Browse)
         )
     }
