@@ -2888,7 +2888,7 @@ fn controller_mode_has_the_decks_and_its_tabs() {
         .dispatch(ViewCmd::SetMode(Mode::Controller).into());
     steps(&mut h, 5);
     assert!(h.query_all_by_label("CUE").count() >= 2, "the decks");
-    assert!(h.query_all_by_label("Save JSON…").count() > 0, "the Mapping tab");
+    assert!(h.query_all_by_label("Show file").count() > 0, "the Mapping tab");
     // A mapping of the user's, to edit (a built-in one can't be).
     let (store, dir) = crate::core::controllers::test_store("controller-mode");
     let id = store.create("Test", "Pad", None, None).unwrap();
@@ -2933,7 +2933,7 @@ fn controller_mode_has_the_decks_and_its_tabs() {
     assert!(h.query_all_by_label_contains("not mapped").count() > 0);
     h.get_all_by_label("Library").next().unwrap().click();
     steps(&mut h, 5);
-    assert!(h.query_all_by_label("Save JSON…").count() == 0);
+    assert!(h.query_all_by_label("Show file").count() == 0);
     assert_eq!(h.state().prefs.mode, Mode::Controller);
 }
 

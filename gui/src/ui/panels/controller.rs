@@ -6,10 +6,9 @@
 //! one pressed since.
 //! Pressing something runs its command, adds its message to the list if it's new, and
 //! scrolls the list to it. Each row's command can be picked from a list, and takes
-//! effect at once. A mapping of the user's is saved as it changes
-//! when earshot starts, so work in progress survives a restart. "New mapping" starts
-//! again: empty, from a bundled controller file, or from a file of your own. "Save JSON…"
-//! writes the lot as a controller file, to go in the repo.
+//! effect at once. A mapping of the user's is saved as it changes (a built-in one
+//! can't be changed). "New mapping…" makes one of the user's: empty, or a copy of one
+//! of its maker's. "Show file" shows the user's mapping file, to copy into the repo.
 //!
 //! History is the stream of messages as they came in, newest first.
 
@@ -302,13 +301,6 @@ impl ControllerUi {
         Ok(cmd)
     }
 
-    fn device(&self) -> String {
-        self.ports
-            .first()
-            .and_then(|p| p.split(':').next())
-            .unwrap_or("controller")
-            .to_string()
-    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -424,12 +416,19 @@ impl Panel for MappingPanel<'_> {
                     ..Default::default()
                 });
             }
-            if ui
-                .add_enabled(mapped > 0, egui::Button::new("Save JSON…"))
-                .on_hover_text("Write this mapping, as it's used, to a file of your choosing")
-                .clicked()
+            // The mapping's own file, in the file manager (one of the user's: a built-in
+            // one is in the repo, `gui/controllers/`).
+            let file = t.active.as_ref().and_then(|p| t.store().path(&p.id)).filter(|f| f.exists());
+            let tip = if file.is_some() {
+                "Show this mapping's file in the file manager"
+            } else {
+                "Built-in mappings are compiled in: their files are in earshot's repo, gui/controllers/"
+            };
+            if ui.add_enabled(file.is_some(), egui::Button::new("Show file")).on_hover_text(tip).clicked()
+                && let Some(f) = &file
+                && let Err(e) = crate::core::library::reveal(f)
             {
-                save(t, ui.ctx());
+                *t.saved.lock().unwrap() = Some(format!("Couldn't show {}: {e}", f.display()));
             }
             if let Some(note) = t.saved.lock().unwrap().as_ref() {
                 ui.label(RichText::new(note).color(cx.theme.muted));
@@ -581,29 +580,6 @@ fn wizard(ui: &mut Ui, t: &mut ControllerUi, cx: &mut Cx) {
             }
         }
     }
-}
-
-/// Ask where to save the mapping, and save it there.
-fn save(t: &ControllerUi, ctx: &egui::Context) {
-    let device = t.device();
-    let json = t.learned.to_json(&device);
-    let (saved, ctx) = (t.saved.clone(), ctx.clone());
-    std::thread::spawn(move || {
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Save the controller mapping as")
-            .set_file_name(format!("{device}.json"))
-            .add_filter("JSON", &["json"])
-            .save_file()
-        else {
-            return;
-        };
-        let note = match std::fs::write(&path, json) {
-            Ok(()) => format!("Saved {}", path.display()),
-            Err(e) => format!("Couldn't save {}: {e}", path.display()),
-        };
-        *saved.lock().unwrap() = Some(note);
-        ctx.request_repaint();
-    });
 }
 
 /// The Mapping table's columns.
