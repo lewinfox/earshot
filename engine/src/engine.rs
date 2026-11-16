@@ -21,6 +21,7 @@ use crate::fx::{BeatClock, FALLBACK_BPM, FX_UNITS, FxCmd, FxTarget, FxUnit, FxUn
 use crate::keylock::KEY_SHIFT_MAX;
 use crate::pad_fx::PadFxSlot;
 use crate::processor::{Channel, KNOB_SECS, MasterChain};
+use crate::sampler::{SampleSlot, Sampler};
 use crate::snapshot::{
     DeckSnap, EngineEvent, EngineSnapshot, MixerSnap, Monitor, PreviewSnap, Stats,
 };
@@ -945,6 +946,8 @@ pub struct Renderer {
     preview: Option<Arc<TrackAudio>>,
     preview_player: Player,
     preview_gain: f32,
+    /// The sampler's slots, mixed into the master with the decks.
+    sampler: Sampler,
     master_chain: MasterChain,
     /// Each channel after its fader and crossfader, where the effect units go.
     post: [Vec<f32>; MAX_DECKS],
@@ -1055,6 +1058,7 @@ impl Renderer {
             preview: None,
             preview_player: Player::new(0.0, None),
             preview_gain: 1.0,
+            sampler: Sampler::new(sr),
             master_chain: MasterChain::new(sr),
             post: std::array::from_fn(|_| vec![0.0; MAX_BLOCK * 2]),
             cue: vec![0.0; MAX_BLOCK * 2],
@@ -1315,6 +1319,9 @@ impl Renderer {
             self.master[2 * f] = 0.8 * m[0];
             self.master[2 * f + 1] = 0.8 * m[1];
         }
+        // The sampler joins the mix here: under the master's effects and level, and
+        // in the headphones wherever the master is.
+        self.sampler.render(&mut self.master[..n * 2], n);
         for (u, clock) in clocks.iter().enumerate() {
             if let (FxTarget::Master, Some(clock)) = (self.fx[u].state().target, clock) {
                 self.fx[u].process(&mut self.master[..n * 2], clock);
@@ -1660,6 +1667,11 @@ impl Renderer {
             }
             Command::Preview(p) => self.preview_cmd(p),
             Command::Fx { unit, cmd } => self.fx_cmd(unit, cmd),
+            Command::Sampler(cmd) => {
+                if let Some(old) = self.sampler.apply(cmd) {
+                    self.trash(Garbage::Audio(old));
+                }
+            }
             Command::Restore(st) => self.restore(st),
         }
     }
@@ -1877,6 +1889,11 @@ impl Renderer {
         }
         self.apply(Command::SetSyncLeader(st.sync_leader));
         self.apply(Command::SetHotcueMode(st.hotcue_mode));
+        for slot in SampleSlot::all() {
+            if let Some(old) = self.sampler.restore(slot, &mut st.sampler[slot.index()]) {
+                self.trash(Garbage::Audio(old));
+            }
+        }
         // Its tracks are out; the box itself is freed elsewhere.
         self.trash(Garbage::State(st));
     }
@@ -1920,6 +1937,7 @@ impl Renderer {
                 position: pt.pos(),
                 duration: self.preview.as_ref().map_or(0.0, |a| a.duration()),
             },
+            sampler: self.sampler.snapshot(),
             sample_rate: self.sample_rate as u32,
             last_block_frames: self.last_block_frames,
             callbacks: self.callbacks,
@@ -3653,5 +3671,110 @@ mod tests {
         assert!(
             std::iter::from_fn(|| fresh.garbage.pop().ok()).any(|g| matches!(g, Garbage::State(_)))
         );
+    }
+
+    /// `secs` of a constant `level` on both channels.
+    fn flat(level: f32, secs: f64) -> Arc<TrackAudio> {
+        Arc::new(TrackAudio {
+            samples: vec![level; 2 * (secs * SR as f64) as usize],
+            sample_rate: SR,
+        })
+    }
+
+    fn sample(i: usize) -> crate::sampler::SampleSlot {
+        crate::sampler::SampleSlot::new(i).unwrap()
+    }
+
+    #[test]
+    fn the_sampler_plays_into_the_master_with_the_decks() {
+        use crate::sampler::SamplerCmd;
+        let mut rig = Rig::new();
+        rig.send(Command::Sampler(SamplerCmd::Load {
+            slot: sample(0),
+            audio: Some(flat(0.3, 1.0)),
+        }));
+        rig.send(Command::Sampler(SamplerCmd::Load {
+            slot: sample(8),
+            audio: Some(flat(0.2, 1.0)),
+        }));
+        rig.run(0.05);
+        assert!(peaks(&rig.out, 4).iter().all(|p| *p == 0.0), "loaded, not played");
+        assert!(rig.snap().sampler[0].loaded && !rig.snap().sampler[0].playing);
+        // One slot, with no deck loaded at all: on the master, not the headphones.
+        rig.send(Command::Sampler(SamplerCmd::Play(sample(0))));
+        rig.run(0.1);
+        let one = peaks(&rig.out, 4);
+        assert!((one[0] - 0.3).abs() < 0.01 && (one[1] - 0.3).abs() < 0.01, "{one:?}");
+        assert!(one[2] == 0.0 && one[3] == 0.0, "nothing cued: {one:?}");
+        assert!(rig.snap().sampler[0].playing);
+        // Two at once add up.
+        rig.send(Command::Sampler(SamplerCmd::Play(sample(8))));
+        rig.run(0.1);
+        let two = peaks(&rig.out, 4);
+        assert!((two[0] - 0.5).abs() < 0.01, "{two:?}");
+        // With the master in the headphones, they're there too.
+        rig.send(Command::MasterCue(Set::On));
+        rig.master(MasterParam::HeadMix, 1.0);
+        rig.run(0.1);
+        assert!(peaks(&rig.out, 4)[2] > 0.3);
+        // Under the master level.
+        rig.master(MasterParam::Gain, 0.0);
+        rig.run(0.2);
+        assert!(peaks(&rig.out, 4)[0] < 1e-3);
+        // SHIFT + pad stops it; the other plays out its second.
+        rig.send(Command::Sampler(SamplerCmd::Stop(sample(0))));
+        rig.run(0.05);
+        assert!(!rig.snap().sampler[0].playing && rig.snap().sampler[8].playing);
+        rig.run(1.0);
+        assert!(!rig.snap().sampler[8].playing, "once through");
+    }
+
+    #[test]
+    fn a_replaced_sample_is_freed_off_the_audio_thread() {
+        use crate::sampler::SamplerCmd;
+        let mut rig = Rig::new();
+        let first = flat(0.3, 0.5);
+        for audio in [Some(first.clone()), Some(flat(0.1, 0.5)), None] {
+            rig.send(Command::Sampler(SamplerCmd::Load {
+                slot: sample(15),
+                audio,
+            }));
+        }
+        rig.run(0.01);
+        // Both sounds that were taken out came back on the garbage ring.
+        assert!(matches!(rig.garbage.pop(), Ok(Garbage::Audio(a)) if Arc::ptr_eq(&a, &first)));
+        assert!(matches!(rig.garbage.pop(), Ok(Garbage::Audio(_))));
+        assert!(rig.garbage.pop().is_err());
+        assert_eq!(Arc::strong_count(&first), 1, "the renderer let go of it");
+        assert!(!rig.snap().sampler[15].loaded);
+    }
+
+    #[test]
+    fn restore_puts_the_sampler_back() {
+        use crate::sampler::{SampleState, SamplerCmd};
+        let mut rig = Rig::new();
+        rig.send(Command::Sampler(SamplerCmd::Volume(sample(2), 0.5)));
+        rig.send(Command::Sampler(SamplerCmd::Loop(sample(2), Set::On)));
+        rig.run(0.01);
+        // The settings come from the snapshot; the sound is put back in.
+        let mut st = rig.snap().state();
+        assert!(st.sampler[2].looping && st.sampler[2].volume == 0.5);
+        assert!(st.sampler[2].audio.is_none());
+        st.sampler[2].audio = Some(flat(0.4, 0.02));
+        st.sampler[3] = SampleState {
+            audio: Some(flat(0.1, 1.0)),
+            ..SampleState::default()
+        };
+        let mut fresh = Rig::new();
+        fresh.send(Command::Restore(Box::new(st)));
+        fresh.send(Command::Sampler(SamplerCmd::Play(sample(2))));
+        fresh.run(0.2);
+        let s = fresh.snap().sampler;
+        assert!(s[2].loaded && s[2].looping && s[2].playing, "still going round");
+        assert!((s[2].volume - 0.5).abs() < 1e-9);
+        assert!(s[3].loaded && !s[3].looping && s[3].volume == 1.0);
+        // 0.4 at half volume: a quarter gain.
+        let p = peaks(&fresh.out, 4);
+        assert!((p[0] - 0.1).abs() < 0.01, "{p:?}");
     }
 }

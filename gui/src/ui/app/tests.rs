@@ -1729,6 +1729,7 @@ mod external;
 mod history;
 mod metadata;
 mod quick;
+mod sampler;
 mod tempo_lock;
 
 /// The text columns fit their contents; clicking a row sizes nothing, and dragging
