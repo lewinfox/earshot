@@ -46,6 +46,8 @@ pub struct Engine {
     spare: Vec<rtrb::Producer<Command>>,
     events: rtrb::Consumer<EngineEvent>,
     monitor: Monitor,
+    tap: Option<rtrb::Consumer<f32>>,
+    stats: Arc<Stats>,
     decks: usize,
     info: OutputInfo,
     gc_stop: Arc<AtomicBool>,
@@ -108,6 +110,8 @@ impl Engine {
             spare: app.spare,
             events: app.events,
             monitor: app.monitor,
+            tap: Some(app.tap),
+            stats: app.stats,
             decks,
             info,
             gc_stop,
@@ -184,6 +188,44 @@ impl Engine {
     pub fn info(&self) -> &OutputInfo {
         &self.info
     }
+
+    /// A copy of everything this engine sends to the device, from now on (once: `None`
+    /// after the first call). Nothing is copied until it's taken.
+    pub fn take_output_tap(&mut self) -> Option<OutputTap> {
+        let samples = self.tap.take()?;
+        self.stats.tapping.store(true, Relaxed);
+        Some(OutputTap {
+            samples,
+            stats: self.stats.clone(),
+            sample_rate: self.info.sample_rate,
+        })
+    }
+}
+
+/// What an engine sends to its device, copied ([`Engine::take_output_tap`]): the
+/// interleaved samples, as many channels as the device has. Read it often: when it's
+/// full, blocks are dropped (and counted in [`Stats::tap_dropped`]).
+pub struct OutputTap {
+    pub samples: rtrb::Consumer<f32>,
+    stats: Arc<Stats>,
+    pub sample_rate: u32,
+}
+
+impl OutputTap {
+    /// The device's channels (0 until the first block).
+    pub fn channels(&self) -> usize {
+        self.stats.tap_channels.load(Relaxed) as usize
+    }
+
+    /// Blocks dropped so far because the tap was full.
+    pub fn dropped(&self) -> u64 {
+        self.stats.tap_dropped.load(Relaxed)
+    }
+
+    /// Underruns and overruns the sound card has reported so far.
+    pub fn xruns(&self) -> u64 {
+        self.stats.xruns.load(Relaxed)
+    }
 }
 
 /// One thread's own ring into the engine (see [`Engine::sender`]). Commands from one
@@ -205,5 +247,29 @@ impl CommandSender {
 impl Drop for Engine {
     fn drop(&mut self) {
         self.gc_stop.store(true, Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Nothing is copied until the tap is taken; then every channel of every block.
+    #[test]
+    fn the_output_tap_copies_what_goes_to_the_device() {
+        let opts = OutputOptions {
+            stepped: true,
+            buffer_frames: Some(256),
+            ..OutputOptions::default()
+        };
+        let mut e = Engine::start(&opts, 2).unwrap();
+        e.advance(512);
+        let tap = e.take_output_tap().expect("a tap");
+        assert!(e.take_output_tap().is_none(), "only once");
+        assert_eq!(tap.samples.slots(), 0, "nothing before it was taken");
+        e.advance(1024);
+        assert_eq!(tap.channels(), STEPPED_CHANNELS);
+        assert_eq!(tap.samples.slots(), 1024 * STEPPED_CHANNELS);
+        assert_eq!(tap.dropped(), 0);
     }
 }

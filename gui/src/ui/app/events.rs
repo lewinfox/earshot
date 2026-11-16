@@ -113,7 +113,12 @@ impl EarshotApp {
                 Event::TempoLock(e) => self.tempo_lock_event(e),
                 Event::Stems(e) => self.panels.stems.on_event(e),
                 Event::Trim(e) => self.trim_event(e),
-                Event::Midi(m) => self.panels.controller.on_midi(m),
+                Event::Midi(m) => {
+                    if let Some(r) = &self.panels.debug.recorder {
+                        r.note_midi(false, &m.bytes);
+                    }
+                    self.panels.controller.on_midi(m)
+                }
             }
         }
     }

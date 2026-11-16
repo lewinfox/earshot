@@ -2,7 +2,7 @@
 //! triple buffer, so a reader always sees one whole callback's state), [`EngineEvent`]s
 //! for things that happened, and a few [`Stats`] counters.
 
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 
 use crate::command::{
@@ -273,6 +273,13 @@ pub struct Stats {
     pub phones_realigns: AtomicU64,
     /// Frames queued for the headphones (smoothed): how far behind the master they are.
     pub phones_level: AtomicU64,
+    /// Someone has the output tap ([`crate::Engine::take_output_tap`]): copy what goes
+    /// to the device into it.
+    pub tapping: AtomicBool,
+    /// The device's channels, as the tap's samples are interleaved.
+    pub tap_channels: AtomicU64,
+    /// Blocks the tap had no room for (whoever reads it fell behind).
+    pub tap_dropped: AtomicU64,
 }
 
 impl Stats {

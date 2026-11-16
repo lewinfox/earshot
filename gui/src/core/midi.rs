@@ -617,11 +617,11 @@ pub fn connect_all(
 
 /// Asks a DDJ-400 to send where each of its knobs, faders and switches is (Mixxx's
 /// mapping sends it on start), so earshot starts out matching the controller.
-const DDJ400_REPORT: [u8; 12] = [0xF0, 0x00, 0x40, 0x05, 0x00, 0x00, 0x02, 0x06, 0x00, 0x03, 0x01, 0xF7];
+pub const DDJ400_REPORT: [u8; 12] = [0xF0, 0x00, 0x40, 0x05, 0x00, 0x00, 0x02, 0x06, 0x00, 0x03, 0x01, 0xF7];
 
 /// The output ports named like the inputs that opened (a controller's two halves).
 /// A DDJ-400 is asked where its controls are (the inputs are open by now, to hear).
-fn connect_outputs(inputs: &[String]) -> Vec<midir::MidiOutputConnection> {
+fn connect_outputs(inputs: &[String]) -> Vec<(midir::MidiOutputConnection, bool)> {
     let Ok(probe) = MidiOutput::new("earshot-probe") else {
         return vec![];
     };
@@ -634,12 +634,11 @@ fn connect_outputs(inputs: &[String]) -> Vec<midir::MidiOutputConnection> {
         let Ok(output) = MidiOutput::new("earshot") else { continue };
         match output.connect(&port, "earshot-lights") {
             Ok(mut c) => {
-                if name.contains("DDJ-400")
-                    && let Err(e) = c.send(&DDJ400_REPORT)
-                {
+                let ddj = name.contains("DDJ-400");
+                if ddj && let Err(e) = c.send(&DDJ400_REPORT) {
                     eprintln!("MIDI: could not ask {name} where its controls are: {e}");
                 }
-                out.push(c);
+                out.push((c, ddj));
             }
             Err(e) => eprintln!("MIDI: could not open {name} for its lights: {e}"),
         }

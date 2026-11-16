@@ -37,6 +37,8 @@ const COMMAND_SLOTS: usize = 1024;
 pub(crate) const COMMAND_RINGS: usize = 3;
 const EVENT_SLOTS: usize = 256;
 const GARBAGE_SLOTS: usize = 64;
+/// The output tap's room, in samples: a few seconds of a 4-channel device.
+const TAP_SAMPLES: usize = 1 << 20;
 
 // ---- output routing ----------------------------------------------------------------
 
@@ -147,6 +149,9 @@ pub(crate) struct AppEnds {
     pub events: rtrb::Consumer<EngineEvent>,
     pub garbage: rtrb::Consumer<Garbage>,
     pub monitor: Monitor,
+    /// What goes to the device, copied (see [`crate::Engine::take_output_tap`]).
+    pub tap: rtrb::Consumer<f32>,
+    pub stats: Arc<Stats>,
 }
 
 /// The audio thread's ends, handed to [`Renderer::new`].
@@ -156,6 +161,7 @@ pub(crate) struct RendererEnds {
     garbage: rtrb::Producer<Garbage>,
     snapshots: triple_buffer::Input<EngineSnapshot>,
     stats: Arc<Stats>,
+    tap: rtrb::Producer<f32>,
 }
 
 impl RendererEnds {
@@ -177,6 +183,7 @@ pub(crate) fn wire() -> (AppEnds, RendererEnds) {
     let (garbage_tx, garbage) = rtrb::RingBuffer::new(GARBAGE_SLOTS);
     let (snap_in, snap_out) = triple_buffer::triple_buffer(&EngineSnapshot::default());
     let stats = Arc::new(Stats::default());
+    let (tap_tx, tap) = rtrb::RingBuffer::new(TAP_SAMPLES);
     (
         AppEnds {
             commands,
@@ -184,6 +191,8 @@ pub(crate) fn wire() -> (AppEnds, RendererEnds) {
             events,
             garbage,
             monitor: Monitor::new(snap_out, stats.clone()),
+            tap,
+            stats: stats.clone(),
         },
         RendererEnds {
             commands: command_rx,
@@ -191,6 +200,7 @@ pub(crate) fn wire() -> (AppEnds, RendererEnds) {
             garbage: garbage_tx,
             snapshots: snap_in,
             stats,
+            tap: tap_tx,
         },
     )
 }
@@ -902,6 +912,8 @@ pub struct Renderer {
     outbox: Outbox,
     snapshots: triple_buffer::Input<EngineSnapshot>,
     stats: Arc<Stats>,
+    /// A copy of what goes to the device, while [`Stats::tapping`].
+    out_tap: rtrb::Producer<f32>,
     callbacks: u64,
     last_block_frames: u32,
     /// All [`MAX_DECKS`] exist, so a [`DeckId`] can always index them. Only the first
@@ -995,6 +1007,7 @@ impl Renderer {
             },
             snapshots: ends.snapshots,
             stats: ends.stats,
+            out_tap: ends.tap,
             callbacks: 0,
             last_block_frames: 0,
             decks: std::array::from_fn(|i| {
@@ -1083,6 +1096,17 @@ impl Renderer {
                     // Both buses may share channels (a laptop's only pair).
                     for s in frame.iter_mut() {
                         *s = s.clamp(-1.0, 1.0);
+                    }
+                }
+            }
+            if self.stats.tapping.load(Relaxed) {
+                self.stats.tap_channels.store(channels as u64, Relaxed);
+                match self.out_tap.write_chunk_uninit(chunk.len()) {
+                    Ok(c) => {
+                        c.fill_from_iter(chunk.iter().copied());
+                    }
+                    Err(_) => {
+                        self.stats.tap_dropped.fetch_add(1, Relaxed);
                     }
                 }
             }

@@ -1297,6 +1297,7 @@ name = "earshot-gui"
 version = "0.1.0"
 dependencies = [
  "alsa",
+ "crc32fast",
  "directories",
  "earshot-engine",
  "eframe",
@@ -1307,6 +1308,7 @@ dependencies = [
  "image",
  "libc",
  "midir",
+ "realfft",
  "rfd",
  "rusqlite",
  "serde",
