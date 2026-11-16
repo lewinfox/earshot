@@ -21,6 +21,8 @@ pub struct ControllerAudio {
 
 /// The ALSA sequencer client a MIDI port name ends with: midir names ALSA ports
 /// `DDJ-400:DDJ-400 MIDI 1 20:0`, client 20, port 0.
+// Used by the Linux module (and the tests); dead on other platforms.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn port_client(name: &str) -> Option<i32> {
     let (client, port) = name.rsplit_once(' ')?.1.split_once(':')?;
     port.parse::<i32>().ok()?;
@@ -29,6 +31,8 @@ pub fn port_client(name: &str) -> Option<i32> {
 
 /// The PipeWire device for ALSA card `card` in `pw-dump`'s output, and its profile
 /// now: (object id, profile index).
+// Used by the Linux module (and the tests); dead on other platforms.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn pipewire_device(dump: &str, card: i32) -> Option<(u64, Option<i64>)> {
     let objects: Vec<serde_json::Value> = serde_json::from_str(dump).ok()?;
     objects.iter().find_map(|o| {

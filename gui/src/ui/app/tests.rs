@@ -2240,6 +2240,9 @@ fn the_top_bar_keeps_its_groups_apart() {
 /// to format it; a playlist's "Send to" opens the add window, which offers to format
 /// first, and the format window says what's lost. (The stick here has no device, so
 /// formatting it fails, harmlessly.) Its icon's menu has Format and Eject.
+// The format failure asserted here is the Linux udisks path; macOS routes through
+// diskutil and fails with its own message.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_stick_with_files_is_formatted_first() {
     use egui_kittest::kittest::Queryable;

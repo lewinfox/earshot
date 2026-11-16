@@ -11,7 +11,7 @@
 
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -169,6 +169,7 @@ fn tee_stderr() -> Result<(), String> {
     std::thread::Builder::new()
         .name("earshot-log".into())
         .spawn(move || {
+            use std::io::{BufRead, BufReader};
             for line in BufReader::new(pipe).split(b'\n').map_while(Result::ok) {
                 to_terminal(&line);
                 write_line(&line);

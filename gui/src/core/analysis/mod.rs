@@ -839,6 +839,8 @@ enum Priority {
     /// Linux's idle CPU and disk classes: only what nothing else wants.
     Idle,
     /// Normal scheduling at this nice value (higher is nicer).
+    // The value is only read by the Linux `apply`; dead on other platforms.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Nice(i32),
 }
 

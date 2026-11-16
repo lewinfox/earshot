@@ -357,10 +357,20 @@ impl Drop for StopOnDrop {
 
 /// Write everything cached for the filesystem at `at` to the drive.
 pub fn flush(at: &Path) {
-    use std::os::fd::AsRawFd;
-    if let Ok(f) = fs::File::open(at) {
+    let Ok(f) = fs::File::open(at) else { return };
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
         // SAFETY: a valid open file descriptor.
         unsafe { libc::syncfs(f.as_raw_fd()) };
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // macOS (and other unixes) have no syncfs: flush all filesystems instead.
+        // Heavier, but flush is best effort and only runs after a copy or on eject.
+        let _ = f;
+        // SAFETY: sync takes no arguments and can't fail.
+        unsafe { libc::sync() };
     }
 }
 

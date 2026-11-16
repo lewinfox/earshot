@@ -1637,6 +1637,8 @@ mod tests {
         assert!(next.wait(&mut |_| {}).unwrap().grid.unwrap().is_ok());
     }
 
+    // The memory cap reads /proc, so it's enforced on Linux only.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_worker_over_its_memory_cap_is_stopped() {
         let mut config = fake(PROTOCOL, true);
