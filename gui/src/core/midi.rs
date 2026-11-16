@@ -626,14 +626,20 @@ pub fn connect_all(
     ))
 }
 
-/// The output ports named like the inputs that opened (a controller's two halves).
+/// Asks a DDJ-400 where its knobs, faders and switches are (Mixxx's mapping sends it
+/// on start). Not sent at start (see [`connect_outputs`]); Debug mode can send it on
+/// demand, to test when it upsets the unit.
+pub const DDJ400_REPORT: [u8; 12] = [0xF0, 0x00, 0x40, 0x05, 0x00, 0x00, 0x02, 0x06, 0x00, 0x03, 0x01, 0xF7];
+
+/// The output ports named like the inputs that opened (a controller's two halves),
+/// and whether each is a DDJ-400's.
 ///
 /// A DDJ-400 isn't asked where its controls are. Mixxx's mapping sends it a SysEx
 /// for that (F0 00 40 05 00 00 02 06 00 03 01 F7), but sent by earshot it left the
 /// unit's headphone mix chirping, now and then, until it was unplugged (it arrived
 /// the day that started, and six runs without it were clean). Earshot learns each
 /// control's place when it's first moved.
-fn connect_outputs(inputs: &[String]) -> Vec<midir::MidiOutputConnection> {
+fn connect_outputs(inputs: &[String]) -> Vec<(midir::MidiOutputConnection, bool)> {
     let Ok(probe) = MidiOutput::new("earshot-probe") else {
         return vec![];
     };
@@ -647,7 +653,7 @@ fn connect_outputs(inputs: &[String]) -> Vec<midir::MidiOutputConnection> {
         match output.connect(&port, "earshot-lights") {
             Ok(c) => {
                 eprintln!("[init] MIDI: opened output {name:?}");
-                out.push(c);
+                out.push((c, name.contains("DDJ-400")));
             }
             Err(e) => eprintln!("MIDI: could not open {name} for its lights: {e}"),
         }
