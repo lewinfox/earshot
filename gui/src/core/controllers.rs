@@ -356,6 +356,7 @@ impl Store {
                 .collect(),
             meters: if full.meters == base.meters { vec![] } else { full.meters.clone() },
             start: p.own.start.clone(),
+            start_every_ms: p.own.start_every_ms,
             mirror: p.own.mirror.clone(),
             mirror_status: p.own.mirror_status.clone(),
             skipped: vec![],
@@ -428,6 +429,7 @@ fn merge(mut base: ControllerFile, top: ControllerFile) -> ControllerFile {
     }
     if !top.start.is_empty() {
         base.start = top.start;
+        base.start_every_ms = top.start_every_ms;
     }
     base.mirror.extend(top.mirror);
     base.mirror_status.extend(top.mirror_status);
@@ -481,7 +483,7 @@ mod tests {
         assert_eq!(model(s.find("x", Some("2b73:0026"), None)), Some(Some("ddj-400".into())));
         assert_eq!(model(s.find("x", Some("2B73:0026"), None)), Some(Some("ddj-400".into())));
         assert_eq!(model(s.find(port, None, None)), Some(Some("ddj-400".into())));
-        assert_eq!(model(s.find("DDJ-FLX4 MIDI 1", Some("2b73:ffff"), None)), Some(None), "Pioneer's file");
+        assert_eq!(model(s.find("DDJ-SB3 MIDI 1", Some("2b73:ffff"), None)), Some(None), "Pioneer's file");
         assert!(s.find("Launchpad", Some("1235:0069"), None).is_none());
         assert!(s.find("Midi Through Port-0", None, None).is_none());
     }
@@ -555,6 +557,29 @@ mod tests {
         assert_eq!(own.inputs, ddj.own.inputs);
         assert_eq!(own.meters, ddj.own.meters);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The DDJ-FLX4 by its port's name: Pioneer's lines under its own, its start
+    /// message repeated every 200 ms, and its own sampler pad layout and BEAT FX.
+    #[test]
+    fn the_flx4() {
+        let s = Store::new(None);
+        let p = s.find("DDJ-FLX4:DDJ-FLX4 MIDI 1 24:0", None, None).unwrap();
+        assert_eq!(p.id.model.as_deref(), Some("ddj-flx4"));
+        assert_eq!(p.file.start_every_ms, Some(200));
+        assert_eq!(p.file.start, vec![vec![0xF0, 0x00, 0x40, 0x05, 0x00, 0x00, 0x04, 0x05, 0x00, 0x50, 0x02, 0xF7]]);
+        let cmd = |k: (u8, u8)| p.file.inputs.get(&k).map(|l| l.control.name().0);
+        assert_eq!(cmd((0x90, 0x0B)).as_deref(), Some("deck_1_play"), "Pioneer's");
+        assert_eq!(cmd((0x97, 0x34)).as_deref(), Some("sampler_9_play"));
+        assert_eq!(cmd((0x99, 0x30)).as_deref(), Some("sampler_5_play"));
+        assert_eq!(cmd((0x9A, 0x37)).as_deref(), Some("sampler_16_stop"));
+        assert_eq!(cmd((0x95, 0x11)).as_deref(), Some("fx_1_channel_deck_2"));
+        assert_eq!(cmd((0x94, 0x11)), None, "not on the FLX4");
+        assert_eq!(cmd((0xB6, 0x0D)), None, "no headphone level");
+        // Written back, it reads the same.
+        let (_, again) = from_json(&file_json(serde_json::Map::new(), &p.own)).unwrap();
+        assert_eq!(again.start_every_ms, Some(200));
+        assert_eq!(again.inputs, p.own.inputs);
     }
 
     #[test]

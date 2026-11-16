@@ -291,8 +291,28 @@ impl Drop for Lights {
     }
 }
 
+/// What a controller is sent as it starts (its file's `start`), and how often again
+/// after that, if it needs them repeated to stay in touch (`start_every_ms`: a
+/// DDJ-FLX4 stops talking without them).
+#[derive(Clone, Debug, Default)]
+pub struct Start {
+    pub messages: Vec<Vec<u8>>,
+    pub every: Option<Duration>,
+    last: Option<Instant>,
+}
+
+impl Start {
+    pub fn new(messages: Vec<Vec<u8>>, every: Option<Duration>) -> Start {
+        Start {
+            messages,
+            every,
+            last: None,
+        }
+    }
+}
+
 /// Each output, with its controller's start messages.
-type Outputs = Vec<(MidiOutputConnection, Vec<Vec<u8>>)>;
+pub type Outputs = Vec<(MidiOutputConnection, Start)>;
 
 fn send(outputs: &mut Outputs, recorder: &Option<super::debug::Recorder>, (status, data1): (u8, u8), v: u8) {
     for (o, _) in outputs.iter_mut() {
@@ -308,7 +328,7 @@ fn send(outputs: &mut Outputs, recorder: &Option<super::debug::Recorder>, (statu
 fn send_start(outputs: &mut Outputs, recorder: &Option<super::debug::Recorder>) {
     let mut sent = 0;
     for (o, start) in outputs.iter_mut() {
-        for m in start.iter() {
+        for m in &start.messages {
             if o.send(m).is_ok() {
                 sent += 1;
             }
@@ -316,8 +336,27 @@ fn send_start(outputs: &mut Outputs, recorder: &Option<super::debug::Recorder>) 
                 r.note_midi(true, m);
             }
         }
+        start.last = Some(Instant::now());
+        if let Some(e) = start.every {
+            eprintln!("[midi] start messages repeat every {} ms", e.as_millis());
+        }
     }
     eprintln!("[midi] sent {sent} start message(s)");
+}
+
+/// Send again the start messages of each controller that needs them repeated, when
+/// it's time. Not logged or recorded: they go several times a second.
+fn keep_alive(outputs: &mut Outputs) {
+    for (o, start) in outputs.iter_mut() {
+        let Some(every) = start.every else { continue };
+        if start.last.is_some_and(|t| t.elapsed() < every) {
+            continue;
+        }
+        for m in &start.messages {
+            let _ = o.send(m);
+        }
+        start.last = Some(Instant::now());
+    }
 }
 
 /// A message typed in Controller mode's Send tab, to every output, logged.
@@ -427,6 +466,7 @@ fn run(mut outputs: Outputs, mut sent: BTreeMap<(u8, u8), u8>, learned: &Learned
         for m in by_hand.drain(..) {
             send_by_hand(&mut outputs, &recorder, &m);
         }
+        keep_alive(&mut outputs);
         let lit_half = (start.elapsed().as_millis() / FLASH.as_millis()) % 2 == 0;
         // No audio (it's reopening): as at start-up, the decks empty.
         let s = snap.unwrap_or_default();

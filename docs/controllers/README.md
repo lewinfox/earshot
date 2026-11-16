@@ -31,7 +31,9 @@ Nothing else in the code names a controller.
   4. Its **maker's file** alone (`"usb": ["2b73:*"]`): an unknown Pioneer gets the
      shared lines.
 - **Fields:** `name`, `usb`, `names`; `inputs` and `meters`; `start` (messages sent
-  after the start-up lights, e.g. the DDJ-400's position query); `mirror` and
+  after the start-up lights, e.g. the DDJ-400's position query) and
+  `start_every_ms` (send them again this often: the DDJ-FLX4 stops talking without
+  its query every 200 ms); `mirror` and
   `mirror_status` (where else a button's light goes: the DDJ keeps a separate light
   for each SHIFT note and shows those while SHIFT is held, so each light is sent to
   both).
