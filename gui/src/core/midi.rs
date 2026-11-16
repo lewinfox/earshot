@@ -135,7 +135,8 @@ fn ddj400_names() -> Vec<(u8, u8, String, String, Input)> {
 /// The DDJ-400's pads in beat loop and beat jump mode (each mode's pads send their
 /// own notes), and its Shift buttons, in earshot's names. From Mixxx's DDJ-400
 /// mapping: pads 1-8 on notes 0x60-0x67 (loops) and 0x20-0x27 (jumps); keyboard
-/// (0x40-0x47) and key shift (0x70-0x77) from rekordbox's, with SHIFT a channel up; deck 1 on
+/// (0x40-0x47), key shift (0x70-0x77), pad FX 1 (0x10-0x17) and pad FX 2 (0x50-0x57) from
+/// rekordbox's, with SHIFT a channel up; deck 1 on
 /// 0x97, deck 2 on 0x99; on each deck's channel, Shift on 0x3F and CUE/LOOP CALL on
 /// 0x51 / 0x53 (with Shift: 0x3E / 0x3D), Shift + RELOOP/EXIT on 0x50, BEAT SYNC
 /// held on 0x5C and LOOP IN held (4-beat loop) on 0x14 (both seen from the unit), and
@@ -160,8 +161,13 @@ fn ddj400_pads() -> Vec<(u8, u8, String, Option<f64>)> {
     }
     // MASTER CUE (seen from the unit): display only, the controller does it itself.
     v.push((0x96, 0x63, "mixer_master_headphone_cue".to_string(), None));
+    // Related tracks and the library maximised (mapped on the unit).
+    v.push((0x96, 0x68, "library_related_tracks_toggle".to_string(), None));
+    v.push((0x96, 0x7A, "ui_library_maximize_toggle".to_string(), None));
     for (d, status) in [(1, 0x90u8), (2, 0x91)] {
         v.push((status, 0x3F, format!("deck_{d}_shift"), None));
+        // The next tempo range (mapped on the unit).
+        v.push((status, 0x60, format!("deck_{d}_tempo_range_next"), None));
         // CUE/LOOP CALL ◀ ▶, and with Shift: delete / save a memory cue.
         v.push((status, 0x51, format!("deck_{d}_cue_jump_to_prev"), None));
         v.push((status, 0x53, format!("deck_{d}_cue_jump_to_next"), None));
@@ -203,6 +209,11 @@ fn ddj400_pads() -> Vec<(u8, u8, String, Option<f64>)> {
             v.push((status + 1, 0x40 + i, format!("deck_{d}_keyboard_pad_shift"), n));
             v.push((status, 0x70 + i, format!("deck_{d}_key_shift_pad"), n));
             v.push((status + 1, 0x70 + i, format!("deck_{d}_key_shift_pad_shift"), n));
+            // Pad FX 1 and 2's pads (0x10-0x17, 0x50-0x57), likewise.
+            v.push((status, 0x10 + i, format!("deck_{d}_pad_fx_1_pad"), n));
+            v.push((status + 1, 0x10 + i, format!("deck_{d}_pad_fx_1_pad_shift"), n));
+            v.push((status, 0x50 + i, format!("deck_{d}_pad_fx_2_pad"), n));
+            v.push((status + 1, 0x50 + i, format!("deck_{d}_pad_fx_2_pad_shift"), n));
         }
     }
     v
@@ -617,7 +628,9 @@ fn ddj400_map() -> Map {
                 input: mp.input,
                 display_only: matches!(
                     mp.control,
-                    Control::Master(MasterParam::Gain | MasterParam::HeadMix | MasterParam::MasterCue)
+                    Control::Master(
+                        MasterParam::Gain | MasterParam::HeadGain | MasterParam::HeadMix | MasterParam::MasterCue
+                    )
                 ),
             };
             ((mp.status, mp.data1), l)
@@ -1063,6 +1076,47 @@ mod tests {
         }
     }
 
+    /// Pad FX pads: bank 1 on 0x10-0x17 and bank 2 on 0x50-0x57, deck 1 on 0x97 and
+    /// deck 2 on 0x99, SHIFT's on the next channel; a press and a release each.
+    #[test]
+    fn pad_fx_pads() {
+        use crate::core::view::{PadMode, ViewCmd};
+        for (bytes, d, m, p, sh, dn) in [
+            ([0x97, 0x10, 0x7F], 0, PadMode::PadFx1, 0, false, true),
+            ([0x87, 0x10, 0x00], 0, PadMode::PadFx1, 0, false, false),
+            ([0x97, 0x17, 0x7F], 0, PadMode::PadFx1, 7, false, true),
+            ([0x98, 0x13, 0x7F], 0, PadMode::PadFx1, 3, true, true),
+            ([0x88, 0x13, 0x00], 0, PadMode::PadFx1, 3, true, false),
+            ([0x99, 0x12, 0x7F], 1, PadMode::PadFx1, 2, false, true),
+            ([0x97, 0x50, 0x7F], 0, PadMode::PadFx2, 0, false, true),
+            ([0x99, 0x57, 0x7F], 1, PadMode::PadFx2, 7, false, true),
+            ([0x89, 0x57, 0x00], 1, PadMode::PadFx2, 7, false, false),
+            ([0x9A, 0x54, 0x7F], 1, PadMode::PadFx2, 4, true, true),
+        ] {
+            assert!(
+                matches!(cmd(bytes),
+                    Some(Command::View(ViewCmd::ModePad { deck: x, mode, pad, shift, down }))
+                        if x == deck(d) && mode == m && pad == p && shift == sh && down == dn
+                ),
+                "{bytes:02X?}"
+            );
+        }
+        // Every pad of both banks is mapped, with and without SHIFT, on both decks,
+        // and no note is mapped twice.
+        let pads = ddj400_pads();
+        let fx = pads.iter().filter(|(_, _, name, _)| name.contains("_pad_fx_") && !name.contains("set_pad_mode"));
+        assert_eq!(fx.count(), 2 * 2 * 2 * 8);
+        let all = ddj400();
+        for (i, a) in all.iter().enumerate() {
+            assert!(
+                !all[..i].iter().any(|b| (b.status, b.data1) == (a.status, a.data1)),
+                "{:02X} {:02X} mapped twice",
+                a.status,
+                a.data1
+            );
+        }
+    }
+
     /// Pads in beat loop and beat jump mode: their own notes, each a fixed size.
     #[test]
     fn loop_and_jump_pads() {
@@ -1147,15 +1201,15 @@ mod tests {
         assert!(back.inputs[&(0xB6, 0x08)].display_only && back.inputs[&(0xB6, 0x28)].display_only);
     }
 
-    /// A DDJ-400's MASTER LEVEL and HEADPHONES MIXING are display only from the start
-    /// (the controller does both itself); only the output levels and the headphone mix
+    /// A DDJ-400's MASTER LEVEL, HEADPHONES LEVEL and HEADPHONES MIXING are display
+    /// only from the start (the controller does them itself); only the output levels and the headphone mix
     /// can be display only.
     #[test]
     fn the_ddj_master_level_is_display_only() {
         let l = ddj();
         assert!(l.get((0xB6, 0x08)).unwrap().display_only);
         assert!(l.get((0xB6, 0x28)).unwrap().display_only);
-        assert!(!l.get((0xB6, 0x0D)).unwrap().display_only, "headphone level stays live");
+        assert!(l.get((0xB6, 0x0D)).unwrap().display_only, "the headphone level: the DDJ sets it");
         // HEADPHONES MIXING too: the controller blends its master into the headphones,
         // and earshot's headphone channels carry only the cue.
         assert!(l.get((0xB6, 0x0C)).unwrap().display_only);

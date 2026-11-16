@@ -183,6 +183,7 @@ and, to build Rubber Band, `sudo apt install build-essential libsndfile1-dev`.
 - Exports (Prepare's Export tab) write whole playlists; there's no two-way sync yet.
 - Whole tracks are decoded into memory (about 10 MB per stereo minute).
 - No controller LED feedback. Effects are Echo and Trans only, and the DDJ-400's FX
-  section isn't mapped yet.
+  section isn't mapped yet. Its PAD FX 1 / 2 pads play a fixed bank of 16 effects
+  each (`gui/src/core/pads.rs`): not rekordbox's own defaults, and not editable yet.
 - Hot cues are not saved.
 - The worker has no timeout: if it hangs, the analysis queue stops until restart.

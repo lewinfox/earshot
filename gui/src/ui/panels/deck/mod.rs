@@ -443,11 +443,22 @@ impl DeckUi {
         out.extend(Control::Deck(self.id, c).command(value));
     }
 
-    /// A pad pressed or let go in keyboard or key shift mode: what the deck is told.
+    /// A pad pressed or let go in keyboard, key shift or pad FX mode: what the deck is
+    /// told.
     pub fn mode_pad(&mut self, mode: PadMode, pad: usize, shift: bool, down: bool) -> Vec<Command> {
         let state = self.state;
         self.pads
             .press(mode, pad, shift, down, &state)
+            .into_iter()
+            .map(|c| Command::Deck(self.id, DeckCmd::Engine(c)))
+            .collect()
+    }
+
+    /// The pads change to `mode`: a pad FX pad held in the old one is let go.
+    pub fn set_pad_mode(&mut self, mode: PadMode) -> Vec<Command> {
+        self.pad_mode = mode;
+        self.pads
+            .release_fx()
             .into_iter()
             .map(|c| Command::Deck(self.id, DeckCmd::Engine(c)))
             .collect()

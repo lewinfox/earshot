@@ -10,6 +10,7 @@ use crate::beatgrid::Beatgrid;
 use crate::decode::TrackAudio;
 use crate::engine::Routing;
 use crate::fx::{FX_UNITS, FxCmd, FxUnitState};
+use crate::pad_fx::PadFx;
 use crate::stems::StemAudio;
 use crate::tempo::TempoRange;
 
@@ -158,6 +159,9 @@ pub enum DeckCmd {
     KeyShift(f64),
     /// Move the key shift by this many semitones.
     KeyShiftBy(f64),
+    /// The deck's pad effect slot ([`crate::pad_fx`]): a pad pressed (its effect goes
+    /// on, in place of any other held), or the held one let go (`None`).
+    PadFx(Option<PadFx>),
     /// Headphone cue for this deck's channel.
     Pfl(Set),
     Crossfader(XfSide),
