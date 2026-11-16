@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use midir::{MidiInput, MidiInputConnection, MidiOutput};
 
-use earshot_engine::MasterParam;
+use earshot_engine::{DeckId, MasterParam};
 
 use super::bus::{Control, Kind};
 use super::command::{self, Command, Lane};
@@ -299,6 +299,10 @@ pub struct Learned(Arc<Mutex<Session>>);
 #[derive(Default)]
 struct Session {
     map: BTreeMap<(u8, u8), Learn>,
+    /// The controller's level meters, which earshot drives (`core::lights`).
+    meters: Vec<Meter>,
+    /// Messages that came in mapped to nothing, already logged (once each a run).
+    unmapped: std::collections::HashSet<(u8, u8)>,
     /// The built-in table has been put in once, or a mapping was loaded (so the
     /// table isn't added on top).
     seeded: bool,
@@ -311,6 +315,26 @@ struct Session {
 
 /// A mapping: the command each message runs, by message key.
 pub type Map = BTreeMap<(u8, u8), Learn>;
+
+/// A channel level meter on the controller: a message earshot sends, with a number
+/// (0-127) the controller lights its LEDs from. Where its colours start differs from
+/// one controller to the next, so the file says: the lowest number that lights the
+/// first amber LED, and the red one. Red is only sent over full scale.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Meter {
+    pub deck: DeckId,
+    pub status: u8,
+    pub data1: u8,
+    pub amber_at: u8,
+    pub red_at: u8,
+}
+
+/// Everything a controller file holds: what each message runs, and the meters.
+#[derive(Clone, Debug, Default)]
+pub struct ControllerFile {
+    pub inputs: Map,
+    pub meters: Vec<Meter>,
+}
 
 impl Learned {
     pub fn get(&self, key: (u8, u8)) -> Option<Learn> {
@@ -358,15 +382,27 @@ impl Learned {
     }
 
     pub fn clear(&self) {
-        self.replace(Map::new());
+        self.replace(ControllerFile::default());
     }
 
-    /// Put `map` in place of the whole mapping.
-    pub fn replace(&self, map: Map) {
+    /// Put `m` in place of the whole mapping.
+    pub fn replace(&self, m: ControllerFile) {
         let mut s = self.0.lock().unwrap();
-        s.map = map;
+        s.map = m.inputs;
+        s.meters = m.meters;
         s.seeded = true;
         s.version += 1;
+    }
+
+    /// A message with `key` came in and nothing's mapped to it: true the first time
+    /// this run, so it's logged once rather than with every turn of a knob.
+    pub fn first_unmapped(&self, key: (u8, u8)) -> bool {
+        self.0.lock().unwrap().unmapped.insert(key)
+    }
+
+    /// The controller's level meters.
+    pub fn meters(&self) -> Vec<Meter> {
+        self.0.lock().unwrap().meters.clone()
     }
 
     /// How many changes so far.
@@ -386,8 +422,12 @@ impl Learned {
         if std::mem::replace(&mut s.seeded, true) {
             return;
         }
-        for (k, l) in ddj400_map() {
+        let m = ddj400_mapping();
+        for (k, l) in m.inputs {
             s.map.entry(k).or_insert(l);
+        }
+        if s.meters.is_empty() {
+            s.meters = m.meters;
         }
         s.version += 1;
     }
@@ -428,19 +468,43 @@ impl Learned {
                 Value::Object(o)
             })
             .collect();
-        let file = json!({ "device": device, "inputs": inputs });
+        let mut file = json!({ "device": device, "inputs": inputs });
+        let meters: Vec<Value> = self
+            .meters()
+            .iter()
+            .map(|m| {
+                json!({
+                    "deck": m.deck.index() + 1,
+                    "message": format!("{:02X} {:02X}", m.status, m.data1),
+                    "amber_at": m.amber_at,
+                    "red_at": m.red_at,
+                })
+            })
+            .collect();
+        if !meters.is_empty() {
+            file["meters"] = json!(meters);
+        }
         serde_json::to_string_pretty(&file).expect("JSON") + "\n"
     }
 }
 
 /// A controller file (see [`Learned::to_json`]): its device name and mapping. Errors
 /// say which input is wrong.
-pub fn from_json(text: &str) -> Result<(String, Map), String> {
+pub fn from_json(text: &str) -> Result<(String, ControllerFile), String> {
     #[derive(serde::Deserialize)]
     struct File {
         #[serde(default)]
         device: String,
         inputs: Vec<Line>,
+        #[serde(default)]
+        meters: Vec<MeterLine>,
+    }
+    #[derive(serde::Deserialize)]
+    struct MeterLine {
+        deck: usize,
+        message: String,
+        amber_at: u8,
+        red_at: u8,
     }
     #[derive(serde::Deserialize)]
     struct Line {
@@ -487,12 +551,59 @@ pub fn from_json(text: &str) -> Result<(String, Map), String> {
             },
         );
     }
-    Ok((file.device, map))
+    let mut meters = vec![];
+    for (i, m) in file.meters.iter().enumerate() {
+        let at = |e: &str| format!("meter {} ({}): {e}", i + 1, m.message);
+        let bytes: Vec<u8> = m
+            .message
+            .split_whitespace()
+            .map(|b| u8::from_str_radix(b, 16))
+            .collect::<Result<_, _>>()
+            .map_err(|_| at("the message isn't two hex bytes"))?;
+        let [status, data1] = bytes[..] else {
+            return Err(at("the message isn't two hex bytes"));
+        };
+        let deck = m
+            .deck
+            .checked_sub(1)
+            .and_then(DeckId::new)
+            .ok_or_else(|| at("no such deck"))?;
+        if !(m.amber_at < m.red_at && m.red_at <= 127) {
+            return Err(at("amber_at must be below red_at, and red_at at most 127"));
+        }
+        meters.push(Meter {
+            deck,
+            status,
+            data1,
+            amber_at: m.amber_at,
+            red_at: m.red_at,
+        });
+    }
+    Ok((file.device, ControllerFile { inputs: map, meters }))
 }
 
 /// Mappings earshot knows without a file, to start a new one from.
-pub fn profiles() -> Vec<(&'static str, Map)> {
-    vec![("Pioneer DDJ-400 (built-in)", ddj400_map())]
+pub fn profiles() -> Vec<(&'static str, ControllerFile)> {
+    vec![("Pioneer DDJ-400 (built-in)", ddj400_mapping())]
+}
+
+/// The built-in DDJ-400 table, with its two channel meters: controller 0x02 on
+/// channel 1 (deck 1) and 2 (deck 2). Measured on the unit: the first amber LED
+/// comes on at 87, red at 119.
+fn ddj400_mapping() -> ControllerFile {
+    let meters = [(0, 0xB0), (1, 0xB1)]
+        .map(|(d, status)| Meter {
+            deck: DeckId::new(d).expect("a deck"),
+            status,
+            data1: 0x02,
+            amber_at: 87,
+            red_at: 119,
+        })
+        .to_vec();
+    ControllerFile {
+        inputs: ddj400_map(),
+        meters,
+    }
 }
 
 /// The built-in DDJ-400 table as a mapping.
@@ -705,6 +816,20 @@ fn on_message(
     port: usize,
 ) {
     let found = translate(bytes, learned);
+    // Mapped to nothing: an error, so a button earshot ignores can be tracked down.
+    // Once a message (a knob sends a stream); system messages (clock, SysEx) aside.
+    if found.is_none()
+        && bytes.first().is_some_and(|s| *s < 0xF0)
+        && let Some(k) = key(bytes)
+        && learned.get(k).is_none()
+        && learned.first_unmapped(k)
+    {
+        let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02X}")).collect();
+        eprintln!(
+            "ERROR MIDI: {} (port {port}) isn't mapped to anything; logged once a message",
+            hex.join(" ")
+        );
+    }
     sink(Event::Midi(MidiMsg {
         port,
         bytes: bytes.to_vec(),
@@ -830,7 +955,8 @@ mod tests {
         let v = learned.version();
         let (device, map) = from_json(&learned.to_json("DDJ-400")).unwrap();
         assert_eq!(device, "DDJ-400");
-        assert_eq!(map, ddj400_map());
+        assert_eq!(map.inputs, ddj400_map());
+        assert_eq!(map.meters, ddj400_mapping().meters, "the meters too");
         let fresh = Learned::default();
         fresh.replace(map);
         assert!(fresh.version() > 0);
@@ -849,6 +975,10 @@ mod tests {
     fn every_entry_maps_to_a_control() {
         assert_eq!(ddj400().len(), ddj400_names().len() + ddj400_pads().len());
         assert!(translate(&[0x90, 0x0B, 0x7F], &Learned::default()).is_none(), "nothing mapped");
+        let l = Learned::default();
+        assert!(l.first_unmapped((0x90, 0x0B)), "logged the first time");
+        assert!(!l.first_unmapped((0x90, 0x0B)), "not again");
+        assert!(l.first_unmapped((0x90, 0x0C)), "another message is");
     }
 
     #[test]
@@ -999,7 +1129,7 @@ mod tests {
             other => panic!("{other:?}"),
         }
         let (_, back) = from_json(&l.to_json("x")).unwrap();
-        assert!(back[&(0xB6, 0x08)].display_only && back[&(0xB6, 0x28)].display_only);
+        assert!(back.inputs[&(0xB6, 0x08)].display_only && back.inputs[&(0xB6, 0x28)].display_only);
     }
 
     /// A DDJ-400's MASTER LEVEL and HEADPHONES MIXING are display only from the start
@@ -1075,7 +1205,7 @@ mod tests {
         let json = l.to_json("x");
         assert!(json.contains("\"msb\"") && json.contains("\"lsb\""), "{json}");
         let (_, back) = from_json(&json).unwrap();
-        assert_eq!(back[&(0xB6, 0x40)].input, Input::Lsb);
+        assert_eq!(back.inputs[&(0xB6, 0x40)].input, Input::Lsb);
     }
 
     #[test]
