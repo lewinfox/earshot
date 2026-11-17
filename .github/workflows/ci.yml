@@ -30,7 +30,7 @@ jobs:
           - name: linux
             os: ubuntu-latest
           - name: macos
-            os: macos-14 # Apple silicon, as the release builds
+            os: macos-latest # Apple silicon, as the release builds
     steps:
       - uses: actions/checkout@v4
 
