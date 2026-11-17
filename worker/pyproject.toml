@@ -1,6 +1,6 @@
 [project]
 name = "earshot-worker"
-version = "0.1.0"
+version = "0.1.1"
 description = "Stateless analysis worker for earshot (beatgrids via Beat This!) and its reader for other DJ libraries (cratelib)"
 requires-python = ">=3.12"
 dependencies = [
