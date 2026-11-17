@@ -36,9 +36,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # Restore only: cache.yml saves this cache from develop, which every PR can read.
+      # (A cache a PR saves is only usable by re-runs of that PR.)
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.name }}
+          shared-key: test-${{ matrix.name }}
+          save-if: false
 
       # The same build packages as the release's Linux build. macOS needs none.
       - name: Linux packages
