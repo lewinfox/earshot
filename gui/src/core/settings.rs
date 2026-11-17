@@ -1,12 +1,13 @@
 //! Deck and audio settings (tempo ranges, keylock and quantise), and the Flow canvas's: engine and app state, kept in the Store's `settings`
 //! table as JSON. (The UI's own preferences, like the layout, are kept by the UI.)
 
-use earshot_engine::{HotcueMode, TempoRange};
+use earshot_engine::{HotcueMode, TempoRange, XfCurve};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use super::collections::CollectionId;
 use super::player::AudioSettings;
+use super::sampler::Bank;
 use super::store::{Reader, StoreCmd};
 
 /// [`AudioSettings`]: the output device, buffer size and routing.
@@ -18,18 +19,28 @@ pub const TEMPO_RANGES: &str = "decks.tempo_ranges";
 pub const DECK_OPTIONS: &str = "decks.options";
 /// What hot cues do on a stopped deck ([`HotcueMode`]).
 pub const HOTCUE_MODE: &str = "decks.hotcue_mode";
+/// The crossfader's curve ([`XfCurve`]).
+pub const XF_CURVE: &str = "mixer.crossfader_curve";
 /// The Flow that was on the canvas last. (Where its canvas was looking is kept with
 /// the Flow: `StoreCmd::SaveFlowCamera`.)
 pub const FLOW_OPEN: &str = "flow.open";
 /// Cue a newly loaded track on its first beat (else at its start).
 pub const CUE_FIRST_BEAT: &str = "decks.cue_first_beat";
+/// A track may be loaded onto a deck that's playing (else the load is refused).
+pub const LOAD_WHILE_PLAYING: &str = "decks.load_while_playing";
 /// The most the stems cache may take, GB: the least recently used go at start-up.
 pub const STEMS_CACHE_GB: &str = "stems.cache_gb";
 /// [`STEMS_CACHE_GB`] until it's set.
 pub const STEMS_CACHE_GB_DEFAULT: f64 = 20.0;
+/// The sampler's 16 slots ([`Bank`]): each one's sound file, volume and loop switch.
+pub const SAMPLER: &str = "sampler.slots";
 /// Add another library's tracks to earshot without asking, when they're put in a
 /// playlist, crate or Flow.
 pub const IMPORT_WITHOUT_ASKING: &str = "import.without_asking";
+
+/// Give tracks new to the library a quick grid in the background
+/// (`library::QuickAnalyser`). On until it's turned off.
+pub const QUICK_ANALYSE_NEW: &str = "analysis.quick_new_tracks";
 
 /// What was saved, read once at startup.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -38,10 +49,14 @@ pub struct Settings {
     pub tempo_ranges: Vec<TempoRange>,
     pub deck_options: Vec<DeckOptions>,
     pub hotcue_mode: HotcueMode,
+    pub xf_curve: XfCurve,
     pub cue_first_beat: bool,
+    pub load_while_playing: bool,
     pub flow_open: Option<CollectionId>,
     pub import_without_asking: bool,
     pub stems_cache_gb: f64,
+    pub quick_analyse_new: bool,
+    pub sampler: Bank,
 }
 
 /// A player's options that stay as they were set, from one run to the next.
@@ -71,10 +86,14 @@ impl Settings {
             tempo_ranges: read(reader, TEMPO_RANGES).unwrap_or_default(),
             deck_options: read(reader, DECK_OPTIONS).unwrap_or_default(),
             hotcue_mode: read(reader, HOTCUE_MODE).unwrap_or_default(),
+            xf_curve: read(reader, XF_CURVE).unwrap_or_default(),
             cue_first_beat: read(reader, CUE_FIRST_BEAT).unwrap_or(true),
+            load_while_playing: read(reader, LOAD_WHILE_PLAYING).unwrap_or(false),
             flow_open: read(reader, FLOW_OPEN).unwrap_or_default(),
             import_without_asking: read(reader, IMPORT_WITHOUT_ASKING).unwrap_or_default(),
             stems_cache_gb: read(reader, STEMS_CACHE_GB).unwrap_or(STEMS_CACHE_GB_DEFAULT),
+            quick_analyse_new: read(reader, QUICK_ANALYSE_NEW).unwrap_or(true),
+            sampler: read(reader, SAMPLER).unwrap_or_default(),
         }
     }
 }

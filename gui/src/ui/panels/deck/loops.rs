@@ -6,7 +6,7 @@ use egui::{Ui, vec2};
 use super::design::*;
 use super::{DeckInfo, DeckUi};
 use crate::core::bus::{DeckControl, JUMP_STEPS};
-use crate::core::command::Command;
+use crate::core::command::{Command, DeckCmd};
 use crate::ui::theme::THEME;
 use crate::ui::widgets::{HwButton, held};
 
@@ -50,7 +50,7 @@ impl DeckUi {
         let size = size_label(info.loop_size);
         // Every button the same width, so the two rows line up.
         let d = self.dims;
-        let w = d.px(LOOP_W);
+        let w = self.wx(LOOP_W);
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 for (label, control) in [
@@ -127,30 +127,33 @@ impl DeckUi {
     pub(super) fn jumps(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
         let n = size_label(info.jump_size);
         let d = self.dims;
+        let (jump_w, both_w) = (self.wx(JUMP_W), self.wx(2.0 * JUMP_W + GAP_X));
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                for (label, control, tip) in [
-                    (format!("◀ {n}"), DeckControl::JumpBack, "Jump back"),
-                    (format!("{n} ▶"), DeckControl::JumpForward, "Jump forward"),
+                // The jump itself, by the size picked below: `beat_jump -8`, `beat_jump 8`.
+                for (label, sign, tip) in [
+                    (format!("◀ {n}"), -1.0, "Jump back"),
+                    (format!("{n} ▶"), 1.0, "Jump forward"),
                 ] {
                     let r = ui
                         .add(
-                            HwButton::new(&label, THEME.text, vec2(d.px(JUMP_W), d.px(BTN_H)))
+                            HwButton::new(&label, THEME.text, vec2(jump_w, d.px(BTN_H)))
                                 .font(d.px(FONT_JUMP)),
                         )
                         .on_hover_text(format!("{tip} {n} beats"));
-                    if let Some(d) = held(ui, &r) {
-                        self.control(out, control, d as u8 as f64);
+                    if held(ui, &r) == Some(true) {
+                        self.control(out, DeckControl::BeatJump, sign * info.jump_size);
                     }
                 }
             });
-            // The step: click to pick 1-32 beats.
+            // The size: click to pick 1-32 beats. The deck remembers it; it's not a
+            // command.
             let r = ui
                 .add(
                     HwButton::new(
                         &format!("BEAT JUMP {n}"),
                         THEME.text,
-                        vec2(d.px(2.0 * JUMP_W + GAP_X), d.px(BTN_H)),
+                        vec2(both_w, d.px(BTN_H)),
                     )
                     .font(d.px(FONT_JUMP)),
                 )
@@ -159,7 +162,7 @@ impl DeckUi {
                 for beats in JUMP_STEPS {
                     let label = format!("{beats} beat{}", if beats == 1.0 { "" } else { "s" });
                     if ui.radio(info.jump_size == beats, label).clicked() {
-                        self.control(out, DeckControl::JumpSize, beats);
+                        self.send(out, DeckCmd::SetJumpSize(beats));
                         ui.close();
                     }
                 }

@@ -1,5 +1,5 @@
-//! Prepare's cue pane, beside its waveform (like Rekordbox's): the loaded track's
-//! memory cues and loops.
+//! Prepare's Cues tab (like Rekordbox's cue list): the target track's memory cues and
+//! loops.
 
 use earshot_engine::beatgrid::Beatgrid;
 use egui::{Align, FontId, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
@@ -10,13 +10,13 @@ use crate::core::store::Memory;
 use crate::ui::panels::{Cx, Panel};
 use crate::ui::theme::{self, THEME};
 use crate::ui::util;
+use crate::ui::widgets::held;
 
-/// The pane's width beside the waveform, and a row's height.
-pub const CUE_PANE_W: f32 = 300.0;
+/// A row's height.
 const CUE_ROW_H: f32 = 20.0;
 
 impl DeckUi {
-    /// Prepare's cue pane, beside its waveform: the track's memory cues and loops in
+    /// Prepare's Cues tab: the track's memory cues and loops in
     /// order through it, as Rekordbox lists them. Each row: colour, time (and a loop's
     /// length), name. Click a row to go there (a cue becomes the cue point; a loop
     /// starts), double-click to name it, click the colour to change it, × to forget it.
@@ -161,8 +161,30 @@ impl DeckUi {
             );
         }
 
+        // A loop's active switch: lit, it turns itself on when played onto.
+        if m.end.is_some() {
+            let badge = ui
+                .put(
+                    Rect::from_center_size(pos2(rect.right() - 26.0, cy), vec2(16.0, CUE_ROW_H)),
+                    egui::Label::new(RichText::new("A").size(10.0).strong().color(if m.active {
+                        THEME.accent
+                    } else {
+                        THEME.muted.gamma_multiply(0.5)
+                    }))
+                    .sense(Sense::click()),
+                )
+                .on_hover_text(if m.active {
+                    "Active loop: it turns itself on when played onto. Click to stop that"
+                } else {
+                    "Make this the active loop: it turns itself on when played onto"
+                });
+            if held(ui, &badge) == Some(true) {
+                out.push(Command::Deck(deck, DeckCmd::SetLoopActive(m.id, !m.active)));
+            }
+        }
+
         // The name, or the field to type it in.
-        let name = Rect::from_x_y_ranges(left + 128.0..=rect.right() - 18.0, rect.y_range());
+        let name = Rect::from_x_y_ranges(left + 128.0..=rect.right() - 36.0, rect.y_range());
         let editing = self
             .edit
             .as_ref()

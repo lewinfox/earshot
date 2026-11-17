@@ -22,7 +22,7 @@ use super::panels::deck::{DeckInfo, PendingLoad};
 use super::panels::flow::FlowUi;
 use super::panels::library::browser::Scope;
 use super::panels::library::tracks::take_wanted_art;
-use super::panels::library::{LibraryPane, LoadedFrom, drag};
+use super::panels::library::{Level, LibraryPane, LoadedFrom, Nav, drag};
 use super::panels::status::{AnalysisSummary, Meter, StatusLine, TopBar};
 use super::panels::{CoreView, Cx, EngineFrame, Panel, PreviewState};
 use super::prefs::{self, UiPrefs};
@@ -34,6 +34,7 @@ use crate::core::collections::{
     CollectionCmd, CollectionId, CollectionKind, Collections, FlowCmd, FlowGraph, Section,
 };
 use crate::core::command::{self, AppCmd, AudioCmd, Command, DeckCmd, PreviewCmd, ViewCmd};
+use crate::core::controller_audio;
 use crate::core::edit;
 use crate::core::history::{DeckNow, History, PlayEvent};
 use crate::core::index::{LibraryCmd, LibraryIndex};
@@ -63,6 +64,14 @@ pub struct EarshotApp {
     sink: Sink,
     rx: Receiver<Event>,
     monitor: Option<Monitor>,
+    /// The same monitor, for the controller's lights thread.
+    lights_monitor: crate::core::lights::MonitorSlot,
+    /// The mapping's version when the engine was last told whether the controller
+    /// blends the headphones (see [`EarshotApp::sync_phones_cue_only`]); `None` sends
+    /// it again (a new engine).
+    phones_cue_only_at: Option<u64>,
+    /// A connected controller's own sound card, which audio plays to when there is one.
+    controller: controller_audio::Hold,
     audio: Result<OutputInfo, String>,
     /// Audio stalls (`core::audio_watch`): when each reopened the device, the last
     /// minute's, and what to show about them (until when; or for good, once reopening
@@ -76,14 +85,23 @@ pub struct EarshotApp {
     quitting: bool,
     /// Each player's track and the list it was loaded from, by `DeckId::index()`.
     loaded_from: [Option<(i64, LoadedFrom)>; session::SLOTS],
+    /// When each deck's load button was last pressed, for a double tap (instant
+    /// doubles); cleared by the double tap.
+    load_taps: [Option<Instant>; session::SLOTS],
     /// Always the null output (tests).
     null_audio: bool,
     midi: Midi,
     midi_ports: Vec<String>,
+    /// The open MIDI inputs, each with its device's USB id and the mapping it got.
+    midi_devices: Vec<midi::Port>,
+    /// Every mapping there is (its key and name), for the MIDI pill's list.
+    mappings: Vec<(String, String)>,
     /// Send track ids here to load their cover art.
-    art_loader: std::sync::mpsc::Sender<i64>,
+    art_loader: crate::core::background::Mailbox<i64>,
     /// Nudge after a scan: works out audio hashes the files' tags didn't have.
-    hasher: std::sync::mpsc::Sender<()>,
+    hasher: library::Hasher,
+    /// Gives new tracks their quick grid, if the setting says to.
+    quick: library::QuickAnalyser,
     /// The tempo lock tool, and its tab's A/B player.
     tempo_lock: TempoLock,
     listener: tempo_lock::Listener,
@@ -101,6 +119,12 @@ pub struct EarshotApp {
     sources: Vec<crate::core::sources::Source>,
     /// The USB sticks plugged in (`core::drives`), and which earshot is using.
     drives: Vec<crate::core::drives::Drive>,
+    /// Each effect unit's TAP presses.
+    fx_taps: [crate::core::tap::Taps; earshot_engine::FX_UNITS],
+    /// Why each sampler slot's sound couldn't be loaded, if it couldn't.
+    sample_errors: [Option<String>; earshot_engine::SAMPLER_SLOTS],
+    /// Ends the drive watcher's thread when the app goes.
+    _drives_stop: crate::core::drives::StopOnDrop,
     uses: crate::core::drives::Uses,
     /// Stick libraries asked to become sources, so they're asked for once.
     sticks_added: std::collections::HashSet<(crate::core::sources::SourceKind, std::path::PathBuf)>,
@@ -136,8 +160,8 @@ pub struct EarshotApp {
     panels: Panels,
     /// The engine as read at the start of this frame.
     frame: EngineFrame,
-    /// Keep repainting until then (see [`SETTLE`]).
-    settle_until: Option<Instant>,
+    /// Keep repainting until then, in frame time (see [`SETTLE`]).
+    settle_until: Option<f64>,
     /// The engine has the players' saved keylock and quantise (see
     /// [`EarshotApp::save_deck_options`]).
     deck_options_restored: bool,
@@ -145,13 +169,61 @@ pub struct EarshotApp {
 
 /// Start audio on the chosen device; failing that the default one, then the null
 /// output (so the app still runs without a sound card).
+/// Start audio: on a connected controller's own sound card, directly, whenever there
+/// is one (no other device, and no PipeWire volume, in between); else on the device
+/// in the settings.
 fn start_audio(
     player: &Player,
     settings: &AudioSettings,
     null: bool,
+    controller: &mut controller_audio::Hold,
 ) -> Result<OutputInfo, String> {
     let mut opts = player::output_options(settings);
-    opts.null |= null;
+    // A thread that steps its background work (a test's) steps its audio too.
+    opts.stepped = crate::core::background::stepped();
+    opts.null |= null || opts.stepped;
+    if !opts.null
+        && let Some(device) = controller.prepare()
+    {
+        opts.device = Some(device);
+        opts.phones_device = None;
+        // The controller's own layout (master on 1-2, headphones on 3-4).
+        player.lock().unwrap().routing = None;
+        // PipeWire may take a moment to close the card after letting it go.
+        let mut why = String::new();
+        let card = controller.found.as_ref().map(|c| c.card);
+        let t0 = Instant::now();
+        for attempt in 1..=10 {
+            eprintln!(
+                "[init] audio: attempt {attempt} at +{:.0} ms; the card's playback now: {}",
+                t0.elapsed().as_secs_f64() * 1000.0,
+                card.map(controller_audio::card_state).unwrap_or_default()
+            );
+            match player::start_engine(player, &opts) {
+                Ok(info) => {
+                    eprintln!(
+                        "[init] audio: open on attempt {attempt} after {:.0} ms; the card's playback now: {}",
+                        t0.elapsed().as_secs_f64() * 1000.0,
+                        card.map(controller_audio::card_state).unwrap_or_default()
+                    );
+                    controller.error = None;
+                    return Ok(info);
+                }
+                Err(e) => {
+                    eprintln!("[init] audio: attempt {attempt} failed: {e}");
+                    why = e
+                }
+            }
+            if !why.to_lowercase().contains("busy") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        eprintln!("audio: the controller's sound card: {why}");
+        controller.error = Some(why);
+        return player::start_engine(player, &OutputOptions { null: true, ..opts });
+    }
+    player.lock().unwrap().routing = settings.routing;
     player::start_engine(player, &opts)
         .or_else(|e| {
             if opts.device.is_none() || opts.null {
@@ -195,6 +267,18 @@ struct Hud {
     /// logged.
     phones_short: u64,
     phones_realigns: u64,
+    /// The machine can't keep up (`EarshotApp::watch_strain`): the audio is behind
+    /// (and how often it has run up against the real-time limit), and the system is
+    /// holding the CPU back; as last seen (and logged), and the top bar's pills for
+    /// them.
+    overruns: u64,
+    behind: bool,
+    power: Option<crate::core::power::Warning>,
+    /// Too little memory is left for the analysis worker (`power::memory_short`).
+    memory_short: bool,
+    /// Any of those: analysis and stems wait, and tracks get quick grids meanwhile.
+    low_resource: bool,
+    alerts: Vec<crate::ui::panels::status::Alert>,
     last: Option<Instant>,
 }
 
@@ -213,25 +297,38 @@ impl EarshotApp {
         let settings = Settings::load(&store.reader);
         let player = player::new_player();
         player.lock().unwrap().routing = settings.audio.routing;
-        let audio = start_audio(&player, &settings.audio, services.null_audio);
-        let monitor = player.lock().unwrap().monitor();
+        // A controller with a sound card is played to directly, from the start.
+        let mut controller = controller_audio::Hold::default();
+        if services.midi {
+            controller.set(controller_audio::find(&midi::port_names()));
+        }
+        // Audio starts once the app is built, after the controller (`EarshotApp::
+        // start_up`).
+        let audio = Err("audio hasn't started yet".to_string());
+        let monitor = None;
 
-        {
+        let drives_stop = crate::core::drives::StopOnDrop::default();
+        // The two that watch the world by the clock (the sound card, the USB sticks)
+        // aren't started where nothing is to run on its own: a test says what they
+        // would have.
+        let watching = !crate::core::background::stepped();
+        if watching {
             let sink = sink.clone();
-            audio_watch::start(player.clone(), move |quiet, decks| {
+            audio_watch::start(&player, move |quiet, decks| {
                 sink(Event::Command(Command::Audio(AudioCmd::Stalled {
                     quiet,
                     decks,
                 })))
             });
         }
-        {
+        if watching {
             let sink = sink.clone();
-            crate::core::drives::watch(move |d| sink(Event::Drives(d)));
+            crate::core::drives::watch(drives_stop.0.clone(), move |d| sink(Event::Drives(d)));
         }
         let analyser =
             Analyser::start(sink.clone(), player.clone(), store.clone(), services.worker);
         let hasher = library::start_hasher(store.clone());
+        let quick = library::start_quick_analyser(store.clone());
         let data_dir = services.db.parent().unwrap_or(std::path::Path::new("."));
         let keymap_path = data_dir.join(keymap::FILE_NAME);
         let (keymap, keymap_origin) = keymap::load_user(&keymap_path, spell_key);
@@ -281,19 +378,29 @@ impl EarshotApp {
             lib,
             sink,
             rx,
+            lights_monitor: Arc::new(std::sync::Mutex::new(crate::core::lights::LightsState {
+                monitor: monitor.clone(),
+                ..Default::default()
+            })),
+            phones_cue_only_at: None,
             monitor,
             audio,
+            controller,
             audio_stalls: VecDeque::new(),
             audio_note: None,
             loaded_from: Default::default(),
+            load_taps: Default::default(),
             notices: Notices::default(),
             asking_quit: false,
             quitting: false,
             null_audio: services.null_audio,
             midi: Midi::default(),
             midi_ports: vec![],
+            midi_devices: vec![],
+            mappings: vec![],
             art_loader,
             hasher,
+            quick,
             tempo_lock,
             listener: Default::default(),
             stems,
@@ -303,6 +410,9 @@ impl EarshotApp {
             edits: edit::History::default(),
             sources: vec![],
             drives: vec![],
+            _drives_stop: drives_stop,
+            fx_taps: Default::default(),
+            sample_errors: Default::default(),
             uses: Default::default(),
             sticks_added: Default::default(),
             cues: HashMap::new(),
@@ -327,6 +437,17 @@ impl EarshotApp {
             settle_until: None,
             deck_options_restored: false,
         };
+        if cfg!(debug_assertions) {
+            let rec = crate::core::debug::Recorder::start();
+            app.lights_monitor.lock().unwrap().recorder = Some(rec.clone());
+            app.panels.debug.recorder = Some(rec);
+            app.panels.debug.mapping = Some(app.panels.controller.learned.clone());
+            app.panels.debug.lights = Some(app.lights_monitor.clone());
+        }
+        app.panels.controller.lights = Some(app.lights_monitor.clone());
+        // The user's own controller mappings (`core::controllers`).
+        app.panels.controller.mine = Some(data_dir.join("controllers"));
+        app.start_up(services.midi);
         app.lib.store.send(StoreCmd::ListSources);
         app.lib.store.send(StoreCmd::StartSession);
         let ranges = app.settings.tempo_ranges.clone();
@@ -334,8 +455,10 @@ impl EarshotApp {
             app.dispatch((deck, EngineCmd::TempoRange(range)).into());
         }
         let _ = player::set_hotcue_mode(&app.player, app.settings.hotcue_mode);
+        let _ = player::set_xf_curve(&app.player, app.settings.xf_curve);
         let _ = player::set_fx_decks(&app.player, app.prefs.decks().len());
         player::set_cue_first_beat(&app.player, app.settings.cue_first_beat);
+        app.start_sampler();
         let options = app.settings.deck_options.clone();
         for (i, o) in options.into_iter().enumerate().take(session::SLOTS) {
             let deck = session::slot(i);
@@ -370,22 +493,146 @@ impl EarshotApp {
                 app.lib.store.send(StoreCmd::UpdateSource(s));
             }
         }
-        if services.midi {
-            app.connect_midi();
-        }
         Ok(app)
     }
 
+    /// Start-up, in Mixxx's order, which a DDJ-400 is happy with: the controller first
+    /// (MIDI open, its lights set, asked where its controls are: `core::lights`), then
+    /// audio. Nothing goes to the controller while its sound card starts.
+    fn start_up(&mut self, midi: bool) {
+        if midi {
+            self.connect_midi(); // opens audio itself if the controller has a sound card
+        }
+        if self.player.lock().unwrap().engine.is_none() {
+            self.reopen_audio();
+        }
+    }
+
+    /// Quitting, in Mixxx's order: audio closed and the controller's sound card let go
+    /// first, then the controller's lights put out and MIDI closed.
+    fn shut_down(&mut self) {
+        eprintln!("[exit] audio: closing");
+        self.preview = None;
+        self.monitor = None;
+        self.lights_monitor.lock().unwrap().monitor = None;
+        {
+            let mut p = self.player.lock().unwrap();
+            p.midi.set(None);
+            p.engine = None;
+        }
+        self.controller.release();
+        eprintln!("[exit] MIDI: closing");
+        self.midi = Midi::default();
+    }
+
+    /// Start audio again (on the controller's sound card, if one's connected).
+    #[track_caller]
+    fn reopen_audio(&mut self) {
+        eprintln!(
+            "[init] audio: (re)opening (asked from {})",
+            std::panic::Location::caller()
+        );
+        self.preview = None;
+        self.audio = start_audio(
+            &self.player,
+            &self.settings.audio,
+            self.null_audio,
+            &mut self.controller,
+        );
+        self.reread_monitor();
+    }
+
+    /// Read the engine's monitor again, after the sound card was reopened.
+    fn reread_monitor(&mut self) {
+        self.monitor = self.player.lock().unwrap().monitor();
+        self.lights_monitor.lock().unwrap().monitor = self.monitor.clone();
+        self.frame.snap = self.monitor.as_ref().map(|m| m.snapshot());
+        self.phones_cue_only_at = None;
+        self.feed_recorder();
+    }
+
+    /// Debug builds: give the recorder the (new) engine's output and state.
+    fn feed_recorder(&mut self) {
+        let Some(rec) = &self.panels.debug.recorder else {
+            return;
+        };
+        let tap = self
+            .player
+            .lock()
+            .unwrap()
+            .engine
+            .as_mut()
+            .and_then(|e| e.take_output_tap());
+        let mut feed = rec.feed.lock().unwrap();
+        feed.tap = tap;
+        feed.monitor = self.monitor.clone();
+    }
+
+    /// A mapping whose headphone mix is display only (a DDJ-400's: the controller
+    /// blends the master into the headphones itself) has the engine send only the
+    /// cued decks to the headphones; otherwise earshot blends them. Sent when the
+    /// mapping changes, and to a new engine.
+    fn sync_phones_cue_only(&mut self) {
+        let learned = &self.panels.controller.learned;
+        let v = learned.version();
+        if self.phones_cue_only_at == Some(v) {
+            return;
+        }
+        self.phones_cue_only_at = Some(v);
+        let on = learned.all().into_iter().any(|(_, l)| {
+            l.display_only
+                && l.control
+                    == crate::core::bus::Control::Master(earshot_engine::MasterParam::HeadMix)
+        });
+        self.dispatch(Command::Mixer(
+            crate::core::command::MixerCmd::PhonesCueOnly(on),
+        ));
+    }
+
     /// (Re)open every MIDI input, e.g. after plugging the controller in.
+    #[track_caller]
     fn connect_midi(&mut self) {
+        eprintln!(
+            "[init] MIDI: connecting (asked from {})",
+            std::panic::Location::caller()
+        );
         // Close the old ports first so they can be reopened.
         self.midi = Midi::default();
         let lane = self.player.lock().unwrap().midi.clone();
-        (self.midi, self.midi_ports) = midi::connect_all(&self.sink, &lane).unwrap_or_else(|e| {
-            eprintln!("MIDI: {e}");
-            (Midi::default(), vec![])
-        });
+        let learned = self.panels.controller.learned.clone();
+        // Each controller's mapping: the one chosen for it before (the MIDI pill), else
+        // the best match (`core::controllers`).
+        let store = crate::core::controllers::Store::new(self.panels.controller.mine.clone());
+        let chosen = self.prefs.controller_mappings.clone();
+        let choose = |port: &str, usb: Option<&str>| {
+            let key = crate::core::controllers::device_key(port, usb);
+            store.find(port, usb, chosen.get(&key).map(String::as_str))
+        };
+        (self.midi, self.midi_devices) =
+            midi::connect_all(&self.sink, &lane, &learned, &self.lights_monitor, &choose)
+                .unwrap_or_else(|e| {
+                    eprintln!("MIDI: {e}");
+                    (Midi::default(), vec![])
+                });
+        self.midi_ports = self.midi_devices.iter().map(|p| p.name.clone()).collect();
+        self.mappings = store
+            .models()
+            .iter()
+            .map(|p| (p.id.key(), p.label()))
+            .collect();
         self.prefs.set_controller(!self.midi_ports.is_empty());
+        self.panels.controller.ports = self.midi_ports.clone();
+        self.panels.controller.devices = self.midi_devices.clone();
+        self.panels
+            .controller
+            .set_active(self.midi_devices.iter().find_map(|p| p.mapping.clone()));
+        // A controller with a sound card came or went: play to it, or stop.
+        if self
+            .controller
+            .set(controller_audio::find(&self.midi_ports))
+        {
+            self.reopen_audio();
+        }
     }
 
     /// Each deck's tempo range, as the engine has it.
@@ -452,39 +699,123 @@ impl EarshotApp {
             .map_or(0, |sh| sh.live().iter().filter(|d| d.playing).count())
     }
 
-    /// Switch mode. Not to Prepare while a deck plays (the set would go on under
-    /// Prepare's player): says so instead, and returns false. To Perform, Prepare's
-    /// player stops.
+    /// The memory cues and loops of the track on `deck`, earliest first.
+    fn memories(&self, deck: DeckId) -> Vec<store::Memory> {
+        let track = self.player.lock().unwrap().session(deck).track_id;
+        let mut m = track
+            .and_then(|t| self.cues.get(&t))
+            .map_or(vec![], |c| c.memories.clone());
+        m.sort_by(|a, b| a.start.total_cmp(&b.start));
+        m
+    }
+
+    /// The memory cue just before (or after) the playhead on `deck`. One right at the
+    /// playhead doesn't count, so pressing again moves on.
+    fn memory_beside(&self, deck: DeckId, forward: bool) -> Option<store::Memory> {
+        const NEAR: f64 = 0.05;
+        let at = self.frame.snap.as_ref()?.deck(deck).position;
+        let m = self.memories(deck);
+        if forward {
+            m.into_iter().find(|m| m.start > at + NEAR)
+        } else {
+            m.into_iter().rev().find(|m| m.start < at - NEAR)
+        }
+    }
+
+    /// The memory cue or loop last called on `deck`: a cue at the cue point (calling
+    /// one puts the cue point there), or the loop playing.
+    fn called_memory(&self, deck: DeckId) -> Option<i64> {
+        const NEAR: f64 = 0.01;
+        let d = self.frame.snap.as_ref()?.deck(deck);
+        let near = |a: f64, b: f64| (a - b).abs() < NEAR;
+        self.memories(deck).into_iter().find_map(|m| {
+            let hit = match (m.end, d.loop_in, d.loop_out) {
+                (Some(end), Some(i), Some(o)) => d.loop_active && near(m.start, i) && near(end, o),
+                (Some(_), ..) => false,
+                (None, ..) => near(m.start, d.cue_point),
+            };
+            hit.then_some(m.id)
+        })
+    }
+
+    /// The memory loop SHIFT + RELOOP/EXIT acts on: the one playing (just called),
+    /// else the one nearest the playhead (none: inside it).
+    fn loop_to_activate(&self, deck: DeckId) -> Option<store::Memory> {
+        let called = self.called_memory(deck);
+        let at = self.frame.snap.as_ref()?.deck(deck).position;
+        let loops = self.memories(deck).into_iter().filter(|m| m.end.is_some());
+        let away = |m: &store::Memory| {
+            let end = m.end.unwrap_or(m.start);
+            if at < m.start {
+                m.start - at
+            } else {
+                (at - end).max(0.0)
+            }
+        };
+        let loops: Vec<store::Memory> = loops.collect();
+        loops
+            .iter()
+            .find(|m| Some(m.id) == called)
+            .or_else(|| loops.iter().min_by(|a, b| away(a).total_cmp(&away(b))))
+            .cloned()
+    }
+
+    /// Give each deck its track's active loop, when the engine has another (a load
+    /// clears it there, and the loop may have been changed or saved since).
+    fn send_active_loops(&mut self) {
+        let Some(snap) = self.frame.snap.as_ref() else {
+            return;
+        };
+        let mut out = vec![];
+        for (i, d) in snap.live().iter().enumerate() {
+            let Some(deck) = DeckId::new(i) else { continue };
+            let want = d
+                .track_id
+                .and_then(|t| self.cues.get(&t))
+                .and_then(|c| c.memories.iter().find(|m| m.active))
+                .and_then(|m| Some((m.start, m.end?)));
+            if want != d.active_loop {
+                out.push(Command::Deck(
+                    deck,
+                    DeckCmd::Engine(earshot_engine::DeckCmd::ActiveLoop(want)),
+                ));
+            }
+        }
+        for c in out {
+            self.dispatch(c);
+        }
+    }
+
+    /// Switch mode: only the tabs under the decks change. Refused (with a note in the
+    /// bottom bar) when leaving Perform while a deck plays; any other switch pauses the
+    /// playing decks, leaving their tracks loaded where they were. True if it switched.
     pub(super) fn set_mode(&mut self, m: Mode) -> bool {
         if m == self.prefs.mode {
             return true;
         }
-        match m {
-            Mode::Prepare if self.decks_playing() > 0 => {
-                let text = "Stop the playing decks before switching to Prepare.";
-                self.notify(notice::Level::Warning, text);
-                return false;
-            }
-            Mode::Perform
-                if self
-                    .frame
-                    .snap
-                    .as_ref()
-                    .is_some_and(|sh| sh.prepare.playing) =>
-            {
-                self.dispatch((DeckId::PREPARE, EngineCmd::Play(Set::Off)).into());
-            }
-            _ => {}
+        if self.prefs.mode == Mode::Perform && self.decks_playing() > 0 {
+            let text = format!("Stop the playing decks before switching to {}.", m.name());
+            self.notify(notice::Level::Warning, text);
+            return false;
+        }
+        let playing: Vec<DeckId> = self.frame.snap.as_ref().map_or(vec![], |sh| {
+            (sh.live().iter().enumerate())
+                .filter(|(_, d)| d.playing)
+                .filter_map(|(i, _)| DeckId::new(i))
+                .collect()
+        });
+        for d in playing {
+            self.dispatch((d, EngineCmd::Play(Set::Off)).into());
         }
         self.prefs.mode = m;
         true
     }
 
-    /// Closing the window in Perform while a deck plays: ask first ("Quit" closes it
+    /// Closing the window while a deck plays: ask first ("Quit" closes it
     /// again, for good).
     fn confirm_quit(&mut self, ctx: &egui::Context) {
         let asked = ctx.input(|i| i.viewport().close_requested());
-        if asked && !self.quitting && self.prefs.mode == Mode::Perform && self.decks_playing() > 0 {
+        if asked && !self.quitting && self.decks_playing() > 0 {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.asking_quit = true;
         }
@@ -539,6 +870,44 @@ impl EarshotApp {
         match cmd {
             Command::View(v) => self.view_cmd(v),
             Command::App(AppCmd::ReconnectMidi) => self.connect_midi(),
+            Command::App(AppCmd::UseMapping { device, mapping }) => {
+                eprintln!("MIDI: {device} uses mapping {mapping} from now on");
+                self.prefs.controller_mappings.insert(device, mapping);
+                self.connect_midi();
+            }
+            Command::App(AppCmd::TakeControllerAudio) => match self.controller.force() {
+                Ok(()) => self.reopen_audio(),
+                Err(e) => self.controller.error = Some(e),
+            },
+            Command::App(AppCmd::ControllerShows { control, value }) => {
+                // A button toggles what's shown on each press (the controller keeps
+                // its own state; it starts off, as the controller does).
+                let shown = if control.range().is_none() {
+                    if value <= 0.5 {
+                        return;
+                    }
+                    let was = crate::ui::panels::mixer::shown(&self.ctx, control).unwrap_or(0.0);
+                    1.0 - was
+                } else {
+                    value
+                };
+                crate::ui::panels::mixer::set_shown(&self.ctx, control, shown);
+                // Earshot's own stays where it leaves the sound to the controller, so
+                // the two don't both act.
+                if let Some(hold) = crate::core::midi::display_only_value(control) {
+                    let now = self.frame.snap.as_ref().and_then(|s| control.get(s));
+                    if now.is_some_and(|v| (v - hold).abs() > 1e-9) {
+                        if let Some(c) = crate::core::midi::set_command(control, hold) {
+                            self.dispatch(c);
+                        }
+                    }
+                }
+            }
+            Command::App(AppCmd::FxTap { unit, at }) => {
+                if let Some(bpm) = self.fx_taps.get_mut(unit).and_then(|t| t.tap(at)) {
+                    self.dispatch(Command::Fx(unit, earshot_engine::FxCmd::TapBpm(bpm)));
+                }
+            }
             Command::App(AppCmd::CancelJob(id)) => self.jobs.cancel(id),
             Command::App(AppCmd::StopAnalysis) => {
                 self.lib.analyser.stop_background();
@@ -569,12 +938,31 @@ impl EarshotApp {
                     .store
                     .send(settings::save(settings::HOTCUE_MODE, &m));
             }
+            Command::App(AppCmd::XfCurve(c)) => {
+                self.settings.xf_curve = c;
+                if let Err(e) = player::set_xf_curve(&self.player, c) {
+                    eprintln!("crossfader curve: {e}");
+                }
+                self.lib.store.send(settings::save(settings::XF_CURVE, &c));
+            }
             Command::App(AppCmd::CueFirstBeat(on)) => {
                 self.settings.cue_first_beat = on;
                 player::set_cue_first_beat(&self.player, on);
                 self.lib
                     .store
                     .send(settings::save(settings::CUE_FIRST_BEAT, &on));
+            }
+            Command::App(AppCmd::LoadWhilePlaying(on)) => {
+                self.settings.load_while_playing = on;
+                self.lib
+                    .store
+                    .send(settings::save(settings::LOAD_WHILE_PLAYING, &on));
+            }
+            Command::App(AppCmd::QuickAnalyseNew(on)) => {
+                self.settings.quick_analyse_new = on;
+                self.lib
+                    .store
+                    .send(settings::save(settings::QUICK_ANALYSE_NEW, &on));
             }
             Command::App(AppCmd::ReloadKeymap) => self.reload_keymap(),
             Command::App(AppCmd::DismissNotice(id)) => self.notices.dismiss(id),
@@ -585,7 +973,7 @@ impl EarshotApp {
                 self.stale = Stale::Counting;
                 let (lib, sink) = (self.lib.clone(), self.sink.clone());
                 let queued = matches!(c, AppCmd::QueueStale);
-                std::thread::spawn(move || {
+                crate::core::background::spawn("earshot-stale", move || {
                     let result = if queued {
                         lib.analyser.queue_stale()
                     } else {
@@ -608,13 +996,40 @@ impl EarshotApp {
                 }
                 self.reload_keymap();
             }
-            Command::Deck(deck, DeckCmd::Load(id)) => self.load(Some(deck), id),
+            Command::Deck(deck, DeckCmd::Load(id)) => {
+                self.load(Some(deck), id);
+            }
+            Command::Deck(deck, DeckCmd::CallMemory { forward }) => {
+                if let Some(m) = self.memory_beside(deck, forward) {
+                    self.dispatch(Command::Deck(deck, DeckCmd::RecallMemory(m)));
+                }
+            }
+            Command::Deck(deck, DeckCmd::DeleteCalledMemory) => {
+                if let Some(id) = self.called_memory(deck) {
+                    self.dispatch(Command::Deck(deck, DeckCmd::DeleteMemory(id)));
+                }
+            }
+            Command::Deck(deck, DeckCmd::ToggleActiveLoop) => {
+                if let Some(m) = self.loop_to_activate(deck) {
+                    self.dispatch(Command::Deck(deck, DeckCmd::SetLoopActive(m.id, !m.active)));
+                }
+            }
             Command::Library(c) => self.library_cmd(c),
             Command::External(c) => self.external_cmd(c),
             Command::Export(c) => self.export_cmd(c),
-            Command::TempoLock(TempoLockCmd::Listen(c)) => self.listen(c),
+            Command::TempoLock(TempoLockCmd::Listen { version, at }) => self.listen(version, at),
             Command::TempoLock(c) => self.tempo_lock.run(c),
+            // Stems are the heaviest thing there is to work out: not while the machine
+            // is short of resources (`watch_strain`).
+            Command::Stems(crate::core::stems::StemsCmd::Calculate(_)) if self.hud.low_resource => {
+                self.notify(
+                    notice::Level::Warning,
+                    "Stems will have to wait: the computer is short of resources, and the \
+                     audio comes first",
+                );
+            }
             Command::Stems(c) => self.stems.run(c),
+            Command::Trim(c) => self.trim_cmd(c),
             Command::Collection(c) => self.collection_cmd(c),
             Command::Flow(c) => self.flow_cmd(c),
             Command::Edit(c) => self.edit_cmd(c),
@@ -623,15 +1038,13 @@ impl EarshotApp {
             Command::Preview(PreviewCmd::Toggle(id)) => self.toggle_preview(id),
             Command::Preview(PreviewCmd::Seek(id, at)) => self.seek_preview(id, at),
             Command::Preview(PreviewCmd::Stop(id)) => self.stop_preview(id),
+            Command::Sampler(c) => self.sampler_cmd(c),
             Command::Audio(AudioCmd::Restart(settings)) => {
                 self.audio_stalls.clear();
                 self.audio_note = None;
                 self.settings.audio = settings;
                 self.save_audio_settings();
-                self.preview = None;
-                self.audio = start_audio(&self.player, &self.settings.audio, self.null_audio);
-                self.monitor = self.player.lock().unwrap().monitor();
-                self.frame.snap = self.monitor.as_ref().map(|m| m.snapshot());
+                self.reopen_audio();
             }
             Command::Audio(AudioCmd::Stalled { quiet, decks }) => self.audio_stalled(quiet, &decks),
             other => eprintln!("command: nothing handles {other:?}"),
@@ -663,9 +1076,7 @@ impl EarshotApp {
         }
         self.audio_stalls.push_back(now);
         crate::core::log::note(&format!("audio stalled ({ms} ms); reopening it: {decks}"));
-        self.audio = start_audio(&self.player, &self.settings.audio, self.null_audio);
-        self.monitor = self.player.lock().unwrap().monitor();
-        self.frame.snap = self.monitor.as_ref().map(|m| m.snapshot());
+        self.reopen_audio();
         self.audio_note = Some((
             format!("audio stopped for {ms} ms; restarted it"),
             Some(now + Duration::from_secs(30)),
@@ -676,20 +1087,41 @@ impl EarshotApp {
     fn view_cmd(&mut self, cmd: ViewCmd) {
         let (lib, flow) = (&mut self.panels.library, &self.panels.flow);
         match cmd {
-            ViewCmd::Browse(n) => lib.browse(n),
-            ViewCmd::TogglePane => {
-                lib.focused_pane = match lib.focused_pane {
-                    Pane::Library | Pane::Flow => Pane::Suggest,
-                    Pane::Suggest => Pane::Library,
-                };
+            // On a list, straight away; elsewhere when the library is next drawn (it
+            // knows the sources and trees then).
+            ViewCmd::Browse(n) if lib.level == Level::List => lib.browse(n),
+            ViewCmd::Browse(n) => lib.nav.push(Nav::Turn(n)),
+            ViewCmd::PaneStep(by) => lib.nav.push(if by > 0 { Nav::Next } else { Nav::Prev }),
+            ViewCmd::FocusPane(p) => lib.focus(p),
+            ViewCmd::RelatedTracks => {
+                use crate::core::view::Aside;
+                let lib = &mut self.panels.library;
+                let layout = self.prefs.layout_mut();
+                if layout.aside == Some(Aside::Suggestions) {
+                    // Open: close it, and the knob goes back to the track list.
+                    layout.aside = None;
+                    if lib.focused_pane == Pane::Suggest {
+                        lib.focus(Pane::Library);
+                    }
+                } else {
+                    layout.aside = Some(Aside::Suggestions);
+                    lib.focus(Pane::Suggest);
+                    lib.suggest.focus_top();
+                }
             }
-            ViewCmd::FocusPane(p) => lib.focused_pane = p,
+            ViewCmd::ToggleLibraryMaximized => {
+                self.prefs.library_maximized = !self.prefs.library_maximized;
+            }
             ViewCmd::FocusSearch => lib.browser.search_focus = true,
             ViewCmd::LoadSelected(deck) => {
-                if let Some(id) = lib.focused_track(flow) {
+                // Pressed twice quickly (as rekordbox's LOAD): instant doubles.
+                if double_tap(&mut self.load_taps[deck.index()], Instant::now()) {
+                    self.instant_double(deck);
+                } else if let Some(id) = lib.focused_track(flow) {
                     self.load(Some(deck), id);
                 }
             }
+            ViewCmd::InstantDouble(deck) => self.instant_double(deck),
             ViewCmd::ShowInLibrary(deck) => {
                 let Some(track) = self.player.lock().unwrap().session(deck).track_id else {
                     return;
@@ -738,8 +1170,40 @@ impl EarshotApp {
                     *l = !*l;
                 }
             }
-            ViewCmd::FourDecks(on) => {
-                self.prefs.four_decks = on;
+            ViewCmd::PadMode(d, m) => {
+                let ui = &mut self.panels.decks[d.index()];
+                let out = ui.set_pad_mode(m);
+                self.lights_monitor.lock().unwrap().pads[d.index()] = ui.pads;
+                for c in out {
+                    self.dispatch(c);
+                }
+            }
+            ViewCmd::Shift(d, held) => self.panels.decks[d.index()].shift_held = held,
+            ViewCmd::ModePad {
+                deck,
+                mode,
+                pad,
+                shift,
+                down,
+            } => {
+                let ui = &mut self.panels.decks[deck.index()];
+                let out = ui.mode_pad(mode, pad as usize, shift, down);
+                self.lights_monitor.lock().unwrap().pads[deck.index()] = ui.pads;
+                for c in out {
+                    self.dispatch(c);
+                }
+            }
+            ViewCmd::Target(d) => {
+                // The tools' marks leave the old deck; they're drawn on the new one
+                // from the next frame.
+                for deck in &mut self.panels.decks {
+                    deck.set_overlay("tempo-lock", None);
+                    deck.set_overlay("trim", None);
+                }
+                self.prefs.target = d.index();
+            }
+            ViewCmd::DeckCount(n) => {
+                self.prefs.deck_count = crate::ui::prefs::deck_count(n);
                 if let Err(e) = player::set_fx_decks(&self.player, self.prefs.decks().len()) {
                     eprintln!("effect decks: {e}");
                 }
@@ -747,7 +1211,16 @@ impl EarshotApp {
             ViewCmd::SetMode(m) => {
                 self.set_mode(m);
             }
-            ViewCmd::Source(s) => self.prefs.layout_mut().source = s,
+            ViewCmd::NormaliseTempo(id) => {
+                if self.set_mode(Mode::Prepare) {
+                    self.prefs.prepare.tool = Tool::TempoLock;
+                    self.tempo_lock.run(TempoLockCmd::Analyse(id));
+                }
+            }
+            ViewCmd::Source(s) => {
+                self.prefs.layout_mut().source = s;
+                self.panels.library.level = Level::Sources;
+            }
             ViewCmd::Aside(a) => self.prefs.layout_mut().aside = a,
             ViewCmd::Tool(t) => self.prefs.layout_mut().tool = t,
             ViewCmd::ToggleModal(m) => {
@@ -806,8 +1279,10 @@ impl EarshotApp {
                     track,
                     playing: sh.playing,
                     bpm: sh.bpm,
-                    // How far the key has moved: not at all with keylock.
-                    key_speed: if sh.keylock { 1.0 } else { sh.tempo },
+                    // How far the key has moved: by the tempo unless keylocked, and
+                    // by the key shift.
+                    key_speed: if sh.keylock { 1.0 } else { sh.tempo }
+                        * earshot_engine::keylock::semitones(sh.key_shift),
                 }
             }
             None => DeckNow {
@@ -845,7 +1320,6 @@ impl EarshotApp {
     /// selected track.
     fn refresh_suggestions(&mut self) {
         let decks = self.decks_now();
-        let prepare = (self.prefs.mode == Mode::Prepare).then(|| self.deck_now(DeckId::PREPARE));
         let (lib, flow) = (&mut self.panels.library, &self.panels.flow);
         // The suggestions' own selection isn't a reference for themselves.
         let selected = match lib.focused_pane {
@@ -862,8 +1336,7 @@ impl EarshotApp {
             uses: &self.uses,
             loaded: &[],
         };
-        lib.suggest
-            .refresh(&view, &decks, prepare.as_ref(), selected);
+        lib.suggest.refresh(&view, &decks, selected);
     }
 
     /// Draw the window, collecting what it asks for.
@@ -873,11 +1346,8 @@ impl EarshotApp {
             ctx.request_repaint_after(next.saturating_duration_since(Instant::now()));
         }
         let mut out: Vec<Command> = vec![];
-        // What's on the decks shown, and on Prepare's player in Prepare.
-        let mut players = self.prefs.decks();
-        if self.prefs.mode == Mode::Prepare {
-            players = vec![DeckId::PREPARE];
-        }
+        // What's on the decks shown.
+        let players = self.prefs.decks();
         let loaded: Vec<(i64, DeckId)> = {
             let p = self.player.lock().unwrap();
             players
@@ -885,6 +1355,16 @@ impl EarshotApp {
                 .filter_map(|d| p.session(d).track_id.map(|t| (t, d)))
                 .collect()
         };
+        if self.prefs.mode == Mode::Debug {
+            // What an export says about this run, as it is now.
+            self.panels.debug.info = format!(
+                "earshot {} (debug build)\naudio: {:#?}\nsettings: {:#?}\ndecks shown: {}\n",
+                env!("CARGO_PKG_VERSION"),
+                self.audio,
+                self.settings,
+                self.prefs.decks().len(),
+            );
+        }
         let mut cx = Cx {
             core: CoreView {
                 lib: &self.index,
@@ -913,8 +1393,15 @@ impl EarshotApp {
                 }
                 TopBar {
                     audio: &self.audio,
+                    alerts: &self.hud.alerts,
                     audio_note: self.audio_note.as_ref().map(|(n, _)| n.as_str()),
-                    midi_ports: &self.midi_ports,
+                    controller_busy: self
+                        .controller
+                        .found
+                        .as_ref()
+                        .and_then(|c| Some((c.id.as_str(), self.controller.error.as_deref()?))),
+                    midi_devices: &self.midi_devices,
+                    mappings: &self.mappings,
                     analysis: &self.analysis,
                     jobs: &jobs,
                     hud: Meter {
@@ -945,12 +1432,15 @@ impl EarshotApp {
             audio: &self.audio,
             routing,
             hotcue_mode: self.settings.hotcue_mode,
+            xf_curve: self.settings.xf_curve,
             cue_first_beat: self.settings.cue_first_beat,
+            load_while_playing: self.settings.load_while_playing,
             auto_hide_mixer: self.prefs.auto_hide_mixer,
             stem_mode: self.prefs.stem_mode,
             keymap: &self.keymap,
             mode: self.prefs.mode,
             analysis: AnalysisEnv {
+                quick_new: self.settings.quick_analyse_new,
                 workers: self.background_workers,
                 cores: analysis::cores(),
                 stale: &self.stale,
@@ -961,6 +1451,12 @@ impl EarshotApp {
                 path: &self.keymap_path,
                 origin: &self.keymap_origin,
             },
+            sampler: crate::ui::modals::sampler::SamplerEnv {
+                bank: &self.settings.sampler,
+                slots: self.frame.snap.as_ref().map(|s| &s.sampler),
+                errors: &self.sample_errors,
+                selected: (self.panels.library.focused_track(&self.panels.flow)).is_some(),
+            },
         };
         self.modals.show(ctx, &env, cx.out);
         out
@@ -968,6 +1464,11 @@ impl EarshotApp {
 }
 
 impl eframe::App for EarshotApp {
+    /// Audio closed, then the controller (`shut_down`).
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.shut_down();
+    }
+
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.prefs.tables = self.panels.library.tables.clone();
         eframe::set_value(storage, prefs::KEY, &self.prefs);
@@ -977,14 +1478,15 @@ impl eframe::App for EarshotApp {
         self.drain_events(ctx);
         self.read_engine(ctx);
         self.sync_tempo_lock();
-        // Background analysis holds back while a deck plays in Perform mode. In Prepare,
-        // listening while an import analyses is normal, so it runs at full width.
-        let playing = self.prefs.mode == Mode::Perform
-            && self
-                .frame
-                .snap
-                .as_ref()
-                .is_some_and(|sh| sh.live().iter().any(|d| d.playing));
+        self.sync_trim();
+        self.sync_phones_cue_only();
+        self.send_active_loops();
+        // Background analysis holds back while a deck plays, in every mode.
+        let playing = self
+            .frame
+            .snap
+            .as_ref()
+            .is_some_and(|sh| sh.live().iter().any(|d| d.playing));
         self.lib.analyser.set_playing(playing);
         self.confirm_quit(ctx);
         self.keyboard(ctx);
@@ -1008,13 +1510,24 @@ impl eframe::App for EarshotApp {
             let media = &mut self.panels.library.media;
             if !media.art.contains_key(&id) {
                 media.art.insert(id, None);
-                let _ = self.art_loader.send(id);
+                self.art_loader.send(id);
             }
         }
         self.save_flow();
         self.save_flow_view(ctx);
         self.schedule_repaint(ctx);
     }
+}
+
+/// Two presses of a load button this close together are a double tap.
+const DOUBLE_TAP: Duration = Duration::from_millis(400);
+
+/// A load button pressed at `now`, last pressed at `last`: true if that makes a double
+/// tap. A double tap clears `last`, so a third press starts again.
+fn double_tap(last: &mut Option<Instant>, now: Instant) -> bool {
+    let double = last.is_some_and(|t| now.saturating_duration_since(t) < DOUBLE_TAP);
+    *last = (!double).then_some(now);
+    double
 }
 
 /// `then` (before `now`) in unix seconds.
@@ -1045,6 +1558,8 @@ mod frame;
 mod input;
 mod library_ops;
 mod preview;
+mod sampler;
 mod tempo_lock;
 #[cfg(test)]
 mod tests;
+mod trim;

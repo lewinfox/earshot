@@ -6,6 +6,42 @@ Mixxx's XML and JS at runtime, run the JS in an embedded QuickJS, and pass every
 doesn't have yet become harmless stubs that log once. Start with the logging, so
 you can plug in a controller, press everything, and read what's missing.
 
+## Controller files
+
+Everything earshot knows about a particular controller is in a JSON mapping file.
+Nothing else in the code names a controller.
+
+- **Two places, one layout:** a maker's file `<maker>/<maker>.json`, its models'
+  `<maker>/controllers/<model>.json`.
+  - **Built-in:** `gui/controllers/`, found by `gui/build.rs` and compiled in. Read
+    only in the app; change them in the repo.
+  - **Your own:** `controllers/` in the data folder. Made with Controller mode's
+    "New mapping…", saved as you edit (only the lines that differ from the
+    maker's file).
+- **A model builds on its maker:** the maker's file (yours if you have one, else
+  the built-in one) with the model's on top, message by message; the model's
+  `meters` and `start` replace the maker's if it has any. `pioneer.json` holds only
+  what Mixxx's mappings show all Pioneer DDJs share.
+- **Which mapping a device gets** (at connect, per MIDI port):
+  1. The one picked for it from the MIDI pill (remembered per device: USB id, else
+     port name).
+  2. One of yours, by **USB id** (`"usb": ["2b73:0026"]`, from the port's ALSA card
+     on Linux), then by **port name** (`"names": ["DDJ-400"]`).
+  3. A built-in one, likewise.
+  4. Its **maker's file** alone (`"usb": ["2b73:*"]`): an unknown Pioneer gets the
+     shared lines.
+- **Fields:** `name`, `usb`, `names`; `inputs` and `meters`; `start` (messages sent
+  after the start-up lights, e.g. the DDJ-400's position query) and
+  `start_every_ms` (send them again this often: the DDJ-FLX4 stops talking without
+  its query every 200 ms); `mirror` and
+  `mirror_status` (where else a button's light goes: the DDJ keeps a separate light
+  for each SHIFT note and shows those while SHIFT is held, so each light is sent to
+  both).
+- **New mapping…:** pick the maker (or a new one: name it, and it gets an empty
+  maker file), what to start from (one of that maker's mappings, copied, or empty),
+  the model's name and the MIDI device. The device uses it from then on.
+- A line that can't be read is left out and logged; the rest of the file loads.
+
 ## The docs
 
 - **[mixxx-controls.md](mixxx-controls.md)**: every Mixxx control, what earshot
@@ -19,6 +55,8 @@ you can plug in a controller, press everything, and read what's missing.
 - **[capture.md](capture.md)**: controllers with no mapping. Detecting the
   model, guided and free capture in a new Configure mode, guesses from Mixxx's
   mappings, and a GitHub issue for adding support.
+- **[ddj-400-chirp.md](ddj-400-chirp.md)**: why asking a DDJ-400 for its knob
+  positions as audio starts made its headphones chirp, and how earshot waits now.
 - **`tools/`**: the two scripts that measured all this. Rerun them after a Mixxx
   update (see the top of mixxx-controls.md). They read `~/git/mixxx` and
   `/usr/share/mixxx/controllers` and write only the tables in mixxx-controls.md.
@@ -94,7 +132,7 @@ earshot would have.
    - Do the option maths (14-bit, relative, invert, soft takeover).
    - Add the names and aliases for what earshot already does.
    - Add XML `<output>`s for LEDs.
-   - Replace the hardcoded DDJ-400 table in `gui/src/core/midi.rs`.
+   - The hardcoded DDJ-400 table is gone: it's `gui/controllers/` now (#38).
    - Result: 12 XML-only mappings work fully. A DDJ-400 gets its mixer, pads,
      loops, load and button LEDs.
 2. **JS.**

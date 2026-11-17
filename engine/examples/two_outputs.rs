@@ -9,6 +9,9 @@
 //!
 //! Devices are matched by part of their name. A quiet tick plays once a second on
 //! both, so you can also listen for them drifting apart.
+//!
+//! PipeWire only, so Linux only; elsewhere it's a stub.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -33,6 +36,12 @@ struct Counts {
     errors: AtomicU64,
 }
 
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("two_outputs is a PipeWire diagnostic and runs on Linux only.");
+}
+
+#[cfg(target_os = "linux")]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let host = cpal::host_from_id(HostId::PipeWire).expect("PipeWire host");

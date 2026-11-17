@@ -14,6 +14,7 @@ impl EarshotApp {
                     });
                     self.panels.library.media.art.insert(id, tex);
                 }
+                Event::Sample { slot, result } => self.sample_loaded(slot, result),
                 Event::Scanned(Ok(())) => self.panels.library.browser.scanning = false,
                 Event::Store(e) => self.store_event(e),
                 Event::External(e) => self.external_event(e),
@@ -40,6 +41,9 @@ impl EarshotApp {
                     // Stop showing the pending track (on failure the deck shows what
                     // it had). An older request's result changes nothing: the player
                     // didn't take it either.
+                    if deck == self.prefs.target() {
+                        self.tempo_lock_loaded(ticket, result.is_ok());
+                    }
                     if self.panels.decks[deck.index()].finish_load(ticket) {
                         match result {
                             Ok(()) => self.refresh_cues(deck),
@@ -89,7 +93,7 @@ impl EarshotApp {
                     } else {
                         let q = self
                             .analysis_queue
-                            .get_or_insert_with(|| self.jobs.queue("Analysis"));
+                            .get_or_insert_with(|| self.jobs.summary("Analysis"));
                         q.say(format!(
                             "{waiting} track{} waiting",
                             if waiting == 1 { "" } else { "s" }
@@ -109,6 +113,13 @@ impl EarshotApp {
                 Event::Command(cmd) => self.dispatch(cmd),
                 Event::TempoLock(e) => self.tempo_lock_event(e),
                 Event::Stems(e) => self.panels.stems.on_event(e),
+                Event::Trim(e) => self.trim_event(e),
+                Event::Midi(m) => {
+                    if let Some(r) = &self.panels.debug.recorder {
+                        r.note_midi(false, &m.bytes);
+                    }
+                    self.panels.controller.on_midi(m)
+                }
             }
         }
     }
@@ -132,6 +143,11 @@ impl EarshotApp {
                 // Tracks came or went: the duplicates may have changed.
                 if *self.panels.library.browser.scope() == Scope::Duplicates {
                     self.dispatch(LibraryCmd::FindDuplicates.into());
+                }
+            }
+            StoreEvent::NewTracks(ids) => {
+                if self.settings.quick_analyse_new {
+                    self.quick.send(ids);
                 }
             }
             StoreEvent::TracksChanged(tracks) => self.index.patch(tracks),

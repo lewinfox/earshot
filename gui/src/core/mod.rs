@@ -6,9 +6,13 @@
 
 pub mod analysis;
 pub mod audio_watch;
+pub mod background;
 pub mod bus;
 pub mod collections;
 pub mod command;
+pub mod controller_audio;
+pub mod controllers;
+pub mod debug;
 pub mod drives;
 pub mod edit;
 #[allow(dead_code)] // searched by the Vibe suggestion feature to come; tests use it
@@ -22,13 +26,17 @@ pub mod jobs;
 pub mod keymap;
 pub mod keys;
 pub mod library;
+pub mod lights;
 pub mod log;
 pub mod memlock;
 pub mod midi;
 pub mod notice;
 pub mod outside;
+pub mod pads;
 pub mod player;
+pub mod power;
 pub mod query;
+pub mod sampler;
 pub mod selection;
 pub mod services;
 pub mod session;
@@ -37,8 +45,10 @@ pub mod sources;
 pub mod stems;
 pub mod store;
 pub mod suggest;
+pub mod tap;
 pub mod tempo_lock;
 pub mod track;
+pub mod trim;
 pub mod view;
 pub mod worker_client;
 pub mod worker_env;
@@ -57,6 +67,11 @@ pub enum Event {
         deck: earshot_engine::DeckId,
         /// The request's ticket (`player::request_load`).
         ticket: u64,
+        result: Result<(), String>,
+    },
+    /// A sound finished loading into a sampler slot, or couldn't (`sampler::load`).
+    Sample {
+        slot: earshot_engine::SampleSlot,
         result: Result<(), String>,
     },
     /// A library scan finished (the tracks themselves arrive as a
@@ -83,6 +98,10 @@ pub enum Event {
     TempoLock(tempo_lock::TempoLockEvent),
     /// News from the stems tool.
     Stems(stems::StemsEvent),
+    /// The Trim tool saved a cut, or couldn't.
+    Trim(trim::TrimEvent),
+    /// A MIDI message came in (it has already gone to the engine, if it does anything).
+    Midi(midi::MidiMsg),
 }
 
 /// Where background threads send [`Event`]s (the UI's channel, plus a repaint).

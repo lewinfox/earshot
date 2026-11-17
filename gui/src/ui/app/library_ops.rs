@@ -11,8 +11,14 @@ use crate::core::store::FlowCamera;
 impl EarshotApp {
     pub(super) fn library_cmd(&mut self, c: LibraryCmd) {
         match c {
-            LibraryCmd::Load(track) => self.load(None, track),
-            LibraryCmd::Analyse { tracks, dynamic } => self.analyse(tracks, dynamic),
+            LibraryCmd::Load(track) => {
+                self.load(None, track);
+            }
+            LibraryCmd::Analyse {
+                tracks,
+                dynamic,
+                asked,
+            } => self.analyse(tracks, dynamic, asked),
             LibraryCmd::PickRoots => {
                 // The picker blocks, so on its own thread; what's picked comes back as
                 // a command.
@@ -56,7 +62,7 @@ impl EarshotApp {
             LibraryCmd::ListSessions => self.lib.store.send(StoreCmd::ListSessions),
             LibraryCmd::FindDuplicates => {
                 let (reader, sink) = (self.lib.store.reader.clone(), self.sink.clone());
-                std::thread::spawn(move || {
+                crate::core::background::spawn("earshot-library", move || {
                     sink(Event::Duplicates(
                         reader.duplicates().map_err(|e| e.to_string()),
                     ));
@@ -99,6 +105,9 @@ impl EarshotApp {
             CollectionCmd::Show(id) => {
                 if self.collections.get(id).is_some() {
                     lib.browser.set_scope(Scope::Collection(id));
+                    // Picked in the tree: the browse knob is there.
+                    lib.level = crate::ui::panels::library::Level::Tree;
+                    lib.tree_cursor = Some(crate::ui::panels::library::TreeKey::Collection(id));
                 }
             }
             CollectionCmd::Create {
@@ -260,11 +269,10 @@ impl EarshotApp {
         &mut self.panels.flow
     }
 
-    /// Prepare's Flow tab (not while a deck plays: see `set_mode`).
+    /// Prepare's Flow tab.
     pub(super) fn show_flow_tab(&mut self) {
-        if self.set_mode(Mode::Prepare) {
-            self.prefs.prepare.tool = Tool::Flow;
-        }
+        self.set_mode(Mode::Prepare);
+        self.prefs.prepare.tool = Tool::Flow;
     }
 
     /// Ask for the collections and the Flow that was open last time.
@@ -299,10 +307,10 @@ impl EarshotApp {
         let Some(id) = open else {
             return;
         };
-        let busy = ctx.input(|i| i.pointer.any_down());
-        if let Some(camera) = self.panels.flow.camera_to_save(busy) {
+        let (busy, now) = ctx.input(|i| (i.pointer.any_down(), i.time));
+        if let Some(camera) = self.panels.flow.camera_to_save(busy, now) {
             self.lib.store.send(StoreCmd::SaveFlowCamera { id, camera });
-        } else if let Some(wait) = self.panels.flow.camera_wait() {
+        } else if let Some(wait) = self.panels.flow.camera_wait(now) {
             // No frames come while nothing moves: wake up to save it.
             ctx.request_repaint_after(wait);
         }
@@ -355,23 +363,31 @@ impl EarshotApp {
             self.hasher.clone(),
         );
         let job = self.jobs.start("Scanning the music folders");
-        std::thread::spawn(move || {
+        crate::core::background::spawn("earshot-library", move || {
             let result = library::scan_library(&store);
             drop(job);
             sink(Event::Scanned(result));
-            let _ = hasher.send(());
+            hasher.send(());
         });
     }
 
-    pub(super) fn load(&mut self, deck: Option<DeckId>, track_id: i64) {
-        // Double-click: Prepare's player, or the first deck that isn't playing.
+    /// The load's ticket, as its [`Event::Loaded`] will carry; `None` if it was
+    /// refused (the deck is playing, and the setting doesn't allow that).
+    pub(super) fn load(&mut self, deck: Option<DeckId>, track_id: i64) -> Option<u64> {
+        // Double-click: in Prepare, the target deck; else the first deck that isn't
+        // playing.
         let decks = &self.panels.decks;
         let deck = deck.unwrap_or_else(|| match self.prefs.mode {
-            Mode::Prepare => DeckId::PREPARE,
-            Mode::Perform => DeckId::first(self.prefs.decks().len())
-                .find(|d| !decks[d.index()].playing())
-                .unwrap_or(DeckId::new(0).expect("deck 1")),
+            Mode::Prepare => self.prefs.target(),
+            Mode::Perform | Mode::Controller | Mode::Debug => {
+                DeckId::first(self.prefs.decks().len())
+                    .find(|d| !decks[d.index()].playing())
+                    .unwrap_or(DeckId::new(0).expect("deck 1"))
+            }
         });
+        if self.refuse_load(deck) {
+            return None;
+        }
         let lib = &self.panels.library;
         self.loaded_from[deck.index()] = lib
             .here(self.prefs.layout().source, &self.panels.flow)
@@ -385,7 +401,7 @@ impl EarshotApp {
             self.index.get(track_id),
         ));
         let (player, lib, sink) = (self.player.clone(), self.lib.clone(), self.sink.clone());
-        std::thread::spawn(move || {
+        crate::core::background::spawn("earshot-library", move || {
             // A panic still finishes the load (as a failure), so the player doesn't sit
             // on "loading" ignoring its controls.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -398,16 +414,71 @@ impl EarshotApp {
                 result,
             });
         });
+        Some(ticket)
     }
 
-    pub(super) fn analyse(&self, ids: Vec<i64>, dynamic: bool) {
+    /// The deck is playing and the setting doesn't allow loading onto it: say so.
+    fn refuse_load(&mut self, deck: DeckId) -> bool {
+        if !self.panels.decks[deck.index()].playing() || self.settings.load_while_playing {
+            return false;
+        }
+        self.notify(
+            crate::core::notice::Level::Warning,
+            format!(
+                "Deck {} is playing: stop it first to load a track (or allow loading onto a \
+                 playing deck in Settings › Decks)",
+                crate::core::bus::deck_letter(deck)
+            ),
+        );
+        true
+    }
+
+    /// Instant doubles: the track on the deck beside `to` (1 and 2, 3 and 4) goes on
+    /// `to` too, at the same place, playing in step with it.
+    pub(super) fn instant_double(&mut self, to: DeckId) {
+        let Some(from) = DeckId::new(to.index() ^ 1) else {
+            return;
+        };
+        if self.refuse_load(to) {
+            return;
+        }
+        match player::instant_double(&self.player, from, to) {
+            Ok(ticket) => {
+                self.loaded_from[to.index()] = self.loaded_from[from.index()].clone();
+                let track_id = self.player.lock().unwrap().session(to).track_id;
+                if let Some(id) = track_id {
+                    self.panels.decks[to.index()].start_load(PendingLoad::new(
+                        ticket,
+                        id,
+                        self.index.get(id),
+                    ));
+                }
+                // As any load finishes: the cues, and Prepare's tempo lock.
+                (self.sink)(Event::Loaded {
+                    deck: to,
+                    ticket,
+                    result: Ok(()),
+                });
+            }
+            Err(e) => self.notify(
+                crate::core::notice::Level::Warning,
+                format!("Instant doubles: {e}"),
+            ),
+        }
+    }
+
+    pub(super) fn analyse(&self, ids: Vec<i64>, dynamic: bool, asked: bool) {
         let mode = if dynamic {
             AnalysisMode::Dynamic
         } else {
             AnalysisMode::Static
         };
-        for id in ids {
-            self.lib.analyser.queue(id, None, true, mode);
+        for &id in &ids {
+            self.lib.analyser.queue(id, None, asked, true, mode);
+        }
+        // The full analysis has to wait: a quick grid for those with none, meanwhile.
+        if self.hud.low_resource {
+            self.quick.send(ids);
         }
     }
 }

@@ -2,7 +2,9 @@
 //!
 //! - [`Store`] owns the only writing connection, on its own thread. Others send it
 //!   [`StoreCmd`]s (the UI: never waits) or [`Store::call`] it (background threads
-//!   that need the answer). What changed comes back as [`StoreEvent`]s.
+//!   that need the answer). What changed comes back as [`StoreEvent`]s. (Opened from
+//!   a thread that steps its background work, `core::background`, it has no thread:
+//!   each command is carried out at once, where it's sent.)
 //! - [`Reader`] is a small pool of read-only connections for loaders and other
 //!   background threads. WAL mode lets them read while the writer writes.
 //! - The UI thread never runs SQL.
@@ -30,6 +32,7 @@ pub use read::{
 };
 pub use write::{AnalysisSave, GridSave, ScannedFile, Writer, grid_bpm};
 
+use super::background;
 use super::collections::{Collection, CollectionKind, FlowGraph, NodeId, Section};
 use super::edit::{Edit, EditCmd};
 use super::embeddings::Embeddings;
@@ -116,6 +119,9 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 /// Where a beatgrid came from. Stored as TEXT (with a CHECK in the schema).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GridSource {
+    /// Quick analysis (`audio::quick`): one steady tempo from signal processing, made
+    /// when the track was added. The basic level; full analysis replaces it.
+    Quick,
     /// Static (one tempo) analysis.
     Analysis,
     /// Dynamic analysis: follows the drift.
@@ -131,6 +137,7 @@ pub enum GridSource {
 impl GridSource {
     pub const fn as_str(self) -> &'static str {
         match self {
+            GridSource::Quick => "quick",
             GridSource::Analysis => "analysis",
             GridSource::AnalysisDynamic => "analysis-dynamic",
             GridSource::User => "user",
@@ -141,6 +148,7 @@ impl GridSource {
 
     pub fn parse(s: &str) -> Option<GridSource> {
         Some(match s {
+            "quick" => GridSource::Quick,
             "analysis" => GridSource::Analysis,
             "analysis-dynamic" => GridSource::AnalysisDynamic,
             "user" => GridSource::User,
@@ -153,6 +161,7 @@ impl GridSource {
     /// How the deck names it.
     pub const fn label(self) -> &'static str {
         match self {
+            GridSource::Quick => "quick grid",
             GridSource::Analysis => "analysis",
             GridSource::AnalysisDynamic => "analysis (dynamic)",
             GridSource::User => "user",
@@ -160,6 +169,23 @@ impl GridSource {
             GridSource::Import => "import",
         }
     }
+
+    /// How far the track has been analysed, going by its grid.
+    pub const fn level(self) -> AnalysisLevel {
+        match self {
+            GridSource::Quick => AnalysisLevel::Basic,
+            _ => AnalysisLevel::Full,
+        }
+    }
+}
+
+/// How far a track with a beatgrid has been analysed ([`GridSource::level`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnalysisLevel {
+    /// A quick grid only.
+    Basic,
+    /// Analysed by the worker, fixed by hand, or brought in with its grid.
+    Full,
 }
 
 /// What a row in `cues` is. Stored as INTEGER.
@@ -210,6 +236,13 @@ pub enum StoreCmd {
     SaveUserGrid {
         track: i64,
         grid: Arc<earshot_engine::beatgrid::Beatgrid>,
+    },
+    /// A quick grid for a track that has no grid (else nothing is saved), and where
+    /// its beats start.
+    SaveQuickGrid {
+        track: i64,
+        grid: Arc<earshot_engine::beatgrid::Beatgrid>,
+        first_beat: f64,
     },
     /// A waveform worked out on load (the track list shows its thumbnail).
     SaveWaveform {
@@ -293,6 +326,13 @@ pub enum StoreCmd {
         track: i64,
         id: i64,
         color: Option<u32>,
+    },
+    /// Make a memory loop the track's active loop (the one it had stops being), or
+    /// stop it being. Answered with [`StoreEvent::Cues`].
+    SetLoopActive {
+        track: i64,
+        id: i64,
+        active: bool,
     },
     /// A new play session (one run of the app): the plays saved from now on are
     /// its. An earlier session left open (the app didn't get to end it) is closed at
@@ -414,6 +454,9 @@ pub enum StoreEvent {
     Sources(Vec<Source>),
     /// Every track in the library (after a scan, or tracks merging).
     Library(Vec<LibTrack>),
+    /// Tracks the library hadn't seen before (a scan or an import found them), that
+    /// have no beatgrid: sent just after the [`StoreEvent::Library`] that has them.
+    NewTracks(Vec<i64>),
     /// These tracks changed (analysis, a grid edit, metadata).
     TracksChanged(Vec<LibTrack>),
     /// Waveform thumbnails for the track list.
@@ -446,10 +489,20 @@ pub type EventSink = Arc<dyn Fn(StoreEvent) + Send + Sync>;
 
 type Job = Box<dyn FnOnce(&mut Writer) + Send>;
 
+/// Where the writing connection is.
+#[derive(Clone)]
+enum WriterAt {
+    /// On its own thread, which takes jobs in the order they're sent.
+    Thread(Sender<Job>),
+    /// Here: a job runs at once on the thread that asks (and its events are sent
+    /// before the call returns). For tests that step their background work.
+    Inline(Arc<Mutex<Writer>>),
+}
+
 /// The handle to the writer thread, plus a read pool. Cheap to clone.
 #[derive(Clone)]
 pub struct Store {
-    tx: Sender<Job>,
+    writer: WriterAt,
     pub reader: Reader,
     next_collection: Arc<AtomicI64>,
     embeddings: Arc<RwLock<Embeddings>>,
@@ -469,25 +522,30 @@ impl Store {
             [],
             |r| r.get(0),
         )?;
-        let (tx, rx) = channel::<Job>();
         let mut writer = Writer::new(conn);
         let embeddings = writer.embeddings();
-        std::thread::Builder::new()
-            .name("earshot-store".into())
-            .spawn(move || {
-                for job in rx {
-                    job(&mut writer);
-                    for e in writer.take_events() {
-                        sink(e);
+        let writer = if background::stepped() {
+            WriterAt::Inline(Arc::new(Mutex::new(writer)))
+        } else {
+            let (tx, rx) = channel::<Job>();
+            std::thread::Builder::new()
+                .name("earshot-store".into())
+                .spawn(move || {
+                    for job in rx {
+                        job(&mut writer);
+                        for e in writer.take_events() {
+                            sink(e);
+                        }
                     }
-                }
-            })
-            .map_err(|e| StoreError::Io {
-                path: path.into(),
-                source: e,
-            })?;
+                })
+                .map_err(|e| StoreError::Io {
+                    path: path.into(),
+                    source: e,
+                })?;
+            WriterAt::Thread(tx)
+        };
         Ok(Store {
-            tx,
+            writer,
             reader: Reader::new(path),
             next_collection: Arc::new(AtomicI64::new(next)),
             embeddings,
@@ -504,6 +562,26 @@ impl Store {
         &self.embeddings
     }
 
+    /// Give the writer a job: queued for its thread, or run here and now. False if
+    /// the writer's thread has stopped.
+    fn run(&self, job: Job) -> bool {
+        match &self.writer {
+            WriterAt::Thread(tx) => tx.send(job).is_ok(),
+            WriterAt::Inline(writer) => {
+                let events = {
+                    let mut w = writer.lock().unwrap();
+                    job(&mut w);
+                    w.take_events()
+                };
+                // (Sent with the writer free again, as from its thread.)
+                for e in events {
+                    (self.sink)(e);
+                }
+                true
+            }
+        }
+    }
+
     /// Queue a command. Never blocks; errors come back as [`StoreEvent::Error`].
     pub fn send(&self, cmd: StoreCmd) {
         // An outside track's: kept in memory (its cue edits) or dropped, never saved.
@@ -513,7 +591,7 @@ impl Store {
             }
             return;
         }
-        let _ = self.tx.send(Box::new(move |w: &mut Writer| {
+        self.run(Box::new(move |w: &mut Writer| {
             if let Err(e) = w.apply(cmd) {
                 w.emit(StoreEvent::Error(e));
             }
@@ -532,11 +610,12 @@ impl Store {
         f: impl FnOnce(&mut Writer) -> Result<R> + Send + 'static,
     ) -> Result<R> {
         let (tx, rx) = channel();
-        self.tx
-            .send(Box::new(move |w: &mut Writer| {
-                let _ = tx.send(f(w));
-            }))
-            .map_err(|_| StoreError::Closed)?;
+        let sent = self.run(Box::new(move |w: &mut Writer| {
+            let _ = tx.send(f(w));
+        }));
+        if !sent {
+            return Err(StoreError::Closed);
+        }
         rx.recv().map_err(|_| StoreError::Closed)?
     }
 
@@ -564,9 +643,11 @@ impl Store {
             return;
         }
         let reader = self.reader.clone();
-        std::thread::spawn(move || match reader.with(|c| read::cues(c, track)) {
-            Ok(cues) => sink(StoreEvent::Cues { track, cues }),
-            Err(e) => sink(StoreEvent::Error(e)),
+        background::spawn("earshot-read-cues", move || {
+            match reader.with(|c| read::cues(c, track)) {
+                Ok(cues) => sink(StoreEvent::Cues { track, cues }),
+                Err(e) => sink(StoreEvent::Error(e)),
+            }
         });
     }
 
@@ -574,21 +655,23 @@ impl Store {
     /// send it as [`StoreEvent::MetaSources`].
     pub fn request_meta(&self, ids: Vec<i64>, sink: EventSink) {
         let reader = self.reader.clone();
-        std::thread::spawn(move || match reader.with(|c| read::meta_sources(c, &ids)) {
-            Ok(m) => sink(StoreEvent::MetaSources(m)),
-            Err(e) => sink(StoreEvent::Error(e)),
+        background::spawn("earshot-read-meta", move || {
+            match reader.with(|c| read::meta_sources(c, &ids)) {
+                Ok(m) => sink(StoreEvent::MetaSources(m)),
+                Err(e) => sink(StoreEvent::Error(e)),
+            }
         });
     }
 
     /// Load waveform thumbnails on a reader thread and send them as an event.
     pub fn request_previews(&self, ids: Option<Vec<i64>>, sink: EventSink) {
         let reader = self.reader.clone();
-        std::thread::spawn(
-            move || match reader.with(|c| read::previews(c, ids.as_deref())) {
+        background::spawn("earshot-read-previews", move || {
+            match reader.with(|c| read::previews(c, ids.as_deref())) {
                 Ok(p) => sink(StoreEvent::Previews(p)),
                 Err(e) => sink(StoreEvent::Error(e)),
-            },
-        );
+            }
+        });
     }
 }
 

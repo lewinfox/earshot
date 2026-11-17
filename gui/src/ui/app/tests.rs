@@ -1,7 +1,18 @@
-//! The whole app, started on the null audio output, a database in a temporary
-//! folder, a stand-in analysis worker and a few generated tracks. Each test drives
-//! it through commands; with `EARSHOT_SHOT=/tmp/shot.png` set, each also renders the
-//! window off-screen and writes it next to that path (`/tmp/shot-perform.png`, …).
+//! The whole app, started on a database in a temporary folder, a stand-in analysis
+//! worker and a few generated tracks. Each test drives it through commands; with
+//! `EARSHOT_SHOT=/tmp/shot.png` set, each also renders the window off-screen and
+//! writes it next to that path (`/tmp/shot-perform.png`, …).
+//!
+//! Nothing in the app runs on its own here, so no test waits for anything or depends
+//! on timing (`core::background`): the Store writes where it's asked, the stand-in
+//! worker answers at once, and what the app would do on other threads (loads, scans,
+//! analysis) waits until the test runs it. Audio is rendered only when the test
+//! advances it. A test takes the app from one state to the next itself:
+//!
+//! - [`settle`] runs everything that's waiting, and whatever that starts, until
+//!   nothing is left ([`settle_until`] then checks the state it should have reached);
+//! - [`play`] renders so many seconds of audio;
+//! - [`steps`] draws so many frames.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -9,6 +20,7 @@ use std::time::Duration;
 use egui::vec2;
 
 use super::*;
+use crate::core::background;
 use crate::core::worker_client::WorkerConfig;
 use crate::core::worker_client::testing::{stand_in, stand_in_old_grid};
 
@@ -22,9 +34,34 @@ pub(super) fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-/// Where [`scratch`] puts one test's folder.
+/// Where [`scratch`] puts one test's folder: under this run's folder in
+/// `earshot-app-tests`.
 pub(super) fn scratch_dir(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("earshot-app-{name}-{}", std::process::id()))
+    static SWEPT: std::sync::Once = std::sync::Once::new();
+    let root = std::env::temp_dir().join("earshot-app-tests");
+    // A folder is left behind by every run (the harness outlives the test body):
+    // the first test of a run clears out earlier runs' folders. One
+    // untouched for an hour is from a run that's over.
+    SWEPT.call_once(|| sweep(&root, std::time::Duration::from_secs(3600)));
+    root.join(std::process::id().to_string()).join(name)
+}
+
+/// Delete the folders in `root` not changed for `age`.
+fn sweep(root: &Path, age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|d| d > age);
+        if old {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 /// Write `seconds` of a four-to-the-floor beat at `bpm`: a decaying low thump on
@@ -74,6 +111,39 @@ const TRACKS: [(&str, f64); 4] = [
     ("Low Orbit", 128.0),
 ];
 
+/// The fixture library's files, made once a run and shared by every test: each
+/// test's music folder has links to them ([`link_tracks`]), not copies, so a run
+/// doesn't write them out again for every test. They're read-only: a test that
+/// would change a track's file must replace its link with a copy first.
+fn fixture_tracks() -> &'static Path {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = scratch_dir("fixture-tracks");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (title, bpm) in TRACKS {
+            let path = dir.join(format!("{title}.wav"));
+            write_track(&path, bpm, 24.0);
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_readonly(true);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+        dir
+    })
+}
+
+/// Put the fixture library's tracks in `music`: as hard links to the shared files
+/// ([`fixture_tracks`]), or as copies where the folder can't link to them.
+fn link_tracks(music: &Path) {
+    for (title, _) in TRACKS {
+        let name = format!("{title}.wav");
+        let (from, to) = (fixture_tracks().join(&name), music.join(&name));
+        if std::fs::hard_link(&from, &to).is_err() {
+            std::fs::copy(&from, &to).unwrap();
+        }
+    }
+}
+
 /// Where `EARSHOT_SHOT` asks for this test's picture, if it does.
 fn shot_path(test: &str) -> Option<PathBuf> {
     let p = PathBuf::from(std::env::var_os("EARSHOT_SHOT")?);
@@ -90,6 +160,7 @@ pub(super) fn start(test: &str) -> H {
         LibraryCmd::Analyse {
             tracks: ids,
             dynamic: false,
+            asked: false,
         }
         .into(),
     );
@@ -100,45 +171,103 @@ pub(super) fn start(test: &str) -> H {
 /// Start the app on the fixture library with this analysis worker, and scan it.
 pub(super) fn start_with(test: &str, worker: fn(Role, usize) -> WorkerConfig) -> H {
     let dir = scratch(test);
-    for (title, bpm) in TRACKS {
-        write_track(&dir.join("music").join(format!("{title}.wav")), bpm, 24.0);
-    }
+    link_tracks(&dir.join("music"));
     let services = Services {
         db: dir.join(store::FILE_NAME),
         null_audio: true,
         worker,
         midi: false,
     };
-    let mut b = egui_kittest::Harness::builder().with_size(vec2(1700.0, 1000.0));
-    if shot_path(test).is_some() {
-        b = b.wgpu();
-    }
-    let mut h = b.build_eframe(move |cc| EarshotApp::new(cc, services).expect("app"));
+    let mut h = build(test, services);
     h.state_mut()
         .dispatch(LibraryCmd::AddRoots(vec![dir.join("music")]).into());
     settle_until(&mut h, |a| a.index.tracks().len() == TRACKS.len());
     h
 }
 
-/// Step frames (in real time: the work happens on other threads) until `ok` holds.
-#[track_caller]
-pub(super) fn settle_until(h: &mut H, ok: impl Fn(&EarshotApp) -> bool) {
-    // A minute: the tests run side by side, each with its own analysis workers.
-    let end = Instant::now() + Duration::from_secs(60);
-    while Instant::now() < end {
-        h.step();
-        if ok(h.state()) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
+/// The app with these services, with nothing running on its own (this thread steps
+/// its background work from here on).
+pub(super) fn build(test: &str, services: Services) -> H {
+    background::step_this_thread();
+    let mut b = egui_kittest::Harness::builder()
+        .with_size(vec2(1700.0, 1000.0))
+        .with_step_dt(FRAME);
+    if shot_path(test).is_some() {
+        b = b.wgpu();
     }
-    panic!("timed out");
+    b.build_eframe(move |cc| EarshotApp::new(cc, services).expect("app"))
 }
 
+/// Frames in a block of audio, as the app's default buffer has them.
+const BLOCK: usize = 256;
+
+/// How long the app takes each frame drawn to have lasted, seconds: what it times
+/// by frames (animations, saving a view that has held still) takes that many
+/// frames here, however long they really take.
+const FRAME: f32 = 0.25;
+
+/// One round of the app: the background work that's waiting (and whatever it
+/// starts), then `frames` of audio, then a frame drawn (which takes in what both
+/// did). True if the app has more to do: it did background work, or the frame left
+/// some waiting, or events it hasn't seen, or commands the engine hasn't taken.
+fn round(h: &mut H, frames: usize) -> bool {
+    let ran = background::run_pending();
+    if let Some(e) = h.state().player.lock().unwrap().engine.as_mut() {
+        e.advance(frames);
+    }
+    h.step();
+    let app = h.state();
+    // (The channel can't be looked into: what's in it is taken out and put back.)
+    let waiting: Vec<Event> = app.rx.try_iter().collect();
+    let events = !waiting.is_empty();
+    for e in waiting {
+        (app.sink)(e);
+    }
+    let engine = app.player.lock().unwrap();
+    let commands = engine
+        .engine
+        .as_ref()
+        .is_some_and(|e| e.pending_commands() > 0);
+    ran > 0 || background::pending() > 0 || events || commands
+}
+
+/// Run everything the app has waiting until nothing is left: background work, the
+/// events it sends, the commands the engine is to take (a block of audio a round),
+/// and a frame after each. Fails if that never ends.
+#[track_caller]
+pub(super) fn settle(h: &mut H) {
+    let mut quiet = 0;
+    for _ in 0..10_000 {
+        // Two quiet rounds: the first may be the frame that shows the last change.
+        quiet = if round(h, BLOCK) { 0 } else { quiet + 1 };
+        if quiet == 2 {
+            return;
+        }
+    }
+    panic!("the app never settles: it always has more to do");
+}
+
+/// [`settle`], then `ok` must hold: the state the test's last step leads to.
+#[track_caller]
+pub(super) fn settle_until(h: &mut H, ok: impl Fn(&EarshotApp) -> bool) {
+    settle(h);
+    assert!(ok(h.state()), "not so, with everything pending done");
+}
+
+/// Draw `n` frames (a block of audio each, as [`settle`] does).
 pub(super) fn steps(h: &mut H, n: usize) {
     for _ in 0..n {
-        h.step();
-        std::thread::sleep(Duration::from_millis(16));
+        round(h, BLOCK);
+    }
+}
+
+/// Render `seconds` of audio, drawing a frame every few blocks.
+pub(super) fn play(h: &mut H, seconds: f64) {
+    let mut left = (seconds * 44_100.0).ceil() as usize;
+    while left > 0 {
+        let n = left.min(4 * BLOCK);
+        round(h, n);
+        left -= n;
     }
 }
 
@@ -190,6 +319,27 @@ fn perform() {
         t.elapsed().as_secs_f64() * 1000.0 / n as f64,
         worst * 1000.0
     );
+    // What follows the build each frame, before the GPU: turning the shapes into
+    // triangles. (The GPU's own work isn't measured here.)
+    let out = h.output();
+    let (shapes, ppp) = (out.shapes.clone(), out.pixels_per_point);
+    let t = Instant::now();
+    let mut triangles = 0;
+    for _ in 0..n {
+        let prims = h.ctx.tessellate(shapes.clone(), ppp);
+        triangles = prims
+            .iter()
+            .map(|p| match &p.primitive {
+                egui::epaint::Primitive::Mesh(m) => m.indices.len() / 3,
+                _ => 0,
+            })
+            .sum();
+    }
+    eprintln!(
+        "tessellation: {:.2} ms average: {} shapes, {triangles} triangles",
+        t.elapsed().as_secs_f64() * 1000.0 / n as f64,
+        shapes.len()
+    );
     render(&mut h, "perform");
     // With the mixer hidden (as with a controller): no tempo faders.
     h.state_mut().dispatch(ViewCmd::ShowMixer(false).into());
@@ -232,17 +382,9 @@ fn duplicates() {
     h.get_by_label("Duplicates").click();
     steps(&mut h, 2);
     assert_eq!(*h.state().panels.library.browser.scope(), Scope::Duplicates);
-    // The copy's audio hash is worked out in the background, then it's found.
+    // The copy's audio hash was worked out after the scan, so it's found.
     let groups = |a: &EarshotApp| a.panels.library.browser.duplicates().map(<[_]>::len);
-    for _ in 0..600 {
-        if groups(h.state()) == Some(1) {
-            break;
-        }
-        if h.state().panels.library.browser.duplicates().is_some() {
-            h.state_mut().dispatch(LibraryCmd::FindDuplicates.into());
-        }
-        steps(&mut h, 5);
-    }
+    settle(&mut h);
     assert_eq!(groups(h.state()), Some(1));
     let group = h.state().panels.library.browser.duplicates().unwrap()[0].clone();
     steps(&mut h, 3);
@@ -312,9 +454,9 @@ fn prepare() {
     h.state_mut()
         .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
     h.state_mut().dispatch(LibraryCmd::Load(id).into());
-    let prep = DeckId::PREPARE.index();
+    let prep = DeckId::new(0).unwrap().index();
     settle_until(&mut h, |a| a.panels.decks[prep].wave.is_some());
-    let deck = DeckId::PREPARE;
+    let deck = DeckId::new(0).unwrap();
     h.state_mut()
         .dispatch(Command::Deck(deck, DeckCmd::SeekFraction(0.25)));
     steps(&mut h, 5);
@@ -328,9 +470,137 @@ fn prepare() {
     steps(&mut h, 5);
     render(&mut h, "prepare");
     // Nothing moving: no more frames asked for once it settles.
-    steps(&mut h, (SETTLE.as_millis() / 16) as usize + 10);
+    steps(&mut h, (SETTLE.as_secs_f32() / FRAME).ceil() as usize + 1);
     assert!(!h.state().moving());
     assert!(h.state().settle_until.is_none());
+}
+
+/// CUE/LOOP CALL: ◀ / ▶ go to the memory cue before / after the playhead (or halve
+/// / double a loop); with Shift, delete the one just called, or save one.
+#[test]
+fn cue_loop_call() {
+    use crate::core::bus::{Control, DeckControl};
+    let mut h = start_prepare("cue-call", 1);
+    let deck = DeckId::new(0).unwrap();
+    let id = ids(&h)[1];
+    let press = |h: &mut H, c: DeckControl| {
+        let cmd = Control::Deck(deck, c).command(1.0).unwrap();
+        h.state_mut().dispatch(cmd);
+        steps(h, 3);
+    };
+    let pos = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().deck(deck).position;
+    let memories = |a: &EarshotApp| a.cues.get(&id).map_or(0, |c| c.memories.len());
+    let duration = h.state().frame.snap.as_ref().unwrap().deck(deck).duration;
+    // Memory cues at a quarter and half way.
+    for (n, at) in [(1, 0.25), (2, 0.5)] {
+        h.state_mut()
+            .dispatch(Command::Deck(deck, DeckCmd::SeekFraction(at)));
+        settle_until(&mut h, |a| (pos(a) - at * duration).abs() < 0.1);
+        h.state_mut().dispatch(Command::Deck(deck, DeckCmd::SetCue));
+        settle_until(&mut h, |a| {
+            (a.frame.snap.as_ref().unwrap().deck(deck).cue_point - at * duration).abs() < 0.5
+        });
+        press(&mut h, DeckControl::SaveMemory);
+        settle_until(&mut h, |a| memories(a) == n);
+    }
+    h.state_mut()
+        .dispatch(Command::Deck(deck, DeckCmd::SeekFraction(0.75)));
+    settle_until(&mut h, |a| pos(a) > 0.7 * duration);
+    // (Saved on the beat, so near those points, not at them.)
+    let starts: Vec<f64> = h.state().cues[&id]
+        .memories
+        .iter()
+        .map(|m| m.start)
+        .collect();
+    let (first, second) = (starts[0].min(starts[1]), starts[0].max(starts[1]));
+    let near = |a: &EarshotApp, t: f64| (pos(a) - t).abs() < 0.01;
+    press(&mut h, DeckControl::CueJumpPrev);
+    settle_until(&mut h, |a| near(a, second));
+    press(&mut h, DeckControl::CueJumpPrev);
+    settle_until(&mut h, |a| near(a, first));
+    press(&mut h, DeckControl::CueJumpPrev);
+    steps(&mut h, 5);
+    assert!(near(h.state(), first), "nothing before the first");
+    press(&mut h, DeckControl::CueJumpNext);
+    settle_until(&mut h, |a| near(a, second));
+    // Shift ◀: the one just called goes.
+    press(&mut h, DeckControl::CueDelete);
+    settle_until(&mut h, |a| memories(a) == 1);
+    assert_eq!(h.state().cues[&id].memories[0].start, first);
+    // Looping: ▶ doubles the loop instead of moving.
+    h.state_mut()
+        .dispatch((deck, EngineCmd::BeatLoop(2.0)).into());
+    settle_until(&mut h, |a| {
+        a.frame.snap.as_ref().unwrap().deck(deck).loop_active
+    });
+    let len = |a: &EarshotApp| {
+        let d = a.frame.snap.as_ref().unwrap().deck(deck);
+        d.loop_out.unwrap() - d.loop_in.unwrap()
+    };
+    let before = len(h.state());
+    press(&mut h, DeckControl::CueJumpNext);
+    settle_until(&mut h, |a| (len(a) - 2.0 * before).abs() < 0.01);
+    press(&mut h, DeckControl::CueJumpPrev);
+    settle_until(&mut h, |a| (len(a) - before).abs() < 0.01);
+}
+
+/// SHIFT + RELOOP/EXIT makes the nearest memory loop the active loop; the deck then
+/// starts it by itself when playback gets there. Pressed again, it stops being.
+#[test]
+fn active_loop() {
+    use crate::core::bus::{Control, DeckControl};
+    let mut h = start_prepare("active-loop", 1);
+    let deck = DeckId::new(0).unwrap();
+    let id = ids(&h)[1];
+    let snap = |a: &EarshotApp| *a.frame.snap.as_ref().unwrap().deck(deck);
+    let toggle = |h: &mut H| {
+        let cmd = Control::Deck(deck, DeckControl::LoopActiveToggle)
+            .command(1.0)
+            .unwrap();
+        h.state_mut().dispatch(cmd);
+    };
+    let active = |a: &EarshotApp| {
+        a.cues
+            .get(&id)
+            .and_then(|c| c.memories.iter().find(|m| m.active).map(|m| m.id))
+    };
+    // A 4-beat loop a quarter of the way in, saved, and left.
+    let duration = snap(h.state()).duration;
+    h.state_mut()
+        .dispatch(Command::Deck(deck, DeckCmd::SeekFraction(0.25)));
+    settle_until(&mut h, |a| (snap(a).position - 0.25 * duration).abs() < 0.1);
+    h.state_mut()
+        .dispatch((deck, EngineCmd::BeatLoop(4.0)).into());
+    settle_until(&mut h, |a| snap(a).loop_active);
+    let (start, end) = (
+        snap(h.state()).loop_in.unwrap(),
+        snap(h.state()).loop_out.unwrap(),
+    );
+    h.state_mut()
+        .dispatch(Command::Deck(deck, DeckCmd::SaveMemory));
+    settle_until(&mut h, |a| {
+        a.cues.get(&id).is_some_and(|c| c.memories.len() == 1)
+    });
+    h.state_mut()
+        .dispatch((deck, EngineCmd::Reloop(earshot_engine::Set::Off)).into());
+    settle_until(&mut h, |a| !snap(a).loop_active);
+    // Made active: the engine has it.
+    toggle(&mut h);
+    settle_until(&mut h, |a| active(a).is_some());
+    settle_until(&mut h, |a| snap(a).active_loop == Some((start, end)));
+    // Played onto from before it: it turns on.
+    h.state_mut().dispatch(Command::Deck(
+        deck,
+        DeckCmd::Engine(EngineCmd::Seek(start - 0.3)),
+    ));
+    h.state_mut()
+        .dispatch((deck, EngineCmd::Play(earshot_engine::Set::On)).into());
+    play(&mut h, 0.5);
+    assert!(snap(h.state()).loop_active && snap(h.state()).loop_in == Some(start));
+    // Pressed again (the loop playing is the one): no longer active.
+    toggle(&mut h);
+    settle_until(&mut h, |a| active(a).is_none());
+    settle_until(&mut h, |a| snap(a).active_loop.is_none());
 }
 
 /// Prepare's Flow tab with two cards and the "+" suggestions open.
@@ -358,9 +628,15 @@ fn start_prepare(test: &str, n: usize) -> H {
     h.state_mut()
         .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
     h.state_mut().dispatch(LibraryCmd::Load(id).into());
-    let prep = DeckId::PREPARE.index();
+    let prep = DeckId::new(0).unwrap().index();
+    // The app's waveform and grid, and the engine's own news that it has the track
+    // (the app fills its side in before the engine has taken the load).
     settle_until(&mut h, |a| {
-        a.panels.decks[prep].wave.is_some() && a.frame.deck(DeckId::PREPARE).grid.is_some()
+        let deck = DeckId::new(0).unwrap();
+        let engine = a.frame.snap.as_ref().map(|s| s.deck(deck));
+        a.panels.decks[prep].wave.is_some()
+            && a.frame.deck(deck).grid.is_some()
+            && engine.is_some_and(|d| d.track_id == Some(id) && d.duration > 0.0)
     });
     h
 }
@@ -387,7 +663,7 @@ fn press(h: &mut H, modifiers: egui::Modifiers, key: Key) {
 fn first_beat(a: &EarshotApp) -> f64 {
     let inner = a.player.lock().unwrap();
     inner
-        .session(DeckId::PREPARE)
+        .session(DeckId::new(0).unwrap())
         .grid
         .as_ref()
         .expect("a grid")
@@ -396,14 +672,18 @@ fn first_beat(a: &EarshotApp) -> f64 {
 
 /// The track on Prepare's player.
 fn prepared(a: &EarshotApp) -> Option<i64> {
-    a.player.lock().unwrap().session(DeckId::PREPARE).track_id
+    a.player
+        .lock()
+        .unwrap()
+        .session(DeckId::new(0).unwrap())
+        .track_id
 }
 
 /// Ctrl+← / → nudge Prepare's grid too (not a beat jump).
 #[test]
 fn ctrl_arrows_nudge_the_grid() {
     let mut h = start_prepare("nudge-ctrl", 1);
-    let pos = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().prepare.position;
+    let pos = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().decks[0].position;
     steps(&mut h, 20);
     let (before, at) = (first_beat(h.state()), pos(h.state()));
     press(&mut h, egui::Modifiers::COMMAND, Key::ArrowRight);
@@ -418,7 +698,7 @@ fn ctrl_arrows_nudge_the_grid() {
 fn shift_arrows_nudge_the_grid() {
     let mut h = start_prepare("nudge", 1);
     let id = prepared(h.state()).unwrap();
-    let pos = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().prepare.position;
+    let pos = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().decks[0].position;
     // The player settles on its first cue once the track is in.
     steps(&mut h, 20);
     let (before, at) = (first_beat(h.state()), pos(h.state()));
@@ -435,14 +715,21 @@ fn shift_arrows_nudge_the_grid() {
     );
     // What's drawn has it, it stays, and it's saved: loading the track again keeps it.
     steps(&mut h, 60);
-    let drawn = |a: &EarshotApp| a.frame.deck(DeckId::PREPARE).grid.as_ref().unwrap().times()[0];
+    let drawn = |a: &EarshotApp| {
+        a.frame
+            .deck(DeckId::new(0).unwrap())
+            .grid
+            .as_ref()
+            .unwrap()
+            .times()[0]
+    };
     assert!((drawn(h.state()) - (before + 0.010)).abs() < 1e-6);
     let other = ids(&h)[0];
     h.state_mut()
-        .dispatch(Command::Deck(DeckId::PREPARE, DeckCmd::Load(other)));
+        .dispatch(Command::Deck(DeckId::new(0).unwrap(), DeckCmd::Load(other)));
     settle_until(&mut h, |a| prepared(a) == Some(other));
     h.state_mut()
-        .dispatch(Command::Deck(DeckId::PREPARE, DeckCmd::Load(id)));
+        .dispatch(Command::Deck(DeckId::new(0).unwrap(), DeckCmd::Load(id)));
     settle_until(&mut h, |a| prepared(a) == Some(id));
     steps(&mut h, 30);
     assert!(
@@ -458,8 +745,14 @@ fn shift_arrows_nudge_the_grid() {
 fn prepare_keys() {
     let mut h = start_prepare("prepare-keys", 1);
     let id = prepared(h.state()).unwrap();
-    let snap = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().prepare;
-    let grid = h.state().frame.deck(DeckId::PREPARE).grid.clone().unwrap();
+    let snap = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().decks[0];
+    let grid = h
+        .state()
+        .frame
+        .deck(DeckId::new(0).unwrap())
+        .grid
+        .clone()
+        .unwrap();
     let beats = |a: &EarshotApp| grid.beat_at(snap(a).position);
     // A jump lands on a beat 4 on (from just before the first, the 1 after it).
     let start = beats(h.state());
@@ -498,8 +791,8 @@ fn prepare_keys() {
 fn hot_cues_are_kept_per_track() {
     let mut h = start_prepare("hot-cues", 1);
     let (id, other) = (prepared(h.state()).unwrap(), ids(&h)[0]);
-    let deck = DeckId::PREPARE;
-    let snap = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().prepare;
+    let deck = DeckId::new(0).unwrap();
+    let snap = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().decks[0];
     h.state_mut().dispatch((deck, EngineCmd::Seek(3.0)).into());
     settle_until(&mut h, |a| (snap(a).position - 3.0).abs() < 0.01);
     for press in [earshot_engine::Press::Down, earshot_engine::Press::Up] {
@@ -523,8 +816,8 @@ fn hot_cues_are_kept_per_track() {
 fn the_main_cue_is_kept_per_track() {
     let mut h = start_prepare("main-cue", 1);
     let (id, other) = (prepared(h.state()).unwrap(), ids(&h)[0]);
-    let deck = DeckId::PREPARE;
-    let snap = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().prepare;
+    let deck = DeckId::new(0).unwrap();
+    let snap = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().decks[0];
     h.state_mut().dispatch((deck, EngineCmd::Seek(7.0)).into());
     settle_until(&mut h, |a| (snap(a).position - 7.0).abs() < 0.01);
     for press in [earshot_engine::Press::Down, earshot_engine::Press::Up] {
@@ -563,9 +856,9 @@ fn ctrl_arrows_load_the_next_track() {
     };
     assert_eq!(list.len(), TRACKS.len());
     h.state_mut()
-        .dispatch(ViewCmd::LoadSelected(DeckId::PREPARE).into());
+        .dispatch(ViewCmd::LoadSelected(DeckId::new(0).unwrap()).into());
     // Every load in, so an older one can't land after the next.
-    let prep = DeckId::PREPARE.index();
+    let prep = DeckId::new(0).unwrap().index();
     settle_until(&mut h, |a| {
         prepared(a) == Some(list[0]) && a.panels.decks[prep].pending().is_none()
     });
@@ -588,7 +881,7 @@ fn ctrl_arrows_load_the_next_track() {
 #[test]
 fn only_the_newest_load_lands() {
     let mut h = start_prepare("newest-load", 0);
-    let prep = DeckId::PREPARE;
+    let prep = DeckId::new(0).unwrap();
     let ids = ids(&h);
     let shown = |a: &EarshotApp| a.panels.decks[prep.index()].pending().map(|p| p.track_id);
 
@@ -619,8 +912,8 @@ fn only_the_newest_load_lands() {
 #[test]
 fn c_puts_the_playhead_on_the_cue() {
     let mut h = start_prepare("set-cue", 1);
-    let deck = DeckId::PREPARE;
-    let snap = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().prepare;
+    let deck = DeckId::new(0).unwrap();
+    let snap = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().decks[0];
     if !snap(h.state()).quantize {
         h.state_mut()
             .dispatch((deck, EngineCmd::Quantize(earshot_engine::Set::On)).into());
@@ -646,11 +939,11 @@ fn four_decks() {
     use egui_kittest::kittest::Queryable;
     let mut h = start("four-decks");
     let fx_decks = |h: &H| h.state().player.lock().unwrap().fx_decks;
-    assert!(!h.state().prefs.four_decks);
+    assert!(!h.state().prefs.four_decks());
     assert_eq!(fx_decks(&h), 2);
     h.get_by_label("4 decks").click();
     steps(&mut h, 3);
-    assert!(h.state().prefs.four_decks);
+    assert!(h.state().prefs.four_decks());
     assert_eq!(h.state().prefs.decks().len(), 4);
     // Effects can go on all four.
     assert_eq!(fx_decks(&h), 4);
@@ -670,7 +963,7 @@ fn four_decks() {
     // Not back to two while deck 3 plays out of sight.
     h.get_by_label("2 decks").click();
     steps(&mut h, 3);
-    assert!(h.state().prefs.four_decks);
+    assert!(h.state().prefs.four_decks());
     // Times a frame with four decks shown and playing.
     for d in DeckId::first(4) {
         h.state_mut()
@@ -709,7 +1002,7 @@ fn four_decks() {
     });
     h.get_by_label("2 decks").click();
     steps(&mut h, 3);
-    assert!(!h.state().prefs.four_decks);
+    assert!(!h.state().prefs.four_decks());
 }
 
 /// Layout commands land in the preferences, per mode.
@@ -752,10 +1045,34 @@ fn the_effect_unit_is_in_the_top_bar() {
         .into_iter()
         .find(|k| *k != kind(h.state()))
         .unwrap();
-    h.get_by_value(kind(h.state()).name()).click();
+    // The effect's dropdown is the first (the release's is after it).
+    h.query_all_by_value(kind(h.state()).name())
+        .next()
+        .unwrap()
+        .click();
     steps(&mut h, 3);
     h.get_by_label(next.name()).click();
     settle_until(&mut h, |a| kind(a) == next);
+    // On, then released: off, and the release echo rings.
+    let unit = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().mixer.fx[0];
+    h.get_by_label("ON").click();
+    settle_until(&mut h, |a| unit(a).enabled);
+    h.get_by_label("REL").click();
+    settle_until(&mut h, |a| !unit(a).enabled);
+    // Two taps half a second apart: 120 BPM, shown on the button; AUTO undoes it.
+    let t0 = std::time::Instant::now();
+    for at in [t0, t0 + std::time::Duration::from_millis(500)] {
+        h.state_mut()
+            .dispatch(Command::App(crate::core::command::AppCmd::FxTap {
+                unit: 0,
+                at,
+            }));
+    }
+    settle_until(&mut h, |a| unit(a).tap_bpm == Some(120.0));
+    steps(&mut h, 3);
+    assert!(h.query_by_label("TAP 120").is_some());
+    h.get_by_label("AUTO").click();
+    settle_until(&mut h, |a| unit(a).tap_bpm.is_none());
 }
 
 /// However the mixer and effects are switched, both decks stay inside the window:
@@ -826,7 +1143,7 @@ fn l_and_r_switch_the_hands_between_decks() {
     let mut h = start("layers");
     h.state_mut()
         .dispatch(ViewCmd::SetMode(Mode::Perform).into());
-    h.state_mut().dispatch(ViewCmd::FourDecks(true).into());
+    h.state_mut().dispatch(ViewCmd::DeckCount(4).into());
     let id = ids(&h)[0];
     for d in [0, 2] {
         let deck = DeckId::new(d).unwrap();
@@ -861,7 +1178,7 @@ fn l_and_r_switch_the_hands_between_decks() {
     settle_until(&mut h, |a| playing(a, 2));
     assert!(!playing(h.state(), 0));
     // Back to two decks: the left hand is on deck 1 again.
-    h.state_mut().dispatch(ViewCmd::FourDecks(false).into());
+    h.state_mut().dispatch(ViewCmd::DeckCount(2).into());
     steps(&mut h, 3);
     assert_eq!(h.state().prefs.active_deck(0), DeckId::new(0).unwrap());
 }
@@ -937,7 +1254,7 @@ fn settings() {
     h.state_mut().dispatch(AppCmd::CopyKeymap.into());
     assert_eq!(h.state().keymap_origin, keymap::Origin::File);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), keymap::BUILT_IN);
-    std::fs::write(&path, "perform  P  deck1  play\nperform  P  deck2  play\n").unwrap();
+    std::fs::write(&path, "perform  P  deck_1_play\nperform  P  deck_2_play\n").unwrap();
     // Not over the user's file.
     h.state_mut().dispatch(AppCmd::CopyKeymap.into());
     assert!(
@@ -950,11 +1267,11 @@ fn settings() {
         h.state().keymap.find(Mode::Perform, "S", false).is_some(),
         "built in"
     );
-    std::fs::write(&path, "perform  P  deck1  play\n").unwrap();
+    std::fs::write(&path, "perform  P  deck_1_play\n").unwrap();
     h.state_mut().dispatch(AppCmd::ReloadKeymap.into());
     assert_eq!(h.state().keymap_origin, keymap::Origin::File);
     assert!(h.state().keymap.find(Mode::Perform, "S", false).is_none());
-    std::fs::write(&path, "perform  P  deck1  play\nperform  P  deck2  play\n").unwrap();
+    std::fs::write(&path, "perform  P  deck_1_play\nperform  P  deck_2_play\n").unwrap();
     h.state_mut().dispatch(AppCmd::ReloadKeymap.into());
     h.state_mut()
         .dispatch(ViewCmd::Settings(SettingsTab::Keymap).into());
@@ -976,6 +1293,7 @@ fn a_worker_with_another_grid_version_is_refused() {
         LibraryCmd::Analyse {
             tracks: vec![id],
             dynamic: false,
+            asked: false,
         }
         .into(),
     );
@@ -1016,17 +1334,9 @@ fn stale_tracks_are_counted_and_analysed_again() {
     render(&mut h, "settings-stale");
     h.state_mut().dispatch(AppCmd::QueueStale.into());
     settle_until(&mut h, |a| a.stale == Stale::Queued(1));
-    // Up to date once its new result is saved.
-    for _ in 0..600 {
-        if h.state().stale == Stale::Count(0) {
-            return;
-        }
-        if h.state().stale != Stale::Counting {
-            h.state_mut().dispatch(AppCmd::CountStale.into());
-        }
-        steps(&mut h, 5);
-    }
-    panic!("still stale: {:?}", h.state().stale);
+    // Up to date now its new result is saved (the settling above ran the analysis).
+    h.state_mut().dispatch(AppCmd::CountStale.into());
+    settle_until(&mut h, |a| a.stale == Stale::Count(0));
 }
 
 /// Edits from the shell: metadata, the Flow canvas and a grid, each undone and
@@ -1074,7 +1384,7 @@ fn edits_undo_and_redo() {
     settle_until(&mut h, |a| cards(a) == 2);
 
     // A grid edit on Prepare's player; undo puts the analysed grid back on it too.
-    let deck = DeckId::PREPARE;
+    let deck = DeckId::new(0).unwrap();
     h.state_mut()
         .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
     h.state_mut().dispatch(LibraryCmd::Load(ids[1]).into());
@@ -1300,6 +1610,149 @@ fn folders_in_each_section() {
     render(&mut h, "folders");
 }
 
+/// The browse knob reaches every pane: Next goes from the sources into a tree, into
+/// a folder, into a crate's tracks; Prev comes back out (closing the folder) to the
+/// sources, where turning picks another source. Whatever it's on shows at once.
+#[test]
+fn browsing_with_the_knob() {
+    use crate::ui::panels::library::Level;
+    let mut h = start("browse-knob");
+    let ids = ids(&h);
+    h.state_mut().dispatch(
+        CollectionCmd::CreateFolder {
+            section: Section::Crates,
+            parent: None,
+        }
+        .into(),
+    );
+    settle_until(&mut h, |a| a.collections.children(None).len() == 1);
+    let folder = h.state().collections.children(None)[0].id;
+    let inner = make(&mut h, CollectionKind::Crate, "Inner", ids[..2].to_vec());
+    h.state_mut()
+        .dispatch(CollectionCmd::Move(inner, Some(folder)).into());
+    settle_until(&mut h, |a| {
+        a.collections.get(inner).unwrap().parent == Some(folder)
+    });
+    make(&mut h, CollectionKind::Crate, "Top", ids[2..3].to_vec());
+    use crate::ui::panels::library::TreeKey;
+    let lib = |h: &H| {
+        let l = &h.state().panels.library;
+        let id = match &l.tree_cursor {
+            Some(TreeKey::Collection(id)) => Some(*id),
+            _ => None,
+        };
+        (l.level, id)
+    };
+    let showing = |h: &H| h.state().panels.library.browser.scope().clone();
+    let nav = |h: &mut H, cmd: ViewCmd| {
+        h.state_mut().dispatch(cmd.into());
+        steps(h, 3);
+    };
+    nav(&mut h, ViewCmd::Source(Some(Source::Crates)));
+    assert_eq!(lib(&h).0, Level::Sources);
+    // Into the tree: on its first row, shown.
+    nav(&mut h, ViewCmd::PaneStep(1));
+    let rows = {
+        let a = h.state();
+        a.panels
+            .library
+            .collections
+            .visible(&a.collections, Section::Crates)
+    };
+    assert_eq!(lib(&h), (Level::Tree, Some(rows[0].0)));
+    // Turn to the folder, and go into it: on the crate inside, its tracks listed.
+    let at = rows.iter().position(|(id, _)| *id == folder).unwrap() as i32;
+    nav(&mut h, ViewCmd::Browse(at));
+    assert_eq!(lib(&h), (Level::Tree, Some(folder)));
+    nav(&mut h, ViewCmd::PaneStep(1));
+    assert_eq!(lib(&h), (Level::Tree, Some(inner)));
+    assert_eq!(showing(&h), Scope::Collection(inner));
+    render(&mut h, "browse-knob");
+    // Into its tracks, on the first: the knob moves on through them.
+    nav(&mut h, ViewCmd::PaneStep(1));
+    assert_eq!(lib(&h).0, Level::List);
+    let focused = |h: &H| h.state().panels.library.browser.focused();
+    let first = h.state().panels.library.browser.shown()[0];
+    assert_eq!(focused(&h), Some(first));
+    nav(&mut h, ViewCmd::Browse(1));
+    assert_eq!(
+        focused(&h),
+        Some(h.state().panels.library.browser.shown()[1])
+    );
+    // Back out: the crate, then its folder (closed), then the sources.
+    nav(&mut h, ViewCmd::PaneStep(-1));
+    assert_eq!(lib(&h), (Level::Tree, Some(inner)));
+    nav(&mut h, ViewCmd::PaneStep(-1));
+    assert_eq!(lib(&h), (Level::Tree, Some(folder)));
+    let a = h.state();
+    let rows = a
+        .panels
+        .library
+        .collections
+        .visible(&a.collections, Section::Crates);
+    assert!(rows.iter().all(|(id, _)| *id != inner), "the folder closed");
+    nav(&mut h, ViewCmd::PaneStep(-1));
+    assert_eq!(lib(&h).0, Level::Sources);
+    // Turning there picks the next source, at once.
+    nav(&mut h, ViewCmd::Browse(1));
+    assert_eq!(h.state().prefs.layout().source, Some(Source::Flows));
+    nav(&mut h, ViewCmd::Browse(-2));
+    assert_eq!(h.state().prefs.layout().source, Some(Source::Playlists));
+    // Manage goes no further than itself: Next stays, Prev comes back.
+    nav(&mut h, ViewCmd::Source(Some(Source::Manage)));
+    nav(&mut h, ViewCmd::PaneStep(1));
+    assert_eq!(lib(&h).0, Level::Inside);
+    nav(&mut h, ViewCmd::Browse(1));
+    assert_eq!(h.state().prefs.layout().source, Some(Source::Manage));
+    nav(&mut h, ViewCmd::PaneStep(-1));
+    assert_eq!(lib(&h).0, Level::Sources);
+    // All tracks: into its lists (all of them, then by analysis), not its tracks.
+    use crate::ui::panels::library::browser::AllRow;
+    nav(&mut h, ViewCmd::Source(Some(Source::AllTracks)));
+    nav(&mut h, ViewCmd::PaneStep(1));
+    let all = |h: &H| h.state().panels.library.tree_cursor.clone();
+    assert_eq!(lib(&h).0, Level::Tree);
+    assert_eq!(all(&h), Some(TreeKey::All(AllRow::All)));
+    nav(&mut h, ViewCmd::Browse(1));
+    assert!(matches!(all(&h), Some(TreeKey::All(AllRow::Status(_)))));
+    nav(&mut h, ViewCmd::PaneStep(1));
+    assert_eq!(lib(&h).0, Level::List);
+    nav(&mut h, ViewCmd::PaneStep(-1));
+    assert!(matches!(all(&h), Some(TreeKey::All(AllRow::Status(_)))));
+}
+
+/// Related tracks opens the suggestions with the knob on them; VIEW hides the decks.
+#[test]
+fn related_tracks_and_a_bigger_library() {
+    let mut h = start("related");
+    h.state_mut().dispatch(ViewCmd::Aside(None).into());
+    steps(&mut h, 2);
+    let cmd = |name: &str| {
+        crate::core::bus::Control::parse(name, None)
+            .unwrap()
+            .0
+            .command(1.0)
+            .unwrap()
+    };
+    h.state_mut().dispatch(cmd("library_related_tracks_toggle"));
+    steps(&mut h, 3);
+    assert_eq!(
+        h.state().prefs.layout().aside,
+        Some(crate::core::view::Aside::Suggestions)
+    );
+    assert_eq!(h.state().panels.library.focused_pane, Pane::Suggest);
+    // Again: closed, the knob back on the track list.
+    h.state_mut().dispatch(cmd("library_related_tracks_toggle"));
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.layout().aside, None);
+    assert_eq!(h.state().panels.library.focused_pane, Pane::Library);
+    let decks = |h: &H| h.query_all_by_label("SYNC").count();
+    assert_eq!(decks(&h), 2);
+    h.state_mut().dispatch(cmd("ui_library_maximize_toggle"));
+    steps(&mut h, 10);
+    assert_eq!(decks(&h), 2, "the decks stay (the waveforms go)");
+}
+
 /// "Add to Flow ▸ <Flow>" in the track menu adds a card that follows nothing.
 #[test]
 fn add_to_flow_from_the_track_menu() {
@@ -1321,16 +1774,16 @@ fn add_to_flow_from_the_track_menu() {
     assert!(!c.linear, "two starting cards: not linked");
 }
 
-/// The FEATURES.md bug: in Prepare, the suggestions' Master is Prepare's player while
-/// it plays. Then the suggestions take focus: browsing and "load selected" use them.
+/// In Prepare, the suggestions' Master is the deck that plays, as in Perform. Then the
+/// suggestions take focus: browsing and "load selected" use them.
 #[test]
-fn master_in_prepare_is_the_player() {
+fn master_in_prepare_is_the_playing_deck() {
     let mut h = start("prepare-master");
     let id = ids(&h)[1];
     h.state_mut()
         .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
     h.state_mut().dispatch(LibraryCmd::Load(id).into());
-    let prep = DeckId::PREPARE;
+    let prep = DeckId::new(0).unwrap();
     settle_until(&mut h, |a| a.panels.decks[prep.index()].wave.is_some());
     h.state_mut().dispatch(Command::from((
         prep,
@@ -1353,7 +1806,8 @@ fn master_in_prepare_is_the_player() {
         app.panels.library.focused_track(&app.panels.flow),
         Some(pick)
     );
-    let a = DeckId::new(0).unwrap();
+    // Onto the other deck: deck 1 is playing.
+    let a = DeckId::new(1).unwrap();
     app.dispatch(ViewCmd::LoadSelected(a).into());
     settle_until(&mut h, |app| app.panels.decks[a.index()].wave.is_some());
     assert_eq!(
@@ -1363,9 +1817,12 @@ fn master_in_prepare_is_the_player() {
 }
 
 mod audio_watch;
+mod cpu_strain;
 mod external;
 mod history;
 mod metadata;
+mod quick;
+mod sampler;
 mod tempo_lock;
 
 /// The text columns fit their contents; clicking a row sizes nothing, and dragging
@@ -1420,14 +1877,15 @@ fn deck_options_survive_a_restart() {
         .dispatch((deck1, EngineCmd::Keylock(earshot_engine::Set::On)).into());
     h.state_mut().dispatch(
         (
-            DeckId::PREPARE,
+            DeckId::new(0).unwrap(),
             EngineCmd::Quantize(earshot_engine::Set::Off),
         )
             .into(),
     );
     let want = |o: &[DeckOptions]| {
         o.first().is_some_and(|d| d.keylock)
-            && o.get(DeckId::PREPARE.index()).is_some_and(|d| !d.quantize)
+            && o.get(DeckId::new(0).unwrap().index())
+                .is_some_and(|d| !d.quantize)
     };
     settle_until(&mut h, |a| {
         settings::read::<Vec<DeckOptions>>(&a.lib.store.reader, settings::DECK_OPTIONS)
@@ -1443,14 +1901,12 @@ fn deck_options_survive_a_restart() {
         worker: stand_in,
         midi: false,
     };
-    let mut h = egui_kittest::Harness::builder()
-        .with_size(vec2(1700.0, 1000.0))
-        .build_eframe(move |cc| EarshotApp::new(cc, services).expect("app"));
+    let mut h = build("deck-options", services);
     settle_until(&mut h, |a| {
         a.frame
             .snap
             .as_ref()
-            .is_some_and(|s| s.deck(deck1).keylock && !s.deck(DeckId::PREPARE).quantize)
+            .is_some_and(|s| s.deck(deck1).keylock && !s.deck(DeckId::new(0).unwrap()).quantize)
     });
 }
 
@@ -1600,9 +2056,52 @@ fn cue_first_beat_setting() {
     h.state_mut()
         .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
     h.state_mut().dispatch(LibraryCmd::Load(id).into());
-    settle_until(&mut h, |a| a.frame.deck(DeckId::PREPARE).grid.is_some());
-    let snap = h.state().frame.snap.as_ref().unwrap().prepare;
+    settle_until(&mut h, |a| {
+        a.frame.deck(DeckId::new(0).unwrap()).grid.is_some()
+    });
+    let snap = h.state().frame.snap.as_ref().unwrap().decks[0];
     assert_eq!(snap.cue_point, 0.0);
+}
+
+/// A load onto a playing deck is refused, with a notice, unless the setting allows it.
+#[test]
+fn loading_onto_a_playing_deck() {
+    use crate::core::settings;
+    let mut h = start("load-while-playing");
+    let deck = DeckId::new(0).unwrap();
+    let ids = ids(&h);
+    assert!(!h.state().settings.load_while_playing, "refused by default");
+    h.state_mut().load(Some(deck), ids[0]);
+    settle_until(&mut h, |a| a.frame.deck(deck).grid.is_some());
+    h.state_mut()
+        .dispatch((deck, EngineCmd::Play(Set::On)).into());
+    settle(&mut h);
+    assert!(h.state().panels.decks[0].playing());
+    let loaded = |h: &H| h.state().frame.snap.as_ref().unwrap().deck(deck).track_id;
+
+    let before = loaded(&h);
+    assert_eq!(h.state_mut().load(Some(deck), ids[1]), None);
+    settle(&mut h);
+    assert_eq!(loaded(&h), before, "still the track on air");
+    let notice = h
+        .state()
+        .notices
+        .shown()
+        .last()
+        .expect("a notice")
+        .text
+        .clone();
+    assert!(notice.contains("Deck A is playing"), "{notice}");
+
+    h.state_mut()
+        .dispatch(Command::App(AppCmd::LoadWhilePlaying(true)));
+    settle_until(&mut h, |a| {
+        settings::read::<bool>(&a.lib.store.reader, settings::LOAD_WHILE_PLAYING) == Some(true)
+    });
+    assert!(h.state_mut().load(Some(deck), ids[1]).is_some());
+    settle_until(&mut h, |a| {
+        a.frame.snap.as_ref().unwrap().deck(deck).track_id != before
+    });
 }
 
 /// Prepare's Export tab draws: what to export on the left, where to on the right.
@@ -1676,20 +2175,31 @@ fn the_status_line_shows_whats_running() {
         LibraryCmd::Analyse {
             tracks: ids.clone(),
             dynamic: false,
+            asked: false,
         }
         .into(),
     );
-    settle_until(&mut h, |a| {
-        a.jobs.list().iter().any(|j| j.progress.is_some())
-    });
-    steps(&mut h, 1);
+    // Every track is waiting, and stays so until the test runs the analysis: the
+    // first is said to have got half way.
+    (h.state().sink)(Event::Analysis(crate::core::analysis::AnalysisEvent {
+        track_id: ids[0],
+        state: Some(AnalysisState::Running {
+            progress: 0.5,
+            stage: "finding the tempo",
+        }),
+    }));
+    h.step();
+    assert!(h.state().jobs.list().iter().any(|j| j.progress.is_some()));
+    h.step();
     let jobs = h.state().jobs.list();
     assert!(jobs[0].title.starts_with("Analysing "), "{jobs:?}");
     h.get_by_label_contains(&jobs[0].title);
-    let n = jobs.len();
+    let n = jobs.iter().filter(|j| j.counted).count();
+    assert!(jobs.iter().all(|j| j.counted || j.title == "Analysis"));
     h.get_by_label(&format!("{n} job{}", if n == 1 { "" } else { "s" }))
         .click();
-    steps(&mut h, 2);
+    h.step();
+    h.step();
     h.get_by_label("Stop analysis");
     render(&mut h, "status_line");
     settle_until(&mut h, |a| a.analysis.busy.is_empty());
@@ -1698,10 +2208,41 @@ fn the_status_line_shows_whats_running() {
     assert!(h.query_by_label_contains("job").is_none());
 }
 
+/// The top bar's groups never overlap: with a job running (its pill left of the
+/// effect units) and the long no-audio pill, the effect units sit between the
+/// two, clear of both, in a window narrower than the app allows.
+#[test]
+fn the_top_bar_keeps_its_groups_apart() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = start("top-bar");
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Perform).into());
+    let _job = h.state().jobs.start("Exporting to STICK");
+    h.set_size(vec2(1500.0, 900.0));
+    steps(&mut h, 4);
+    let rect = |h: &H, label: &str| h.get_by_label(label).rect();
+    let fx_left = rect(&h, "FX").left();
+    let fx_right = rect(&h, "REL").right();
+    let job = rect(&h, "1 job");
+    let audio = h.get_by_label_contains("no audio device").rect();
+    assert!(
+        job.right() < fx_left,
+        "the jobs pill {job:?} is left of the FX ({fx_left})"
+    );
+    assert!(
+        fx_right < audio.left(),
+        "the FX ({fx_right}) are left of the audio pill {audio:?}"
+    );
+    render(&mut h, "top-bar");
+}
+
 /// A stick with files on it isn't ready for a library: its pane says so and offers
 /// to format it; a playlist's "Send to" opens the add window, which offers to format
 /// first, and the format window says what's lost. (The stick here has no device, so
 /// formatting it fails, harmlessly.) Its icon's menu has Format and Eject.
+// The format failure asserted here is the Linux udisks path; macOS routes through
+// diskutil and fails with its own message.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_stick_with_files_is_formatted_first() {
     use egui_kittest::kittest::Queryable;
@@ -1967,6 +2508,31 @@ fn library_tracks_in_the_table() {
         ViewCmd::Source(Some(crate::core::view::Source::Program(SourceKind::Mixxx))).into(),
     );
     steps(&mut h, 3);
+    // The browse knob steps through Mixxx's tree as through earshot's: its All
+    // tracks, then its playlist, listed as the knob lands on it.
+    {
+        use crate::ui::panels::library::TreeKey;
+        let nav = |h: &mut H, cmd: ViewCmd| {
+            h.state_mut().dispatch(cmd.into());
+            steps(h, 3);
+        };
+        nav(&mut h, ViewCmd::PaneStep(1));
+        let cursor = |h: &H| h.state().panels.library.tree_cursor.clone();
+        assert_eq!(cursor(&h), Some(TreeKey::Node((source.id, None))));
+        nav(&mut h, ViewCmd::Browse(1));
+        assert_eq!(cursor(&h), Some(TreeKey::Node((source.id, Some(vec![0])))));
+        assert_eq!(
+            h.state().panels.library.external.open_list(),
+            Some((source.id, Some(vec![0])))
+        );
+        // Into the playlist: on its (one) track, which is what "load" loads.
+        nav(&mut h, ViewCmd::PaneStep(1));
+        assert_eq!(h.state().panels.library.external.focused(), Some(outside));
+        let flow = &h.state().panels.flow;
+        assert_eq!(h.state().panels.library.focused_track(flow), Some(outside));
+        nav(&mut h, ViewCmd::PaneStep(-1));
+        nav(&mut h, ViewCmd::PaneStep(-1));
+    }
     h.get_by_label("All tracks (2)").click();
     steps(&mut h, 3);
     h.get_by_label("Only in Mixxx");
@@ -2055,7 +2621,8 @@ fn everything_fits_at_the_narrowest_window() {
         (Mode::Prepare, false),
     ] {
         h.state_mut().dispatch(ViewCmd::SetMode(mode).into());
-        h.state_mut().dispatch(ViewCmd::FourDecks(four).into());
+        h.state_mut()
+            .dispatch(ViewCmd::DeckCount(if four { 4 } else { 2 }).into());
         steps(&mut h, 30);
         // Every widget with a place on screen (text runs are left out: a
         // right-aligned label's is reported further right than it's drawn).
@@ -2123,11 +2690,10 @@ fn show_in_library_goes_back_to_where_it_came_from() {
     settle_until(&mut h, |a| shown_in(a, &Scope::All, Source::AllTracks));
 }
 
-/// Prepare isn't opened while a deck plays (the bottom bar says why); going back to
-/// Perform stops Prepare's player; closing the window while a deck plays asks first.
+/// Every mode has the same decks: switching modes while a deck plays leaves it
+/// playing. Closing the window while a deck plays asks first, in any mode.
 #[test]
-fn mode_switches_and_quitting_mind_whats_playing() {
-    use egui_kittest::kittest::Queryable;
+fn mode_switches_leave_the_decks_and_quitting_asks() {
     let mut h = start_with("mode-switch", stand_in);
     let id = ids(&h)[0];
     let deck = h.state().prefs.decks()[0];
@@ -2136,16 +2702,49 @@ fn mode_switches_and_quitting_mind_whats_playing() {
     let play =
         |d, on: bool| Command::from((d, EngineCmd::Play(earshot_engine::Set::from_bool(on))));
     let playing = |a: &EarshotApp, d| a.frame.snap.as_ref().is_some_and(|sh| sh.deck(d).playing);
+    let position = |a: &EarshotApp| a.frame.snap.as_ref().unwrap().deck(deck).position;
     h.state_mut().dispatch(play(deck, true));
     settle_until(&mut h, |a| playing(a, deck));
 
+    // Leaving Perform while a deck plays is refused, with a note in the bottom bar.
     h.state_mut()
         .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
-    steps(&mut h, 2);
+    steps(&mut h, 3);
     assert_eq!(h.state().prefs.mode, Mode::Perform);
+    assert!(playing(h.state(), deck));
     h.get_by_label_contains("Stop the playing decks before switching to Prepare.");
 
-    // Closing the window: asked, and Cancel keeps it open.
+    // Any other switch pauses the deck, leaving its track loaded where it was.
+    h.state_mut().dispatch(play(deck, false));
+    settle_until(&mut h, |a| !playing(a, deck));
+    for mode in [Mode::Prepare, Mode::Controller, Mode::Perform] {
+        h.state_mut().dispatch(ViewCmd::SetMode(mode).into());
+        steps(&mut h, 3);
+        assert_eq!(h.state().prefs.mode, mode);
+        h.state_mut().dispatch(play(deck, true));
+        settle_until(&mut h, |a| playing(a, deck));
+        if mode == Mode::Perform {
+            break;
+        }
+        let next = if mode == Mode::Prepare {
+            Mode::Controller
+        } else {
+            Mode::Perform
+        };
+        h.state_mut().dispatch(ViewCmd::SetMode(next).into());
+        settle_until(&mut h, |a| !playing(a, deck));
+        let at = position(h.state());
+        assert!(at > 0.0, "kept its place in {next:?}");
+        assert_eq!(
+            h.state().player.lock().unwrap().session(deck).track_id,
+            Some(id),
+            "still loaded in {next:?}"
+        );
+        steps(&mut h, 3);
+        assert_eq!(position(h.state()), at, "stays paused in {next:?}");
+    }
+
+    // Closing the window while a deck plays: asked, and Cancel keeps it open.
     h.input_mut()
         .viewports
         .entry(egui::ViewportId::ROOT)
@@ -2157,33 +2756,403 @@ fn mode_switches_and_quitting_mind_whats_playing() {
     h.get_by_label("Cancel").click();
     steps(&mut h, 2);
     assert!(h.query_by_label("Do you really want to quit?").is_none());
-
-    h.state_mut().dispatch(play(deck, false));
-    settle_until(&mut h, |a| !playing(a, deck));
-    h.state_mut()
-        .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
-    assert_eq!(h.state().prefs.mode, Mode::Prepare);
-    let prepare = DeckId::PREPARE;
-    h.state_mut().load(Some(prepare), id);
-    settle_until(&mut h, |a| a.panels.decks[prepare.index()].wave.is_some());
-    h.state_mut().dispatch(play(prepare, true));
-    settle_until(&mut h, |a| playing(a, prepare));
-    h.state_mut()
-        .dispatch(ViewCmd::SetMode(Mode::Perform).into());
-    assert_eq!(h.state().prefs.mode, Mode::Perform);
-    settle_until(&mut h, |a| !playing(a, prepare));
 }
 
-/// A track dropped anywhere on Prepare's player panel loads, as on a Perform deck
-/// (not just on its waveform).
+/// Prepare's tools follow the target deck, picked in the top bar: deck 1 to begin
+/// with, and back to deck 1 when the deck count hides the one picked.
 #[test]
-fn a_track_drops_onto_prepares_player_panel() {
-    let mut h = start_prepare("prepare-drop", 0);
-    let other = ids(&h)[1];
+fn the_target_deck_is_picked_in_prepare() {
+    let mut h = start("prepare-target");
     h.state_mut()
-        .dispatch(ViewCmd::Source(Some(Source::AllTracks)).into());
+        .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
     steps(&mut h, 3);
-    let (from, to) = (at(&h, &title(&h, other)).center(), at(&h, "Q").center());
-    drag(&mut h, from, to, |_| {});
-    settle_until(&mut h, |a| prepared(a) == Some(other));
+    let deck = |i| DeckId::new(i).unwrap();
+    assert_eq!(h.state().prefs.target(), deck(0));
+    h.state_mut().dispatch(ViewCmd::Target(deck(1)).into());
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.target(), deck(1));
+    // A double-click load in Prepare goes to the target.
+    let id = ids(&h)[2];
+    h.state_mut().load(None, id);
+    settle_until(&mut h, |a| a.panels.decks[1].wave.is_some());
+    assert_eq!(
+        h.state().player.lock().unwrap().session(deck(1)).track_id,
+        Some(id)
+    );
+    // One deck: deck 2 is hidden, so the tools are on deck 1 again.
+    h.state_mut().dispatch(ViewCmd::DeckCount(1).into());
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.decks().len(), 1);
+    assert_eq!(h.state().prefs.target(), deck(0));
+    // One deck is for Prepare only: Perform shows two and offers 2 or 4, and Prepare
+    // goes back to one.
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Perform).into());
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.decks().len(), 2);
+    assert!(h.query_by_label("1 deck").is_none());
+    h.get_by_label("2 decks");
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.decks().len(), 1);
+    h.get_by_label("1 deck");
+}
+
+/// The controller's pad mode buttons change what each deck's pads show: hot cues
+/// (letter and time), loops, or beat jumps in pairs; a pad clicked does the same.
+#[test]
+fn pad_modes_label_the_pads() {
+    use crate::core::bus::{Control, DeckControl};
+    use crate::core::view::PadMode;
+    let mut h = start("pad-modes");
+    h.state_mut().prefs.pretend_controller = true;
+    let deck = DeckId::new(0).unwrap();
+    let id = ids(&h)[0];
+    h.state_mut().load(Some(deck), id);
+    settle_until(&mut h, |a| a.panels.decks[0].wave.is_some());
+    steps(&mut h, 3);
+    let set = |h: &mut H, m| {
+        let (c, _) = Control::parse(
+            Control::Deck(deck, DeckControl::SetPadMode(m))
+                .name()
+                .0
+                .as_str(),
+            None,
+        )
+        .unwrap();
+        h.state_mut().dispatch(c.command(1.0).unwrap());
+        steps(h, 3);
+    };
+    // Hot cue mode (the start): letters; a set cue shows its time.
+    assert!(h.query_all_by_label("A").count() >= 2, "both decks");
+    assert!(h.query_all_by_label("H").count() >= 2);
+    h.state_mut().dispatch(
+        (
+            deck,
+            EngineCmd::Hotcue {
+                slot: 0,
+                press: earshot_engine::Press::Down,
+            },
+        )
+            .into(),
+    );
+    h.state_mut().dispatch(
+        (
+            deck,
+            EngineCmd::Hotcue {
+                slot: 0,
+                press: earshot_engine::Press::Up,
+            },
+        )
+            .into(),
+    );
+    settle_until(&mut h, |a| {
+        a.frame.snap.as_ref().unwrap().deck(deck).hotcues[0].is_some()
+    });
+    steps(&mut h, 3);
+    assert!(
+        h.query_all_by_label_contains("A 00:0").count() > 0,
+        "A and its time"
+    );
+    render(&mut h, "pad-modes-hot-cue");
+
+    set(&mut h, PadMode::BeatLoop);
+    assert_eq!(h.state().panels.decks[0].pad_mode, PadMode::BeatLoop);
+    h.get_by_label("1/4");
+    h.get_by_label("32");
+
+    set(&mut h, PadMode::BeatJump);
+    h.get_by_label("◀ 1");
+    h.get_by_label("8 ▶");
+    render(&mut h, "pad-modes-beat-jump");
+    // Pad 6 jumps forward 4 beats.
+    let before = h.state().frame.snap.as_ref().unwrap().deck(deck).position;
+    h.get_by_label("4 ▶").click();
+    settle_until(&mut h, |a| {
+        a.frame.snap.as_ref().unwrap().deck(deck).position > before + 0.5
+    });
+
+    // Deck 2 keeps its own mode.
+    assert_eq!(h.state().panels.decks[1].pad_mode, PadMode::HotCue);
+}
+
+/// Keyboard mode: a pad picks a hot cue (an empty one is set at the playhead), then
+/// each pad plays it with the key shifted by its semitones; SHIFT + pad 7 turns to
+/// the page with +12. Key shift mode: a pad sets the key.
+#[test]
+fn keyboard_and_key_shift_pads() {
+    use crate::core::bus::Control;
+    use crate::core::view::{PadMode, ViewCmd};
+    let mut h = start("keyboard-pads");
+    h.state_mut().prefs.pretend_controller = true;
+    let deck = DeckId::new(0).unwrap();
+    let id = ids(&h)[0];
+    h.state_mut().load(Some(deck), id);
+    settle_until(&mut h, |a| a.panels.decks[0].wave.is_some());
+    let snap = |h: &H| *h.state().frame.snap.as_ref().unwrap().deck(deck);
+    let pad = |h: &mut H, mode, pad: u8, shift| {
+        for down in [true, false] {
+            h.state_mut().dispatch(Command::View(ViewCmd::ModePad {
+                deck,
+                mode,
+                pad,
+                shift,
+                down,
+            }));
+        }
+        settle(h);
+    };
+    h.state_mut()
+        .dispatch(Command::View(ViewCmd::PadMode(deck, PadMode::Keyboard)));
+    settle(&mut h);
+    // Picking: the pads show the hot cues' letters.
+    assert_eq!(h.state().panels.decks[0].pads.keyboard_cue(&snap(&h)), None);
+    assert!(
+        h.query_all_by_label("C").count() >= 2,
+        "and deck 2's hot cues"
+    );
+
+    // Pad 3: hot cue C, empty, so set here (2 s in).
+    h.state_mut().dispatch((deck, EngineCmd::Seek(2.0)).into());
+    settle(&mut h);
+    pad(&mut h, PadMode::Keyboard, 2, false);
+    let cue = snap(&h).hotcues[2].expect("hot cue C set");
+    assert_eq!(
+        h.state().panels.decks[0].pads.keyboard_cue(&snap(&h)),
+        Some(2)
+    );
+    h.get_by_label("±0");
+    h.get_by_label("+7");
+    render(&mut h, "keyboard-pads");
+
+    // SHIFT held on the controller: the pads show their SHIFT actions.
+    let (shift, _) = Control::parse("deck_1_shift", None).unwrap();
+    h.state_mut().dispatch(shift.command(1.0).unwrap());
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("PICK").count(), 6);
+    h.get_by_label("◀ PAGE");
+    h.get_by_label("PAGE ▶");
+    render(&mut h, "keyboard-pads-shift");
+    h.state_mut()
+        .dispatch(Command::View(ViewCmd::PadMode(deck, PadMode::HotCue)));
+    settle(&mut h);
+    h.get_by_label("✕ C");
+    h.state_mut().dispatch(shift.command(0.0).unwrap());
+    h.state_mut()
+        .dispatch(Command::View(ViewCmd::PadMode(deck, PadMode::Keyboard)));
+    settle(&mut h);
+    assert_eq!(h.query_all_by_label("PICK").count(), 0, "SHIFT let go");
+
+    // Pad 2 (+5) from elsewhere: back to C, a fourth up.
+    h.state_mut().dispatch((deck, EngineCmd::Seek(10.0)).into());
+    settle(&mut h);
+    pad(&mut h, PadMode::Keyboard, 1, false);
+    assert_eq!(snap(&h).key_shift, 5.0);
+    assert!((snap(&h).position - cue).abs() < 0.05, "at the hot cue");
+
+    // SHIFT + pad 7: page 1, whose pad 1 is an octave up.
+    pad(&mut h, PadMode::Keyboard, 6, true);
+    pad(&mut h, PadMode::Keyboard, 0, false);
+    assert_eq!(snap(&h).key_shift, 12.0);
+
+    // Key shift mode, page 2: pad 8 is +3; the key stays when the mode changes.
+    h.state_mut()
+        .dispatch(Command::View(ViewCmd::PadMode(deck, PadMode::KeyShift)));
+    settle(&mut h);
+    assert_eq!(snap(&h).key_shift, 12.0);
+    pad(&mut h, PadMode::KeyShift, 7, false);
+    assert_eq!(snap(&h).key_shift, 3.0);
+    render(&mut h, "key-shift-pads");
+}
+
+/// Pad FX modes: the pads show their bank's effects, and SHIFT its other 8. An effect
+/// is on its deck while its pad is held, and off when it's let go, or when the pads
+/// change mode under it.
+#[test]
+fn pad_fx_pads() {
+    use crate::core::bus::Control;
+    use crate::core::pads::PAD_FX_BANKS;
+    use crate::core::view::{PadMode, ViewCmd};
+    let mut h = start("pad-fx-pads");
+    h.state_mut().prefs.pretend_controller = true;
+    let deck = DeckId::new(0).unwrap();
+    let id = ids(&h)[0];
+    h.state_mut().load(Some(deck), id);
+    settle_until(&mut h, |a| a.panels.decks[0].wave.is_some());
+    let snap = |h: &H| *h.state().frame.snap.as_ref().unwrap().deck(deck);
+    let pad = |h: &mut H, name: &str, pad: u8, down: bool| {
+        let (control, _) = Control::parse(name, Some(&(pad + 1).to_string())).unwrap();
+        h.state_mut()
+            .dispatch(control.command(if down { 1.0 } else { 0.0 }).unwrap());
+        settle(h);
+    };
+    h.state_mut()
+        .dispatch(Command::View(ViewCmd::PadMode(deck, PadMode::PadFx1)));
+    settle(&mut h);
+    // Bank 1's first 8, each with its letter.
+    h.get_by_label("ECHO 1/4");
+    h.get_by_label("ROLL 1");
+    assert_eq!(snap(&h).pad_fx, None);
+
+    // Pad 1 held: effect A on the deck (and not the other), until it's let go.
+    pad(&mut h, "deck_1_pad_fx_1_pad", 0, true);
+    assert_eq!(snap(&h).pad_fx, Some(PAD_FX_BANKS[0][0]));
+    assert_eq!(h.state().frame.snap.as_ref().unwrap().decks[1].pad_fx, None);
+    assert_eq!(
+        h.state().panels.decks[0].pads.fx_held,
+        Some((PadMode::PadFx1, 0, false))
+    );
+    render(&mut h, "pad-fx-pads");
+    pad(&mut h, "deck_1_pad_fx_1_pad", 0, false);
+    assert_eq!(snap(&h).pad_fx, None);
+
+    // SHIFT held on the controller: the bank's other 8.
+    let (shift, _) = Control::parse("deck_1_shift", None).unwrap();
+    h.state_mut().dispatch(shift.command(1.0).unwrap());
+    settle(&mut h);
+    h.get_by_label("TRANS 1/8");
+    h.get_by_label("V.BRAKE 3/4");
+    h.get_by_label("BACK SPIN 1/2");
+    assert_eq!(h.query_all_by_label("ECHO 1/4").count(), 0);
+    pad(&mut h, "deck_1_pad_fx_1_pad_shift", 7, true);
+    assert_eq!(snap(&h).pad_fx, Some(PAD_FX_BANKS[0][15]));
+    pad(&mut h, "deck_1_pad_fx_1_pad_shift", 7, false);
+    assert_eq!(snap(&h).pad_fx, None);
+    h.state_mut().dispatch(shift.command(0.0).unwrap());
+
+    // Bank 2; a pad still held when the pads change mode is let go.
+    h.state_mut()
+        .dispatch(Command::View(ViewCmd::PadMode(deck, PadMode::PadFx2)));
+    settle(&mut h);
+    h.get_by_label("REVERB 1");
+    pad(&mut h, "deck_1_pad_fx_2_pad", 4, true);
+    assert_eq!(snap(&h).pad_fx, Some(PAD_FX_BANKS[1][4]));
+    h.state_mut()
+        .dispatch(Command::View(ViewCmd::PadMode(deck, PadMode::HotCue)));
+    settle(&mut h);
+    assert_eq!(snap(&h).pad_fx, None);
+    assert_eq!(h.state().panels.decks[0].pads.fx_held, None);
+}
+
+/// Controller mode: Perform's decks, then the Mapping, History and Library tabs. MIDI
+/// messages reach the Mapping tab's list and the History.
+#[test]
+fn controller_mode_has_the_decks_and_its_tabs() {
+    use crate::core::midi::MidiMsg;
+    let mut h = start("controller-mode");
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Controller).into());
+    steps(&mut h, 5);
+    assert!(h.query_all_by_label("CUE").count() >= 2, "the decks");
+    assert!(
+        h.query_all_by_label("Show file").count() > 0,
+        "the Mapping tab"
+    );
+    // A mapping of the user's, to edit (a built-in one can't be).
+    let (store, dir) = crate::core::controllers::test_store("controller-mode");
+    let id = store.create("Test", "Pad", None, None).unwrap();
+    let c = &mut h.state_mut().panels.controller;
+    c.mine = Some(dir.clone());
+    c.set_active(store.get(&id));
+    h.state_mut().panels.controller.on_midi(MidiMsg {
+        port: 0,
+        bytes: vec![0x90, 0x0B, 0x7F],
+        at: std::time::Instant::now(),
+        did: None,
+    });
+    // The message joins the list, to map to a command; one mapped, for the picture.
+    let crossfader = crate::core::bus::Control::Master(earshot_engine::MasterParam::Crossfader);
+    h.state().panels.controller.learned.set(
+        (0xB6, 0x1F),
+        crate::core::midi::Learn {
+            control: crossfader,
+            arg: None,
+            input: crate::core::midi::Input::Cc,
+            display_only: false,
+        },
+    );
+    steps(&mut h, 3);
+    assert!(h.query_all_by_label_contains("90 0B").count() > 0);
+    render(&mut h, "controller-mode");
+    // Pick a command for the message pressed: open its list, search, click.
+    h.query_by_label("—")
+        .or_else(|| h.query_by_value("—"))
+        .expect("the row's command list")
+        .click();
+    steps(&mut h, 3);
+    h.get_by_role(egui::accesskit::Role::TextInput)
+        .type_text("deck_2_pl");
+    steps(&mut h, 3);
+    h.get_by_label("deck_2_play").click();
+    steps(&mut h, 3);
+    let l = h
+        .state()
+        .panels
+        .controller
+        .learned
+        .get((0x90, 0x0B))
+        .expect("mapped");
+    assert_eq!(
+        l.control,
+        crate::core::bus::Control::Deck(
+            DeckId::new(1).unwrap(),
+            crate::core::bus::DeckControl::Play
+        )
+    );
+    assert!(
+        h.query_by_label("deck_2_play")
+            .or_else(|| h.query_by_value("deck_2_play"))
+            .is_some(),
+        "shown in its row"
+    );
+    h.get_all_by_label("History").next().unwrap().click();
+    steps(&mut h, 3);
+    assert!(h.query_all_by_label_contains("not mapped").count() > 0);
+    h.get_all_by_label("Library").next().unwrap().click();
+    steps(&mut h, 5);
+    assert!(h.query_all_by_label("Show file").count() == 0);
+    assert_eq!(h.state().prefs.mode, Mode::Controller);
+}
+
+/// Instant doubles: deck B gets deck A's track at the same place, playing in step;
+/// LOAD pressed twice quickly does it too.
+#[test]
+fn instant_doubles() {
+    let mut h = start("instant-doubles");
+    let (a, b) = (DeckId::new(0).unwrap(), DeckId::new(1).unwrap());
+    let ids = ids(&h);
+    h.state_mut().load(Some(a), ids[0]);
+    settle_until(&mut h, |app| app.frame.deck(a).grid.is_some());
+    h.state_mut().dispatch((a, EngineCmd::Play(Set::On)).into());
+    h.state_mut().dispatch(ViewCmd::InstantDouble(b).into());
+    settle_until(&mut h, |app| {
+        let s = app.frame.snap.as_ref().unwrap();
+        let (x, y) = (s.deck(a), s.deck(b));
+        y.track_id == Some(ids[0])
+            && y.playing
+            && x.position > 0.0
+            && (x.position - y.position).abs() < 1e-6
+    });
+    assert!(
+        h.state().panels.decks[1].pending().is_none(),
+        "nothing left loading"
+    );
+}
+
+/// Two presses closer than [`super::DOUBLE_TAP`] are a double tap; a third starts
+/// again, and a slow second press isn't one.
+#[test]
+fn double_tap_on_load() {
+    use super::{DOUBLE_TAP, double_tap};
+    let t0 = std::time::Instant::now();
+    let soon = t0 + DOUBLE_TAP / 2;
+    let mut last = None;
+    assert!(!double_tap(&mut last, t0));
+    assert!(double_tap(&mut last, soon));
+    assert!(
+        !double_tap(&mut last, soon + DOUBLE_TAP / 4),
+        "a third press starts again"
+    );
+    assert!(!double_tap(&mut last, soon + DOUBLE_TAP * 2), "too slow");
 }

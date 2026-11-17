@@ -12,7 +12,7 @@ use crate::core::keymap::Origin;
 use crate::core::view::{SettingsTab, StemMode, ViewCmd};
 use crate::ui::theme::THEME;
 use crate::ui::widgets::{Button, Seg, Slider, muted, segmented};
-use earshot_engine::HotcueMode;
+use earshot_engine::{HotcueMode, XfCurve};
 
 /// The window's title, which is also its id.
 pub const TITLE: &str = "Settings";
@@ -26,6 +26,8 @@ const TABS: [(SettingsTab, &str); 4] = [
 
 /// The analysis tab's facts, gathered by the shell.
 pub struct AnalysisEnv<'a> {
+    /// New tracks get a quick grid.
+    pub quick_new: bool,
     /// Background workers allowed at once now.
     pub workers: usize,
     /// The most there can be (the CPU cores).
@@ -121,6 +123,25 @@ fn decks(ui: &mut Ui, env: &ModalEnv) -> Vec<Command> {
          deck and Prepare's player.",
     );
     ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label("Crossfader curve");
+        let choices = [
+            Seg::new(XfCurve::ConstantPower, "Smooth").tip(
+                "Each side a little quieter in the middle, so a blend is as loud as one track",
+            ),
+            Seg::new(XfCurve::Sharp, "Sharp")
+                .tip("Both sides full until the middle, for cuts and scratching"),
+        ];
+        if let Some(c) = segmented(ui, env.xf_curve, &choices) {
+            out.push(Command::App(AppCmd::XfCurve(c)));
+        }
+    });
+    muted(
+        ui,
+        "Sharp: two tracks in the middle are louder than one, and a track doubled on both \
+         decks twice as loud.",
+    );
+    ui.add_space(8.0);
     let mut cue = env.cue_first_beat;
     if ui
         .checkbox(
@@ -134,6 +155,19 @@ fn decks(ui: &mut Ui, env: &ModalEnv) -> Vec<Command> {
     muted(
         ui,
         "When a track loads. Off, the cue is at the start of the track.",
+    );
+    ui.add_space(8.0);
+    let mut load = env.load_while_playing;
+    if ui
+        .checkbox(&mut load, "Allow loading a track onto a playing deck")
+        .changed()
+    {
+        out.push(Command::App(AppCmd::LoadWhilePlaying(load)));
+    }
+    muted(
+        ui,
+        "Off, a load onto a playing deck is refused, so the track on air can't be \
+         replaced by mistake.",
     );
     ui.add_space(8.0);
     let mut hide = env.auto_hide_mixer;
@@ -171,6 +205,18 @@ fn decks(ui: &mut Ui, env: &ModalEnv) -> Vec<Command> {
 
 fn analysis(ui: &mut Ui, env: &AnalysisEnv) -> Vec<Command> {
     let mut out = vec![];
+    let mut quick = env.quick_new;
+    if ui
+        .checkbox(&mut quick, "Quick-analyse new tracks")
+        .changed()
+    {
+        out.push(Command::App(AppCmd::QuickAnalyseNew(quick)));
+    }
+    muted(
+        ui,
+        "A track new to the library gets a quick grid in the background: one steady          tempo, in a moment, shown amber in the status column. The full analysis is          yours to run (right-click, Analyse) and replaces it.",
+    );
+    ui.separator();
     let mut n = env.workers;
     ui.add(Slider::new(
         "Background workers",

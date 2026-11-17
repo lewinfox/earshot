@@ -24,7 +24,7 @@ pub mod registry;
 
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use earshot_engine::Command;
@@ -35,6 +35,7 @@ use serde::Deserialize;
 
 use self::queue::{Batch, JobQueue, Lane, Req, Want};
 use self::registry::{AnalyserId, REGISTRY, RunsIn};
+use super::background;
 use super::player::Player;
 use super::store::{
     AnalysisSave, GridSave, GridSource, JobRow, ResultState, Store, StoreCmd, grid_bpm,
@@ -128,6 +129,21 @@ struct Shared {
     deck: WorkerClient,
     /// One per background lane.
     background: Vec<WorkerClient>,
+    /// The analyser was dropped: lanes end after their current track (and with
+    /// them the workers).
+    stopping: AtomicBool,
+    /// No lane threads (the analyser was started from a thread that steps its
+    /// background work, `core::background`): waiting work is a piece of that work,
+    /// done by [`Shared::run_waiting`] for this player.
+    stepped: Option<(std::sync::Weak<Shared>, Player)>,
+}
+
+impl Drop for Analyser {
+    fn drop(&mut self) {
+        self.shared.stopping.store(true, Ordering::Relaxed);
+        let _q = self.shared.queue.lock().unwrap();
+        self.shared.ready.notify_all();
+    }
 }
 
 impl Analyser {
@@ -169,15 +185,19 @@ impl Analyser {
         let background = (0..cores)
             .map(|_| WorkerClient::start(worker(Role::Background, threads)))
             .collect();
-        let shared = Arc::new(Shared {
+        let stepped = background::stepped();
+        let shared = Arc::new_cyclic(|me| Shared {
             queue: Mutex::new(JobQueue::new(cap)),
             ready: Condvar::new(),
             store,
             sink,
             deck,
             background,
+            stopping: AtomicBool::new(false),
+            stepped: stepped.then(|| (me.clone(), player.clone())),
         });
-        let lanes = std::iter::once(Lane::Deck).chain((0..cores).map(Lane::Background));
+        // (Stepped: no threads, see `Shared::stepped`.)
+        let lanes = shared.lanes().filter(|_| !stepped);
         for (n, lane) in lanes.enumerate() {
             let (shared, player) = (shared.clone(), player.clone());
             std::thread::Builder::new()
@@ -210,7 +230,7 @@ impl Analyser {
     pub fn set_background_workers(&self, n: usize) -> usize {
         let n = n.clamp(1, self.shared.background.len());
         self.shared.queue.lock().unwrap().background_cap = n;
-        self.shared.ready.notify_all();
+        self.shared.wake();
         n
     }
 
@@ -230,7 +250,7 @@ impl Analyser {
         for &t in &tracks {
             s.emit(AnalysisEvent::new(t, None));
         }
-        s.ready.notify_all();
+        s.wake();
         tracks.len()
     }
 
@@ -251,7 +271,7 @@ impl Analyser {
         for &t in &dropped {
             s.emit(AnalysisEvent::new(t, None));
         }
-        s.ready.notify_all();
+        s.wake();
     }
 
     /// Tell the queue whether a deck is playing, which holds background jobs back.
@@ -260,18 +280,42 @@ impl Analyser {
         if q.playing != on {
             q.playing = on;
             drop(q);
-            self.shared.ready.notify_all();
+            self.shared.wake();
+        }
+    }
+
+    /// Tell the queue whether the machine is short of resources (a low-power
+    /// profile, capped CPUs, the audio behind, little memory left). While it is, no
+    /// lane starts a track, so the worker and its model aren't started for one: what's
+    /// asked for waits in the queue (it's saved, so across a restart too) and runs
+    /// once there's room again. A track already being analysed finishes. Tracks get
+    /// their grid from the quick finder meanwhile (`library::QuickAnalyser`).
+    pub fn set_held(&self, on: bool) {
+        let mut q = self.shared.queue.lock().unwrap();
+        if q.held != on {
+            q.held = on;
+            drop(q);
+            self.shared.wake();
         }
     }
 
     /// Make sure a track is analysed. A track just loaded onto a deck (`audio` given)
     /// goes to the deck lane, ahead of everything, taking it over from the background
-    /// if it was waiting or running there. `force` re-analyses the grid whatever there
-    /// is (in `mode`), and anything else whose result is stale.
-    pub fn queue(&self, id: i64, audio: Option<Arc<TrackAudio>>, force: bool, mode: Mode) {
-        let priority = match audio {
-            Some(_) => JobPriority::Deck,
-            None => JobPriority::Background,
+    /// if it was waiting or running there. One someone `asked` for goes next, ahead of
+    /// background work. `force` re-analyses the grid whatever there is (in `mode`),
+    /// and anything else whose result is stale.
+    pub fn queue(
+        &self,
+        id: i64,
+        audio: Option<Arc<TrackAudio>>,
+        asked: bool,
+        force: bool,
+        mode: Mode,
+    ) {
+        let priority = match (&audio, asked) {
+            (Some(_), _) => JobPriority::Deck,
+            (None, true) => JobPriority::Asked,
+            (None, false) => JobPriority::Background,
         };
         let wants: Vec<(AnalyserId, Req)> = AnalyserId::ALL
             .iter()
@@ -370,6 +414,38 @@ impl Shared {
         (self.sink)(Event::Analysis(ev));
     }
 
+    /// Every lane: the deck's, then the background ones.
+    fn lanes(&self) -> impl Iterator<Item = Lane> + use<> {
+        std::iter::once(Lane::Deck).chain((0..self.background.len()).map(Lane::Background))
+    }
+
+    /// A lane might now be able to take work: wake the lanes' threads, or (stepped)
+    /// have the waiting work done as a piece of background work.
+    fn wake(&self) {
+        self.ready.notify_all();
+        if let Some((me, _)) = &self.stepped
+            && let Some(me) = me.upgrade()
+        {
+            background::spawn("earshot-analysis", move || me.run_waiting());
+        }
+    }
+
+    /// Stepped: do all the work the lanes may take now, here, a track at a time.
+    fn run_waiting(&self) {
+        let Some((_, player)) = &self.stepped else {
+            return;
+        };
+        loop {
+            let taken = self
+                .lanes()
+                .find_map(|lane| Some((lane, self.queue.lock().unwrap().take(lane)?)));
+            let Some((lane, batch)) = taken else {
+                return;
+            };
+            self.work(lane, player, batch);
+        }
+    }
+
     fn worker(&self, lane: Lane) -> &WorkerClient {
         match lane {
             Lane::Deck => &self.deck,
@@ -388,7 +464,7 @@ impl Shared {
         if r.new_track || r.superseded.is_some() {
             self.emit(AnalysisEvent::new(track, Some(AnalysisState::Queued)));
         }
-        self.ready.notify_all();
+        self.wake();
     }
 
     /// Save what's queued for a track. Called with the queue locked, so the Store gets
@@ -417,44 +493,53 @@ impl Shared {
             let batch = {
                 let mut q = self.queue.lock().unwrap();
                 loop {
+                    if self.stopping.load(Ordering::Relaxed) {
+                        return;
+                    }
                     if let Some(b) = q.take(lane) {
                         break b;
                     }
                     q = self.ready.wait(q).unwrap();
                 }
             };
-            let track = batch.track;
-            let t0 = std::time::Instant::now();
-            let result = self.run(lane, player, &batch);
-            let superseded = batch.superseded.load(Ordering::Relaxed);
-            crate::core::log::note(&format!(
-                "analysis: {lane:?} ends track {track} after {:.1} s: {}",
-                t0.elapsed().as_secs_f64(),
-                match (&result, superseded) {
-                    (_, true) => "stopped".to_string(),
-                    (Ok(()), _) => "ok".to_string(),
-                    (Err(e), _) => format!("failed: {e}"),
-                }
-            ));
-            if let Err(e) = &result
-                && !superseded
-            {
-                eprintln!("analysis of track {track}: {e}");
-            }
-            let mut q = self.queue.lock().unwrap();
-            let idle = q.finish(lane).is_some_and(|(_, idle)| idle);
-            self.save_queue(&q, track);
-            drop(q);
-            self.ready.notify_all();
-            self.emit(match result {
-                // More was asked for meanwhile (or this was taken over): still waiting.
-                _ if !idle => AnalysisEvent::new(track, Some(AnalysisState::Queued)),
-                // Stopped (`stop_background`): not a failure.
-                Err(_) if superseded => AnalysisEvent::new(track, None),
-                Ok(()) => AnalysisEvent::new(track, None),
-                Err(e) => AnalysisEvent::new(track, Some(AnalysisState::Failed(e))),
-            });
+            self.work(lane, player, batch);
         }
+    }
+
+    /// Analyse the track a lane took, and say how it went.
+    fn work(&self, lane: Lane, player: &Player, batch: Batch) {
+        let track = batch.track;
+        let t0 = std::time::Instant::now();
+        let result = self.run(lane, player, &batch);
+        let superseded = batch.superseded.load(Ordering::Relaxed);
+        crate::core::log::note(&format!(
+            "analysis: {lane:?} ends track {track} after {:.1} s: {}",
+            t0.elapsed().as_secs_f64(),
+            match (&result, superseded) {
+                (_, true) => "stopped".to_string(),
+                (Ok(()), _) => "ok".to_string(),
+                (Err(e), _) => format!("failed: {e}"),
+            }
+        ));
+        if let Err(e) = &result
+            && !superseded
+        {
+            eprintln!("analysis of track {track}: {e}");
+        }
+        let mut q = self.queue.lock().unwrap();
+        let idle = q.finish(lane).is_some_and(|(_, idle)| idle);
+        self.save_queue(&q, track);
+        drop(q);
+        // (Stepped, the lanes' loop goes on to what's waiting by itself.)
+        self.ready.notify_all();
+        self.emit(match result {
+            // More was asked for meanwhile (or this was taken over): still waiting.
+            _ if !idle => AnalysisEvent::new(track, Some(AnalysisState::Queued)),
+            // Stopped (`stop_background`): not a failure.
+            Err(_) if superseded => AnalysisEvent::new(track, None),
+            Ok(()) => AnalysisEvent::new(track, None),
+            Err(e) => AnalysisEvent::new(track, Some(AnalysisState::Failed(e))),
+        });
     }
 
     fn run(&self, lane: Lane, player: &Player, batch: &Batch) -> Result<(), String> {
@@ -595,9 +680,7 @@ impl Shared {
 
         // Beatgrid: in the worker.
         // Deleted when this goes out of scope, however the job ends.
-        let wav = TempWav(
-            std::env::temp_dir().join(format!("{TEMP_PREFIX}{}-{id}.wav", std::process::id())),
-        );
+        let wav = TempWav::new(id);
         write_mono_wav(&wav.0, &audio)
             .map_err(|e| fail(format!("writing {}: {e}", wav.0.display())))?;
         progress(WORKER_START, "waiting for the analyser");
@@ -726,15 +809,24 @@ fn needed(
     let fresh = result.is_some_and(|r| !r.failed && r.version >= spec.version && r.same_audio);
     match (a, want) {
         (_, Want::Force) => true,
-        // Any grid will do: a hand-fixed or imported one, or an analysed one from
-        // before results were versioned.
+        // Any grid will do: a hand-fixed or imported one, an analysed one from before
+        // results were versioned, or a quick one (full analysis of a track that has
+        // one is left to the user: `Want::Force`).
+        //
+        // A machine short of resources holds full analysis back in the queue that
+        // runs these jobs (`JobQueue::held`); quick analysis
+        // (`library::QuickAnalyser`, which never comes through here) carries on.
         (AnalyserId::Grid, Want::Missing) => grid.is_none(),
         (_, Want::Missing) => result.is_none(),
-        // Only ever replaces an analysed grid.
+        // Only ever replaces an analysed grid, or a quick one (which was only there
+        // until analysis ran).
         (AnalyserId::Grid, Want::Stale) => {
             !fresh
                 && grid.is_none_or(|g| {
-                    matches!(g.1, GridSource::Analysis | GridSource::AnalysisDynamic)
+                    matches!(
+                        g.1,
+                        GridSource::Quick | GridSource::Analysis | GridSource::AnalysisDynamic
+                    )
                 })
         }
         (_, Want::Stale) => !fresh,
@@ -747,6 +839,8 @@ enum Priority {
     /// Linux's idle CPU and disk classes: only what nothing else wants.
     Idle,
     /// Normal scheduling at this nice value (higher is nicer).
+    // The value is only read by the Linux `apply`; dead on other platforms.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Nice(i32),
 }
 
@@ -825,12 +919,24 @@ fn update_decks(
 }
 
 /// 32-bit float mono WAV, the average of both channels.
-/// How the WAVs written for the worker are named: `<prefix><pid>-<track>.wav`.
+/// How the WAVs written for the worker are named: `<prefix><pid>-<n>-<track>.wav`,
+/// `n` counting up in this process (tests run several apps in one).
 const TEMP_PREFIX: &str = "earshot-analyse-";
 
 /// A WAV written for the worker, deleted when dropped (the job finished, failed or
 /// panicked).
 struct TempWav(PathBuf);
+
+impl TempWav {
+    fn new(track: i64) -> TempWav {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        TempWav(std::env::temp_dir().join(format!(
+            "{TEMP_PREFIX}{}-{n}-{track}.wav",
+            std::process::id()
+        )))
+    }
+}
 
 impl Drop for TempWav {
     fn drop(&mut self) {
@@ -952,7 +1058,7 @@ mod tests {
         let (played, cued, untouched) = (
             DeckId::new(0).unwrap(),
             DeckId::new(1).unwrap(),
-            DeckId::PREPARE,
+            DeckId::new(2).unwrap(),
         );
         for deck in [played, cued, untouched] {
             put_on(&p, deck, 11);
@@ -976,16 +1082,16 @@ mod tests {
         // Silence until 12 s, then beats: the straight grid runs back to 0.25 s.
         let grid = Beatgrid::constant(120.0, 12.25, 30.0).unwrap();
         update_decks(&p, 11, Some((grid, GridSource::Analysis)), 12.26);
-        // Prepare's player goes last, so the decks have had theirs by then.
-        let after = wait(&p, |s| s.prepare.cue_point == 12.25);
-        assert_eq!(after.prepare.position, 12.25, "the playhead goes with it");
+        // Deck 3 goes last, so the others have had theirs by then.
+        let after = wait(&p, |s| s.decks[2].cue_point == 12.25);
+        assert_eq!(after.decks[2].position, 12.25, "the playhead goes with it");
         assert_eq!(after.decks[0].cue_point, before.decks[0].cue_point);
         assert_eq!(after.decks[0].position, before.decks[0].position);
         assert_eq!(after.decks[1].cue_point, 3.0);
         let inner = p.lock().unwrap();
         assert_eq!(inner.session(untouched).state.cues.main, Some(12.25));
         // Every player got the grid, touched or not.
-        assert!(inner.decks[..2].iter().all(|d| d.grid.is_some()));
+        assert!(inner.decks[..3].iter().all(|d| d.grid.is_some()));
     }
 
     #[test]
@@ -1068,5 +1174,11 @@ mod tests {
             &[result("grid", 2, false, true)],
             user
         ));
+        // A quick grid: a deck load leaves the full analysis to the user, who gets
+        // it by asking (forced) or with "Re-analyse stale".
+        let quick = Some((1, GridSource::Quick));
+        assert!(!needed(Grid, Want::Missing, &[], quick));
+        assert!(needed(Grid, Want::Stale, &[], quick));
+        assert!(needed(Grid, Want::Force, &[], quick));
     }
 }

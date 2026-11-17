@@ -5,34 +5,34 @@
 //! waveforms with their beat grids, for the original and the straightened version.
 //!
 //! The tool's work is in `core::tempo_lock`; this tab keeps what it last heard from
-//! it ([`TempoLockUi::on_event`]) and sends `TempoLockCmd`s. Listening goes through
-//! the headphones' preview player (the shell's `app/tempo_lock.rs`), which reports
-//! back in [`ListenStatus`].
+//! it ([`TempoLockUi::on_event`]) and sends `TempoLockCmd`s. Listening is on Prepare's
+//! player: the shell (`app/tempo_lock.rs`) loads the version asked for and says which
+//! is in ([`TempoLockUi::player`]).
 
 mod charts;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use egui::{Color32, CornerRadius, Margin, Response, RichText, Sense, Stroke, Ui, vec2};
+use egui::{Color32, CornerRadius, Margin, Pos2, RichText, Sense, Stroke, Ui, vec2};
 
 use self::charts::{HistChart, TempoChart, bpm_range, fmt_time, ruler, time_at};
-use super::deck::wave::{self, DeckWave, Grid, Marks};
+use super::deck::wave::{Layer, Timeline};
+use super::deck::zoomed;
 use super::library::drag;
 use super::{Cx, Panel};
+use crate::core::command::ViewCmd;
 use crate::core::tempo_lock::{
-    BeatLevel, Chart, Engine, ListenCmd, Stage, StraightenOptions, Straightened, TempoAnalysis,
-    TempoLockCmd, TempoLockEvent, Version, Waveform, histogram_range, version_beats,
+    BeatLevel, Chart, Engine, Stage, StraightenOptions, Straightened, TempoAnalysis, TempoLockCmd,
+    TempoLockEvent, Version, histogram_range, version_beats,
 };
 use crate::core::track::TrackId;
-use crate::ui::theme::{Theme, fs};
-use crate::ui::widgets::{Button, RoundButton, RoundSize, Seg, Toggle, segmented};
+use crate::ui::theme::{THEME, Theme, fs};
+use crate::ui::widgets::{Button, Seg, segmented};
 
 /// The shortest stretch the waveforms zoom in to, s.
-const MIN_SPAN: f64 = 1.0;
-const WAVE_H: f32 = 140.0;
-const OVERVIEW_H: f32 = 24.0;
-const CHART_H: f32 = 120.0;
+/// The charts' heights: they share what's left of the tab.
+const CHART_H: (f32, f32) = (48.0, 260.0);
 
 /// What the tab has heard from the tool, its controls, and its view.
 pub struct TempoLockUi {
@@ -53,21 +53,19 @@ pub struct TempoLockUi {
     pub engine: Engine,
     /// The library folder to save into (one of the Store's roots).
     pub root: Option<String>,
-    /// Which version plays, and the click track on its grid.
+    /// Which version plays.
     pub version: Version,
-    pub clicks: bool,
-    pub follow: bool,
 
     // ---- view ---------------------------------------------------------------------
-    /// The waveforms' window, in the original's time (s).
-    view: (f64, f64),
     /// Where playback is (or will start), in the original's time.
     cursor: f64,
-    /// The original's and the straightened version's waveforms, as the decks have
-    /// theirs: made from the tool's [`Waveform`]s when first drawn.
-    waves: [Option<DeckWave>; 2],
-    /// The preview player, as the shell last saw it.
-    pub listen: ListenStatus,
+    /// The height of everything but the charts, as drawn last frame (with this many
+    /// rows of charts), for sizing the charts to fit.
+    rest: (usize, f32),
+    /// Which version is in Prepare's player, if either (set every frame by the shell).
+    pub player: Option<Version>,
+    /// A version loading into the player.
+    pub loading: bool,
 }
 
 /// How the last step ended.
@@ -76,16 +74,6 @@ pub enum Note {
     Failed(Stage, String),
     Cancelled(Stage),
     Saved(PathBuf),
-}
-
-/// The tab's A/B player as the shell sees it (set every frame).
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ListenStatus {
-    /// What of the tab's is in the preview player: a version, with clicks or not.
-    pub loaded: Option<(Version, bool)>,
-    /// Decoding a version to play it.
-    pub decoding: bool,
-    pub error: Option<String>,
 }
 
 impl Default for TempoLockUi {
@@ -102,12 +90,10 @@ impl Default for TempoLockUi {
             engine: Engine::R3,
             root: None,
             version: Version::Original,
-            clicks: false,
-            follow: true,
-            view: (0.0, 30.0),
             cursor: 0.0,
-            waves: [None, None],
-            listen: ListenStatus::default(),
+            rest: (0, 0.0),
+            player: None,
+            loading: false,
         }
     }
 }
@@ -119,9 +105,6 @@ impl TempoLockUi {
             track: Some(track),
             engine: self.engine,
             root: self.root.take(),
-            clicks: self.clicks,
-            follow: self.follow,
-            listen: std::mem::take(&mut self.listen),
             ..TempoLockUi::default()
         };
     }
@@ -168,15 +151,12 @@ impl TempoLockUi {
                 let a = &chart.analysis;
                 self.bpm = a.suggested_bpm;
                 self.level = BeatLevel::Beat;
-                self.view = (0.0, a.duration.min(30.0));
                 self.cursor = 0.0;
-                self.waves = [None, None];
                 self.chart = Some(chart);
                 self.busy = None;
             }
             TempoLockEvent::Straightened { result, .. } => {
                 self.straightened = Some(result);
-                self.waves[1] = None;
                 self.measured = None;
                 if self.version == Version::Straightened {
                     self.version = Version::Original;
@@ -228,43 +208,43 @@ impl TempoLockUi {
         }
     }
 
-    fn duration(&self) -> f64 {
-        self.chart
+    /// Where playback is (or will start), in the original's time.
+    pub fn cursor(&self) -> f64 {
+        self.cursor
+    }
+
+    /// The stretch Prepare's waveform shows, in `version`'s time: the shared zoom
+    /// (× the player's tempo) either side of the playhead.
+    fn window(&self, version: Version, cx: &Cx) -> (f64, f64) {
+        let tempo = cx
+            .engine
+            .snap
             .as_ref()
-            .map_or(1.0, |c| c.analysis.duration.max(1e-3))
+            .map(|s| s.deck(cx.prefs.target()).tempo)
+            .filter(|t| *t > 0.0)
+            .unwrap_or(1.0);
+        let half = cx.prefs.wave_zoom * tempo;
+        let shown = self.player.unwrap_or(self.version);
+        let c = self.from_original(self.cursor, shown);
+        let ends =
+            [c - half, c + half].map(|t| self.from_original(self.to_original(t, shown), version));
+        (ends[0], ends[1])
     }
 
-    /// Show `v0..v1` (original time), kept inside the track.
-    fn set_view(&mut self, v0: f64, v1: f64) {
-        let dur = self.duration();
-        let span = (v1 - v0).clamp(MIN_SPAN.min(dur), dur);
-        let v0 = v0.clamp(0.0, (dur - span).max(0.0));
-        self.view = (v0, v0 + span);
-    }
-
-    /// Whether the tab's audio is in the preview player, and playing.
-    fn playing(&self, cx: &Cx) -> bool {
-        self.listen.loaded.is_some() && cx.engine.snap.as_ref().is_some_and(|s| s.preview.playing)
-    }
-
-    /// Play from the cursor, in the version chosen.
-    fn play(&self, cx: &mut Cx) {
+    /// Put the version chosen in the player, at the cursor.
+    fn listen(&self, cx: &mut Cx) {
         let version = self.version;
-        cx.send(TempoLockCmd::Listen(ListenCmd::Play {
+        cx.send(TempoLockCmd::Listen {
             version,
             at: self.from_original(self.cursor, version).max(0.0),
-            clicks: self.clicks,
-        }));
+        });
     }
 
-    /// Move to `t` in `version`'s time, and play that version there if playing.
+    /// Move to `t` in `version`'s time, putting that version in the player there.
     fn seek(&mut self, version: Version, t: f64, cx: &mut Cx) {
-        let playing = self.playing(cx);
         self.version = version;
         self.cursor = self.to_original(t, version).max(0.0);
-        if playing {
-            self.play(cx);
-        }
+        self.listen(cx);
     }
 }
 
@@ -298,14 +278,12 @@ impl TempoLockPanel<'_> {
     fn body(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let tab = &mut *self.tab;
         // Where the player is: the cursor follows it while the tab's audio plays.
-        if let (Some((v, _)), Some(snap)) = (tab.listen.loaded, cx.engine.snap.as_ref()) {
-            tab.cursor = tab.to_original(snap.preview.position, v);
-            if tab.playing(cx) && tab.follow {
-                // Scrolls under a still playhead in the middle, as the decks do (and
-                // like them runs past the start and end).
-                let half = (tab.view.1 - tab.view.0) / 2.0;
-                tab.view = (tab.cursor - half, tab.cursor + half);
-            }
+        if let (Some(v), Some(snap)) = (tab.player, cx.engine.snap.as_ref())
+            && !tab.loading
+        {
+            tab.cursor = tab
+                .to_original(snap.deck(cx.prefs.target()).position, v)
+                .max(0.0);
         }
         ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
         header(ui, tab, cx);
@@ -326,9 +304,7 @@ impl TempoLockPanel<'_> {
         controls(ui, tab, self.roots, cx);
         transport(ui, tab, cx);
         ui.separator();
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| body(ui, tab, &chart, cx));
+        body(ui, tab, &chart, cx);
     }
 }
 
@@ -484,31 +460,10 @@ fn controls(ui: &mut Ui, tab: &mut TempoLockUi, roots: &[String], cx: &mut Cx) {
     });
 }
 
-/// Play, stop, A/B, the click track, follow, and the time.
+/// A/B (which version is in Prepare's player), and the time.
 fn transport(ui: &mut Ui, tab: &mut TempoLockUi, cx: &mut Cx) {
     let theme = cx.theme;
-    let playing = tab.playing(cx);
     ui.horizontal_wrapped(|ui| {
-        if ui
-            .add(RoundButton::play_pause(playing))
-            .on_hover_text("In the headphones (the preview player)")
-            .clicked()
-        {
-            if playing {
-                cx.send(TempoLockCmd::Listen(ListenCmd::Pause));
-            } else {
-                tab.play(cx);
-            }
-        }
-        if ui
-            .add(RoundButton::stop().size(RoundSize::Small))
-            .on_hover_text("Stop, back to the start")
-            .clicked()
-        {
-            cx.send(TempoLockCmd::Listen(ListenCmd::Stop));
-            tab.cursor = 0.0;
-        }
-        ui.separator();
         let versions = [
             Seg::new(Version::Original, "Original"),
             Seg::new(Version::Straightened, "Straightened")
@@ -517,34 +472,41 @@ fn transport(ui: &mut Ui, tab: &mut TempoLockUi, cx: &mut Cx) {
         ];
         if let Some(v) = segmented(ui, tab.version, &versions) {
             tab.version = v;
-            if playing {
-                tab.play(cx);
-            }
+            tab.listen(cx);
         }
         ui.separator();
-        if ui
-            .add(Toggle::new(&mut tab.clicks, "click track on beats"))
-            .changed()
-            && playing
-        {
-            tab.play(cx);
-        }
-        ui.add(Toggle::new(&mut tab.follow, "follow playhead"));
         let at = tab.from_original(tab.cursor, tab.version);
         ui.label(RichText::new(fmt_time(at)).monospace().size(fs(14.0)));
-        if tab.listen.decoding {
+        if tab.loading {
             ui.spinner();
-            ui.label(RichText::new("decoding…").color(theme.muted));
-        }
-        if let Some(e) = &tab.listen.error {
-            ui.label(RichText::new(e).color(theme.bad));
+            ui.label(RichText::new("loading…").color(theme.muted));
+        } else if tab.track.is_some() && tab.player.is_none() {
+            ui.label(RichText::new("another track is in the player").color(theme.muted));
         }
     });
 }
 
-/// Everything charted: the original's stats, warning, charts and waveform; then the
-/// straightened version's.
+/// Everything charted, the charts sized so it all fits the tab.
 fn body(ui: &mut Ui, tab: &mut TempoLockUi, chart: &Chart, cx: &mut Cx) {
+    let rows = if tab.straightened.is_some() && tab.measured.is_some() {
+        2
+    } else {
+        1
+    };
+    // Measured last frame; a frame with a new number of rows guesses.
+    let rest = match tab.rest {
+        (r, h) if r == rows => h,
+        (_, h) => h + 150.0 * (rows as f32 - 1.0),
+    };
+    let (top, avail) = (ui.cursor().top(), ui.available_height());
+    let chart_h = ((avail - rest) / rows as f32).clamp(CHART_H.0, CHART_H.1);
+    charted(ui, tab, chart, chart_h, cx);
+    tab.rest = (rows, ui.cursor().top() - top - rows as f32 * chart_h);
+}
+
+/// The original's stats, warning and charts; then the straightened version's, the
+/// charts `chart_h` tall.
+fn charted(ui: &mut Ui, tab: &mut TempoLockUi, chart: &Chart, chart_h: f32, cx: &mut Cx) {
     let theme = cx.theme;
     let a = &chart.analysis;
     let straight = tab.straightened.clone();
@@ -573,27 +535,8 @@ fn body(ui: &mut Ui, tab: &mut TempoLockUi, chart: &Chart, cx: &mut Cx) {
         tab.level.factor(),
         range,
         hist,
+        chart_h,
         "",
-        cx,
-    );
-
-    ui.add_space(6.0);
-    title(
-        ui,
-        theme,
-        "Original",
-        "grid = detected beats · red lines are downbeats · click to seek · wheel to zoom · drag to pan",
-    );
-    let (beats, downs) = version_beats(Version::Original, chart, None);
-    wave(
-        ui,
-        tab,
-        Version::Original,
-        &chart.wave,
-        a.duration,
-        beats,
-        downs,
-        &a.dropped_beats,
         cx,
     );
 
@@ -611,25 +554,12 @@ fn body(ui: &mut Ui, tab: &mut TempoLockUi, chart: &Chart, cx: &mut Cx) {
         theme,
         "Straightened",
         &format!(
-            "{} BPM · {} · MP3 {} kbps · {file} · grid = where each original beat now sits",
+            "{} BPM · {} · MP3 {} kbps · {file}",
             s.grid.target_bpm,
             fmt_time(s.duration),
             s.bitrate_kbps
         ),
     );
-    let (beats, downs) = version_beats(Version::Straightened, chart, Some(&*s));
-    wave(
-        ui,
-        tab,
-        Version::Straightened,
-        &s.wave,
-        s.duration,
-        beats,
-        downs,
-        &[],
-        cx,
-    );
-    ui.add_space(6.0);
     let measuring = matches!(tab.busy, Some((Stage::Measure | Stage::Straighten, _)));
     ui.horizontal(|ui| {
         ui.label(RichText::new("Measured on the straightened audio").strong());
@@ -655,6 +585,7 @@ fn body(ui: &mut Ui, tab: &mut TempoLockUi, chart: &Chart, cx: &mut Cx) {
             s.level,
             range,
             hist,
+            chart_h,
             " · beats detected again in the output · same scale as the original",
             cx,
         );
@@ -669,6 +600,8 @@ fn title(ui: &mut Ui, theme: &Theme, name: &str, hint: &str) {
     });
 }
 
+/// A version's tempo over the stretch Prepare's waveform shows (click to seek there,
+/// wheel to zoom both), and its histogram.
 #[allow(clippy::too_many_arguments)]
 fn charts_row(
     ui: &mut Ui,
@@ -679,6 +612,7 @@ fn charts_row(
     level: f64,
     range: (f64, f64),
     hist: (f64, f64, f64),
+    height: f32,
     hint: &str,
     cx: &mut Cx,
 ) {
@@ -687,20 +621,23 @@ fn charts_row(
     let w = ui.available_width();
     let side = (w * 0.26).clamp(200.0, 420.0);
     let main = w - side - 10.0;
-    let window = (
-        tab.from_original(tab.view.0, version),
-        tab.from_original(tab.view.1, version),
-    );
+    let window = tab.window(version, cx);
     let playhead = Some(tab.from_original(tab.cursor, version));
+    // Thrown-away detections only mean something on the original.
+    let dropped: &[f64] = match version {
+        Version::Original => &a.dropped_beats,
+        Version::Straightened => &[],
+    };
     ui.horizontal_top(|ui| {
-        ui.allocate_ui(vec2(main, CHART_H + 24.0), |ui| {
+        ui.allocate_ui(vec2(main, height + 24.0), |ui| {
             ui.vertical(|ui| {
                 title(
                     ui,
                     theme,
                     "Tempo over time",
                     &format!(
-                        "BPM per beat · dashed = target · shaded bands = sections at a steady tempo{hint}"
+                        "BPM per beat · dashed = target · shaded bands = sections at a steady \
+                         tempo · red ticks = dropped beats · click to seek · wheel to zoom{hint}"
                     ),
                 );
                 let r = TempoChart {
@@ -712,19 +649,26 @@ fn charts_row(
                     playhead,
                     colour,
                 }
-                .show(ui, theme, CHART_H);
+                .show(ui, theme, height);
+                ruler(&ui.painter_at(r.rect), theme, r.rect, window, dropped);
                 if r.clicked()
                     && let Some(pos) = r.interact_pointer_pos()
                 {
-                    let t = time_at(r.rect, (0.0, a.duration), pos.x);
+                    let t = time_at(r.rect, window, pos.x);
                     let t = tab.to_original(t, version);
                     let v = tab.version;
                     let at = tab.from_original(t, v);
                     tab.seek(v, at, cx);
                 }
+                if r.hovered() {
+                    let scroll = ui.input(|i| i.raw_scroll_delta.y);
+                    if scroll != 0.0 {
+                        cx.send(ViewCmd::WaveZoom(zoomed(cx.prefs.wave_zoom, scroll)));
+                    }
+                }
             });
         });
-        ui.allocate_ui(vec2(side, CHART_H + 24.0), |ui| {
+        ui.allocate_ui(vec2(side, height + 24.0), |ui| {
             ui.vertical(|ui| {
                 title(ui, theme, "Beat intervals", "histogram of BPM per beat");
                 HistChart {
@@ -733,127 +677,12 @@ fn charts_row(
                     range: hist,
                     colour,
                 }
-                .show(ui, theme, CHART_H);
+                .show(ui, theme, height);
             });
         });
     });
 }
 
-/// A version's waveform and its overview, drawn as a deck's are, with seeking, panning
-/// and zooming.
-#[allow(clippy::too_many_arguments)]
-fn wave(
-    ui: &mut Ui,
-    tab: &mut TempoLockUi,
-    version: Version,
-    data: &Waveform,
-    duration: f64,
-    beats: &[f64],
-    downbeats: &[bool],
-    dropped: &[f64],
-    cx: &mut Cx,
-) {
-    let i = match version {
-        Version::Original => 0,
-        Version::Straightened => 1,
-    };
-    if tab.waves[i].is_none() && !data.detail.is_empty() {
-        tab.waves[i] = Some(DeckWave::new(
-            ui.ctx(),
-            &format!("tempo-lock-overview-{i}"),
-            data.bands.clone(),
-            data.detail.clone(),
-        ));
-    }
-    let view = (
-        tab.from_original(tab.view.0, version),
-        tab.from_original(tab.view.1, version),
-    );
-    let at = tab.from_original(tab.cursor, version);
-    // The other version's playhead is faint.
-    let idle = tab.version != version;
-    let width = ui.available_width();
-    let (rect, r) = ui.allocate_exact_size(vec2(width, WAVE_H), Sense::click_and_drag());
-    let marks = Marks {
-        grid: Grid::Beats {
-            times: beats,
-            downbeats,
-        },
-        idle,
-        ..Marks::default()
-    };
-    let painter = ui.painter_at(rect);
-    wave::window(&painter, rect, tab.waves[i].as_ref(), view, at, &marks);
-    ruler(&painter, cx.theme, rect, view, dropped);
-    wave_input(ui, tab, &r, version, view, cx);
-
-    let (rect, o) = ui.allocate_exact_size(vec2(width, OVERVIEW_H), Sense::click_and_drag());
-    let marks = Marks {
-        window: Some(view),
-        idle,
-        ..Marks::default()
-    };
-    let wv = tab.waves[i].as_ref();
-    wave::overview(&ui.painter_at(rect), rect, wv, at, duration, &marks, None);
-    if (o.clicked() || o.dragged())
-        && let Some(pos) = o.interact_pointer_pos()
-    {
-        let t = time_at(o.rect, (0.0, duration), pos.x);
-        let centre = tab.to_original(t, version);
-        let span = tab.view.1 - tab.view.0;
-        tab.set_view(centre - span / 2.0, centre + span / 2.0);
-    }
-}
-
-/// Click to seek (and pick that version), drag to pan, wheel to zoom (Shift + wheel
-/// pans).
-fn wave_input(
-    ui: &mut Ui,
-    tab: &mut TempoLockUi,
-    r: &Response,
-    version: Version,
-    view: (f64, f64),
-    cx: &mut Cx,
-) {
-    let span = tab.view.1 - tab.view.0;
-    let w = r.rect.width().max(1.0) as f64;
-    if r.dragged() {
-        let d = -r.drag_delta().x as f64 / w * span;
-        tab.set_view(tab.view.0 + d, tab.view.1 + d);
-    } else if r.clicked()
-        && let Some(pos) = r.interact_pointer_pos()
-    {
-        tab.seek(version, time_at(r.rect, view, pos.x), cx);
-    }
-    if r.hovered() {
-        let (delta, shift, pointer) = ui.input(|i| {
-            (
-                i.smooth_scroll_delta,
-                i.modifiers.shift,
-                i.pointer.hover_pos(),
-            )
-        });
-        if delta != egui::Vec2::ZERO {
-            // The wheel is the waveform's, not the page's.
-            ui.ctx()
-                .input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
-            if shift || delta.x.abs() > delta.y.abs() {
-                let d = -(if delta.x != 0.0 { delta.x } else { delta.y }) as f64 / w * span;
-                tab.set_view(tab.view.0 + d, tab.view.1 + d);
-            } else if let Some(p) = pointer {
-                let frac = ((p.x - r.rect.left()) as f64 / w).clamp(0.0, 1.0);
-                let anchor = tab.view.0 + frac * span;
-                let ns = span * (-delta.y as f64 * 0.004).exp();
-                let ns = ns.clamp(MIN_SPAN, tab.duration());
-                tab.set_view(anchor - frac * ns, anchor + (1.0 - frac) * ns);
-            }
-        }
-    }
-}
-
-// ---- stats ---------------------------------------------------------------------------------
-
-/// A stat tile: its name, value and a note under it. `flag` marks it in amber.
 fn stat(ui: &mut Ui, theme: &Theme, name: &str, value: &str, note: &str, flag: bool) {
     let stroke = if flag { theme.warn } else { theme.line };
     // A wrapped row can't see a card's width before drawing it, so it never wraps one:
@@ -1060,8 +889,6 @@ fn tempo_changes(ui: &mut Ui, tab: &mut TempoLockUi, a: &TempoAnalysis, cx: &mut
                     };
                     ui.label(what);
                     if ui.link("jump to").clicked() {
-                        let span = tab.view.1 - tab.view.0;
-                        tab.set_view(c.time - span * 0.3, c.time + span * 0.7);
                         let v = tab.version;
                         let at = tab.from_original(c.time, v);
                         tab.seek(v, at, cx);
@@ -1154,4 +981,53 @@ fn short_path(p: &str) -> &str {
         }
     }
     &p[cut + 1..]
+}
+
+// ---- over Prepare's waveform ---------------------------------------------------------------
+
+/// The beats the tool found, over Prepare's waveform while one of its versions is in
+/// the player: in the original, where they were detected (and the detections thrown
+/// away, as red ticks); in the straightened version, where each was put. A line
+/// across the middle in the version's colour, longer on a downbeat, so the player's
+/// own beatgrid still shows around it.
+pub struct DetectedBeats {
+    pub version: Version,
+    pub chart: Arc<Chart>,
+    pub straightened: Option<Arc<Straightened>>,
+}
+
+impl Layer for DetectedBeats {
+    fn draw(&self, tl: &Timeline) {
+        let (beats, downs) = version_beats(self.version, &self.chart, self.straightened.as_deref());
+        let (p, rect) = (tl.painter, tl.rect);
+        let colour = version_colour(&THEME, self.version);
+        let (cy, h) = (rect.center().y, rect.height());
+        let i0 = beats.partition_point(|&t| t < tl.view.0);
+        let i1 = beats.partition_point(|&t| t <= tl.view.1);
+        for i in i0..i1 {
+            let x = tl.x_of(beats[i]);
+            let (reach, width) = match downs.get(i).copied().unwrap_or(false) {
+                true => (0.32, 2.0),
+                false => (0.16, 1.5_f32),
+            };
+            p.line_segment(
+                [Pos2::new(x, cy - h * reach), Pos2::new(x, cy + h * reach)],
+                Stroke::new(width, colour),
+            );
+        }
+        if self.version == Version::Original {
+            for &d in &self.chart.analysis.dropped_beats {
+                if (tl.view.0..=tl.view.1).contains(&d) {
+                    let x = tl.x_of(d);
+                    p.line_segment(
+                        [
+                            Pos2::new(x, rect.bottom() - 8.0),
+                            Pos2::new(x, rect.bottom()),
+                        ],
+                        Stroke::new(1.0_f32, THEME.bad),
+                    );
+                }
+            }
+        }
+    }
 }

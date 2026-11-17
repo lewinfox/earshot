@@ -118,9 +118,7 @@ impl DeckUi {
         if resp.hovered() {
             let scroll = ui.input(|i| i.raw_scroll_delta.y);
             if scroll != 0.0 {
-                // About 7% per wheel notch.
-                let zoom = (half_window * (-(scroll as f64) * 0.0014).exp()).clamp(0.5, 30.0);
-                out.push(ViewCmd::WaveZoom(zoom).into());
+                out.push(ViewCmd::WaveZoom(zoomed(half_window, scroll)).into());
             }
         }
         if let Some(id) = drag::take_track(&resp) {
@@ -167,6 +165,12 @@ impl DeckUi {
         }
         self.library_menu(&resp, out);
     }
+}
+
+/// The shared waveform zoom (s either side of the playhead) after `scroll` points of
+/// mouse wheel: about 7% per notch.
+pub fn zoomed(half_window: f64, scroll: f32) -> f64 {
+    (half_window * (-(scroll as f64) * 0.0014).exp()).clamp(0.5, 30.0)
 }
 
 /// A player's scrolling waveform, `height` tall, at the shared zoom.

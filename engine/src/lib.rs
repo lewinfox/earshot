@@ -9,9 +9,13 @@ pub mod dsp;
 pub mod engine;
 pub mod fx;
 pub mod keylock;
+pub mod load;
 pub mod output;
+pub mod pad_fx;
 pub mod phones_out;
 pub mod processor;
+pub mod realtime;
+pub mod sampler;
 pub mod scratch;
 pub mod snapshot;
 pub mod tempo;
@@ -29,11 +33,14 @@ use std::time::Duration;
 pub use command::{
     ChannelParam, ChannelState, Command, CueSet, DeckCmd, DeckId, DeckState, EQ_HIGH, EQ_LOW,
     EQ_MID, EngineState, HOTCUES, HotcueMode, LoadedTrack, LoopState, MAX_DECKS, MasterParam,
-    MixerState, ParamId, Press, PreviewCmd, Set, XfSide,
+    MixerState, ParamId, Press, PreviewCmd, Set, XfCurve, XfSide,
 };
 pub use engine::{Out, Routing};
-pub use fx::{FX_UNITS, FxCmd, FxKind, FxTarget, FxUnitState, step_beats};
+pub use fx::{FX_UNITS, FxCmd, FxKind, FxRelease, FxTarget, FxUnitState, step_beats};
+pub use keylock::KEY_SHIFT_MAX;
 pub use output::{OutputInfo, OutputOptions};
+pub use pad_fx::{PadFx, PadFxKind};
+pub use sampler::{SAMPLER_SLOTS, SampleSlot, SampleSnap, SampleState, SamplerCmd};
 pub use snapshot::{DeckSnap, EngineEvent, EngineSnapshot, MixerSnap, Monitor, PreviewSnap, Stats};
 pub use tempo::TempoRange;
 pub use transport::LEAD_IN;
@@ -45,12 +52,27 @@ pub struct Engine {
     spare: Vec<rtrb::Producer<Command>>,
     events: rtrb::Consumer<EngineEvent>,
     monitor: Monitor,
+    tap: Option<rtrb::Consumer<f32>>,
+    stats: Arc<Stats>,
     decks: usize,
     info: OutputInfo,
     gc_stop: Arc<AtomicBool>,
+    /// A stepped engine's renderer ([`OutputOptions::stepped`]).
+    stepped: Option<Stepped>,
     // Dropped last: stops the audio thread.
-    _output: output::OutputHandle,
+    _output: Option<output::OutputHandle>,
 }
+
+/// The renderer of an engine with no output, and the buffer it renders into.
+struct Stepped {
+    renderer: Renderer,
+    /// Frames in a block, as a sound card would ask for them.
+    block: usize,
+    buf: Vec<f32>,
+}
+
+/// The channels a stepped engine renders (master and headphones).
+const STEPPED_CHANNELS: usize = 4;
 
 impl Engine {
     /// Start audio with `decks` live decks (at most [`MAX_DECKS`]).
@@ -73,19 +95,63 @@ impl Engine {
             })
             .map_err(|e| e.to_string())?;
 
-        let stats = ends.stats().clone();
-        let make = move |rate| Renderer::new(ends, rate, decks);
-        let (output, info) = output::start(opts, stats, make)?;
+        let (output, info, stepped) = if opts.stepped {
+            let block = opts.buffer_frames.unwrap_or(256).max(1);
+            let mut renderer = Renderer::new(ends, output::NULL_RATE, decks);
+            renderer.set_stepped();
+            let stepped = Stepped {
+                renderer,
+                block: block as usize,
+                buf: vec![0.0; block as usize * STEPPED_CHANNELS],
+            };
+            (None, output::stepped_info(block), Some(stepped))
+        } else {
+            let stats = ends.stats().clone();
+            let make = move |rate| Renderer::new(ends, rate, decks);
+            let (output, info) = output::start(opts, stats, make)?;
+            (Some(output), info, None)
+        };
         Ok(Engine {
             commands: app.commands,
             spare: app.spare,
             events: app.events,
             monitor: app.monitor,
+            tap: Some(app.tap),
+            stats: app.stats,
             decks,
             info,
             gc_stop,
+            stepped,
             _output: output,
         })
+    }
+
+    /// Render `frames` of audio now, a block at a time, as a sound card would have
+    /// asked for them. Only a stepped engine ([`OutputOptions::stepped`]) does
+    /// anything: commands sent to it take effect in the next block rendered, and its
+    /// snapshot and events are as of the last one.
+    pub fn advance(&mut self, frames: usize) {
+        let Some(s) = &mut self.stepped else {
+            return;
+        };
+        let mut left = frames;
+        while left > 0 {
+            let n = left.min(s.block);
+            s.renderer
+                .process(&mut s.buf[..n * STEPPED_CHANNELS], STEPPED_CHANNELS);
+            left -= n;
+        }
+    }
+
+    /// How many commands sent with [`Engine::send`] the audio thread hasn't taken yet
+    /// (a stepped engine takes them all in its next block).
+    pub fn pending_commands(&self) -> usize {
+        self.commands.buffer().capacity() - self.commands.slots()
+    }
+
+    /// Whether audio is rendered only when [`Engine::advance`] asks.
+    pub fn is_stepped(&self) -> bool {
+        self.stepped.is_some()
     }
 
     /// Queue a command for the audio thread. Fails only if the queue is full.
@@ -128,6 +194,44 @@ impl Engine {
     pub fn info(&self) -> &OutputInfo {
         &self.info
     }
+
+    /// A copy of everything this engine sends to the device, from now on (once: `None`
+    /// after the first call). Nothing is copied until it's taken.
+    pub fn take_output_tap(&mut self) -> Option<OutputTap> {
+        let samples = self.tap.take()?;
+        self.stats.tapping.store(true, Relaxed);
+        Some(OutputTap {
+            samples,
+            stats: self.stats.clone(),
+            sample_rate: self.info.sample_rate,
+        })
+    }
+}
+
+/// What an engine sends to its device, copied ([`Engine::take_output_tap`]): the
+/// interleaved samples, as many channels as the device has. Read it often: when it's
+/// full, blocks are dropped (and counted in [`Stats::tap_dropped`]).
+pub struct OutputTap {
+    pub samples: rtrb::Consumer<f32>,
+    stats: Arc<Stats>,
+    pub sample_rate: u32,
+}
+
+impl OutputTap {
+    /// The device's channels (0 until the first block).
+    pub fn channels(&self) -> usize {
+        self.stats.tap_channels.load(Relaxed) as usize
+    }
+
+    /// Blocks dropped so far because the tap was full.
+    pub fn dropped(&self) -> u64 {
+        self.stats.tap_dropped.load(Relaxed)
+    }
+
+    /// Underruns and overruns the sound card has reported so far.
+    pub fn xruns(&self) -> u64 {
+        self.stats.xruns.load(Relaxed)
+    }
 }
 
 /// One thread's own ring into the engine (see [`Engine::sender`]). Commands from one
@@ -149,5 +253,29 @@ impl CommandSender {
 impl Drop for Engine {
     fn drop(&mut self) {
         self.gc_stop.store(true, Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Nothing is copied until the tap is taken; then every channel of every block.
+    #[test]
+    fn the_output_tap_copies_what_goes_to_the_device() {
+        let opts = OutputOptions {
+            stepped: true,
+            buffer_frames: Some(256),
+            ..OutputOptions::default()
+        };
+        let mut e = Engine::start(&opts, 2).unwrap();
+        e.advance(512);
+        let tap = e.take_output_tap().expect("a tap");
+        assert!(e.take_output_tap().is_none(), "only once");
+        assert_eq!(tap.samples.slots(), 0, "nothing before it was taken");
+        e.advance(1024);
+        assert_eq!(tap.channels(), STEPPED_CHANNELS);
+        assert_eq!(tap.samples.slots(), 1024 * STEPPED_CHANNELS);
+        assert_eq!(tap.dropped(), 0);
     }
 }

@@ -42,7 +42,10 @@ impl Widget for Pill<'_> {
                     if self.busy {
                         ui.add(egui::Spinner::new().size(fs(11.0)));
                     }
-                    ui.label(RichText::new(self.text).size(fs(11.0)));
+                    // Not selectable: the pointer stays an arrow, not a text caret.
+                    ui.add(
+                        egui::Label::new(RichText::new(self.text).size(fs(11.0))).selectable(false),
+                    );
                 });
             })
             .response

@@ -239,4 +239,52 @@ mod lossless_tests {
         assert_eq!(is_lossless(&Location::File(wav)), Ok(true));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A 16-bit stereo AIFF at 44.1 kHz holding `frames` frames; the left channel ramps
+    /// up from zero and the right is its negative.
+    fn aiff(frames: u16) -> Vec<u8> {
+        let mut data = Vec::new();
+        for i in 0..frames as i16 {
+            data.extend((i * 100).to_be_bytes());
+            data.extend((-i * 100).to_be_bytes());
+        }
+        let mut b = Vec::new();
+        b.extend(b"FORM");
+        b.extend((4 + 8 + 18 + 8 + 8 + data.len() as u32).to_be_bytes());
+        b.extend(b"AIFFCOMM");
+        b.extend(18u32.to_be_bytes());
+        b.extend(2u16.to_be_bytes());
+        b.extend((frames as u32).to_be_bytes());
+        b.extend(16u16.to_be_bytes());
+        // 44100 as an 80-bit extended float.
+        b.extend([0x40, 0x0E, 0xAC, 0x44, 0, 0, 0, 0, 0, 0]);
+        b.extend(b"SSND");
+        b.extend((8 + data.len() as u32).to_be_bytes());
+        b.extend(0u32.to_be_bytes()); // offset
+        b.extend(0u32.to_be_bytes()); // block size
+        b.extend(&data);
+        b
+    }
+
+    #[test]
+    fn decodes_aiff() {
+        let dir = std::env::temp_dir().join(format!("earshot-aiff-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Both spellings the library scan accepts.
+        for name in ["a.aiff", "a.aif"] {
+            let path = dir.join(name);
+            std::fs::write(&path, aiff(100)).unwrap();
+            let at = Location::File(path);
+            assert_eq!(is_lossless(&at), Ok(true));
+            let tags = read_tags(&at).unwrap();
+            assert_eq!(tags.duration, Some(100.0 / 44_100.0));
+            let (audio, _) = decode(&at).unwrap();
+            assert_eq!(audio.sample_rate, 44_100);
+            assert_eq!(audio.frames(), 100);
+            let expect = 300.0 / 32_768.0;
+            assert!((audio.samples[6] - expect).abs() < 1e-6);
+            assert!((audio.samples[7] + expect).abs() < 1e-6);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

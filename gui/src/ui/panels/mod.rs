@@ -4,6 +4,8 @@
 //! anything else they want changed goes out as a command, which the shell's
 //! `dispatch` carries out after the frame.
 
+pub mod controller;
+pub mod debug;
 pub mod deck;
 pub mod export;
 pub mod flow;
@@ -13,6 +15,7 @@ pub mod mixer;
 pub mod status;
 pub mod stems;
 pub mod tempo_lock;
+pub mod trim;
 
 use earshot_engine::{DeckId, EngineSnapshot};
 use egui::Ui;

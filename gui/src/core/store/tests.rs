@@ -795,6 +795,112 @@ fn analysis_of_a_new_track_sets_grid_bpm_and_thumbnail() {
     );
 }
 
+/// A quick grid is for a track with none: it sets the BPM and the first beat, and
+/// never replaces a grid that's there.
+#[test]
+fn a_quick_grid_is_saved_only_for_a_track_without_a_grid() {
+    let (_dir, mut w, id) = one_track("quick");
+    w.take_events();
+    let saved = w.save_quick_grid(id, &grid(126.0), 1.5).unwrap();
+    assert!(saved.is_some());
+    assert!(w.take_events().iter().any(|e| matches!(
+        e,
+        StoreEvent::TracksChanged(t)
+            if t[0].bpm == Some(126.0) && t[0].grid_source == Some(GridSource::Quick)
+    )));
+    let (g, src) = read::grid(w.conn(), id).unwrap().unwrap();
+    assert_eq!((g, src), (grid(126.0).model(), GridSource::Quick));
+    assert_eq!(read::first_beat(w.conn(), id).unwrap(), Some(1.5));
+    // Not over another quick grid, an analysed one or a hand-fixed one.
+    assert_eq!(w.save_quick_grid(id, &grid(100.0), 0.0).unwrap(), None);
+    assert_eq!(library(&mut w)[0].bpm, Some(126.0));
+    w.save_user_grid(id, &grid(127.0)).unwrap();
+    assert_eq!(w.save_quick_grid(id, &grid(100.0), 0.0).unwrap(), None);
+    assert_eq!(
+        (library(&mut w)[0].bpm, library(&mut w)[0].grid_source),
+        (Some(127.0), Some(GridSource::User))
+    );
+}
+
+/// Full analysis replaces a quick grid: asked for or not, and even a quick grid
+/// that was saved while the analysis ran (which a hand fix would survive).
+#[test]
+fn analysis_replaces_a_quick_grid() {
+    let (_dir, mut w, id) = one_track("quick-replaced");
+    let quick = w.save_quick_grid(id, &grid(126.0), 0.0).unwrap();
+    let out = w.save_analysis(analysis(id, 125.0, quick, false)).unwrap();
+    assert!(out.switched);
+    assert_eq!(out.source, Some(GridSource::Analysis));
+
+    let (_dir, mut w, id) = one_track("quick-raced");
+    // The job started with no grid; the quick grid arrived before it saved.
+    w.save_quick_grid(id, &grid(126.0), 0.0).unwrap();
+    let out = w.save_analysis(analysis(id, 125.0, None, false)).unwrap();
+    assert!(out.switched);
+    assert_eq!(
+        (out.bpm, out.source),
+        (Some(125.0), Some(GridSource::Analysis))
+    );
+}
+
+/// A quick grid fixed by hand becomes the user's, and undoing that goes back to it.
+#[test]
+fn a_quick_grid_fixed_by_hand_becomes_the_users() {
+    let (_dir, mut w, id) = one_track("quick-fixed");
+    let quick = w.save_quick_grid(id, &grid(126.0), 0.0).unwrap();
+    w.take_events();
+    let fixed = w.save_user_grid(id, &grid(126.5)).unwrap();
+    assert_eq!(
+        read::active_grid(w.conn(), id).unwrap(),
+        Some((fixed, GridSource::User))
+    );
+    assert!(w.take_events().iter().any(|e| matches!(
+        e,
+        StoreEvent::Edited(Edit::Grid { old, new, .. }) if *old == quick && *new == Some(fixed)
+    )));
+}
+
+/// A scan says which tracks it hadn't seen before, once: a rescan, a changed file
+/// and a moved one aren't new.
+#[test]
+fn a_scan_reports_the_tracks_new_to_the_library() {
+    let (dir, mut w) = setup("new-tracks");
+    add_folder(&mut w, &dir.join("music"));
+    let new = |w: &mut Writer| -> Vec<Vec<i64>> {
+        w.take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                StoreEvent::NewTracks(ids) => Some(ids),
+                _ => None,
+            })
+            .collect()
+    };
+    w.take_events();
+    let (a, b) = (dir.join("music/a.mp3"), dir.join("music/b.mp3"));
+    scan(&mut w, &dir, &[file(&a, "A", Some(1)), file(&b, "B", None)]);
+    let ids: Vec<i64> = library(&mut w).iter().map(|t| t.id).collect();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(new(&mut w), vec![ids.clone()]);
+    // Scanned again, one of them changed on disk: nothing new.
+    let mut changed = file(&b, "B", None);
+    changed.mtime_ns = 2;
+    w.apply_scan(&[dir.join("music")], &[a.clone(), b.clone()], &[changed])
+        .unwrap();
+    assert_eq!(new(&mut w), Vec::<Vec<i64>>::new());
+    // A moved to another name: the same track, not a new one. C is new.
+    let (moved, c) = (dir.join("music/a2.mp3"), dir.join("music/c.mp3"));
+    w.apply_scan(
+        &[dir.join("music")],
+        &[moved.clone(), b, c.clone()],
+        &[file(&moved, "A", Some(1)), file(&c, "C", None)],
+    )
+    .unwrap();
+    let lib = library(&mut w);
+    assert_eq!(lib.len(), 3);
+    let c = lib.iter().find(|t| t.title == "C").unwrap().id;
+    assert_eq!(new(&mut w), vec![vec![c]]);
+}
+
 /// Bug 4: a grid edit changes the track's BPM, and the library hears about it.
 #[test]
 fn a_grid_edit_updates_the_bpm() {
@@ -1191,6 +1297,10 @@ fn smart_playlists_run_their_query_in_sql_like_in_memory() {
     let id = |title: &str| lib.iter().find(|t| t.title == title).unwrap().id;
     // A grid for one of them (so is:analysed and the grid's BPM count).
     w.save_user_grid(id("Other"), &grid(141.0)).unwrap();
+    // And a quick grid for another: a BPM, but not "analysed".
+    w.save_quick_grid(id("Warm Up"), &grid(123.0), 0.0).unwrap();
+    w.save_quick_grid(id("Deep Space"), &grid(125.0), 0.0)
+        .unwrap();
     w.create_collection(9, None, Crate, "C", None).unwrap();
     w.add_tracks(9, &[id("Shallow"), id("Warm Up")]).unwrap();
     // Energy: Deep Space lowest, Warm Up highest.
@@ -1270,6 +1380,10 @@ fn smart_playlists_run_their_query_in_sql_like_in_memory() {
         "-is:drifting",
         "status:attention",
         "-status:attention",
+        "status:quick",
+        "status:done",
+        "status:none",
+        "sort:status sort:title",
     ] {
         w.set_query(1, q).unwrap();
         let parsed = query::parse(q).unwrap();
@@ -1409,6 +1523,7 @@ fn a_grid_edit_doesnt_wait_for_the_database() {
             buffer_frames: Some(256),
             null: true,
             phones_device: None,
+            stepped: false,
         },
     )
     .unwrap();

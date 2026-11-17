@@ -13,12 +13,16 @@ use std::time::Instant;
 use crate::beatgrid::Beatgrid;
 use crate::command::{
     ChannelParam, Command, DeckCmd, DeckId, DeckState, EngineState, HOTCUES, HotcueMode,
-    LoadedTrack, LoopState, MAX_DECKS, MasterParam, ParamId, Press, PreviewCmd, SLOTS, XfSide,
+    LoadedTrack, LoopState, MAX_DECKS, MasterParam, ParamId, Press, PreviewCmd, XfCurve, XfSide,
 };
 use crate::decode::TrackAudio;
 use crate::dsp::{self, Limiter, Smoothed};
 use crate::fx::{BeatClock, FALLBACK_BPM, FX_UNITS, FxCmd, FxTarget, FxUnit, FxUnitState};
+use crate::keylock::KEY_SHIFT_MAX;
+use crate::load::LoadWatch;
+use crate::pad_fx::PadFxSlot;
 use crate::processor::{Channel, KNOB_SECS, MasterChain};
+use crate::sampler::{SampleSlot, Sampler};
 use crate::snapshot::{
     DeckSnap, EngineEvent, EngineSnapshot, MixerSnap, Monitor, PreviewSnap, Stats,
 };
@@ -36,6 +40,8 @@ const COMMAND_SLOTS: usize = 1024;
 pub(crate) const COMMAND_RINGS: usize = 3;
 const EVENT_SLOTS: usize = 256;
 const GARBAGE_SLOTS: usize = 64;
+/// The output tap's room, in samples: a few seconds of a 4-channel device.
+const TAP_SAMPLES: usize = 1 << 20;
 
 // ---- output routing ----------------------------------------------------------------
 
@@ -146,6 +152,9 @@ pub(crate) struct AppEnds {
     pub events: rtrb::Consumer<EngineEvent>,
     pub garbage: rtrb::Consumer<Garbage>,
     pub monitor: Monitor,
+    /// What goes to the device, copied (see [`crate::Engine::take_output_tap`]).
+    pub tap: rtrb::Consumer<f32>,
+    pub stats: Arc<Stats>,
 }
 
 /// The audio thread's ends, handed to [`Renderer::new`].
@@ -155,6 +164,7 @@ pub(crate) struct RendererEnds {
     garbage: rtrb::Producer<Garbage>,
     snapshots: triple_buffer::Input<EngineSnapshot>,
     stats: Arc<Stats>,
+    tap: rtrb::Producer<f32>,
 }
 
 impl RendererEnds {
@@ -176,6 +186,7 @@ pub(crate) fn wire() -> (AppEnds, RendererEnds) {
     let (garbage_tx, garbage) = rtrb::RingBuffer::new(GARBAGE_SLOTS);
     let (snap_in, snap_out) = triple_buffer::triple_buffer(&EngineSnapshot::default());
     let stats = Arc::new(Stats::default());
+    let (tap_tx, tap) = rtrb::RingBuffer::new(TAP_SAMPLES);
     (
         AppEnds {
             commands,
@@ -183,6 +194,8 @@ pub(crate) fn wire() -> (AppEnds, RendererEnds) {
             events,
             garbage,
             monitor: Monitor::new(snap_out, stats.clone()),
+            tap,
+            stats: stats.clone(),
         },
         RendererEnds {
             commands: command_rx,
@@ -190,6 +203,7 @@ pub(crate) fn wire() -> (AppEnds, RendererEnds) {
             garbage: garbage_tx,
             snapshots: snap_in,
             stats,
+            tap: tap_tx,
         },
     )
 }
@@ -265,7 +279,32 @@ struct Deck {
     stem_level: [f64; stems::COUNT],
     stem_mute: [bool; stems::COUNT],
     stem_gain: [f32; stems::COUNT],
+    /// Seconds of audio the deck stays quiet for after a search step (see
+    /// [`SEARCH_QUIET_SECS`]), and its level now, eased over [`STEM_RAMP_SECS`].
+    search_quiet: f64,
+    search_gain: f32,
 }
+
+/// Quiet while searching: ease a deck's block toward silence while a search is on
+/// (`quiet`: seconds of it left), and back up after; `gain` is its level now.
+fn search_mute(quiet: &mut f64, gain: &mut f32, buf: &mut [f32], sr: f64) {
+    let n = buf.len() / 2;
+    let target = if *quiet > 0.0 { 0.0 } else { 1.0 };
+    *quiet = (*quiet - n as f64 / sr).max(0.0);
+    if *gain == 1.0 && target == 1.0 {
+        return;
+    }
+    let step = (1.0 / (STEM_RAMP_SECS * sr)) as f32;
+    for frame in buf.chunks_exact_mut(2) {
+        *gain += (target - *gain).clamp(-step, step);
+        frame[0] *= *gain;
+        frame[1] *= *gain;
+    }
+}
+
+/// A search (SHIFT + jog) is silent: the deck goes quiet on its first step and comes
+/// back this long after its last. A jog wheel turning steadily steps far more often.
+const SEARCH_QUIET_SECS: f64 = 0.15;
 
 /// How long a stem takes to go from silent to full (or back): short enough not to
 /// hear as a fade, long enough not to click.
@@ -281,14 +320,29 @@ const SYNC_PHASE_SECS: f64 = 0.25;
 const SYNC_DEADBAND: f64 = 0.008;
 
 /// A jog wheel's bend: turning it as fast as a record goes (1.8 s a turn at 33⅓ rpm)
-/// speeds the deck up by this much (0.2 = 20%), about as Mixxx's DDJ-400 mapping does.
-/// The turning speed is measured over [`BEND_SECS`], and springs back over it.
-const BEND: f64 = 0.2;
+/// speeds the deck up by this much (0.1 = 10%). The turning speed is measured over
+/// [`BEND_SECS`], and springs back over it.
+const BEND: f64 = 0.1;
+/// On a stopped deck, the jog wheel moves the track this fraction of its turn.
+const STOPPED_JOG: f64 = 0.2;
 const BEND_SECS: f64 = 0.1;
 
 /// The tempo fader picks the tempo up when it comes this close (in fader travel,
 /// -1..1) or moves past it.
 const PICKUP: f64 = 0.01;
+
+/// A crossfader side's level at position `x` (-1..1) on `curve`. Sharp: both full
+/// in the centre, each fading out (a quarter cosine) as the fader moves to the other
+/// side. Constant power: a quarter cosine across the whole travel, so the two sides'
+/// powers always add up to one.
+fn xf_gain(curve: XfCurve, x: f64, side: usize) -> f64 {
+    let away = if side == 0 { x } else { -x };
+    let q = std::f64::consts::FRAC_PI_2;
+    match curve {
+        XfCurve::Sharp => (away.max(0.0) * q).cos(),
+        XfCurve::ConstantPower => ((away + 1.0) / 2.0 * q).cos(),
+    }
+}
 
 /// Without a grid, beat maths falls back to 120 BPM from zero.
 const FALLBACK_BEAT: f64 = 0.5;
@@ -325,6 +379,8 @@ impl Deck {
             stem_level: [1.0; stems::COUNT],
             stem_mute: [false; stems::COUNT],
             stem_gain: [1.0; stems::COUNT],
+            search_quiet: 0.0,
+            search_gain: 1.0,
         }
     }
 
@@ -431,7 +487,7 @@ impl Deck {
             self.bend += by / BEND_SECS;
         } else {
             self.untouched = false;
-            self.player.scratch.nudge(by * BEND, at, now);
+            self.player.scratch.nudge(by * STOPPED_JOG, at, now);
         }
     }
 
@@ -454,8 +510,10 @@ impl Deck {
         t.set_duration(track.audio.duration());
         t.playing = false;
         t.loop_ = LoopState::default();
+        t.active_loop = None;
         t.jump(cue, JumpReason::Load);
         self.player.speed = 1.0;
+        self.player.key_shift = 0.0;
         self.player.scratch.cancel();
         self.cue_point = cue;
         self.untouched = true;
@@ -479,6 +537,7 @@ impl Deck {
         self.player.transport.playing = loaded && s.playing;
         self.player.transport.loop_ = s.loop_;
         self.player.keylock = s.keylock;
+        self.set_key_shift(s.key_shift);
         self.vinyl = s.vinyl;
         if let Some(c) = s.cues.main {
             self.cue_point = c;
@@ -559,6 +618,14 @@ impl Deck {
                 }
             }
             DeckCmd::Seek(t) => self.jump(t, JumpReason::Seek),
+            DeckCmd::Search(by) => {
+                // Silent from the first step: no fade-out to hear the jump through.
+                if self.search_quiet == 0.0 {
+                    self.search_gain = 0.0;
+                }
+                self.search_quiet = SEARCH_QUIET_SECS;
+                self.jump(self.pos() + by, JumpReason::Seek)
+            }
             DeckCmd::SetCue(at) => {
                 self.untouched = false;
                 self.cue_point = at.unwrap_or_else(|| self.snap(self.pos())).max(-LEAD_IN);
@@ -591,6 +658,9 @@ impl Deck {
                     self.event_loop(out);
                 }
             }
+            DeckCmd::ActiveLoop(l) => {
+                self.player.transport.active_loop = l.filter(|(s, e)| e > s);
+            }
             DeckCmd::BeatJump(beats) => {
                 let target = self.time_at(self.beat_at(self.pos()) + beats);
                 let l = self.player.transport.loop_;
@@ -617,8 +687,11 @@ impl Deck {
                     } else {
                         let end = self.time_at(self.beat_at(lin) + beats);
                         self.loop_().end = Some(end);
-                        if self.pos() >= end {
-                            self.jump(lin, JumpReason::Loop);
+                        // Past the new end: to the same place in the shorter loop, so
+                        // it plays on to the end of it, still on the beat.
+                        let pos = self.pos();
+                        if pos >= end {
+                            self.jump(lin + (pos - lin) % (end - lin), JumpReason::Loop);
                         }
                     }
                 } else if l.active {
@@ -770,8 +843,20 @@ impl Deck {
             | DeckCmd::Bend { .. } => {}
             DeckCmd::Quantize(set) => self.quantize = set.apply(self.quantize),
             DeckCmd::Keylock(set) => self.player.keylock = set.apply(self.player.keylock),
+            DeckCmd::KeyShift(n) => self.set_key_shift(n),
+            DeckCmd::KeyShiftBy(n) => self.set_key_shift(self.player.key_shift + n),
             // Handled by the renderer.
-            DeckCmd::Play(_) | DeckCmd::Sync(_) | DeckCmd::Pfl(_) | DeckCmd::Crossfader(_) => {}
+            DeckCmd::Play(_)
+            | DeckCmd::Sync(_)
+            | DeckCmd::Pfl(_)
+            | DeckCmd::Crossfader(_)
+            | DeckCmd::PadFx(_) => {}
+        }
+    }
+
+    fn set_key_shift(&mut self, semitones: f64) {
+        if semitones.is_finite() {
+            self.player.key_shift = semitones.clamp(-KEY_SHIFT_MAX, KEY_SHIFT_MAX);
         }
     }
 
@@ -808,10 +893,14 @@ impl Deck {
             following: self.following,
             quantize: self.quantize,
             keylock: self.player.keylock,
+            key_shift: self.player.key_shift,
+            // The renderer's: see `Renderer::publish`.
+            pad_fx: None,
             vinyl: self.vinyl,
             loop_in: l.start,
             loop_out: l.end,
             loop_active: l.active,
+            active_loop: self.player.transport.active_loop,
             cue_point: self.cue_point,
             cue_by_hand: self.cue_by_hand,
             hotcues: self.hotcues,
@@ -838,13 +927,14 @@ pub struct Renderer {
     outbox: Outbox,
     snapshots: triple_buffer::Input<EngineSnapshot>,
     stats: Arc<Stats>,
+    /// A copy of what goes to the device, while [`Stats::tapping`].
+    out_tap: rtrb::Producer<f32>,
     callbacks: u64,
     last_block_frames: u32,
-    /// All [`MAX_DECKS`] exist, then Prepare's player ([`DeckId::PREPARE`]), so a
-    /// [`DeckId`] can always index them. Only the first `live` decks and Prepare's
-    /// player are rendered and take commands.
-    decks: [Deck; SLOTS],
-    channels: [Channel; SLOTS],
+    /// All [`MAX_DECKS`] exist, so a [`DeckId`] can always index them. Only the first
+    /// `live` are rendered and take commands.
+    decks: [Deck; MAX_DECKS],
+    channels: [Channel; MAX_DECKS],
     live: usize,
     /// The decks effects can go on: the first `fx_decks` ([`Command::SetFxDecks`]).
     fx_decks: usize,
@@ -852,7 +942,7 @@ pub struct Renderer {
     sync_leader: Option<DeckId>,
     sample_rate: f64,
     /// Per-deck stereo scratch, master and headphone buses (interleaved stereo).
-    deck_buf: [Vec<f32>; SLOTS],
+    deck_buf: [Vec<f32>; MAX_DECKS],
     master: Vec<f32>,
     phones: Vec<f32>,
     preview_buf: Vec<f32>,
@@ -863,9 +953,11 @@ pub struct Renderer {
     preview: Option<Arc<TrackAudio>>,
     preview_player: Player,
     preview_gain: f32,
+    /// The sampler's slots, mixed into the master with the decks.
+    sampler: Sampler,
     master_chain: MasterChain,
     /// Each channel after its fader and crossfader, where the effect units go.
-    post: [Vec<f32>; SLOTS],
+    post: [Vec<f32>; MAX_DECKS],
     /// The headphone cue bus (before the head mix).
     cue: Vec<f32>,
     /// The crossfader's left and right gains, per frame of the block.
@@ -876,11 +968,22 @@ pub struct Renderer {
     /// there's nothing to follow.
     fx_spb: [f64; FX_UNITS],
     fx_free_beat: [f64; FX_UNITS],
+    /// Each unit's beat while tapped, from 0 at the last tap.
+    fx_tap_beat: [f64; FX_UNITS],
+    /// Each live deck's pad effect slot, straight after its channel, and the deck's
+    /// seconds per beat when it last moved (as `fx_spb`).
+    pad_fx: [Option<PadFxSlot>; MAX_DECKS],
+    pad_spb: [f64; MAX_DECKS],
     crossfader: f64,
+    xf_curve: XfCurve,
     /// Left and right crossfader gains, eased.
     xf_gain: [Smoothed; 2],
     head_gain: Smoothed,
     head_mix: Smoothed,
+    /// Master cue ([`MasterParam::MasterCue`]).
+    master_cue: bool,
+    /// See [`Command::PhonesCueOnly`].
+    phones_cue_only: bool,
     limiters: [Limiter; 2],
     limiting: f64,
     vu_main: [f32; 2],
@@ -893,18 +996,41 @@ pub struct Renderer {
     /// The clock minus seconds since `epoch`, as of the last callback, smoothed:
     /// callbacks come a little unevenly.
     clock_offset: Option<f64>,
+    /// Rendered only when asked, not as time passes ([`Renderer::set_stepped`]).
+    stepped: bool,
+    /// Nothing waits for the audio ([`Renderer::set_untimed`]).
+    untimed: bool,
+    /// Whether the audio is behind, from how long callbacks take.
+    load: LoadWatch,
+    /// Tests: the load each callback reports, in place of the time it really took
+    /// (which depends on the machine running them).
+    #[cfg(test)]
+    test_load: f32,
     /// Tests render faster than real time: they set this to have callbacks come at the
     /// times they would in real time ([`Renderer::moment`]).
     #[cfg(test)]
     simulated_time: bool,
 }
 
-/// Prepare mode's slot, after the decks.
-const PREP: usize = MAX_DECKS;
+/// Deck `dk`'s beat clock for the block just rendered. `spb`: its seconds per beat
+/// when it last moved, kept up here, so a tail keeps its timing while it's stopped.
+fn deck_clock(dk: &Deck, spb: &mut f64, sr: f64) -> BeatClock {
+    let bpm = dk.sync_bpm().unwrap_or(FALLBACK_BPM);
+    let speed = dk.player.speed.abs();
+    let moving = dk.track.is_some() && dk.playing() && speed > 0.05;
+    if moving {
+        *spb = 60.0 / (bpm * speed);
+    }
+    BeatClock {
+        beat_end: dk.beat_at(dk.pos()),
+        beats_per_frame: if moving { bpm * speed / 60.0 / sr } else { 0.0 },
+        secs_per_beat: *spb,
+    }
+}
 
-/// The slots in use: the first `live` decks, then Prepare's player.
+/// The decks in use: the first `live`.
 fn slots(live: usize) -> impl Iterator<Item = usize> {
-    (0..live).chain(std::iter::once(PREP))
+    0..live
 }
 
 /// A meter that jumps up to a block's peak and falls back slowly.
@@ -917,7 +1043,7 @@ impl Renderer {
     pub(crate) fn new(ends: RendererEnds, sample_rate: u32, decks: usize) -> Self {
         let live = decks.min(MAX_DECKS);
         let sr = sample_rate as f64;
-        let id = |i: usize| DeckId::new(i).unwrap_or(DeckId::PREPARE);
+        let id = |i: usize| DeckId::new(i).expect("a deck");
         let mut r = Renderer {
             commands: ends.commands,
             garbage: ends.garbage,
@@ -927,17 +1053,14 @@ impl Renderer {
             },
             snapshots: ends.snapshots,
             stats: ends.stats,
+            out_tap: ends.tap,
             callbacks: 0,
             last_block_frames: 0,
             decks: std::array::from_fn(|i| {
-                let used = i < live || i == PREP;
+                let used = i < live;
                 Deck::new(id(i), used.then_some((sample_rate, MAX_BLOCK)))
             }),
-            channels: std::array::from_fn(|i| {
-                let mut ch = Channel::new(sr, XfSide::default_for(id(i)));
-                ch.direct = i == PREP;
-                ch
-            }),
+            channels: std::array::from_fn(|i| Channel::new(sr, XfSide::default_for(id(i)))),
             live,
             fx_decks: live,
             sync_leader: None,
@@ -951,6 +1074,7 @@ impl Renderer {
             preview: None,
             preview_player: Player::new(0.0, None),
             preview_gain: 1.0,
+            sampler: Sampler::new(sr),
             master_chain: MasterChain::new(sr),
             post: std::array::from_fn(|_| vec![0.0; MAX_BLOCK * 2]),
             cue: vec![0.0; MAX_BLOCK * 2],
@@ -958,10 +1082,16 @@ impl Renderer {
             fx: std::array::from_fn(|u| FxUnit::new(sr, FxUnitState::default_for(u))),
             fx_spb: [60.0 / FALLBACK_BPM; FX_UNITS],
             fx_free_beat: [0.0; FX_UNITS],
+            fx_tap_beat: [0.0; FX_UNITS],
+            pad_fx: std::array::from_fn(|i| (i < live).then(|| PadFxSlot::new(sr))),
+            pad_spb: [60.0 / FALLBACK_BPM; MAX_DECKS],
             crossfader: 0.0,
+            xf_curve: XfCurve::default(),
             xf_gain: [Smoothed::new(0.0); 2],
             head_gain: Smoothed::new(1.0),
             head_mix: Smoothed::new(0.5),
+            master_cue: false,
+            phones_cue_only: false,
             limiters: [Limiter::new(sr), Limiter::new(sr)],
             limiting: 0.0,
             vu_main: [0.0; 2],
@@ -969,6 +1099,11 @@ impl Renderer {
             frames: 0,
             epoch: Instant::now(),
             clock_offset: None,
+            stepped: false,
+            untimed: false,
+            load: LoadWatch::default(),
+            #[cfg(test)]
+            test_load: 0.0,
             #[cfg(test)]
             simulated_time: false,
         };
@@ -1018,6 +1153,17 @@ impl Renderer {
                     }
                 }
             }
+            if self.stats.tapping.load(Relaxed) {
+                self.stats.tap_channels.store(channels as u64, Relaxed);
+                match self.out_tap.write_chunk_uninit(chunk.len()) {
+                    Ok(c) => {
+                        c.fill_from_iter(chunk.iter().copied());
+                    }
+                    Err(_) => {
+                        self.stats.tap_dropped.fetch_add(1, Relaxed);
+                    }
+                }
+            }
             done += n;
             self.frames += n as u64;
         }
@@ -1031,6 +1177,44 @@ impl Renderer {
         if elapsed * 10 > budget_ns * 8 {
             s.slow_callbacks.fetch_add(1, Relaxed);
         }
+        let load = self.load_of(elapsed, budget_ns);
+        let was = self.load.behind();
+        let behind = self.load.callback(load, total as f64 / self.sample_rate);
+        if behind != was {
+            self.stats.behind.store(behind, Relaxed);
+        }
+    }
+
+    /// The share of its time a callback used, for [`LoadWatch`]: nothing when no
+    /// sound card is waiting for the audio.
+    #[cfg(not(test))]
+    fn load_of(&self, elapsed_ns: u64, budget_ns: u64) -> f32 {
+        if self.untimed || self.stepped || budget_ns == 0 {
+            0.0
+        } else {
+            (elapsed_ns as f64 / budget_ns as f64) as f32
+        }
+    }
+
+    /// Tests say what the load is.
+    #[cfg(test)]
+    fn load_of(&self, _elapsed_ns: u64, _budget_ns: u64) -> f32 {
+        let _ = self.untimed;
+        self.test_load
+    }
+
+    /// The audio thread ran up against the real-time limit ([`crate::realtime`]):
+    /// the audio is behind, without waiting to see the load. Called on the audio
+    /// thread, before the callback's render.
+    pub(crate) fn overran(&mut self) {
+        self.load.overrun();
+        self.stats.behind.store(self.load.behind(), Relaxed);
+    }
+
+    /// No sound card is waiting for the audio (the null output): how long a callback
+    /// takes doesn't matter, and the audio is never behind.
+    pub(crate) fn set_untimed(&mut self) {
+        self.untimed = true;
     }
 
     /// The engine's clock now, seconds.
@@ -1063,8 +1247,18 @@ impl Renderer {
         });
     }
 
+    /// Audio is rendered only when asked for, however much time passes between
+    /// blocks: the engine's clock has nothing to do with the real one, so a hand's
+    /// move counts as made when the block that hears of it starts.
+    pub(crate) fn set_stepped(&mut self) {
+        self.stepped = true;
+    }
+
     /// Where moment `at` falls on the engine's clock.
     fn clock_at(&self, at: Instant) -> f64 {
+        if self.stepped {
+            return self.clock();
+        }
         let secs = at.saturating_duration_since(self.epoch).as_secs_f64();
         secs + self.clock_offset.unwrap_or(0.0)
     }
@@ -1101,7 +1295,9 @@ impl Renderer {
                     _ => None,
                 },
             };
-            if deck.player.render(&mix, buf, sr, now) {
+            let ended = deck.player.render(&mix, buf, sr, now);
+            search_mute(&mut deck.search_quiet, &mut deck.search_gain, buf, sr);
+            if ended {
                 deck.preview = Preview::None;
                 self.outbox.send(EngineEvent::TrackEnded {
                     deck: deck.id,
@@ -1110,11 +1306,21 @@ impl Renderer {
             }
         }
 
-        // Channel chains: gain, EQ, filter. Meters read here, before the faders.
+        // Channel chains: gain, EQ, filter, then the deck's pad effect. Meters read
+        // here, before the faders.
         let secs = n as f64 / sr;
         for d in slots(live) {
+            let mut peak = self.channels[d].process(&mut self.deck_buf[d][..n * 2]);
+            if let Some(slot) = &mut self.pad_fx[d] {
+                let clock = deck_clock(&self.decks[d], &mut self.pad_spb[d], sr);
+                let busy = slot.busy();
+                let buf = &mut self.deck_buf[d][..n * 2];
+                slot.process(buf, &clock);
+                if busy {
+                    peak = buf.iter().fold(0.0, |m, s| m.max(s.abs()));
+                }
+            }
             let ch = &mut self.channels[d];
-            let peak = ch.process(&mut self.deck_buf[d][..n * 2]);
             ch.vu = meter(ch.vu, peak, secs);
         }
 
@@ -1132,10 +1338,6 @@ impl Renderer {
         for d in slots(live) {
             let (ch, buf) = (&mut self.channels[d], &self.deck_buf[d][..n * 2]);
             let post = &mut self.post[d][..n * 2];
-            if ch.direct {
-                post.copy_from_slice(buf);
-                continue;
-            }
             for f in 0..n {
                 let v = ch.fader.next(k) as f32;
                 let xf = self.xf_frames[f];
@@ -1166,7 +1368,7 @@ impl Renderer {
             }
         }
 
-        // The main mix, then effects on it, then the headphones.
+        // The master mix, then effects on it, then the headphones.
         for f in 0..n {
             let mut m = [0f32; 2];
             for d in slots(live) {
@@ -1176,6 +1378,9 @@ impl Renderer {
             self.master[2 * f] = 0.8 * m[0];
             self.master[2 * f + 1] = 0.8 * m[1];
         }
+        // The sampler joins the mix here: under the master's effects and level, and
+        // in the headphones wherever the master is.
+        self.sampler.render(&mut self.master[..n * 2], n);
         for (u, clock) in clocks.iter().enumerate() {
             if let (FxTarget::Master, Some(clock)) = (self.fx[u].state().target, clock) {
                 self.fx[u].process(&mut self.master[..n * 2], clock);
@@ -1183,21 +1388,56 @@ impl Renderer {
         }
         for f in 0..n {
             let head = self.head_gain.next(k) as f32;
-            // Head mix: how much of the main mix the headphones hear, against the cue bus.
-            let mix = self.head_mix.next(k).clamp(0.0, 1.0) as f32;
+            // As on a DJ mixer: the cue side is the cued channels, plus the master with
+            // master cue on, all at full level; the head mix crossfades from it to the
+            // master (constant power: -3 dB each in the middle). The master here is
+            // before the master level. With nothing cued the headphones are silent.
+            let mix = self.head_mix.next(k).clamp(0.0, 1.0);
+            let angle = mix * std::f64::consts::FRAC_PI_2;
+            let (to_cue, to_master) = (angle.cos() as f32, angle.sin() as f32);
+            let cued = any_pfl || self.master_cue;
             for c in 0..2 {
                 let m = self.master[2 * f + c];
-                // With nothing cued the cue bus carries the main mix.
-                let cue = if any_pfl {
+                let mut cue = if any_pfl {
                     0.8 * self.cue[2 * f + c]
                 } else {
-                    m
+                    0.0
                 };
-                self.phones[2 * f + c] = head * ((1.0 - mix) * cue + mix * m);
+                let heard = if self.phones_cue_only {
+                    cue
+                } else {
+                    if self.master_cue {
+                        cue += m;
+                    }
+                    if cued {
+                        to_cue * cue + to_master * m
+                    } else {
+                        0.0
+                    }
+                };
+                self.phones[2 * f + c] = head * heard;
             }
         }
 
-        // Main level and balance, metered before the limiter so over 0 dB shows when
+        // The preview player plays at its own pace on the headphone bus, or on the main
+        // mix (under its level) when the headphones go nowhere.
+        if let Some(audio) = self.preview.as_deref() {
+            let buf = &mut self.preview_buf[..n * 2];
+            buf.fill(0.0);
+            self.preview_player.render(&Mix::plain(audio), buf, sr, now);
+            let (bus, g) = match self.routing.phones {
+                Out::Off => (&mut self.master, 0.8 * self.preview_gain),
+                _ => (
+                    &mut self.phones,
+                    0.8 * self.head_gain.current as f32 * self.preview_gain,
+                ),
+            };
+            for (o, s) in bus.iter_mut().zip(buf.iter()) {
+                *o += g * s;
+            }
+        }
+
+        // Master level and balance, metered before the limiter so over 0 dB shows when
         // it's working.
         let master = &mut self.master[..n * 2];
         self.master_chain.process(master);
@@ -1212,21 +1452,11 @@ impl Renderer {
         let lowest = self.limiters[0].process(master);
         self.limiting = -20.0 * (lowest as f64).log10();
 
-        // The preview player plays at its own pace on the headphone bus only.
-        if let Some(audio) = self.preview.as_deref() {
-            let buf = &mut self.preview_buf[..n * 2];
-            buf.fill(0.0);
-            self.preview_player.render(&Mix::plain(audio), buf, sr, now);
-            let g = 0.8 * self.head_gain.current as f32 * self.preview_gain;
-            for (o, s) in self.phones.iter_mut().zip(buf.iter()) {
-                *o += g * s;
-            }
-        }
         // The headphones get their own limiter, after the preview is mixed in.
         self.limiters[1].process(&mut self.phones[..n * 2]);
     }
 
-    /// The deck effects on the main mix follow: the sync leader if it's playing, else
+    /// The deck effects on the master mix follow: the sync leader if it's playing, else
     /// the first playing deck, else the first loaded one.
     fn master_deck(&self) -> Option<usize> {
         let loaded = |d: &usize| self.decks[*d].track.is_some();
@@ -1247,6 +1477,13 @@ impl Renderer {
             FxTarget::Deck(_) => return None,
             FxTarget::Master => self.master_deck(),
         };
+        // Tapped: a steady clock at the tapped tempo, its beats counted from the tap.
+        if let Some(bpm) = self.fx[u].state().tap_bpm {
+            let clock = BeatClock::steady(bpm, self.fx_tap_beat[u], sr);
+            self.fx_tap_beat[u] = (clock.beat_end + n as f64 * clock.beats_per_frame) % 64.0;
+            self.fx_spb[u] = clock.secs_per_beat;
+            return Some(clock);
+        }
         let Some(d) = deck.filter(|d| self.decks[*d].track.is_some()) else {
             // Nothing to follow: a steady fallback tempo.
             let clock = BeatClock::steady(FALLBACK_BPM, self.fx_free_beat[u], sr);
@@ -1254,27 +1491,14 @@ impl Renderer {
             self.fx_spb[u] = clock.secs_per_beat;
             return Some(clock);
         };
-        let dk = &self.decks[d];
-        let bpm = dk.sync_bpm().unwrap_or(FALLBACK_BPM);
-        let speed = dk.player.speed.abs();
-        let moving = dk.playing() && speed > 0.05;
-        if moving {
-            self.fx_spb[u] = 60.0 / (bpm * speed);
-        }
-        Some(BeatClock {
-            beat_end: dk.beat_at(dk.pos()),
-            beats_per_frame: if moving { bpm * speed / 60.0 / sr } else { 0.0 },
-            secs_per_beat: self.fx_spb[u],
-        })
+        Some(deck_clock(&self.decks[d], &mut self.fx_spb[u], sr))
     }
 
     /// The deck `d` follows when synced: the app's chosen leader, or else the best
     /// loaded deck (one playing without sync, then one stopped without sync, then
     /// a playing synced one). `None` for the chosen leader itself.
     fn leader_for(&self, d: usize) -> Option<usize> {
-        let ok = |l: usize| {
-            l != d && l < self.live && self.decks[l].track.is_some() && !self.channels[l].direct
-        };
+        let ok = |l: usize| l != d && l < self.live && self.decks[l].track.is_some();
         if let Some(l) = self.sync_leader.map(DeckId::index) {
             if l == d {
                 return None;
@@ -1408,7 +1632,7 @@ impl Renderer {
 
     /// The slot behind `id`, if it's in use.
     fn live(&self, id: DeckId) -> Option<usize> {
-        (id.index() < self.live || id.is_prepare()).then_some(id.index())
+        (id.index() < self.live).then_some(id.index())
     }
 
     fn load(&mut self, d: usize, track: Arc<LoadedTrack>) {
@@ -1423,6 +1647,41 @@ impl Renderer {
             deck: self.decks[d].id,
             generation,
         });
+    }
+
+    /// See [`Command::InstantDouble`]. Done between blocks, so both decks render the
+    /// next block from the same place at the same speed.
+    fn instant_double(&mut self, f: usize, t: usize, generation: u64) {
+        let same = match (&self.decks[f].track, &self.decks[t].track) {
+            (Some(a), Some(b)) => Arc::ptr_eq(&a.audio, &b.audio),
+            _ => false,
+        };
+        if f == t || !same || self.decks[t].generation() != generation {
+            return;
+        }
+        let src = &self.decks[f];
+        let (pos, playing, rate, range) = (src.pos(), src.playing(), src.rate, src.range);
+        let (keylock, key_shift) = (src.player.keylock, src.player.key_shift);
+        let loop_ = src.player.transport.loop_;
+        let stems = src.stems.clone();
+        // Each deck's key-lock shifter has a state of its own, which can't be copied:
+        // both start afresh here instead, so they stay sample for sample alike. (Out
+        // of step by a few milliseconds, the two copies would sound like a flanger.)
+        self.decks[f].player.restart_keylock();
+        let dk = &mut self.decks[t];
+        dk.player.restart_keylock();
+        dk.range = range;
+        dk.rate = rate;
+        dk.check_pickup();
+        dk.player.keylock = keylock;
+        dk.set_key_shift(key_shift);
+        dk.jump(pos, JumpReason::Seek);
+        *dk.loop_() = loop_;
+        dk.preview = Preview::None;
+        dk.player.transport.playing = playing;
+        if let Some(old) = std::mem::replace(&mut dk.stems, stems) {
+            self.trash(Garbage::Stems(old));
+        }
     }
 
     fn apply(&mut self, cmd: Command) {
@@ -1475,8 +1734,23 @@ impl Renderer {
                     self.decks[d].initial_cue(at, &mut self.outbox);
                 }
             }
+            Command::InstantDouble {
+                from,
+                to,
+                generation,
+            } => {
+                if let (Some(f), Some(t)) = (self.live(from), self.live(to)) {
+                    self.instant_double(f, t, generation);
+                }
+            }
             Command::SetSyncLeader(l) => {
                 self.sync_leader = l.filter(|l| l.index() < self.live);
+            }
+            Command::MasterCue(set) => self.master_cue = set.apply(self.master_cue),
+            Command::PhonesCueOnly(on) => self.phones_cue_only = on,
+            Command::SetXfCurve(c) => {
+                self.xf_curve = c;
+                self.set_crossfader(self.crossfader);
             }
             Command::SetHotcueMode(m) => {
                 for d in &mut self.decks {
@@ -1506,6 +1780,11 @@ impl Renderer {
             }
             Command::Preview(p) => self.preview_cmd(p),
             Command::Fx { unit, cmd } => self.fx_cmd(unit, cmd),
+            Command::Sampler(cmd) => {
+                if let Some(old) = self.sampler.apply(cmd) {
+                    self.trash(Garbage::Audio(old));
+                }
+            }
             Command::Restore(st) => self.restore(st),
         }
     }
@@ -1531,7 +1810,7 @@ impl Renderer {
             }
             DeckCmd::Sync(set) => {
                 // Prepare's player doesn't sync.
-                let on = set.apply(self.decks[d].sync) && !self.channels[d].direct;
+                let on = set.apply(self.decks[d].sync);
                 self.decks[d].sync = on;
                 // Line the beats up now if both are playing; the tempo follows in
                 // `update_speeds` (only a loaded track is needed for that).
@@ -1578,16 +1857,20 @@ impl Renderer {
                 let at = self.clock_at(at).min(now);
                 self.decks[d].bend(by, at, now);
             }
+            DeckCmd::PadFx(fx) => {
+                if let Some(slot) = &mut self.pad_fx[d] {
+                    slot.set(fx);
+                }
+            }
             other => self.decks[d].apply(other, &mut self.outbox),
         }
     }
 
     fn set_crossfader(&mut self, v: f64) {
         self.crossfader = v.clamp(-1.0, 1.0);
-        // Constant power.
-        let x = (self.crossfader + 1.0) * std::f64::consts::FRAC_PI_4;
-        self.xf_gain[0].target = x.cos();
-        self.xf_gain[1].target = x.sin();
+        for (side, g) in self.xf_gain.iter_mut().enumerate() {
+            g.target = xf_gain(self.xf_curve, self.crossfader, side);
+        }
     }
 
     fn set_param(&mut self, p: ParamId, v: f64) {
@@ -1603,15 +1886,16 @@ impl Renderer {
                 }
                 match mp {
                     MasterParam::Crossfader => self.set_crossfader(v),
-                    MasterParam::HeadGain => self.head_gain.target = v.clamp(0.0, 5.0),
+                    MasterParam::HeadGain => self.head_gain.target = v.clamp(0.0, 1.0),
                     MasterParam::HeadMix => self.head_mix.target = v.clamp(0.0, 1.0),
+                    MasterParam::MasterCue => self.master_cue = v > 0.5,
                     MasterParam::Gain | MasterParam::Balance => {}
                 }
             }
         }
     }
 
-    /// Whether an effect can go on `t`: the main mix, or one of the first
+    /// Whether an effect can go on `t`: the master mix, or one of the first
     /// [`Self::fx_decks`] decks (not Prepare's player).
     fn fx_target_ok(&self, t: FxTarget) -> bool {
         match t {
@@ -1632,6 +1916,11 @@ impl Renderer {
                 FxCmd::NextTarget => {
                     let next = fx.state().target.next(fx_decks);
                     fx.apply(FxCmd::Target(next));
+                }
+                FxCmd::TapBpm(_) => {
+                    // The tap is a beat.
+                    self.fx_tap_beat[unit] = 0.0;
+                    fx.apply(cmd);
                 }
                 cmd => fx.apply(cmd),
             }
@@ -1675,7 +1964,7 @@ impl Renderer {
     }
 
     fn restore(&mut self, mut st: Box<EngineState>) {
-        for id in DeckId::first(MAX_DECKS).chain([DeckId::PREPARE]) {
+        for id in DeckId::first(MAX_DECKS) {
             let Some(track) = st.deck_mut(id).track.take() else {
                 continue;
             };
@@ -1684,17 +1973,22 @@ impl Renderer {
                 None => self.trash(Garbage::Track(track)),
             }
         }
-        for id in DeckId::first(self.live).chain([DeckId::PREPARE]) {
+        for id in DeckId::first(self.live) {
             let (d, ds) = (id.index(), st.deck_mut(id));
             self.decks[d].restore(ds);
             self.channels[d].restore(&ds.channel);
+            // A pad held across a restore is let go.
+            if let Some(slot) = &mut self.pad_fx[d] {
+                slot.set(None);
+            }
         }
         let m = st.mixer;
         self.set_crossfader(m.crossfader);
-        self.master_chain.set(MasterParam::Gain, m.main_gain);
+        self.master_chain.set(MasterParam::Gain, m.master_gain);
         self.master_chain.set(MasterParam::Balance, m.balance);
         self.set_param(ParamId::Master(MasterParam::HeadGain), m.head_gain);
         self.set_param(ParamId::Master(MasterParam::HeadMix), m.head_mix);
+        self.master_cue = m.master_cue;
         for (u, s) in m.fx.into_iter().enumerate() {
             let target_ok = self.fx_target_ok(s.target);
             self.fx[u].set(if target_ok {
@@ -1708,16 +2002,22 @@ impl Renderer {
         }
         self.apply(Command::SetSyncLeader(st.sync_leader));
         self.apply(Command::SetHotcueMode(st.hotcue_mode));
+        self.apply(Command::SetXfCurve(st.xf_curve));
+        for slot in SampleSlot::all() {
+            if let Some(old) = self.sampler.restore(slot, &mut st.sampler[slot.index()]) {
+                self.trash(Garbage::Audio(old));
+            }
+        }
         // Its tracks are out; the box itself is freed elsewhere.
         self.trash(Garbage::State(st));
     }
 
     fn publish(&mut self) {
         let mut decks = [DeckSnap::default(); MAX_DECKS];
-        let mut prepare = DeckSnap::default();
         for d in slots(self.live) {
             let dk = &mut self.decks[d];
-            *decks.get_mut(d).unwrap_or(&mut prepare) = dk.snapshot(&self.channels[d]);
+            decks[d] = dk.snapshot(&self.channels[d]);
+            decks[d].pad_fx = self.pad_fx[d].as_ref().and_then(PadFxSlot::held);
             let playing = dk.playing();
             if playing != dk.was_playing {
                 dk.was_playing = playing;
@@ -1733,13 +2033,13 @@ impl Renderer {
         let snap = EngineSnapshot {
             decks,
             decks_live: self.live,
-            prepare,
             mixer: MixerSnap {
                 crossfader: self.crossfader,
-                main_gain: self.master_chain.get(MasterParam::Gain),
+                master_gain: self.master_chain.get(MasterParam::Gain),
                 balance: self.master_chain.get(MasterParam::Balance),
                 head_gain: self.head_gain.target,
                 head_mix: self.head_mix.target,
+                master_cue: self.master_cue,
                 vu_main: self.vu_main.map(|v| v as f64),
                 limiting: self.limiting,
                 sync_leader: self.sync_leader,
@@ -1751,6 +2051,7 @@ impl Renderer {
                 position: pt.pos(),
                 duration: self.preview.as_ref().map_or(0.0, |a| a.duration()),
             },
+            sampler: self.sampler.snapshot(),
             sample_rate: self.sample_rate as u32,
             last_block_frames: self.last_block_frames,
             callbacks: self.callbacks,
@@ -1896,6 +2197,9 @@ mod tests {
     fn fx_rig(kind: crate::fx::FxKind) -> Rig {
         use crate::fx::FxCmd;
         let mut rig = Rig::new();
+        // Deck 1 at full level with the crossfader in the middle, so the tone's level
+        // is the master's.
+        rig.send(Command::SetXfCurve(XfCurve::Sharp));
         load_fn(&mut rig, 0, 30.0, |t| {
             (t * 440.0 * std::f64::consts::TAU).sin() as f32 * 0.5
         });
@@ -1910,6 +2214,35 @@ mod tests {
             cmd: FxCmd::Level(1.0),
         });
         rig
+    }
+
+    /// Tapped, a unit runs on the tapped tempo, its beat starting at the tap, whatever
+    /// the deck's tempo; AUTO goes back to the deck's.
+    #[test]
+    fn a_tapped_tempo_replaces_the_decks() {
+        use crate::fx::{FxCmd, FxKind};
+        let mut rig = fx_rig(FxKind::Trans);
+        rig.run(0.5);
+        let spb = |rig: &mut Rig| rig.r.fx_clock(0, 256).unwrap().secs_per_beat;
+        // The test track has no grid: the deck runs at the fallback tempo.
+        assert!((spb(&mut rig) - 60.0 / crate::fx::FALLBACK_BPM).abs() < 1e-9);
+        rig.send(Command::Fx {
+            unit: 0,
+            cmd: FxCmd::TapBpm(90.0),
+        });
+        rig.run(0.01);
+        assert_eq!(rig.snap().mixer.fx[0].tap_bpm, Some(90.0));
+        let clock = rig.r.fx_clock(0, 256).unwrap();
+        assert!((clock.secs_per_beat - 60.0 / 90.0).abs() < 1e-9);
+        // About 10 ms after the tap: just past a beat.
+        assert!(clock.beat_end > 0.0 && clock.beat_end < 0.05, "{clock:?}");
+        rig.send(Command::Fx {
+            unit: 0,
+            cmd: FxCmd::TempoAuto,
+        });
+        rig.run(0.01);
+        assert_eq!(rig.snap().mixer.fx[0].tap_bpm, None);
+        assert!((spb(&mut rig) - 60.0 / crate::fx::FALLBACK_BPM).abs() < 1e-9);
     }
 
     #[test]
@@ -1936,7 +2269,62 @@ mod tests {
         assert!(rig.snap().mixer.fx[0].enabled);
     }
 
-    /// With two decks shown, an effect goes on A, B or the main mix only, and a unit on
+    /// A pad effect is on while its pad is held, on its own deck: a brake takes the
+    /// sound to a stop while the track plays on underneath, and it's back when the pad
+    /// is let go.
+    #[test]
+    fn a_pad_effect_is_on_while_its_pad_is_held() {
+        use crate::pad_fx::{PadFx, PadFxKind};
+        let mut rig = fx_rig(crate::fx::FxKind::Echo);
+        rig.run(0.5);
+        assert_eq!(rig.snap().decks[0].pad_fx, None);
+        // One beat, at the fallback 120 BPM: stopped half a second on.
+        let brake = PadFx::new(PadFxKind::Brake, 1.0);
+        rig.deck(0, DeckCmd::PadFx(Some(brake)));
+        rig.deck(1, DeckCmd::PadFx(None));
+        let before = rig.pos(0);
+        rig.run(0.6);
+        assert_eq!(rig.snap().decks[0].pad_fx, Some(brake));
+        assert_eq!(rig.snap().decks[1].pad_fx, None);
+        assert!(peak(&record(&mut rig, 0.2)) < 1e-4, "braked to silence");
+        assert!(rig.pos(0) - before > 0.7, "the track played on");
+        // The tone peaks at 0.5; the meter has been falling since the sound stopped.
+        assert!(rig.snap().decks[0].vu < 0.25, "the meter shows the effect");
+        assert!(
+            !rig.snap().mixer.fx[0].enabled,
+            "the effect unit is its own"
+        );
+        rig.deck(0, DeckCmd::PadFx(None));
+        rig.run(0.1);
+        assert_eq!(rig.snap().decks[0].pad_fx, None);
+        assert!(
+            peak(&record(&mut rig, 0.2)) > 0.3,
+            "let go: the track again"
+        );
+    }
+
+    /// A pad echo rings on after the pad is let go, even with the deck stopped. The
+    /// slot is before the fader: the fader takes the tail down with it.
+    #[test]
+    fn a_pad_echo_rings_out_before_the_fader() {
+        use crate::pad_fx::{PadFx, PadFxKind};
+        let mut rig = fx_rig(crate::fx::FxKind::Echo);
+        rig.deck(0, DeckCmd::PadFx(Some(PadFx::new(PadFxKind::Echo, 0.5))));
+        rig.run(1.0);
+        rig.deck(0, DeckCmd::PadFx(None));
+        rig.deck(0, DeckCmd::Play(Set::Off));
+        rig.run(0.05);
+        assert!(peak(&record(&mut rig, 0.3)) > 0.05, "the tail");
+        rig.channel(0, ChannelParam::Volume, 0.0);
+        rig.run(0.05);
+        assert!(peak(&record(&mut rig, 0.2)) < 1e-4, "the fader is after it");
+        // Given long enough the tail is over; a deck that isn't live takes no pad.
+        rig.run(12.0);
+        assert!(!rig.r.pad_fx[0].as_ref().unwrap().busy());
+        assert!(rig.r.pad_fx.iter().filter(|s| s.is_some()).count() == rig.r.live);
+    }
+
+    /// With two decks shown, an effect goes on A, B or the master mix only, and a unit on
     /// a hidden deck goes back to its own.
     #[test]
     fn effects_go_only_on_the_decks_shown() {
@@ -2032,6 +2420,68 @@ mod tests {
         move |t| 0.5 * (std::f64::consts::TAU * hz * t).sin() as f32
     }
 
+    /// Measurement, not a test: what a block costs. `cargo test --release -p
+    /// earshot-engine cost_of_a_block -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn cost_of_a_block() {
+        use crate::pad_fx::{PadFx, PadFxKind};
+        fn time(rig: &mut Rig, what: &str) {
+            rig.run(2.0);
+            let mut t: Vec<f64> = (0..3000)
+                .map(|_| {
+                    let t0 = std::time::Instant::now();
+                    rig.r.process(&mut rig.out, 4);
+                    t0.elapsed().as_secs_f64() * 1e6
+                })
+                .collect();
+            t.sort_by(|a, b| a.total_cmp(b));
+            let mean = t.iter().sum::<f64>() / t.len() as f64;
+            let budget = 256.0 / SR as f64 * 1e6;
+            println!(
+                "{what:<44} mean {mean:7.1} us ({:4.1} %)  p99 {:7.1}  max {:7.1} ({:4.1} %)",
+                100.0 * mean / budget,
+                t[t.len() * 99 / 100],
+                t[t.len() - 1],
+                100.0 * t[t.len() - 1] / budget
+            );
+        }
+        let noise = |t: f64| {
+            (0.3 * (t * 440.0 * std::f64::consts::TAU).sin()
+                + 0.2
+                    * ((t * 48_000.0) as u64)
+                        .wrapping_mul(2654435761)
+                        .rem_euclid(1000) as f64
+                    / 1000.0
+                - 0.1) as f32
+        };
+        for decks in [2usize, 4] {
+            let mut rig = Rig::with_decks(decks);
+            for d in 0..decks {
+                load_fn(&mut rig, d, 120.0, noise);
+            }
+            time(&mut rig, &format!("{decks} decks loaded, stopped"));
+            for d in 0..decks {
+                rig.deck(d, DeckCmd::Play(Set::On));
+            }
+            time(&mut rig, "  playing at 1.0");
+            for d in 0..decks {
+                rig.deck(d, DeckCmd::Rate(0.08));
+            }
+            time(&mut rig, "  playing at 1.08, no keylock");
+            for d in 0..decks {
+                rig.deck(d, DeckCmd::Keylock(Set::On));
+            }
+            time(&mut rig, "  + keylock");
+            rig.r.fx[0].apply(FxCmd::Enabled(Set::On));
+            time(&mut rig, "  + the effect unit");
+            for d in 0..decks {
+                rig.deck(d, DeckCmd::PadFx(Some(PadFx::new(PadFxKind::Reverb, 1.0))));
+            }
+            time(&mut rig, "  + pad reverb on every deck");
+        }
+    }
+
     #[test]
     fn keylock_keeps_the_key_at_another_tempo() {
         for (keylock, want) in [(false, 440.0 * 1.08), (true, 440.0)] {
@@ -2053,6 +2503,53 @@ mod tests {
                 "tempo with keylock {keylock}"
             );
         }
+    }
+
+    #[test]
+    fn key_shift_moves_the_key_but_not_the_tempo() {
+        // (keylock, rate, semitones, want): alone, on top of keylock, and on top of
+        // the tempo's own pitch change.
+        for (keylock, rate, shift, want) in [
+            (false, 0.0, 12.0, 880.0),
+            (false, 0.0, -5.0, 440.0 * (-5.0f64 / 12.0).exp2()),
+            (true, 0.08, -12.0, 220.0),
+            (false, 0.08, 7.0, 440.0 * 1.08 * (7.0f64 / 12.0).exp2()),
+        ] {
+            let mut rig = Rig::new();
+            load_fn(&mut rig, 0, 20.0, sine(440.0));
+            rig.deck(0, DeckCmd::Keylock(Set::from_bool(keylock)));
+            rig.deck(0, DeckCmd::Rate(rate));
+            rig.deck(0, DeckCmd::KeyShift(shift));
+            rig.deck(0, DeckCmd::Play(Set::On));
+            rig.run(0.5);
+            let start = rig.pos(0);
+            let f = frequency(&record(&mut rig, 1.0));
+            let what = format!("keylock {keylock}, rate {rate}, shift {shift}");
+            assert!(
+                (f - want).abs() < want * 0.005,
+                "{what}: {f:.1} Hz, want {want:.1}"
+            );
+            assert!(
+                (rig.pos(0) - start - (1.0 + rate)).abs() < 0.02,
+                "tempo, {what}"
+            );
+        }
+    }
+
+    #[test]
+    fn key_shift_steps_stay_in_range_and_a_load_clears_them() {
+        let mut rig = Rig::new();
+        load_fn(&mut rig, 0, 20.0, sine(440.0));
+        rig.deck(0, DeckCmd::KeyShiftBy(2.0));
+        rig.deck(0, DeckCmd::KeyShiftBy(-3.0));
+        rig.run(0.01);
+        assert_eq!(rig.snap().decks[0].key_shift, -1.0);
+        rig.deck(0, DeckCmd::KeyShift(100.0));
+        rig.run(0.01);
+        assert_eq!(rig.snap().decks[0].key_shift, KEY_SHIFT_MAX);
+        load_fn(&mut rig, 0, 20.0, sine(440.0));
+        rig.run(0.01);
+        assert_eq!(rig.snap().decks[0].key_shift, 0.0);
     }
 
     /// Times (s) where clicks start in `x`.
@@ -2107,6 +2604,159 @@ mod tests {
             (first - 0.1 / 1.08).abs() < 0.008,
             "first click after the jump at {first:.3}s"
         );
+    }
+
+    /// Instant doubles: the copy plays from the same place, at the same tempo and key,
+    /// in step from then on; a copy of other audio is left alone.
+    #[test]
+    fn instant_double_copies_place_tempo_and_key() {
+        let mut rig = Rig::new();
+        let (audio, grid) = demo(124.0, 124.0, 60.0, 3);
+        let first = track(audio, Some(Arc::new(grid)), 1);
+        let copy = Arc::new(LoadedTrack {
+            generation: 2,
+            audio: first.audio.clone(),
+            grid: first.grid.clone(),
+            ..*first
+        });
+        rig.send(Command::Load {
+            deck: id(0),
+            track: first,
+        });
+        rig.deck(0, DeckCmd::Rate(0.04));
+        rig.deck(0, DeckCmd::Keylock(Set::On));
+        rig.deck(0, DeckCmd::KeyShift(2.0));
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.run(1.0);
+        let before = rig.pos(0);
+        rig.send(Command::Load {
+            deck: id(1),
+            track: copy,
+        });
+        rig.send(Command::InstantDouble {
+            from: id(0),
+            to: id(1),
+            generation: 2,
+        });
+        rig.run(0.5);
+        let s = rig.snap();
+        let (a, b) = (&s.decks[0], &s.decks[1]);
+        assert!(b.playing);
+        assert_eq!((b.rate, b.keylock, b.key_shift), (0.04, true, 2.0));
+        assert!(
+            (a.position - b.position).abs() < 1e-9,
+            "{} vs {}",
+            a.position,
+            b.position
+        );
+        assert!(a.position > before + 0.4);
+
+        // Other audio on deck 2: nothing copied.
+        rig.load(1, 100.0, 100.0);
+        rig.send(Command::InstantDouble {
+            from: id(0),
+            to: id(1),
+            generation: 1,
+        });
+        rig.run(0.1);
+        assert!(!rig.snap().decks[1].playing);
+    }
+
+    /// Instant doubles play the same samples on both decks, key lock or not: two
+    /// copies a few milliseconds apart would sound like a flanger.
+    #[test]
+    fn an_instant_double_sounds_the_same_as_its_original() {
+        for (keylock, rate) in [(false, 0.04), (true, 0.0), (true, 0.04), (true, -0.06)] {
+            // Doubled, then only deck `heard` in the mix.
+            let mk = |heard: usize| {
+                let mut rig = Rig::new();
+                rig.send(Command::SetXfCurve(XfCurve::Sharp));
+                let (audio, grid) = demo(124.0, 124.0, 60.0, 3);
+                let first = track(audio, Some(Arc::new(grid)), 1);
+                let copy = Arc::new(LoadedTrack {
+                    generation: 2,
+                    audio: first.audio.clone(),
+                    grid: first.grid.clone(),
+                    ..*first
+                });
+                rig.send(Command::Load {
+                    deck: id(0),
+                    track: first,
+                });
+                rig.deck(0, DeckCmd::Rate(rate));
+                rig.deck(
+                    0,
+                    DeckCmd::Keylock(if keylock { Set::On } else { Set::Off }),
+                );
+                rig.deck(0, DeckCmd::Play(Set::On));
+                rig.run(1.0);
+                rig.send(Command::Load {
+                    deck: id(1),
+                    track: copy,
+                });
+                rig.send(Command::InstantDouble {
+                    from: id(0),
+                    to: id(1),
+                    generation: 2,
+                });
+                rig.channel(1 - heard, ChannelParam::Volume, 0.0);
+                rig.run(0.5);
+                record(&mut rig, 1.0)
+            };
+            let (x, y) = (mk(0), mk(1));
+            assert!(peak(&x) > 0.1, "heard");
+            let err = x
+                .iter()
+                .zip(&y)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f32::max);
+            assert!(err < 1e-6, "keylock {keylock}, rate {rate}: off by {err}");
+        }
+    }
+
+    /// A machine that can't keep up is noticed and the app told; the sound is left
+    /// as it is (keylock, the effects).
+    #[test]
+    fn sustained_load_is_reported_as_behind_and_changes_nothing_in_the_sound() {
+        use crate::pad_fx::{PadFx, PadFxKind};
+        let mut rig = Rig::new();
+        load_fn(&mut rig, 0, 60.0, sine(440.0));
+        rig.deck(0, DeckCmd::Keylock(Set::On));
+        rig.deck(0, DeckCmd::Rate(0.08));
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.r.fx[0].apply(FxCmd::Enabled(Set::On));
+        rig.run(1.0);
+        let behind = |rig: &Rig| rig.monitor.stats().behind.load(Relaxed);
+        assert!(!behind(&rig), "room to spare");
+
+        // One slow callback, then a few: not sustained.
+        rig.r.test_load = 0.95;
+        rig.run(0.05);
+        rig.r.test_load = 0.2;
+        rig.run(1.0);
+        assert!(!behind(&rig));
+
+        rig.r.test_load = 0.9;
+        rig.run(1.0);
+        assert!(behind(&rig));
+        rig.deck(1, DeckCmd::PadFx(Some(PadFx::new(PadFxKind::Reverb, 1.0))));
+        rig.run(0.5);
+        assert!(rig.snap().mixer.fx[0].enabled, "the effect unit stays on");
+        assert!(rig.snap().decks[1].pad_fx.is_some(), "and the pad effect");
+        rig.r.fx[0].apply(FxCmd::Enabled(Set::Off));
+        rig.deck(1, DeckCmd::PadFx(None));
+        rig.run(3.0);
+        let f = frequency(&record(&mut rig, 1.0));
+        assert!((f - 440.0).abs() < 2.0, "keylock as ever: {f:.1} Hz");
+
+        // Room for long enough: no longer behind.
+        rig.r.test_load = 0.1;
+        rig.run(crate::load::RECOVER_SECS + 0.5);
+        assert!(!behind(&rig));
+
+        // The real-time limit: behind at once.
+        rig.r.overran();
+        assert!(behind(&rig));
     }
 
     #[test]
@@ -2181,6 +2831,46 @@ mod tests {
     }
 
     #[test]
+    fn search_moves_the_playhead_by_its_seconds_within_the_track() {
+        let mut rig = Rig::new();
+        rig.load(0, 120.0, 120.0);
+        rig.deck(0, DeckCmd::Seek(10.0));
+        rig.deck(0, DeckCmd::Search(5.0));
+        rig.run(0.0);
+        assert!((rig.pos(0) - 15.0).abs() < 1e-6, "{}", rig.pos(0));
+        rig.deck(0, DeckCmd::Search(-3.0));
+        rig.run(0.0);
+        assert!((rig.pos(0) - 12.0).abs() < 1e-6, "{}", rig.pos(0));
+        rig.deck(0, DeckCmd::Search(-100.0));
+        rig.run(0.0);
+        assert!(
+            rig.pos(0) >= -LEAD_IN - 1e-6,
+            "no further back than the lead-in"
+        );
+    }
+
+    #[test]
+    fn a_search_is_silent_and_the_sound_comes_back_after() {
+        let mut rig = Rig::new();
+        load_fn(&mut rig, 0, 20.0, sine(330.0));
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.run(0.2);
+        assert!(peaks(&rig.out, 4)[0] > 0.1, "playing");
+        // Steps every 50 ms: silent throughout.
+        for _ in 0..4 {
+            rig.deck(0, DeckCmd::Search(1.0));
+            rig.run(0.05);
+            assert!(peaks(&rig.out, 4)[0] < 1e-6, "searching");
+        }
+        // Still quiet just after the last step; back once the quiet is over.
+        rig.run(0.05);
+        assert!(peaks(&rig.out, 4)[0] < 1e-6, "just after");
+        rig.run(0.2);
+        rig.run(0.1);
+        assert!(peaks(&rig.out, 4)[0] > 0.1, "back");
+    }
+
+    #[test]
     fn loops_set_resize_and_end_while_playing() {
         let mut rig = Rig::new();
         let grid = rig.load(0, 120.0, 120.0);
@@ -2233,57 +2923,71 @@ mod tests {
         assert_eq!(s.cue_point, 3.0);
     }
 
-    /// Prepare mode's player sits beside all four decks: straight to the main mix
-    /// whatever the fader, crossfader and headphone cue say, and never synced.
+    /// Shortening a loop with the playhead past the new end keeps its place in the
+    /// beat: it goes to the same point in the shorter loop and plays on to its end,
+    /// not back to the start. By a loop size (a pad) and by halving.
     #[test]
-    fn prepare_plays_beside_four_decks_and_skips_the_mixer() {
-        let mut rig = Rig::with_decks(MAX_DECKS);
-        let p = DeckId::PREPARE;
-        assert!(p.is_prepare() && DeckId::first(MAX_DECKS).all(|d| d != p));
-        let (audio, _) = demo(120.0, 120.0, 5.0, 2);
-        rig.send(Command::Load {
-            deck: p,
-            track: track(audio, None, 3),
-        });
-        rig.send(Command::Param(
-            ParamId::Channel(p, ChannelParam::Volume),
-            0.0,
-        ));
-        rig.send(Command::Deck(p, DeckCmd::Pfl(Set::On)));
-        rig.send(Command::Deck(p, DeckCmd::Sync(Set::On)));
-        rig.deck(1, DeckCmd::Pfl(Set::On)); // headphones on the (silent) cue bus
-        rig.master(MasterParam::HeadMix, 0.0); // cue bus only
-        rig.master(MasterParam::Crossfader, 1.0);
-        rig.send(Command::Deck(p, DeckCmd::Play(Set::On)));
-        let level = level(&mut rig);
-        assert!(level > 0.01, "{level}");
-        assert_eq!(peaks(&rig.out, 4)[2], 0.0, "not on the cue bus");
-        let s = rig.snap();
-        assert!(s.prepare.playing && !s.prepare.sync);
-        assert_eq!(s.prepare.generation, 3);
-        assert_eq!(s.deck(p), &s.prepare);
-        assert!(
-            s.decks.iter().all(|d| d.track_id.is_none()),
-            "no deck slot used"
-        );
-        // All four decks still play alongside it, and none follows it.
-        for d in 0..MAX_DECKS {
-            rig.load(d, 120.0, 120.0);
-            rig.deck(d, DeckCmd::Play(Set::On));
+    fn shortening_a_loop_keeps_the_playhead_in_step() {
+        for halve in [false, true] {
+            let mut rig = Rig::new();
+            let grid = rig.load(0, 120.0, 120.0);
+            rig.deck(0, DeckCmd::Seek(10.0));
+            rig.deck(0, DeckCmd::BeatLoop(8.0));
+            let lin = rig.snap().decks[0].loop_in.unwrap_or(10.0);
+            let lin = grid.time_at(grid.beat_at(lin).round());
+            rig.run(0.05);
+            let lin = rig.snap().decks[0].loop_in.unwrap_or(lin);
+            // 3.25 beats in (half a second a beat), then cut to 2 beats.
+            rig.deck(0, DeckCmd::Seek(lin + 1.625));
+            rig.run(0.01);
+            let before = rig.pos(0);
+            if halve {
+                rig.deck(0, DeckCmd::LoopScale(0.25));
+            } else {
+                rig.deck(0, DeckCmd::BeatLoop(2.0));
+            }
+            rig.run(0.01);
+            let s = rig.snap().decks[0];
+            assert!((s.loop_out.unwrap() - (lin + 1.0)).abs() < 1e-6, "{s:?}");
+            // 1.25 beats in: 0.625 s past the start.
+            let want = lin + (before - lin) % 1.0;
+            assert!(
+                (s.position - want).abs() < 0.02,
+                "halve {halve}: {} vs {want}",
+                s.position
+            );
         }
-        rig.deck(3, DeckCmd::Sync(Set::On));
-        rig.send(Command::SetSyncLeader(Some(p)));
+    }
+
+    /// An active loop turns itself on when playback reaches its start, not when the
+    /// playhead is put inside it, and not again once exited until played onto again.
+    #[test]
+    fn active_loop_turns_on_when_reached() {
+        let mut rig = Rig::new();
+        rig.load(0, 120.0, 120.0);
+        rig.deck(0, DeckCmd::ActiveLoop(Some((11.0, 12.0))));
+        rig.deck(0, DeckCmd::Seek(10.0));
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.run(0.5);
+        assert!(!rig.snap().decks[0].loop_active, "not there yet");
+        rig.run(2.0);
+        let s = rig.snap().decks[0];
+        assert!(s.loop_active && s.loop_in == Some(11.0) && s.loop_out == Some(12.0));
+        assert!(s.position >= 11.0 && s.position < 12.0);
+        assert_eq!(s.active_loop, Some((11.0, 12.0)));
+        // Exited: it plays on past the end.
+        rig.deck(0, DeckCmd::Reloop(Set::Off));
+        rig.run(1.5);
+        assert!(!rig.snap().decks[0].loop_active);
+        assert!(rig.pos(0) > 12.0);
+        // Put inside it: nothing.
+        rig.deck(0, DeckCmd::Seek(11.5));
+        rig.run(0.2);
+        assert!(!rig.snap().decks[0].loop_active);
+        // A load clears it.
+        rig.load(0, 120.0, 120.0);
         rig.run(0.05);
-        let s = rig.snap();
-        assert!(s.live().iter().all(|d| d.playing));
-        assert_eq!(s.mixer.sync_leader, None);
-        assert_ne!(s.decks[3].following, Some(p));
-        // Its events carry its own id.
-        assert!(rig.events().iter().any(|e| *e
-            == EngineEvent::Started {
-                deck: p,
-                generation: 3
-            }));
+        assert_eq!(rig.snap().decks[0].active_loop, None);
     }
 
     /// Scratch deck `d` forward by `by` seconds over `secs`, reporting every block.
@@ -2369,15 +3073,54 @@ mod tests {
             rig.run(0.01);
         }
         // 50 blocks, the wheel turning 0.01 s a block: about 1.7 times as fast as a
-        // record, so about a third faster.
+        // record, so about a sixth faster.
         let secs = 50.0 * 256.0 / SR as f64;
         let moved = (rig.pos(0) - start) / secs;
-        assert!(moved > 1.2 && moved < 1.4, "{moved}");
+        assert!(moved > 1.1 && moved < 1.2, "{moved}");
         // Then it springs back to normal speed.
         rig.run(0.5);
         let t = rig.pos(0);
         rig.run(1.0);
         assert!((rig.pos(0) - t - 1.0).abs() < 0.01);
+    }
+
+    /// Turning the jog wheel out of vinyl mode bends the speed smoothly, with keylock
+    /// or a key shift too: no clicks where the speed changes, block to block.
+    #[test]
+    fn a_jog_bend_is_smooth() {
+        // The largest jump from one sample to the next, beyond what a 440 Hz tone at
+        // its level has (0.5 * TAU * 440 / SR, about 0.031).
+        let roughness = |x: &[f32]| {
+            x.windows(2)
+                .map(|w| (w[1] - w[0]).abs())
+                .fold(0.0, f32::max)
+        };
+        for (keylock, shift) in [(false, 0.0), (true, 0.0), (false, 3.0)] {
+            let mut rig = Rig::new();
+            load_fn(&mut rig, 0, 20.0, sine(440.0));
+            rig.deck(0, DeckCmd::Keylock(Set::from_bool(keylock)));
+            rig.deck(0, DeckCmd::KeyShift(shift));
+            rig.deck(0, DeckCmd::Vinyl(Set::Off));
+            rig.deck(0, DeckCmd::Play(Set::On));
+            rig.run(0.5);
+            let steady = roughness(&record(&mut rig, 0.3));
+            let mut bent = vec![];
+            for _ in 0..60 {
+                rig.deck(
+                    0,
+                    DeckCmd::HandMove {
+                        by: 0.005,
+                        at: Instant::now(),
+                    },
+                );
+                bent.extend(record(&mut rig, 0.006));
+            }
+            let bent = roughness(&bent);
+            assert!(
+                bent < steady * 1.3,
+                "keylock {keylock}, shift {shift}: steady {steady}, bent {bent}"
+            );
+        }
     }
 
     #[test]
@@ -2757,6 +3500,31 @@ mod tests {
         assert!(!rig.snap().preview.playing);
     }
 
+    /// With the headphones going nowhere (a laptop's one pair), the preview plays on
+    /// the main output instead, under the main level.
+    #[test]
+    fn preview_plays_on_main_when_headphones_are_off() {
+        let mut rig = Rig::new();
+        rig.send(Command::SetRouting(Routing::default_for(2)));
+        let (audio, _) = demo(124.0, 124.0, 10.0, 5);
+        rig.send(Command::Preview(PreviewCmd::Start {
+            audio: Arc::new(audio),
+            start: 1.0,
+            gain: 1.0,
+        }));
+        let mut out = vec![0.0; 256 * 2];
+        for _ in 0..40 {
+            rig.r.process(&mut out, 2);
+        }
+        let p = peaks(&out, 2);
+        assert!(p[0] > 0.01 && p[1] > 0.01, "main plays: {p:?}");
+        rig.master(MasterParam::Gain, 0.0);
+        for _ in 0..40 {
+            rig.r.process(&mut out, 2);
+        }
+        assert_eq!(peaks(&out, 2), vec![0.0, 0.0], "under the main level");
+    }
+
     #[test]
     fn meters_follow_gain_and_eq() {
         let mut rig = Rig::new();
@@ -2777,7 +3545,100 @@ mod tests {
     }
 
     #[test]
-    fn main_gain_balance_and_head_mix() {
+    fn head_mix_at_master_plays_the_master_with_another_deck_cued() {
+        // Deck 1 on air; deck 2 cued with its fader down; the mix all the way to master.
+        let mut rig = Rig::new();
+        load_fn(&mut rig, 0, 5.0, sine(330.0));
+        load_fn(&mut rig, 1, 5.0, sine(550.0));
+        rig.channel(1, ChannelParam::Volume, 0.0);
+        rig.deck(1, DeckCmd::Pfl(Set::On));
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.deck(1, DeckCmd::Play(Set::On));
+        rig.master(MasterParam::HeadMix, 1.0);
+        rig.run(0.5);
+        let p = peaks(&rig.out, 4);
+        assert!(p[0] > 0.1, "the master has deck 1: {p:?}");
+        assert!(
+            (p[2] - p[0]).abs() < 0.02,
+            "the headphones hear the master: {p:?}"
+        );
+    }
+
+    /// A DDJ-400 blends the headphones itself: earshot's headphones carry only the
+    /// cued deck, whatever its own head mix and master cue say, and the master only
+    /// what's on air.
+    #[test]
+    fn phones_cue_only_carries_just_the_cued_decks() {
+        let mut rig = Rig::new();
+        load_fn(&mut rig, 0, 5.0, sine(330.0));
+        load_fn(&mut rig, 1, 5.0, sine(550.0));
+        rig.send(Command::PhonesCueOnly(true));
+        // Deck 1 on air; deck 2 cued with its fader down; a mix and master cue left
+        // on from before.
+        rig.channel(1, ChannelParam::Volume, 0.0);
+        rig.deck(1, DeckCmd::Pfl(Set::On));
+        rig.master(MasterParam::HeadMix, 1.0);
+        rig.send(Command::MasterCue(Set::On));
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.deck(1, DeckCmd::Play(Set::On));
+        rig.run(0.5);
+        let both = peaks(&rig.out, 4);
+        assert!(both[0] > 0.1, "the master has deck 1: {both:?}");
+        assert!(both[2] > 0.1, "the headphones have deck 2: {both:?}");
+        // Deck 2 alone in the headphones: they stay as loud with deck 1 stopped, and
+        // go silent with deck 2's cue off.
+        rig.deck(0, DeckCmd::Play(Set::Off));
+        rig.run(0.5);
+        let alone = peaks(&rig.out, 4);
+        assert!(alone[0] < 0.001, "nothing on air: {alone:?}");
+        assert!(
+            (alone[2] - both[2]).abs() < 0.02,
+            "deck 2 only: {both:?} then {alone:?}"
+        );
+        rig.deck(1, DeckCmd::Pfl(Set::Off));
+        rig.run(0.5);
+        assert!(peaks(&rig.out, 4)[2] < 0.001, "nothing cued: silent");
+    }
+
+    #[test]
+    fn master_cue_adds_the_master_to_the_cue_side() {
+        let mut rig = Rig::new();
+        rig.load(0, 120.0, 120.0);
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.master(MasterParam::HeadMix, 1.0); // all master side
+        rig.run(0.3);
+        assert_eq!(
+            peaks(&rig.out, 4)[2],
+            0.0,
+            "nothing cued: silent, whatever the mix"
+        );
+        rig.master(MasterParam::HeadMix, 0.0); // the cue side only
+        // Over a second, so each reading spans two beats of the track.
+        let heard = |rig: &mut Rig| {
+            rig.run(1.0);
+            peaks(&rig.out, 4)[2]
+        };
+        rig.deck(0, DeckCmd::Pfl(Set::On));
+        let channel = heard(&mut rig);
+        rig.deck(0, DeckCmd::Pfl(Set::Off));
+        rig.send(Command::MasterCue(Set::On));
+        let master = heard(&mut rig);
+        assert!(rig.snap().mixer.master_cue);
+        rig.deck(0, DeckCmd::Pfl(Set::On));
+        let both = heard(&mut rig);
+        assert!(channel > 0.01 && master > 0.01, "{channel} {master}");
+        // As on a DJ mixer, both add up at full level.
+        assert!(
+            both > channel.max(master) * 1.2,
+            "{both} vs {channel} / {master}"
+        );
+        rig.send(Command::MasterCue(Set::Toggle));
+        rig.run(0.05);
+        assert!(!rig.snap().mixer.master_cue);
+    }
+
+    #[test]
+    fn master_gain_balance_and_head_mix() {
         let mut rig = Rig::new();
         rig.load(0, 120.0, 120.0);
         rig.deck(0, DeckCmd::Play(Set::On));
@@ -2788,7 +3649,7 @@ mod tests {
         let p = peaks(&rig.out, 4);
         assert!(p[0] == 0.0 && p[1] > 0.01, "balance: {p:?}");
         assert_eq!(p[2], 0.0, "headphones hear only the (silent) cue bus");
-        // Head mix fully to main: the headphones hear the main mix.
+        // Head mix fully to main: the headphones hear the master mix.
         rig.master(MasterParam::HeadMix, 1.0);
         rig.run(0.2);
         assert!(peaks(&rig.out, 4)[2] > 0.01);
@@ -2797,7 +3658,7 @@ mod tests {
         rig.run(0.2);
         let p = peaks(&rig.out, 4);
         assert!(p[0] == 0.0 && p[1] == 0.0 && p[2] > 0.01, "{p:?}");
-        assert_eq!(rig.snap().mixer.main_gain, 0.0);
+        assert_eq!(rig.snap().mixer.master_gain, 0.0);
     }
 
     #[test]
@@ -2838,6 +3699,33 @@ mod tests {
     }
 
     #[test]
+    fn the_sharp_crossfader_is_full_both_sides_in_the_centre() {
+        let g = |x, side| xf_gain(XfCurve::Sharp, x, side);
+        assert_eq!((g(0.0, 0), g(0.0, 1)), (1.0, 1.0));
+        assert_eq!((g(-1.0, 0), g(1.0, 1)), (1.0, 1.0));
+        assert!(g(1.0, 0).abs() < 1e-12 && g(-1.0, 1).abs() < 1e-12);
+        assert!(
+            (g(0.5, 0) - 0.5f64.sqrt()).abs() < 1e-12,
+            "halfway over: -3 dB"
+        );
+    }
+
+    #[test]
+    fn the_constant_power_crossfader_keeps_the_total_power() {
+        let g = |x, side| xf_gain(XfCurve::ConstantPower, x, side);
+        let h = 0.5f64.sqrt();
+        assert!(
+            (g(0.0, 0) - h).abs() < 1e-12 && (g(0.0, 1) - h).abs() < 1e-12,
+            "-3 dB each"
+        );
+        assert!((g(-1.0, 0) - 1.0).abs() < 1e-12 && g(-1.0, 1).abs() < 1e-12);
+        assert!((g(1.0, 1) - 1.0).abs() < 1e-12 && g(1.0, 0).abs() < 1e-12);
+        for x in [-0.8, -0.3, 0.2, 0.7] {
+            assert!((g(x, 0).powi(2) + g(x, 1).powi(2) - 1.0).abs() < 1e-12);
+        }
+    }
+
+    #[test]
     fn four_decks_mix_through_their_crossfader_sides() {
         let mut rig = Rig::with_decks(4);
         // Tones on decks 3 (on the left by default) and 4 (set to thru).
@@ -2852,18 +3740,20 @@ mod tests {
         assert_eq!(rig.snap().decks[2].crossfader, XfSide::Left);
         assert_eq!(rig.snap().decks[3].crossfader, XfSide::Thru);
 
-        // Deck 3 alone: heard in the middle, gone with the crossfader hard right.
+        // Deck 3 alone: heard in the middle, full hard left, gone hard right.
         rig.channel(2, ChannelParam::Volume, 1.0);
         let middle = level(&mut rig);
         assert!(middle > 0.1, "{middle}");
+        rig.master(MasterParam::Crossfader, -1.0);
+        let full = level(&mut rig);
+        assert!(full > middle, "{full} vs {middle}");
         rig.master(MasterParam::Crossfader, 1.0);
         assert!(level(&mut rig) < 1e-4);
-        // Deck 4 on thru ignores the crossfader, and is louder than deck 3 was in the
-        // middle (constant power: each side is at -3 dB there).
+        // Deck 4 on thru ignores the crossfader: as loud as deck 3 at full, either way.
         rig.channel(2, ChannelParam::Volume, 0.0);
         rig.channel(3, ChannelParam::Volume, 1.0);
         let thru = level(&mut rig);
-        assert!(thru > middle * 1.3, "{thru} vs {middle}");
+        assert!((thru - full).abs() < 0.01, "{thru} vs {full}");
         rig.master(MasterParam::Crossfader, -1.0);
         assert!((level(&mut rig) - thru).abs() < 0.01);
     }
@@ -3152,9 +4042,6 @@ mod tests {
         state.decks[1].track = Some(loaded);
         let (audio, grid) = demo(126.0, 126.0, 60.0, 3);
         state.decks[2].track = Some(track(audio, Some(Arc::new(grid)), 1));
-        let (audio, _) = demo(124.0, 124.0, 30.0, 6);
-        state.prepare.track = Some(track(audio, None, 4));
-        state.prepare.position = 7.0;
         let mut fresh = Rig::with_decks(3);
         fresh.send(Command::Restore(Box::new(state)));
         fresh.run(0.1);
@@ -3165,8 +4052,6 @@ mod tests {
         }
         assert_eq!(after.decks[1].auto_gain, 0.5);
         assert_eq!(after.decks[0].track_id, None);
-        assert_eq!(after.prepare.generation, 4);
-        assert!((after.prepare.position - 7.0).abs() < 1e-9);
         let mixer = |m: MixerSnap| MixerSnap {
             vu_main: [0.0; 2],
             limiting: 0.0,
@@ -3177,5 +4062,119 @@ mod tests {
         assert!(
             std::iter::from_fn(|| fresh.garbage.pop().ok()).any(|g| matches!(g, Garbage::State(_)))
         );
+    }
+
+    /// `secs` of a constant `level` on both channels.
+    fn flat(level: f32, secs: f64) -> Arc<TrackAudio> {
+        Arc::new(TrackAudio {
+            samples: vec![level; 2 * (secs * SR as f64) as usize],
+            sample_rate: SR,
+        })
+    }
+
+    fn sample(i: usize) -> crate::sampler::SampleSlot {
+        crate::sampler::SampleSlot::new(i).unwrap()
+    }
+
+    #[test]
+    fn the_sampler_plays_into_the_master_with_the_decks() {
+        use crate::sampler::SamplerCmd;
+        let mut rig = Rig::new();
+        rig.send(Command::Sampler(SamplerCmd::Load {
+            slot: sample(0),
+            audio: Some(flat(0.3, 1.0)),
+        }));
+        rig.send(Command::Sampler(SamplerCmd::Load {
+            slot: sample(8),
+            audio: Some(flat(0.2, 1.0)),
+        }));
+        rig.run(0.05);
+        assert!(
+            peaks(&rig.out, 4).iter().all(|p| *p == 0.0),
+            "loaded, not played"
+        );
+        assert!(rig.snap().sampler[0].loaded && !rig.snap().sampler[0].playing);
+        // One slot, with no deck loaded at all: on the master, not the headphones.
+        rig.send(Command::Sampler(SamplerCmd::Play(sample(0))));
+        rig.run(0.1);
+        let one = peaks(&rig.out, 4);
+        assert!(
+            (one[0] - 0.3).abs() < 0.01 && (one[1] - 0.3).abs() < 0.01,
+            "{one:?}"
+        );
+        assert!(one[2] == 0.0 && one[3] == 0.0, "nothing cued: {one:?}");
+        assert!(rig.snap().sampler[0].playing);
+        // Two at once add up.
+        rig.send(Command::Sampler(SamplerCmd::Play(sample(8))));
+        rig.run(0.1);
+        let two = peaks(&rig.out, 4);
+        assert!((two[0] - 0.5).abs() < 0.01, "{two:?}");
+        // With the master in the headphones, they're there too.
+        rig.send(Command::MasterCue(Set::On));
+        rig.master(MasterParam::HeadMix, 1.0);
+        rig.run(0.1);
+        assert!(peaks(&rig.out, 4)[2] > 0.3);
+        // Under the master level.
+        rig.master(MasterParam::Gain, 0.0);
+        rig.run(0.2);
+        assert!(peaks(&rig.out, 4)[0] < 1e-3);
+        // SHIFT + pad stops it; the other plays out its second.
+        rig.send(Command::Sampler(SamplerCmd::Stop(sample(0))));
+        rig.run(0.05);
+        assert!(!rig.snap().sampler[0].playing && rig.snap().sampler[8].playing);
+        rig.run(1.0);
+        assert!(!rig.snap().sampler[8].playing, "once through");
+    }
+
+    #[test]
+    fn a_replaced_sample_is_freed_off_the_audio_thread() {
+        use crate::sampler::SamplerCmd;
+        let mut rig = Rig::new();
+        let first = flat(0.3, 0.5);
+        for audio in [Some(first.clone()), Some(flat(0.1, 0.5)), None] {
+            rig.send(Command::Sampler(SamplerCmd::Load {
+                slot: sample(15),
+                audio,
+            }));
+        }
+        rig.run(0.01);
+        // Both sounds that were taken out came back on the garbage ring.
+        assert!(matches!(rig.garbage.pop(), Ok(Garbage::Audio(a)) if Arc::ptr_eq(&a, &first)));
+        assert!(matches!(rig.garbage.pop(), Ok(Garbage::Audio(_))));
+        assert!(rig.garbage.pop().is_err());
+        assert_eq!(Arc::strong_count(&first), 1, "the renderer let go of it");
+        assert!(!rig.snap().sampler[15].loaded);
+    }
+
+    #[test]
+    fn restore_puts_the_sampler_back() {
+        use crate::sampler::{SampleState, SamplerCmd};
+        let mut rig = Rig::new();
+        rig.send(Command::Sampler(SamplerCmd::Volume(sample(2), 0.5)));
+        rig.send(Command::Sampler(SamplerCmd::Loop(sample(2), Set::On)));
+        rig.run(0.01);
+        // The settings come from the snapshot; the sound is put back in.
+        let mut st = rig.snap().state();
+        assert!(st.sampler[2].looping && st.sampler[2].volume == 0.5);
+        assert!(st.sampler[2].audio.is_none());
+        st.sampler[2].audio = Some(flat(0.4, 0.02));
+        st.sampler[3] = SampleState {
+            audio: Some(flat(0.1, 1.0)),
+            ..SampleState::default()
+        };
+        let mut fresh = Rig::new();
+        fresh.send(Command::Restore(Box::new(st)));
+        fresh.send(Command::Sampler(SamplerCmd::Play(sample(2))));
+        fresh.run(0.2);
+        let s = fresh.snap().sampler;
+        assert!(
+            s[2].loaded && s[2].looping && s[2].playing,
+            "still going round"
+        );
+        assert!((s[2].volume - 0.5).abs() < 1e-9);
+        assert!(s[3].loaded && !s[3].looping && s[3].volume == 1.0);
+        // 0.4 at half volume: a quarter gain.
+        let p = peaks(&fresh.out, 4);
+        assert!((p[0] - 0.1).abs() < 0.01, "{p:?}");
     }
 }

@@ -89,15 +89,25 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   tracks in it and its subfolders. Right-click a top-level folder to remove it.
 - **Load** a track: double-click it (goes to a deck that isn't playing), right-click →
   *Load to deck A/B*, drag it onto a deck, or `Shift+←`/`Shift+→`. Right-click →
-  *Preview in headphones* plays it on the headphones only.
-- **Analysis**: loading a track with no beatgrid starts analysis in the background. It
-  plays at once, and a moment later gets a *quick grid*: one steady tempo worked out
-  in a fraction of a second by signal processing (ported from
-  [ClubCraft](https://github.com/beneaze/ClubCraft), MIT), or a placeholder from its
-  BPM tag if the quick grid isn't sure. The deck switches to the analysed grid when
-  it's done. Right-click a track → *Analyse*, or a folder →
-  *Analyse unanalysed tracks*, to do it ahead of time. Like Rekordbox there are two
-  modes:
+  *Preview in headphones* plays it on the headphones only (on the main output if the
+  headphones are off, e.g. a laptop with no controller).
+- **Analysis**: a track new to the library gets a *quick grid* in the background: one
+  steady tempo worked out in a fraction of a second by signal processing (ported from
+  [ClubCraft](https://github.com/beneaze/ClubCraft), MIT). It's saved, so the track
+  has a BPM and a grid on a deck straight away (*Menu → Settings… → Analysis →
+  Quick-analyse new tracks* turns this off). The full analysis is yours to run:
+  right-click a track → *Analyse*, or a folder → *Analyse unanalysed tracks*. It
+  replaces the quick grid, as fixing the grid by hand does. While the computer is
+  short of resources (a low-power profile, capped CPUs, the audio struggling to keep
+  up, or under 1.5 GB of memory left: the top bar says *background work on hold*),
+  the audio gets what there is: the full analysis waits in its queue and the tracks
+  asked for get a quick grid meanwhile, and stems aren't started (ones under way stop
+  if the audio is struggling). It all carries on by itself once there's room again.
+  Nothing is taken from the sound: keylock and the effects stay as they are. A track with no grid at
+  all (the quick grid wasn't sure of it, or the setting was off) is analysed in the
+  background when it's loaded: it plays at once, on a quick grid or a placeholder from
+  its BPM tag, and the deck switches to the analysed grid when it's done. Like
+  Rekordbox there are two modes:
   - **Static** (the default): one steady tempo for the whole track, preferring whole
     numbers, in about 3–5 s. A fast tempo pass over the whole track, then Beat This!'s
     small model on five 15 s excerpts for the phase and the downbeat
@@ -106,8 +116,10 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
     follows a drifting tempo (live drummers); about 15–30 s.
 
   Static analysis flags tracks whose tempo seems to drift with an amber ≈; right-click
-  → *Analyse (dynamic)* for those. The dot by each track shows the state (green =
-  analysed, amber = queued or running, red = failed; hover for the error). Four tracks
+  → *Analyse (dynamic)* for those. The status column shows the state (green dot =
+  fully analysed, amber dot = quick grid only, amber ring or percentage = queued or
+  running, red = failed, drifting or marked as needing attention; hover for the
+  reason). Four tracks
   analyse at a time (`EARSHOT_ANALYSIS_JOBS` to change); a track you load onto a deck
   jumps the queue. Grid edits on a deck are saved and are never overwritten by
   automatic analysis (an explicit *Analyse* does overwrite them).
@@ -133,6 +145,13 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   follows the sync leader or the playing deck) and *ON*. Keys: `G`/`H` switch units
   1/2 on and off, `T`/`Y` pick the next effect, `Shift+G`/`Shift+H` the next target, `C`/`V` halve and double unit 1's length and
   `B`/`N` unit 2's.
+- **Sampler** (*Menu → Sampler…*): 16 slots, each a short sound (a file, or the
+  track selected in the library; its first two minutes, kept in memory) with its own
+  volume and a *Loop* switch. With the DDJ-400's pads in SAMPLER mode a pad plays its
+  slot from the start and SHIFT + pad stops it: slots 1–8 on the left deck's pads,
+  9–16 on the right's. A pad is lit while its slot has a sound and flashes while it
+  plays. Several can play at once, into the master mix. The slots are kept between
+  runs (`sampler_N_play` / `sampler_N_stop` for keys and other controllers).
 - **Mixer and FX** switches in the top bar show or hide those panels mid-set.
 - **Layout**: drag the gaps between panes to resize. *Menu → View → Size* or
   Ctrl −/=/0 scales the whole UI.
@@ -155,8 +174,10 @@ See [`gui/README.md`](gui/README.md) for the code layout and an off-screen scree
 
 ## Releases
 
-Pushing a `vX.Y.Z` tag makes a GitHub release (`.github/workflows/release.yml`). For
-each platform, `packaging/bundle.sh` puts the app in a folder with everything it runs:
+Pushing a `vX.Y.Z` tag makes a GitHub release (`.github/workflows/release.yml`).
+`make release` does it: bump `version` in `gui/Cargo.toml` (through a PR), then, on an
+up-to-date `main`, it tags `v<version>` and pushes the tag, after checking and asking.
+For each platform, `packaging/bundle.sh` puts the app in a folder with everything it runs:
 
 - a standalone Python with the worker's packages installed, as `worker/uv.lock` pins them
 - the worker's code
@@ -177,6 +198,7 @@ and, to build Rubber Band, `sudo apt install build-essential libsndfile1-dev`.
 - Exports (Prepare's Export tab) write whole playlists; there's no two-way sync yet.
 - Whole tracks are decoded into memory (about 10 MB per stereo minute).
 - No controller LED feedback. Effects are Echo and Trans only, and the DDJ-400's FX
-  section isn't mapped yet.
+  section isn't mapped yet. Its PAD FX 1 / 2 pads play a fixed bank of 16 effects
+  each (`gui/src/core/pads.rs`): not rekordbox's own defaults, and not editable yet.
 - Hot cues are not saved.
 - The worker has no timeout: if it hangs, the analysis queue stops until restart.

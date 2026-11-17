@@ -56,6 +56,9 @@ pub struct Running {
     pub progress: Option<(u64, u64)>,
     /// Waiting its turn, not running yet.
     pub queued: bool,
+    /// One of the jobs counted on the jobs pill; not for a summary row such as
+    /// "Analysis: 5 tracks waiting" ([`Jobs::summary`]).
+    pub counted: bool,
 }
 
 impl Running {
@@ -96,16 +99,22 @@ impl Jobs {
 
     /// A job called `title` is running until the returned [`Job`] is dropped.
     pub fn start(&self, title: impl Into<String>) -> Job {
-        self.add(title.into(), false)
+        self.add(title.into(), false, true)
     }
 
     /// A job called `title` waiting its turn (listed after those running), until
     /// it's dropped.
     pub fn queue(&self, title: impl Into<String>) -> Job {
-        self.add(title.into(), true)
+        self.add(title.into(), true, true)
     }
 
-    fn add(&self, title: String, queued: bool) -> Job {
+    /// A row listed after the jobs, saying what's waiting, that isn't a job itself
+    /// (it isn't counted), until it's dropped.
+    pub fn summary(&self, title: impl Into<String>) -> Job {
+        self.add(title.into(), true, false)
+    }
+
+    fn add(&self, title: String, queued: bool, counted: bool) -> Job {
         let id = {
             let mut i = self.inner.lock().unwrap();
             i.next += 1;
@@ -121,6 +130,7 @@ impl Jobs {
                     message: String::new(),
                     progress: None,
                     queued,
+                    counted,
                 },
             });
             id
@@ -280,6 +290,10 @@ mod tests {
         assert_eq!(list[1].fraction(), None);
         let q = jobs.queue("Waiting");
         assert_eq!(jobs.list()[2].title, "Waiting");
+        assert!(jobs.list()[2].counted);
+        let s = jobs.summary("Analysis");
+        assert!(!jobs.list()[3].counted, "a summary isn't a job");
+        drop(s);
         let c = jobs.start("Later");
         assert_eq!(jobs.list()[2].title, "Later", "queued ones last");
         drop((q, c));
@@ -287,7 +301,7 @@ mod tests {
         assert_eq!(jobs.list()[0].title, "Importing");
         drop(b);
         assert!(jobs.list().is_empty());
-        assert_eq!(woken.load(Ordering::Relaxed), 10);
+        assert_eq!(woken.load(Ordering::Relaxed), 12);
     }
 
     #[test]

@@ -10,6 +10,8 @@ use crate::beatgrid::Beatgrid;
 use crate::decode::TrackAudio;
 use crate::engine::Routing;
 use crate::fx::{FX_UNITS, FxCmd, FxUnitState};
+use crate::pad_fx::PadFx;
+use crate::sampler::{SAMPLER_SLOTS, SampleState, SamplerCmd};
 use crate::stems::StemAudio;
 use crate::tempo::TempoRange;
 
@@ -22,24 +24,12 @@ pub const EQ_LOW: usize = 0;
 pub const EQ_MID: usize = 1;
 pub const EQ_HIGH: usize = 2;
 
-/// Deck slots inside the engine: the decks, then Prepare mode's player.
-pub(crate) const SLOTS: usize = MAX_DECKS + 1;
-
-/// A deck, or Prepare mode's player ([`DeckId::PREPARE`]). Checked when it's made, so
-/// indexing with it can never go out of bounds on the audio thread.
+/// A deck. Checked when it's made, so indexing with it can never go out of bounds on
+/// the audio thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DeckId(u8);
 
 impl DeckId {
-    /// Prepare mode's player: a full deck (cues, loops, grid, keylock) that isn't one
-    /// of the [`MAX_DECKS`]. It plays straight to the main mix, past the fader,
-    /// crossfader and headphone cue, and never syncs or leads.
-    pub const PREPARE: DeckId = DeckId(MAX_DECKS as u8);
-
-    pub const fn is_prepare(self) -> bool {
-        self.0 as usize == MAX_DECKS
-    }
-
     pub const fn new(index: usize) -> Option<DeckId> {
         if index < MAX_DECKS {
             Some(DeckId(index as u8))
@@ -48,7 +38,7 @@ impl DeckId {
         }
     }
 
-    /// 0.. for decks; [`MAX_DECKS`] for [`DeckId::PREPARE`].
+    /// 0, 1, … below [`MAX_DECKS`].
     pub const fn index(self) -> usize {
         self.0 as usize
     }
@@ -115,6 +105,9 @@ pub enum DeckCmd {
     /// CDJ-style cue: set / return / preview while held.
     Cue(Press),
     Seek(f64),
+    /// Move the playhead this many seconds (negative: back), playing or not: a jog
+    /// wheel turned with SHIFT held (Rekordbox's search).
+    Search(f64),
     BeatJump(f64),
     /// Toggle an auto-loop of this many beats starting at the current beat.
     BeatLoop(f64),
@@ -162,6 +155,14 @@ pub enum DeckCmd {
     Sync(Set),
     Quantize(Set),
     Keylock(Set),
+    /// Shift the key this many semitones (negative: down) without touching the tempo,
+    /// within ±[`crate::KEY_SHIFT_MAX`]. Back to 0 when a track loads.
+    KeyShift(f64),
+    /// Move the key shift by this many semitones.
+    KeyShiftBy(f64),
+    /// The deck's pad effect slot ([`crate::pad_fx`]): a pad pressed (its effect goes
+    /// on, in place of any other held), or the held one let go (`None`).
+    PadFx(Option<PadFx>),
     /// Headphone cue for this deck's channel.
     Pfl(Set),
     Crossfader(XfSide),
@@ -173,6 +174,9 @@ pub enum DeckCmd {
         start: f64,
         end: f64,
     },
+    /// The track's active loop (`start..end`, seconds), or none: playing onto its
+    /// start, with no loop on, turns it on (Pioneer's active loop). Cleared by a load.
+    ActiveLoop(Option<(f64, f64)>),
     /// A stem's level (`stem` indexes [`crate::stems::NAMES`]), 0..1. Levels go back to
     /// 1 when a track loads.
     StemLevel {
@@ -203,15 +207,18 @@ pub enum ChannelParam {
 pub enum MasterParam {
     /// -1 (left) .. 1 (right).
     Crossfader,
-    /// Main output level, linear, 0..5.
+    /// Master output level, linear, 0..1.
     Gain,
     /// -1 (left) .. 1 (right).
     Balance,
-    /// Headphone level, linear, 0..5.
+    /// Headphone level, linear, 0..1.
     HeadGain,
-    /// What the headphones hear: 0 the cue bus only .. 1 the main mix only (0.5 an
-    /// even mix, the default).
+    /// What the headphones hear: 0 the cue side only .. 1 the master mix only (0.5 an
+    /// even mix, the default), crossfaded at constant power.
     HeadMix,
+    /// Master cue (Pioneer's MASTER CUE): the master mix added to the headphones' cue
+    /// side, with the cued channels, as on a DJ mixer. 0 off, 1 on.
+    MasterCue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,6 +309,8 @@ pub struct DeckState {
     pub sync: bool,
     pub quantize: bool,
     pub keylock: bool,
+    /// Semitones: see [`DeckCmd::KeyShift`].
+    pub key_shift: f64,
     pub vinyl: bool,
     pub channel: ChannelState,
 }
@@ -321,6 +330,7 @@ impl Default for DeckState {
             sync: false,
             quantize: true,
             keylock: false,
+            key_shift: 0.0,
             vinyl: true,
             channel: ChannelState::default(),
         }
@@ -330,10 +340,11 @@ impl Default for DeckState {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MixerState {
     pub crossfader: f64,
-    pub main_gain: f64,
+    pub master_gain: f64,
     pub balance: f64,
     pub head_gain: f64,
     pub head_mix: f64,
+    pub master_cue: bool,
     pub fx: [FxUnitState; FX_UNITS],
 }
 
@@ -341,10 +352,11 @@ impl Default for MixerState {
     fn default() -> MixerState {
         MixerState {
             crossfader: 0.0,
-            main_gain: 1.0,
+            master_gain: 1.0,
             balance: 0.0,
             head_gain: 1.0,
             head_mix: 0.5,
+            master_cue: false,
             fx: std::array::from_fn(FxUnitState::default_for),
         }
     }
@@ -356,11 +368,12 @@ impl Default for MixerState {
 #[derive(Clone, Default)]
 pub struct EngineState {
     pub decks: [DeckState; MAX_DECKS],
-    /// Prepare mode's player.
-    pub prepare: DeckState,
     pub mixer: MixerState,
     pub sync_leader: Option<DeckId>,
     pub hotcue_mode: HotcueMode,
+    pub xf_curve: XfCurve,
+    /// The sampler's slots: their sounds, volumes and loop switches.
+    pub sampler: [SampleState; SAMPLER_SLOTS],
 }
 
 /// What pressing a hot cue does on a stopped deck (a playing one just jumps there).
@@ -371,6 +384,18 @@ pub enum HotcueMode {
     PlayOnPress,
     /// Play from there while held; letting go stops and goes back (Mixxx's).
     PlayWhileHeld,
+}
+
+/// How the crossfader fades the two sides into each other.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum XfCurve {
+    /// Each side at -3 dB in the middle: two different tracks sound about as loud as
+    /// one at either end.
+    #[default]
+    ConstantPower,
+    /// Both sides full in the middle, each fading only on the far half: for cuts and
+    /// scratching. Two tracks in the middle are louder than one.
+    Sharp,
 }
 
 pub enum PreviewCmd {
@@ -418,30 +443,47 @@ pub enum Command {
         generation: u64,
         stems: Option<Arc<StemAudio>>,
     },
+    /// Instant doubles: `to` has just been given `from`'s track as `generation`; put
+    /// it where `from` is, playing or not, with its tempo, key, loop and stems, so
+    /// the two play in step from this block on. Ignored unless `to` still has that
+    /// load and both decks have the same audio.
+    InstantDouble {
+        from: DeckId,
+        to: DeckId,
+        generation: u64,
+    },
     /// The deck synced decks follow. `None`: each synced deck picks one (a playing
     /// deck that isn't synced itself, if there is one).
     SetSyncLeader(Option<DeckId>),
     /// What hot cues do on a stopped deck, on every player.
     SetHotcueMode(HotcueMode),
+    /// The crossfader's curve.
+    SetXfCurve(XfCurve),
     /// Effects go only on the first this many decks (the ones the app shows); a unit
-    /// on another goes back to its default, or the main mix.
+    /// on another goes back to its default, or the master mix.
     SetFxDecks(usize),
     SetRouting(Routing),
+    /// Master cue on, off or toggled ([`MasterParam::MasterCue`]).
+    MasterCue(Set),
+    /// The headphones carry only the cued channels, at full: a controller (a DDJ-400)
+    /// blends in the master itself, from the master's own channels, with its own
+    /// headphone mix knob and master cue. Earshot's head mix and master cue are then
+    /// ignored.
+    PhonesCueOnly(bool),
     Preview(PreviewCmd),
     /// An effect unit (0..[`FX_UNITS`]; others are ignored).
     Fx {
         unit: usize,
         cmd: FxCmd,
     },
+    /// The sampler ([`crate::sampler`]).
+    Sampler(SamplerCmd),
     /// Put every deck and the mixer back as they were (after an audio restart).
     Restore(Box<EngineState>),
 }
 
 impl EngineState {
     pub fn deck_mut(&mut self, id: DeckId) -> &mut DeckState {
-        match self.decks.get_mut(id.index()) {
-            Some(d) => d,
-            None => &mut self.prepare,
-        }
+        &mut self.decks[id.index()]
     }
 }

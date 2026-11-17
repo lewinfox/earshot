@@ -136,6 +136,9 @@ pub struct JobQueue {
     seq: u64,
     /// A deck is playing: background work runs one track at a time.
     pub playing: bool,
+    /// The machine is short of resources (`Analyser::set_held`): no lane starts
+    /// anything. What's waiting stays queued, and runs once there's room again.
+    pub held: bool,
     /// Background lanes allowed at once.
     pub background_cap: usize,
 }
@@ -148,6 +151,7 @@ impl JobQueue {
             lanes: HashMap::new(),
             seq: 0,
             playing: false,
+            held: false,
             background_cap: background_cap.max(1),
         }
     }
@@ -270,7 +274,7 @@ impl JobQueue {
 
     /// Whether this lane may start something now (whether or not there's work).
     pub fn may_take(&self, lane: Lane) -> bool {
-        if self.lanes.contains_key(&lane) {
+        if self.held || self.lanes.contains_key(&lane) {
             return false;
         }
         match lane {
@@ -295,10 +299,10 @@ impl JobQueue {
             .filter(|(_, e)| matches!(e.state, State::Running(_)))
             .map(|(k, _)| k.0)
             .collect();
-        // Per track: is any of it deck work, and its place in the queue. Deck work
-        // goes newest first (the track just loaded), the rest first come first served.
+        // Per track: its place in the queue, by its most urgent work. Deck work goes
+        // newest first (the track just loaded), the rest first come first served.
         let mut best: Option<((JobPriority, u64), i64)> = None;
-        let mut tracks: HashMap<i64, (bool, (JobPriority, u64))> = HashMap::new();
+        let mut tracks: HashMap<i64, (JobPriority, u64)> = HashMap::new();
         for (&(track, _), e) in &self.entries {
             if e.state != State::Waiting || busy.contains(&track) {
                 continue;
@@ -308,12 +312,17 @@ impl JobQueue {
                 _ => e.seq,
             };
             let key = (e.req.priority, order);
-            let t = tracks.entry(track).or_insert((false, key));
-            t.0 |= e.req.priority == JobPriority::Deck;
-            t.1 = t.1.min(key);
+            let t = tracks.entry(track).or_insert(key);
+            *t = (*t).min(key);
         }
-        for (track, (deck, key)) in tracks {
-            if deck != (lane == Lane::Deck) {
+        for (track, key) in tracks {
+            // The deck lane takes deck work, then what was asked for; background
+            // lanes take what was asked for, then the rest. Never deck work.
+            let fits = match lane {
+                Lane::Deck => key.0 <= JobPriority::Asked,
+                Lane::Background(_) => key.0 >= JobPriority::Asked,
+            };
+            if !fits {
                 continue;
             }
             if best.is_none_or(|b| key < b.0) {
@@ -373,7 +382,7 @@ impl JobQueue {
         let mut dropped: Vec<i64> = vec![];
         self.entries.retain(|k, e| {
             let keep = match e.state {
-                State::Waiting => e.req.priority == JobPriority::Deck,
+                State::Waiting => e.req.priority <= JobPriority::Asked,
                 State::Running(lane) => lane == Lane::Deck,
             };
             if !keep {
@@ -599,6 +608,29 @@ mod tests {
         assert_eq!(q.finish(Lane::Deck), Some((1, true)));
     }
 
+    /// A track menu's Analyse: after deck loads, ahead of background work, first asked
+    /// first served, on whichever lane is free (the deck lane too).
+    #[test]
+    fn asked_for_goes_after_deck_loads_and_before_the_background() {
+        let mut q = JobQueue::new(4);
+        q.request(1, &grid(Background, Want::Missing, Mode::Static), None);
+        q.request(2, &grid(Asked, Want::Force, Mode::Static), None);
+        q.request(3, &grid(Asked, Want::Force, Mode::Static), None);
+        q.request(4, &grid(Deck, Want::Missing, Mode::Static), None);
+        assert_eq!(q.take(Lane::Deck).unwrap().track, 4);
+        assert_eq!(q.take(Lane::Background(0)).unwrap().track, 2);
+        q.finish(Lane::Deck);
+        assert_eq!(q.take(Lane::Deck).unwrap().track, 3);
+        // Background work never goes on the deck lane.
+        q.finish(Lane::Deck);
+        assert!(q.take(Lane::Deck).is_none());
+        // Stopping background work keeps what was asked for.
+        q.request(5, &grid(Asked, Want::Force, Mode::Static), None);
+        let (dropped, _) = q.stop_background();
+        assert_eq!(dropped, vec![1, 2]);
+        assert_eq!(q.take(Lane::Deck).unwrap().track, 5);
+    }
+
     #[test]
     fn superseded_before_the_worker_job_is_sent() {
         let mut q = JobQueue::new(4);
@@ -631,5 +663,18 @@ mod tests {
         q.playing = true;
         q.finish(Lane::Background(1));
         assert!(!q.may_take(Lane::Background(0)) && !q.may_take(Lane::Background(1)));
+    }
+
+    #[test]
+    fn held_nothing_starts_and_the_work_waits_until_there_is_room() {
+        let mut q = JobQueue::new(2);
+        q.request(1, &grid(Background, Want::Missing, Mode::Static), None);
+        q.request(2, &grid(Asked, Want::Force, Mode::Static), None);
+        q.held = true;
+        assert!(!q.may_take(Lane::Deck) && !q.may_take(Lane::Background(0)));
+        assert!(q.take(Lane::Deck).is_none() && q.take(Lane::Background(0)).is_none());
+        assert!(q.has(1) && q.has(2), "still queued");
+        q.held = false;
+        assert_eq!(q.take(Lane::Background(0)).map(|b| b.track), Some(2));
     }
 }

@@ -6,10 +6,13 @@ impl EarshotApp {
     /// Play a track in the headphones from `start` (0..1), decoding it first. A track
     /// with no beatgrid yet is queued for analysis too.
     pub(super) fn start_preview(&mut self, id: i64, start: f32) {
-        if self.index.get(id).is_some_and(|t| !t.analysed()) && self.index.analysis(id).is_none() {
+        if self.index.get(id).is_some_and(|t| !t.has_grid()) && self.index.analysis(id).is_none() {
             self.lib
                 .analyser
-                .queue(id, None, false, AnalysisMode::Static);
+                .queue(id, None, false, false, AnalysisMode::Static);
+            if self.hud.low_resource {
+                self.quick.send(vec![id]);
+            }
         }
         let decoding = Arc::new(AtomicBool::new(true));
         self.preview = Some(Preview {
@@ -18,7 +21,7 @@ impl EarshotApp {
             start,
         });
         let (player, store) = (self.player.clone(), self.lib.store.clone());
-        std::thread::spawn(move || {
+        crate::core::background::spawn("earshot-preview", move || {
             if let Err(e) = player::preview(&player, &store, id, start as f64) {
                 eprintln!("preview: {e}");
             }

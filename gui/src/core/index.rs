@@ -191,9 +191,13 @@ pub enum LibraryCmd {
     /// Onto Prepare's player in Prepare mode, else the first deck that isn't
     /// playing (a double-click).
     Load(TrackId),
+    /// Analyse the tracks (again, if they have been). `asked`: one at a time, from a
+    /// track menu, so they go ahead of background work, just after deck loads. Bulk
+    /// requests ("Analyse all", a folder's) are background work.
     Analyse {
         tracks: Vec<TrackId>,
         dynamic: bool,
+        asked: bool,
     },
     /// Ask for music folders to add (a folder picker), then scan them.
     PickRoots,

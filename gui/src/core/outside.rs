@@ -219,7 +219,8 @@ impl Outside {
             | StoreCmd::AddMemory { track, .. }
             | StoreCmd::DeleteMemory { track, .. }
             | StoreCmd::SetMemoryLabel { track, .. }
-            | StoreCmd::SetMemoryColor { track, .. } => *track,
+            | StoreCmd::SetMemoryColor { track, .. }
+            | StoreCmd::SetLoopActive { track, .. } => *track,
             StoreCmd::SaveMainCue { track, at } => {
                 // Nothing on screen lists it: no event to answer with.
                 if let Some(t) = inner.tracks.get_mut(track) {
@@ -257,6 +258,7 @@ impl Outside {
                     end,
                     label: None,
                     color: None,
+                    active: false,
                 });
                 t.memories.sort_by(|a, b| a.start.total_cmp(&b.start));
             }
@@ -269,6 +271,15 @@ impl Outside {
             StoreCmd::SetMemoryColor { id, color, .. } => {
                 if let Some(m) = t.memories.iter_mut().find(|m| m.id == id) {
                     m.color = color;
+                }
+            }
+            StoreCmd::SetLoopActive { id, active, .. } => {
+                for m in &mut t.memories {
+                    if m.id == id && m.end.is_some() {
+                        m.active = active;
+                    } else if active {
+                        m.active = false;
+                    }
                 }
             }
             _ => {}
@@ -300,6 +311,7 @@ impl Inner {
                         end: c.end_s,
                         label: (!c.name.is_empty()).then(|| c.name.clone()),
                         color: c.colour,
+                        active: false,
                     });
                 }
                 _ => {}
@@ -326,6 +338,7 @@ pub fn touches_outside(cmd: &StoreCmd) -> bool {
         | StoreCmd::DeleteMemory { track, .. }
         | StoreCmd::SetMemoryLabel { track, .. }
         | StoreCmd::SetMemoryColor { track, .. }
+        | StoreCmd::SetLoopActive { track, .. }
         | StoreCmd::SavePlay { track, .. } => is_outside(*track),
         StoreCmd::AddTracks { tracks, .. } | StoreCmd::RemoveTracks { tracks, .. } => {
             tracks.iter().any(|&t| is_outside(t))

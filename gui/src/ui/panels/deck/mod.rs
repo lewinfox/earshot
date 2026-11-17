@@ -33,19 +33,21 @@ mod waveform;
 
 use design::*;
 
-pub use self::cue_pane::{CUE_PANE_W, CuePane};
-pub use self::waveform::WavePanel;
+pub use self::cue_pane::CuePane;
+pub use self::waveform::{WavePanel, zoomed};
 
-use self::wave::{DeckWave, Grid, Marks};
+use self::wave::{DeckWave, Grid, Layer, Marks, Overlay};
 use crate::core::bus::{Control, DeckControl};
 use crate::core::command::{Command, DeckCmd, ViewCmd};
+use crate::core::pads::DeckPads;
 use crate::core::store::TrackCues;
 use crate::core::track::Track;
+use crate::core::view::PadMode;
 use crate::ui::panels::library::drag;
 use crate::ui::panels::{Cx, Panel};
 use crate::ui::theme::THEME;
 use crate::ui::util::{self, Camelot};
-use crate::ui::widgets::{HwButton, held, key_chip_sized};
+use crate::ui::widgets::key_chip_sized;
 
 /// Which side of the mixer a deck sits on. Its tempo fader goes on the outside edge
 /// and its controls run outwards from the mixer.
@@ -60,7 +62,6 @@ pub struct DeckInfo {
     pub title: String,
     pub artist: String,
     pub grid: Option<Arc<Beatgrid>>,
-    pub grid_source: String,
     pub generation: u64,
     pub waveform: Arc<Vec<u8>>,
     pub detail: Arc<Vec<u8>>,
@@ -79,6 +80,20 @@ pub struct DeckInfo {
     pub leader: bool,
     /// The track's hot cue labels and memory cues, from the Store.
     pub cues: Arc<TrackCues>,
+}
+
+/// A sampler slot on a deck's pads page (`core::sampler`), as the app has it this
+/// frame.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SamplePad {
+    /// The slot, 0-based.
+    pub slot: usize,
+    /// Its sound's name (`None`: the slot is empty).
+    pub name: Option<String>,
+    /// The engine has its sound, and is playing it.
+    pub loaded: bool,
+    pub playing: bool,
+    pub looping: bool,
 }
 
 /// A track asked for but still decoding. The deck shows its details from the library
@@ -118,7 +133,6 @@ impl PendingLoad {
             },
             artist: self.artist.clone(),
             grid: None,
-            grid_source: String::new(),
             generation: 0,
             waveform: Arc::default(),
             detail: Arc::default(),
@@ -137,8 +151,9 @@ impl PendingLoad {
 
 // Layout.
 const TEMPO_W: f32 = 76.0;
-/// SYNC and ★ over Q and KEY, in the header (without a tempo fader).
-const BUTTONS_W: f32 = TEMPO_W + 6.0;
+/// SYNC, ★, Q and KEYLOCK over the key shift, in the header (without a tempo fader):
+/// two lines, no taller than the title and details beside them.
+const BUTTONS_W: f32 = 2.0 * TEMPO_W + 4.0 + 6.0;
 
 /// The controls row's scale: every size in it is [`design`]'s times `k`, so the row
 /// grows and shrinks as one piece.
@@ -149,6 +164,11 @@ struct Dims {
 
 impl Dims {
     const FULL: Dims = Dims { k: 1.0 };
+
+    /// While Perform shows two decks: the row this tall at least.
+    fn full() -> Dims {
+        Dims::for_row(FULL_ROW)
+    }
 
     /// While Perform shows four decks: the row this tall at least.
     fn compact() -> Dims {
@@ -180,22 +200,30 @@ impl Dims {
     }
 
     fn jog(self) -> f32 {
-        self.px(design::JOG_D)
+        self.ring().px(design::JOG_D)
+    }
+
+    /// The jog ring's own scale: it and all in it are drawn bigger than the rest.
+    fn ring(self) -> Dims {
+        Dims {
+            k: self.k * design::JOG_SCALE,
+        }
     }
 }
 
 /// The controls row's height at its design size.
 fn row_h() -> f32 {
-    design::JOG_D.max(2.0 * design::BTN_H + design::GAP_Y)
+    (design::JOG_D * design::JOG_SCALE).max(2.0 * design::BTN_H + design::GAP_Y)
 }
 
-/// The controls row's least height while Perform shows four decks.
-const COMPACT_ROW: f32 = 60.0;
+/// The controls row's least height while Perform shows two decks, and four.
+const FULL_ROW: f32 = 150.0;
+const COMPACT_ROW: f32 = 90.0;
 
 /// A deck panel's least height, full size or while Perform shows four decks. Given
 /// more, its controls grow to fill it (the overview keeps its height).
 pub fn min_height(compact: bool) -> f32 {
-    if compact { 150.0 } else { 198.0 }
+    if compact { 180.0 } else { 264.0 }
 }
 
 /// The pages of a player's controls, picked with the tabs on their outer edge (as in
@@ -302,11 +330,16 @@ pub struct DeckUi {
     page_dims: Dims,
     /// `controller` when they were measured (the player page differs with one).
     page_controller: bool,
-    /// Room to spare beside the page box this frame, which it takes with a controller.
+    /// Room to spare beside the page box this frame, which it takes (like a flexbox
+    /// item that grows).
     page_spare: f32,
     /// The page box's width while the page shown is drawn (`None` while a hidden page
     /// is measured): what a page that fills it fills.
     page_box: Option<f32>,
+    /// How much wider than its own width the page shown is drawn, to fill the box
+    /// (1 while a page is measured): its widths and the gaps across are times this
+    /// (see [`DeckUi::wx`]); heights aren't.
+    page_sx: f32,
     /// Width of the page and CUE / play last frame, to keep a left deck's against
     /// the mixer.
     controls_w: f32,
@@ -324,11 +357,26 @@ pub struct DeckUi {
     pending: Option<PendingLoad>,
     /// A memory cue or hot cue label being typed.
     edit: Option<LabelEdit>,
+    /// Layers tools add over its waveform ([`DeckUi::set_overlay`]).
+    overlays: Vec<Overlay>,
+    /// The controller's pad mode on this deck: what its pads page shows.
+    pub pad_mode: PadMode,
+    /// Keyboard and key shift mode's pages and hot cue.
+    pub pads: DeckPads,
+    /// The controller's SHIFT is held: the pads page shows the pads' SHIFT actions.
+    pub shift_held: bool,
+    /// The sampler slots on this deck's pads (kept up to date while they show).
+    pub sample_pads: [SamplePad; crate::core::sampler::PADS],
 }
 
 impl DeckUi {
     pub fn new(id: DeckId) -> DeckUi {
         DeckUi {
+            overlays: Vec::new(),
+            pad_mode: PadMode::default(),
+            pads: DeckPads::default(),
+            shift_held: false,
+            sample_pads: Default::default(),
             id,
             shown: 0.0,
             seen_generation: u64::MAX,
@@ -344,6 +392,7 @@ impl DeckUi {
             page_controller: false,
             page_spare: 0.0,
             page_box: None,
+            page_sx: 1.0,
             controls_w: 0.0,
             side: Side::Left,
             dims: Dims::FULL,
@@ -413,6 +462,27 @@ impl DeckUi {
         out.extend(Control::Deck(self.id, c).command(value));
     }
 
+    /// A pad pressed or let go in keyboard, key shift or pad FX mode: what the deck is
+    /// told.
+    pub fn mode_pad(&mut self, mode: PadMode, pad: usize, shift: bool, down: bool) -> Vec<Command> {
+        let state = self.state;
+        self.pads
+            .press(mode, pad, shift, down, &state)
+            .into_iter()
+            .map(|c| Command::Deck(self.id, DeckCmd::Engine(c)))
+            .collect()
+    }
+
+    /// The pads change to `mode`: a pad FX pad held in the old one is let go.
+    pub fn set_pad_mode(&mut self, mode: PadMode) -> Vec<Command> {
+        self.pad_mode = mode;
+        self.pads
+            .release_fx()
+            .into_iter()
+            .map(|c| Command::Deck(self.id, DeckCmd::Engine(c)))
+            .collect()
+    }
+
     /// A deck command that isn't a registry control.
     fn send(&self, out: &mut Vec<Command>, c: DeckCmd) {
         out.push(Command::Deck(self.id, c));
@@ -456,7 +526,7 @@ impl DeckUi {
         }
     }
 
-    fn marks<'a>(&self, info: &'a DeckInfo, hotcues: &'a [Option<f64>]) -> Marks<'a> {
+    fn marks<'a>(&'a self, info: &'a DeckInfo, hotcues: &'a [Option<f64>]) -> Marks<'a> {
         Marks {
             grid: info.grid.as_deref().map_or(Grid::None, Grid::Beatgrid),
             cue: Some(self.state.cue_point),
@@ -465,7 +535,17 @@ impl DeckUi {
             memories: &info.cues.memories,
             loop_range: self.state.loop_in.zip(self.state.loop_out),
             loop_active: self.state.loop_active,
+            overlays: &self.overlays,
             ..Marks::default()
+        }
+    }
+
+    /// Put `layer` over the waveform as `key` (replacing the one there by that name),
+    /// or take `key`'s away.
+    pub fn set_overlay(&mut self, key: &'static str, layer: Option<Arc<dyn Layer>>) {
+        self.overlays.retain(|o| o.key != key);
+        if let Some(layer) = layer {
+            self.overlays.push(Overlay { key, layer });
         }
     }
 
@@ -504,7 +584,11 @@ impl DeckUi {
         // its width: the frame, the tempo fader, the controls, the tabs and the least
         // gap between.
         let fader_w = if tempo_fader { TEMPO_W + 8.0 } else { 0.0 };
-        let least = if compact { Dims::compact() } else { Dims::FULL };
+        let least = if compact {
+            Dims::compact()
+        } else {
+            Dims::full()
+        };
         let extra = (height - min_height(compact)).max(0.0);
         let mut k = Dims::for_row(least.controls_h() + extra).k;
         if self.fit.is_some_and(|(w, _)| w != width) {
@@ -610,63 +694,6 @@ impl DeckUi {
         }
     }
 
-    /// Prepare mode's player: the title and overview, then CUE / play and the BPM
-    /// ring, Q, and the page the tabs pick (hot cues, loops and beat jumps, or the
-    /// grid editor), in one row, `width` ×
-    /// `height`. Its memory cues are in the cue pane beside the waveform
-    /// ([`DeckUi::cue_pane`]).
-    pub fn show_prepare(
-        &mut self,
-        ui: &mut Ui,
-        width: f32,
-        height: f32,
-        info: &DeckInfo,
-        out: &mut Vec<Command>,
-    ) {
-        let extra = (height - min_height(false)).max(0.0);
-        self.dims = Dims::for_row(row_h() + extra);
-        self.panel(
-            ui,
-            width,
-            height,
-            info,
-            out,
-            |deck, ui, info, out, inner_h| {
-                let top = ui.cursor().min.y;
-                deck.header(ui, info, out, false);
-                let used = ui.cursor().min.y - top;
-                let overview_h =
-                    (inner_h - used - deck.dims.controls_h() - ui.spacing().item_spacing.y)
-                        .max(24.0);
-                deck.overview(ui, info, out, overview_h);
-                let d = deck.dims;
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(d.px(GAP_X), d.px(GAP_Y));
-                    deck.transport(ui, out);
-                    // Quantise beside the transport, on either page (Rekordbox has it by
-                    // the jog).
-                    let s = deck.state;
-                    let r = ui
-                        .add(
-                            HwButton::new("Q", THEME.accent, vec2(d.px(Q_W), d.px(Q_H)))
-                                .font(d.px(FONT_Q))
-                                .lit(s.quantize),
-                        )
-                        .on_hover_text("Quantise: snap cues, loops and hot cues to the beat");
-                    if held(ui, &r) == Some(true) {
-                        deck.control(out, DeckControl::Quantize, 1.0);
-                    }
-                    ui.add_space(d.px(GROUP_GAP));
-                    deck.page(ui, info, out, false);
-                    // The tabs at the row's outer edge, as on the decks.
-                    let tabs = d.px(TABS_W) + ui.spacing().item_spacing.x;
-                    ui.add_space((ui.available_width() - tabs).max(d.px(GROUP_GAP)));
-                    deck.page_tabs(ui);
-                });
-            },
-        );
-    }
-
     /// The deck number, title and times; with `buttons`, also SYNC, ★, Q and KEY (when
     /// there's no tempo fader to sit over). Right-click the title: "Show in library".
     fn header(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>, buttons: bool) {
@@ -688,8 +715,21 @@ impl DeckUi {
                     format!("{} - {}", info.title, info.artist)
                 };
                 ui.horizontal(|ui| {
+                    // The key as it sounds: moved by the key shift, which shows beside it.
                     if let Some(k) = info.key {
-                        key_chip_sized(ui, k, 15.0);
+                        let n = s.key_shift.round() as i32;
+                        key_chip_sized(ui, crate::core::keys::transpose(k, n), 15.0);
+                        if n != 0 {
+                            ui.label(
+                                RichText::new(format!("{n:+}"))
+                                    .size(11.0)
+                                    .color(THEME.muted),
+                            )
+                            .on_hover_text(format!(
+                                "Key shifted {n:+} semitones from the track's {}",
+                                util::key_name(k)
+                            ));
+                        }
                     }
                     let r = ui.add(
                         egui::Label::new(RichText::new(title).strong().size(15.0))
@@ -716,9 +756,12 @@ impl DeckUi {
             });
             if buttons {
                 ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
-                    self.sync_buttons(ui, info, out);
-                    self.mode_buttons(ui, out);
+                    ui.spacing_mut().item_spacing = vec2(4.0, 3.0);
+                    ui.horizontal(|ui| {
+                        self.sync_buttons(ui, info, out, 16.0);
+                        self.mode_buttons(ui, out, 16.0);
+                    });
+                    self.key_shift_buttons(ui, out, 2.0 * TEMPO_W + 4.0, 16.0);
                 });
             }
             ui.with_layout(Layout::top_down(Align::Max), |ui| {
@@ -759,15 +802,14 @@ impl DeckUi {
                 let tabs = d.px(TABS_W) + ui.spacing().item_spacing.x;
                 ui.add_space((ui.available_width() - group - tabs).max(d.px(GROUP_GAP)));
             };
-            // With a controller the page box takes the room to spare too, for the pads
-            // (`controls_w` stays the controls' own width, which the deck's fit goes by).
-            self.page_spare = if self.controller {
+            // The page box takes the room to spare too, and the page shown stretches
+            // across it (`controls_w` stays the controls' own width, which the deck's
+            // fit goes by).
+            self.page_spare = {
                 let tabs = d.px(TABS_W) + ui.spacing().item_spacing.x;
                 (ui.available_width() - tabs - self.controls_w - d.px(GROUP_GAP))
                     .max(0.0)
                     .floor()
-            } else {
-                0.0
             };
             let spare = self.page_spare;
             if mirrored {
@@ -826,6 +868,11 @@ impl DeckUi {
         let size = vec2(width + self.page_spare, h);
         let page = self.page;
         self.page_box = Some(size.x);
+        // Stretched from its own width to the box's (once that's known).
+        self.page_sx = self.page_widths[page as usize]
+            .filter(|&w| w > 0.0)
+            .map_or(1.0, |w| (size.x / w).max(1.0));
+        let sx = self.page_sx;
         let used = ui
             .allocate_ui_with_layout(size, Layout::left_to_right(Align::Min), |ui| {
                 ui.set_min_size(size);
@@ -834,16 +881,19 @@ impl DeckUi {
             })
             .inner;
         self.page_box = None;
-        // The box's own share of it: what the page needs, without the room to spare.
-        let used = if used > width {
-            width.max(used - self.page_spare)
-        } else {
-            used
-        };
-        // Never narrower than measured before (a hidden measure can come out a little
-        // wider than the page drawn): the box mustn't shrink under the tabs.
+        self.page_sx = 1.0;
+        // Its own width, unstretched. Never narrower than measured before (a hidden
+        // measure can come out a little wider than the page drawn): the box mustn't
+        // shrink under the tabs.
+        let used = (used / sx).min(width);
         let known = self.page_widths[page as usize].unwrap_or(0.0);
         self.page_widths[page as usize] = Some(known.max(used));
+    }
+
+    /// A width on the page shown: a design size, scaled, and stretched to fill the
+    /// page box (see `page_sx`).
+    fn wx(&self, v: f32) -> f32 {
+        self.dims.px(v) * self.page_sx
     }
 
     /// One page's controls; returns how wide they are.
@@ -856,22 +906,23 @@ impl DeckUi {
         page: Page,
     ) -> f32 {
         let d = self.dims;
-        ui.spacing_mut().item_spacing = vec2(d.px(GAP_X), d.px(GAP_Y));
+        ui.spacing_mut().item_spacing = vec2(self.wx(GAP_X), d.px(GAP_Y));
         let start = ui.cursor().min.x;
+        let group = self.wx(GROUP_GAP);
         match page {
             Page::Player if self.controller => self.controller_pads(ui, info, out),
             Page::Player => {
                 if mirrored {
                     self.jumps(ui, info, out);
-                    ui.add_space(d.px(GROUP_GAP));
+                    ui.add_space(group);
                     self.loops(ui, info, out);
-                    ui.add_space(d.px(GROUP_GAP));
+                    ui.add_space(group);
                     self.pads(ui, info, out);
                 } else {
                     self.pads(ui, info, out);
-                    ui.add_space(d.px(GROUP_GAP));
+                    ui.add_space(group);
                     self.loops(ui, info, out);
-                    ui.add_space(d.px(GROUP_GAP));
+                    ui.add_space(group);
                     self.jumps(ui, info, out);
                 }
             }
@@ -985,6 +1036,7 @@ pub struct DeckLayout {
 }
 
 /// A Perform deck.
+
 pub struct DeckPanel<'a> {
     pub deck: &'a mut DeckUi,
     pub layout: DeckLayout,
@@ -995,22 +1047,6 @@ impl Panel for DeckPanel<'_> {
         crate::ui::theme::normal_text(ui);
         let info = cx.engine.deck(self.deck.id);
         self.deck.show(ui, self.layout, info, cx.out);
-    }
-}
-
-/// Prepare's player controls, under its waveform in every tool, `width` × `height`.
-pub struct PreparePlayer<'a> {
-    pub deck: &'a mut DeckUi,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl Panel for PreparePlayer<'_> {
-    fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        crate::ui::theme::normal_text(ui);
-        let info = cx.engine.deck(self.deck.id);
-        self.deck
-            .show_prepare(ui, self.width, self.height, info, cx.out);
     }
 }
 
@@ -1037,7 +1073,6 @@ mod tests {
             title: title.into(),
             artist: String::new(),
             grid: None,
-            grid_source: String::new(),
             generation: 0,
             waveform: Arc::default(),
             detail: Arc::default(),
@@ -1062,6 +1097,7 @@ mod tests {
             end: None,
             label: Some("Old".into()),
             color: None,
+            active: false,
         };
         let info = info(
             "Track",
@@ -1075,7 +1111,7 @@ mod tests {
             .with_step_dt(1.0 / 60.0)
             .build_ui_state(
                 move |ui, (deck, out): &mut (DeckUi, Vec<Command>)| deck.cue_pane(ui, &info, out),
-                (DeckUi::new(DeckId::PREPARE), vec![]),
+                (DeckUi::new(DeckId::new(0).unwrap()), vec![]),
             );
         h.run();
         let recalls = |out: &[Command]| {

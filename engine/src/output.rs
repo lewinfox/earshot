@@ -13,11 +13,14 @@ use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig, SupportedBufferS
 
 use crate::engine::{PhonesRoute, Renderer};
 use crate::phones_out::Aligner;
+use crate::realtime::Overrun;
 use crate::snapshot::Stats;
 
 #[derive(Debug, Clone, Default)]
 pub struct OutputOptions {
     /// Case-insensitive substring of the device name or id. `None` = default device.
+    /// An id starting `alsa:` (`alsa:hw:CARD=DDJ400,DEV=0`) opens that ALSA device
+    /// directly, bypassing the sound server: a controller's own sound card.
     pub device: Option<String>,
     /// Requested buffer size in frames. `None` = backend default.
     pub buffer_frames: Option<u32>,
@@ -26,6 +29,9 @@ pub struct OutputOptions {
     /// The headphones on a device of their own (like [`OutputOptions::device`]).
     /// Only under PipeWire ([`can_split`]); `None`: on the master's device.
     pub phones_device: Option<String>,
+    /// No output at all: audio is rendered only when [`crate::Engine::advance`] asks
+    /// for it, so many frames at a time (tests that mustn't depend on timing).
+    pub stepped: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -157,6 +163,8 @@ pub fn start(
     if opts.null {
         return Ok(start_null(opts.buffer_frames.unwrap_or(256), make_renderer));
     }
+    // The streams' threads run at real-time priority: survive running past its limit.
+    crate::realtime::install();
     let (info_tx, info_rx) = mpsc::channel();
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let opts2 = opts.clone();
@@ -168,10 +176,15 @@ pub fn start(
                 Ok((streams, info)) => {
                     for s in &streams {
                         if let Err(e) = s.play() {
+                            eprintln!("[init] audio: the stream didn't start: {e}");
                             let _ = info_tx.send(Err(e.to_string()));
                             return;
                         }
                     }
+                    eprintln!(
+                        "[init] audio: playing on {} ({} Hz, {} channel(s), {})",
+                        info.device, info.sample_rate, info.channels, info.sample_format
+                    );
                     let _ = info_tx.send(Ok(info));
                     let _ = stop_rx.recv(); // park until the handle is dropped
                     drop(streams);
@@ -190,6 +203,16 @@ pub fn start(
         },
         info,
     ))
+}
+
+#[cfg(target_os = "linux")]
+fn alsa_host() -> Result<cpal::Host, String> {
+    cpal::host_from_id(cpal::HostId::Alsa).map_err(|e| e.to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn alsa_host() -> Result<cpal::Host, String> {
+    Err("ALSA devices are only on Linux".into())
 }
 
 /// The device asked for (by id, or part of its name), or the default.
@@ -221,23 +244,71 @@ fn device_name(d: &cpal::Device) -> String {
         .unwrap_or_else(|_| "unknown".into())
 }
 
+/// Whether `device` names an ALSA device to open directly ([`OutputOptions::device`]).
+pub fn is_direct(device: Option<&str>) -> bool {
+    device.is_some_and(|d| d.starts_with("alsa:"))
+}
+
+/// A step of opening the sound card, for the log (`[init]`), with the time since
+/// the open began.
+fn step(t0: std::time::Instant, what: &str) {
+    eprintln!(
+        "[init] audio +{:.1} ms: {what}",
+        t0.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
 fn build_stream(
     opts: &OutputOptions,
     stats: Arc<Stats>,
     make_renderer: impl FnOnce(u32) -> Renderer + Send + 'static,
 ) -> Result<(Vec<cpal::Stream>, OutputInfo), String> {
-    let host = cpal::default_host();
-    let device = find_device(&host, opts.device.as_deref())?;
+    let t0 = std::time::Instant::now();
+    let direct = is_direct(opts.device.as_deref());
+    step(
+        t0,
+        &format!(
+            "opening {:?} ({}), buffer {:?}, headphones device {:?}",
+            opts.device,
+            if direct {
+                "ALSA directly"
+            } else {
+                "the default host"
+            },
+            opts.buffer_frames,
+            opts.phones_device
+        ),
+    );
+    let host = if direct {
+        alsa_host()?
+    } else {
+        cpal::default_host()
+    };
+    let device = find_device(&host, opts.device.as_deref())
+        .inspect_err(|e| step(t0, &format!("no device: {e}")))?;
     let name = device_name(&device);
+    step(
+        t0,
+        &format!(
+            "found device {name:?} (id {:?})",
+            device.id().map(|i| i.to_string())
+        ),
+    );
 
     // Prefer 4+ channels (master + headphones), 44.1/48 kHz, float samples. Of the
     // rates, the one the system runs at (PipeWire's 48 kHz, CoreAudio's or Windows'
     // current rate): any other is converted on the way, which costs time and smooth
     // timing.
-    let native = if pipewire_running() {
+    let native = if pipewire_running() && !direct {
         Some(PIPEWIRE_RATE)
     } else {
-        device.default_output_config().ok().map(|c| c.sample_rate())
+        // Opens the card to ask (and closes it again).
+        let c = device.default_output_config();
+        step(
+            t0,
+            &format!("asked its default setup (an open and close): {c:?}"),
+        );
+        c.ok().map(|c| c.sample_rate())
     };
     let rate_score = |rate: u32| match (Some(rate) == native, rate) {
         (true, _) => 0,
@@ -251,10 +322,35 @@ fn build_stream(
         _ => 9,
     };
     let mut best: Option<(i32, cpal::SupportedStreamConfig)> = None;
-    for range in device
+    // Opens the card to ask (and closes it again).
+    let ranges: Vec<_> = device
         .supported_output_configs()
-        .map_err(|e| e.to_string())?
-    {
+        .map_err(|e| {
+            step(t0, &format!("couldn't list its setups: {e}"));
+            e.to_string()
+        })?
+        .collect();
+    step(
+        t0,
+        &format!(
+            "listed its setups (an open and close): {} of them",
+            ranges.len()
+        ),
+    );
+    for r in &ranges {
+        step(
+            t0,
+            &format!(
+                "  can do {:?}, {} channel(s), {}-{} Hz, buffer {:?}",
+                r.sample_format(),
+                r.channels(),
+                r.min_sample_rate(),
+                r.max_sample_rate(),
+                r.buffer_size()
+            ),
+        );
+    }
+    for range in ranges {
         if rank(range.sample_format()) == 9 {
             continue;
         }
@@ -294,6 +390,17 @@ fn build_stream(
         phones: None,
         phones_error: None,
     };
+    step(
+        t0,
+        &format!(
+            "chose {:?}, {} channel(s), {} Hz, buffer {:?} (asked {:?})",
+            supported.sample_format(),
+            config.channels,
+            config.sample_rate,
+            config.buffer_size,
+            opts.buffer_frames
+        ),
+    );
     let mut renderer = make_renderer(config.sample_rate);
     // The headphones' device first: if it can't be had, they stay on the master's.
     let mut streams = vec![];
@@ -310,12 +417,15 @@ fn build_stream(
             }
         }
     }
+    step(t0, "opening the stream (the open that plays)");
     let stream = match supported.sample_format() {
         SampleFormat::F32 => build::<f32>(&device, config, renderer, stats),
         SampleFormat::I32 => build::<i32>(&device, config, renderer, stats),
         SampleFormat::I16 => build::<i16>(&device, config, renderer, stats),
         f => return Err(format!("unsupported sample format {f:?}")),
-    }?;
+    }
+    .inspect_err(|e| step(t0, &format!("the stream didn't open: {e}")))?;
+    step(t0, "stream open");
     // The master's stream first, so it's the one that starts the engine.
     streams.insert(0, stream);
     Ok((streams, info))
@@ -358,11 +468,17 @@ fn phones_stream(
     let (tx, rx) = rtrb::RingBuffer::new(master.sample_rate as usize * 2);
     let route = Arc::new(PhonesRoute::default());
     let mut aligner = Aligner::new(rx, chunk, route.clone(), stats.clone());
+    let mut overrun = Overrun::new();
+    let rt_stats = stats.clone();
     let err_stats = stats;
     let stream = device
         .build_output_stream(
             config,
             move |data: &mut [f32], _| {
+                // Up against the real-time limit (either stream's thread): a break.
+                if overrun.check() {
+                    rt_stats.overruns.fetch_add(1, Relaxed);
+                }
                 crate::dsp::flush_denormals();
                 aligner.process(data, channels as usize)
             },
@@ -392,11 +508,19 @@ where
     // Conversion scratch, allocated up front; grows only if the backend hands us a
     // bigger buffer than it promised (which would be an allocation on the audio thread).
     let mut scratch = vec![0f32; 8192 * channels];
+    let mut overrun = Overrun::new();
     let err_stats = stats.clone();
     device
         .build_output_stream(
             config,
             move |data: &mut [T], _| {
+                // Up against the real-time limit: this thread takes a moment's break,
+                // which keeps it real-time and the app alive. Only atomics and that:
+                // the app does the logging when it sees the count.
+                if overrun.check() {
+                    stats.overruns.fetch_add(1, Relaxed);
+                    renderer.overran();
+                }
                 crate::dsp::flush_denormals();
                 if scratch.len() < data.len() {
                     scratch.resize(data.len(), 0.0);
@@ -409,7 +533,11 @@ where
             },
             move |err| {
                 if err.kind() == cpal::ErrorKind::Xrun {
-                    err_stats.xruns.fetch_add(1, Relaxed);
+                    // Logged, not only counted: the first few, then every hundredth.
+                    let n = err_stats.xruns.fetch_add(1, Relaxed) + 1;
+                    if n <= 10 || n % 100 == 0 {
+                        eprintln!("audio: xrun {n} (the sound card ran short)");
+                    }
                 } else {
                     eprintln!("audio stream error: {err}");
                 }
@@ -419,16 +547,34 @@ where
         .map_err(|e| e.to_string())
 }
 
+/// The rate the null and stepped outputs run at.
+pub(crate) const NULL_RATE: u32 = 44_100;
+
+/// What a stepped engine says its output is ([`OutputOptions::stepped`]).
+pub(crate) fn stepped_info(frames: u32) -> OutputInfo {
+    OutputInfo {
+        device: "stepped (no audio device)".into(),
+        sample_rate: NULL_RATE,
+        channels: 4,
+        buffer_frames: Some(frames),
+        sample_format: "F32".into(),
+        null: true,
+        phones: None,
+        phones_error: None,
+    }
+}
+
 fn start_null(
     frames: u32,
     make_renderer: impl FnOnce(u32) -> Renderer + Send + 'static,
 ) -> (OutputHandle, OutputInfo) {
-    const RATE: u32 = 44_100;
+    const RATE: u32 = NULL_RATE;
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let thread = thread::Builder::new()
         .name("earshot-null-audio".into())
         .spawn(move || {
             let mut renderer = make_renderer(RATE);
+            renderer.set_untimed();
             let mut buf = vec![0f32; frames as usize * 4];
             let period = Duration::from_secs_f64(frames as f64 / RATE as f64);
             let mut next = Instant::now();

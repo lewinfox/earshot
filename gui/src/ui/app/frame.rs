@@ -12,7 +12,6 @@ impl EarshotApp {
             title: s.title.clone(),
             artist: s.artist.clone(),
             grid: s.grid.clone(),
-            grid_source: s.grid_source.clone(),
             generation: s.generation,
             waveform: s.waveform.clone(),
             detail: s.detail.clone(),
@@ -45,7 +44,11 @@ impl EarshotApp {
             self.panels.decks[id.index()].stem_mode = self.prefs.stem_mode;
             self.panels.decks[id.index()].controller = self.prefs.controller();
             self.panels.decks[id.index()].active =
-                self.prefs.four_decks && self.prefs.active_decks().contains(&id);
+                self.prefs.four_decks() && self.prefs.active_decks().contains(&id);
+            // Only the pads page in sampler mode shows them.
+            if self.panels.decks[id.index()].pad_mode == crate::core::view::PadMode::Sampler {
+                self.panels.decks[id.index()].sample_pads = self.sample_pads(id);
+            }
             self.panels.decks[id.index()].tick(ctx, sh, &info);
             self.frame.decks[id.index()] = Some(info);
         }
@@ -56,7 +59,9 @@ impl EarshotApp {
     /// decoding), a waveform being scrubbed, a track loading or being analysed.
     pub(super) fn moving(&self) -> bool {
         let playing = self.frame.snap.as_ref().is_some_and(|s| {
-            s.live().iter().any(|d| d.playing) || s.prepare.playing || s.preview.playing
+            s.live().iter().any(|d| d.playing)
+                || s.preview.playing
+                || s.sampler.iter().any(|v| v.playing)
         });
         playing
             || self
@@ -71,14 +76,116 @@ impl EarshotApp {
     /// Otherwise the next frame comes with input, or an event from another thread
     /// (the sink asks for a repaint with each).
     pub(super) fn schedule_repaint(&mut self, ctx: &egui::Context) {
-        let now = Instant::now();
+        // By the frames' clock, as egui's own animations are.
+        let now = ctx.input(|i| i.time);
         if self.moving() {
-            self.settle_until = Some(now + SETTLE);
+            self.settle_until = Some(now + SETTLE.as_secs_f64());
         }
         match self.settle_until {
             Some(t) if now < t => ctx.request_repaint(),
             _ => self.settle_until = None,
         }
+    }
+
+    /// What's being done about a machine that can't keep up, for the log and the top
+    /// bar. The audio comes first, and nothing is taken from the sound (keylock and
+    /// the effects stay as they are): what gives way is the work in the background,
+    /// analysis and stems. The audio thread can't write logs or show anything: it
+    /// sets flags, and this notices when they change.
+    pub(super) fn watch_strain(&mut self) {
+        use crate::ui::panels::status::Alert;
+        let (overruns, behind) = self.monitor.as_ref().map_or((0, false), |m| {
+            let s = m.stats();
+            (s.overruns.load(Relaxed), s.behind.load(Relaxed))
+        });
+        if overruns > self.hud.overruns {
+            eprintln!(
+                "audio: ran up against the real-time limit (SIGXCPU), {overruns} time(s) \
+                 now: making the sound is taking longer than the sound lasts. The audio \
+                 thread took a moment's break to stay real-time"
+            );
+        }
+        // (A new engine counts from nothing.)
+        self.hud.overruns = overruns;
+        if behind != self.hud.behind {
+            self.hud.behind = behind;
+            if behind {
+                eprintln!(
+                    "audio: making the sound is using most of the time there is: \
+                     background work is held back"
+                );
+                self.notify(
+                    notice::Level::Warning,
+                    "The computer is struggling to keep up with the audio: analysis and \
+                     stems are on hold",
+                );
+            } else {
+                eprintln!("audio: there's room again");
+            }
+        }
+        // The audio itself is behind: whatever stems are being worked out stop.
+        if behind && self.stems.cancel_all() > 0 {
+            eprintln!("stems: stopped, as the audio can't keep up");
+        }
+        if let Some(power) = crate::core::power::latest() {
+            self.hud.power = power;
+            self.hud.memory_short = crate::core::power::memory_short();
+        }
+        // Short of resources: full analysis (the worker and its model) waits in its
+        // queue, and tracks get the quick grid finder's grid meanwhile; stems aren't
+        // started (`dispatch`).
+        let short = behind || self.hud.power.is_some() || self.hud.memory_short;
+        if short != self.hud.low_resource {
+            self.hud.low_resource = short;
+            self.lib.analyser.set_held(short);
+            if short {
+                eprintln!(
+                    "analysis: the machine is short of resources: full analysis waits, \
+                     and tracks get a quick grid meanwhile"
+                );
+            } else {
+                eprintln!("analysis: there's room again: full analysis carries on");
+            }
+        }
+        let mut alerts = vec![];
+        if behind {
+            alerts.push(Alert {
+                text: "⚠ audio struggling".into(),
+                tip: "Making the sound is using most of the time there is, so it may drop \
+                      out. Analysis and stems are on hold to leave it all the room there \
+                      is; the sound itself is left as it is."
+                    .into(),
+                serious: true,
+            });
+        }
+        if let Some(p) = &self.hud.power {
+            alerts.push(Alert {
+                text: format!("⚠ {}", p.text),
+                tip: p.detail.clone(),
+                serious: false,
+            });
+        }
+        if self.hud.memory_short {
+            alerts.push(Alert {
+                text: "⚠ low memory".into(),
+                tip: "Less than 1.5 GB of memory is left: not enough to start the \
+                      analysis worker and its model."
+                    .into(),
+                serious: false,
+            });
+        }
+        if short {
+            alerts.push(Alert {
+                text: "background work on hold".into(),
+                tip: "The computer is short of resources, so the audio gets what there \
+                      is. Full analysis is waiting: tracks get a quick grid for now \
+                      (amber in the library), and what's queued runs by itself once \
+                      there's room again. Stems can't be started."
+                    .into(),
+                serious: false,
+            });
+        }
+        self.hud.alerts = alerts;
     }
 
     pub(super) fn tick_hud(&mut self, ctx: &egui::Context) {
@@ -101,6 +208,7 @@ impl EarshotApp {
             return;
         }
         self.hud.last = Some(now);
+        self.watch_strain();
         let mut dts: Vec<f32> = self.hud.frames.iter().map(|f| f.1).collect();
         if dts.is_empty() {
             return;

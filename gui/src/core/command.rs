@@ -36,6 +36,9 @@ pub enum Command {
     Audio(AudioCmd),
     /// The headphone preview of a library track.
     Preview(PreviewCmd),
+    /// The sampler's slots (`core::sampler`): playing and stopping go straight to
+    /// the engine; the UI runs the rest (it keeps the bank).
+    Sampler(super::sampler::SamplerCmd),
     View(ViewCmd),
     App(AppCmd),
     /// Library tracks: load, analyse, library folders. Run by the UI, like `View`.
@@ -52,6 +55,8 @@ pub enum Command {
     TempoLock(TempoLockCmd),
     /// The stems tool (`Stems::run`). Run by the UI, like `Library`.
     Stems(crate::core::stems::StemsCmd),
+    /// The Trim tool. Run by the UI, like `Library`.
+    Trim(crate::core::trim::TrimCmd),
     /// Metadata, ratings, tags and collection edits, which can be undone. Run by the
     /// UI (it keeps the undo history), like `Library`.
     Edit(EditCmd),
@@ -68,9 +73,8 @@ pub enum DeckCmd {
     Jump {
         forward: bool,
     },
+    /// The size the deck's beat jump buttons (and `beat_jump size`) jump by.
     SetJumpSize(f64),
-    /// The size the loop button makes.
-    SetLoopSize(f64),
     /// The loop button: end the loop (whatever its size by now), or start one of the
     /// deck's loop size.
     LoopButton,
@@ -88,8 +92,22 @@ pub enum DeckCmd {
     SaveMemory,
     /// Go to a memory cue (it becomes the cue point) or start a memory loop.
     RecallMemory(Memory),
+    /// CUE/LOOP CALL: go to the memory cue before (`forward` false) or after the
+    /// playhead; while looping, halve (double) the loop instead. The UI finds the cue
+    /// (it has the list).
+    CallMemory {
+        forward: bool,
+    },
+    /// Delete the memory cue or loop just called: the one at the cue point (or the
+    /// loop playing). The UI finds it.
+    DeleteCalledMemory,
     /// Forget one of the loaded track's memory cues.
     DeleteMemory(i64),
+    /// Make one of the loaded track's memory loops its active loop, or not.
+    SetLoopActive(i64, bool),
+    /// SHIFT + RELOOP/EXIT: switch the active loop on or off for the memory loop just
+    /// called (the one playing), or else the one nearest the playhead. The UI finds it.
+    ToggleActiveLoop,
     /// Name one of the loaded track's memory cues (`None` clears it).
     SetMemoryLabel(i64, Option<String>),
     /// Colour one of the loaded track's memory cues (0xRRGGBB; `None`: the default).
@@ -102,6 +120,10 @@ pub enum DeckCmd {
 pub enum MixerCmd {
     /// The deck synced decks follow (`None`: each picks one).
     SyncLeader(Option<DeckId>),
+    /// Master cue: the master mix on the headphones' cue side.
+    MasterCue(earshot_engine::Set),
+    /// The headphones carry only the cued decks (the controller blends them).
+    PhonesCueOnly(bool),
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +154,21 @@ pub use super::view::ViewCmd;
 pub enum AppCmd {
     /// Close and reopen every MIDI input, e.g. after plugging the controller in.
     ReconnectMidi,
+    /// Use mapping `mapping` (a `controllers::MappingId::key`) for the MIDI device
+    /// `device` (a `controllers::device_key`) from now on, and remember it.
+    UseMapping { device: String, mapping: String },
+    /// Make PipeWire let go of the controller's sound card (turn its profile off),
+    /// and play to the card.
+    TakeControllerAudio,
+    /// A display-only knob on the controller moved (it acts on the sound itself):
+    /// show `control` at `value`, and keep earshot's own at its default.
+    ControllerShows {
+        control: super::bus::Control,
+        value: f64,
+    },
+    /// A tap on effect unit `unit`'s TAP button, at `at` (when the message came in):
+    /// from the second tap on, the unit runs on the tapped tempo.
+    FxTap { unit: usize, at: std::time::Instant },
     /// Forget the analysis failures counted so far.
     DismissFailures,
     /// Stop all background analysis (a deck's track carries on).
@@ -144,8 +181,14 @@ pub enum AppCmd {
     StemsCacheGb(f64),
     /// What hot cues do on a stopped deck (and save it).
     HotcueMode(earshot_engine::HotcueMode),
+    /// The crossfader's curve (and save it).
+    XfCurve(earshot_engine::XfCurve),
     /// Cue newly loaded tracks on their first beat, else at their start (and save it).
     CueFirstBeat(bool),
+    /// Let a track load onto a playing deck, else refuse it (and save it).
+    LoadWhilePlaying(bool),
+    /// Quick-analyse tracks new to the library, or leave them unanalysed (and save it).
+    QuickAnalyseNew(bool),
     /// Read the user's keymap file again (the built-in one if there's none).
     ReloadKeymap,
     /// Count the tracks with stale analysis (answered with `Event::Stale`).
@@ -172,25 +215,58 @@ pub fn direct(cmd: Command) -> Result<EngineCommand, Command> {
         Command::Deck(deck, DeckCmd::Engine(c)) => Ok(EngineCommand::Deck(deck, c)),
         Command::Param(p, v) => Ok(EngineCommand::Param(p, v)),
         Command::Fx(unit, cmd) => Ok(EngineCommand::Fx { unit, cmd }),
+        Command::Mixer(MixerCmd::MasterCue(s)) => Ok(EngineCommand::MasterCue(s)),
+        Command::Mixer(MixerCmd::PhonesCueOnly(on)) => Ok(EngineCommand::PhonesCueOnly(on)),
+        Command::Sampler(c) => c.direct().ok_or(Command::Sampler(c)),
         other => Err(other),
     }
 }
 
 /// A thread's own command ring into the engine (see `Engine::sender`). The lock is only
 /// shared with an audio restart, which puts the new engine's ring in.
+///
+/// While there's no engine (before audio starts, or while it reopens) commands wait,
+/// the latest [`LANE_WAITING`] of them, and go to the next engine: a controller tells
+/// earshot where its knobs are before audio starts.
 #[derive(Clone, Default)]
-pub struct Lane(Arc<Mutex<Option<CommandSender>>>);
+pub struct Lane(Arc<Mutex<LaneInner>>);
+
+#[derive(Default)]
+struct LaneInner {
+    sender: Option<CommandSender>,
+    waiting: std::collections::VecDeque<EngineCommand>,
+}
+
+/// How many commands a [`Lane`] keeps while there's no engine.
+pub const LANE_WAITING: usize = 512;
 
 impl Lane {
     pub fn send(&self, cmd: EngineCommand) -> Result<(), String> {
-        match self.0.lock().unwrap().as_mut() {
+        let mut l = self.0.lock().unwrap();
+        match l.sender.as_mut() {
             Some(s) => s.send(cmd),
-            None => Err("audio is not running".into()),
+            None => {
+                if l.waiting.len() == LANE_WAITING {
+                    l.waiting.pop_front();
+                }
+                l.waiting.push_back(cmd);
+                Ok(())
+            }
         }
     }
 
+    /// The engine's ring (`None`: it's gone); what waited goes to a new one.
     pub fn set(&self, sender: Option<CommandSender>) {
-        *self.0.lock().unwrap() = sender;
+        let mut l = self.0.lock().unwrap();
+        l.sender = sender;
+        let LaneInner { sender, waiting } = &mut *l;
+        if let Some(s) = sender {
+            for cmd in waiting.drain(..) {
+                if let Err(e) = s.send(cmd) {
+                    eprintln!("MIDI: {e}");
+                }
+            }
+        }
     }
 }
 
@@ -234,14 +310,20 @@ pub fn dispatch(player: &Player, store: &Store, cmd: Command) -> Result<Option<C
     let session = inner.session(deck);
     let (jump_size, loop_size, track) = (session.jump_size, session.loop_size, session.track_id);
     let grid = session.grid.clone();
+    // CUE/LOOP CALL scales the loop while looping; otherwise the UI finds the cue.
+    let cmd = match cmd {
+        DeckCmd::CallMemory { forward } if looping => {
+            DeckCmd::ScaleLoop(if forward { 2.0 } else { 0.5 })
+        }
+        c => c,
+    };
     match cmd {
         DeckCmd::Jump { forward } => {
             let beats = if forward { jump_size } else { -jump_size };
             inner.send(engine(EngineCmd::BeatJump(beats)))?;
         }
         DeckCmd::SetJumpSize(beats) if beats > 0.0 => inner.session_mut(deck).jump_size = beats,
-        DeckCmd::SetLoopSize(beats) if beats > 0.0 => inner.session_mut(deck).loop_size = beats,
-        DeckCmd::SetJumpSize(_) | DeckCmd::SetLoopSize(_) => {}
+        DeckCmd::SetJumpSize(_) => {}
         DeckCmd::LoopButton => {
             let c = if looping {
                 EngineCmd::Reloop(Set::Off)
@@ -323,12 +405,22 @@ pub fn dispatch(player: &Player, store: &Store, cmd: Command) -> Result<Option<C
                 store.send(StoreCmd::SetMemoryColor { track, id, color });
             }
         }
+        DeckCmd::SetLoopActive(id, active) => {
+            if let Some(track) = track {
+                store.send(StoreCmd::SetLoopActive { track, id, active });
+            }
+        }
         DeckCmd::SetHotcueLabel(slot, label) => {
             if let Some(track) = track {
                 store.send(StoreCmd::SetHotcueLabel { track, slot, label });
             }
         }
-        DeckCmd::Load(_) => return Ok(Some(Command::Deck(deck, cmd))),
+        DeckCmd::Load(_)
+        | DeckCmd::CallMemory { .. }
+        | DeckCmd::DeleteCalledMemory
+        | DeckCmd::ToggleActiveLoop => {
+            return Ok(Some(Command::Deck(deck, cmd)));
+        }
         DeckCmd::Engine(_) | DeckCmd::Grid(_) => unreachable!("handled above"),
     }
     Ok(None)
@@ -472,6 +564,12 @@ impl From<ExportCmd> for Command {
 impl From<ExternalCmd> for Command {
     fn from(c: ExternalCmd) -> Command {
         Command::External(c)
+    }
+}
+
+impl From<crate::core::trim::TrimCmd> for Command {
+    fn from(c: crate::core::trim::TrimCmd) -> Command {
+        Command::Trim(c)
     }
 }
 

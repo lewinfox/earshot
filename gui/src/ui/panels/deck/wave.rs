@@ -124,11 +124,9 @@ pub struct Marks<'a> {
     pub memories: &'a [Memory],
     pub loop_range: Option<(f64, f64)>,
     pub loop_active: bool,
-    /// The stretch a separate detail view shows, outlined on the overview (Tempo lock's).
-    pub window: Option<(f64, f64)>,
-    /// The playhead is for audio that isn't the one playing (Tempo lock's other
-    /// version): drawn faint.
-    pub idle: bool,
+    /// Extra layers a tool puts on this player's timeline, over the grid and cues and
+    /// under the playhead.
+    pub overlays: &'a [Overlay],
 }
 
 /// The beats drawn over a waveform.
@@ -138,12 +136,6 @@ pub enum Grid<'a> {
     None,
     /// A deck's grid.
     Beatgrid(&'a Beatgrid),
-    /// Beats as found (Tempo lock's), each a bar's 1 or not. Bars count from 1 at the
-    /// first.
-    Beats {
-        times: &'a [f64],
-        downbeats: &'a [bool],
-    },
 }
 
 impl Grid<'_> {
@@ -152,18 +144,14 @@ impl Grid<'_> {
         match *self {
             Grid::None => Vec::new(),
             Grid::Beatgrid(g) => beats(g, t_lo, t_hi).collect(),
-            Grid::Beats { times, downbeats } => listed_beats(times, downbeats, t_lo, t_hi),
         }
     }
 
-    /// Seconds per beat, near `beats` (some of this grid's).
-    fn beat_secs(&self, beats: &[(f64, Option<i64>)]) -> f64 {
+    /// Seconds per beat.
+    fn beat_secs(&self) -> f64 {
         match *self {
             Grid::Beatgrid(g) => 60.0 / g.mean_bpm(),
-            _ if beats.len() > 1 => {
-                (beats[beats.len() - 1].0 - beats[0].0) / (beats.len() - 1) as f64
-            }
-            _ => f64::INFINITY,
+            Grid::None => f64::INFINITY,
         }
     }
 }
@@ -185,70 +173,65 @@ fn beats(g: &Beatgrid, t_lo: f64, t_hi: f64) -> impl Iterator<Item = (f64, Optio
     })
 }
 
-/// The beats in `times` from `t_lo` to `t_hi`, numbered as [`Grid::Beats`] numbers bars.
-fn listed_beats(
-    times: &[f64],
-    downbeats: &[bool],
-    t_lo: f64,
-    t_hi: f64,
-) -> Vec<(f64, Option<i64>)> {
-    let (i0, i1) = (
-        times.partition_point(|&t| t < t_lo),
-        times.partition_point(|&t| t <= t_hi),
-    );
-    let down = |i: usize| downbeats.get(i).copied().unwrap_or(false);
-    let mut bar = (0..i0).filter(|&i| down(i)).count() as i64;
-    (i0..i1)
-        .map(|i| {
-            let n = down(i).then(|| {
-                bar += 1;
-                bar
-            });
-            (times[i], n)
-        })
-        .collect()
+// ---- layers -----------------------------------------------------------------------------
+
+/// Where a layer draws: `view` (track seconds) across `rect`, the playhead at `pos`.
+pub struct Timeline<'a> {
+    pub painter: &'a Painter,
+    pub rect: Rect,
+    pub view: (f64, f64),
+    pub pos: f64,
 }
 
-/// Draw the scrolling waveform: `pos` at the centre, `half` track seconds each side.
-pub fn scrolling(
-    painter: &Painter,
-    rect: Rect,
-    wave: Option<&DeckWave>,
-    pos: f64,
-    half: f64,
-    marks: &Marks,
-) {
-    window(painter, rect, wave, (pos - half, pos + half), pos, marks);
+impl Timeline<'_> {
+    /// x of track time `t`.
+    pub fn x_of(&self, t: f64) -> f32 {
+        let (t_lo, t_hi) = self.view;
+        self.rect.left() + ((t - t_lo) / (t_hi - t_lo)) as f32 * self.rect.width()
+    }
+
+    /// Track seconds per point across.
+    pub fn spp(&self) -> f64 {
+        (self.view.1 - self.view.0) / self.rect.width() as f64
+    }
+
+    fn shows(&self, t: f64) -> bool {
+        (self.view.0..=self.view.1).contains(&t)
+    }
 }
 
-/// Draw the waveform from `view.0` to `view.1` (track seconds) across `rect`, with the
-/// playhead at `pos` (anywhere, even off either edge): what's before it is dimmed as
-/// played.
-pub fn window(
-    painter: &Painter,
-    rect: Rect,
-    wave: Option<&DeckWave>,
-    view: (f64, f64),
-    pos: f64,
-    marks: &Marks,
-) {
-    painter.rect_filled(rect, 4.0, THEME.wave_bg);
-    let w = rect.width();
-    let (t_lo, t_hi) = view;
-    let spp = (t_hi - t_lo) / w as f64; // track seconds per point
-    let x_of = |t: f64| rect.left() + ((t - t_lo) / spp) as f32;
-    let cx = x_of(pos);
+/// One thing drawn on a player's timeline. A player's waveform is a stack of these,
+/// bottom up: the loop's shade, the waveform, the beatgrid, memory cues, cues and hot
+/// cues, any [`Overlay`]s, then the playhead.
+pub trait Layer {
+    fn draw(&self, tl: &Timeline);
+}
 
-    if let Some((a, b)) = marks.loop_range {
+/// A layer a tool adds to a player ([`super::DeckUi::set_overlay`]), by name, so the
+/// tool can replace or remove its own.
+#[derive(Clone)]
+pub struct Overlay {
+    pub key: &'static str,
+    pub layer: Arc<dyn Layer>,
+}
+
+struct LoopShade(Option<(f64, f64)>, bool);
+
+impl Layer for LoopShade {
+    fn draw(&self, tl: &Timeline) {
+        let (Some((a, b)), active) = (self.0, self.1) else {
+            return;
+        };
+        let rect = tl.rect;
         let r = Rect::from_x_y_ranges(
-            x_of(a).max(rect.left())..=x_of(b).min(rect.right()),
+            tl.x_of(a).max(rect.left())..=tl.x_of(b).min(rect.right()),
             rect.y_range(),
         );
         if r.width() > 0.0 {
-            painter.rect_filled(
+            tl.painter.rect_filled(
                 r,
                 0.0,
-                if marks.loop_active {
+                if active {
                     THEME.loop_shade
                 } else {
                     THEME.loop_shade_idle
@@ -256,10 +239,19 @@ pub fn window(
             );
         }
     }
+}
 
-    if let Some(wv) = wave
-        && wv.fine_bins() > 0
-    {
+struct WaveLayer<'a>(Option<&'a DeckWave>);
+
+impl Layer for WaveLayer<'_> {
+    fn draw(&self, tl: &Timeline) {
+        let Some(wv) = self.0.filter(|w| w.fine_bins() > 0) else {
+            return;
+        };
+        let (painter, rect) = (tl.painter, tl.rect);
+        let w = rect.width();
+        let spp = tl.spp();
+        let cx = tl.x_of(tl.pos);
         let end = wv.fine_bins() as f64 / wv.fine_rate;
         let half_h = rect.height() / 2.0;
         let cy = rect.center().y;
@@ -270,12 +262,12 @@ pub fn window(
         // audio changed a little each frame and the waveform shimmered.
         let px = 1.0 / painter.pixels_per_point();
         let col_t = spp * px as f64;
-        let first = (t_lo / col_t).floor() as i64;
+        let first = (tl.view.0 / col_t).floor() as i64;
         let cols = (w / px).ceil() as i64 + 1;
         for k in first..first + cols {
             let t0 = k as f64 * col_t;
             let t1 = t0 + col_t;
-            let x = x_of(t0);
+            let x = tl.x_of(t0);
             if t1 <= 0.0 || t0 >= end {
                 continue;
             }
@@ -319,13 +311,18 @@ pub fn window(
         }
         painter.add(Shape::mesh(mesh));
     }
+}
 
-    let beats = marks.grid.beats(t_lo, t_hi);
-    if !beats.is_empty() {
+struct GridLayer<'a>(Grid<'a>);
+
+impl Layer for GridLayer<'_> {
+    fn draw(&self, tl: &Timeline) {
+        let (painter, rect) = (tl.painter, tl.rect);
+        let beats = self.0.beats(tl.view.0, tl.view.1);
         // Each bar's 1 gets its number while there's room for it.
-        let bar_w = (4.0 * marks.grid.beat_secs(&beats) / spp) as f32;
+        let bar_w = (4.0 * self.0.beat_secs() / tl.spp()) as f32;
         for (t, bar) in beats {
-            let x = x_of(t);
+            let x = tl.x_of(t);
             if let Some(bar) = bar {
                 painter.line_segment(
                     [pos2(x, rect.top()), pos2(x, rect.bottom())],
@@ -348,89 +345,164 @@ pub fn window(
             }
         }
     }
-    let marker = |t: f64, c: Color32, label: &str| {
-        if t < t_lo || t > t_hi {
-            return;
+}
+
+/// Memory cues: a triangle on the bottom edge; a memory loop also underlines its span.
+struct MemoryLayer<'a>(&'a [Memory]);
+
+impl Layer for MemoryLayer<'_> {
+    fn draw(&self, tl: &Timeline) {
+        let (painter, rect) = (tl.painter, tl.rect);
+        for m in self.0 {
+            let c = THEME.memory_colour(m);
+            if let Some(end) = m.end
+                && end >= tl.view.0
+                && m.start <= tl.view.1
+            {
+                let span = tl.x_of(m.start).max(rect.left())..=tl.x_of(end).min(rect.right());
+                painter.rect_filled(
+                    Rect::from_x_y_ranges(span, rect.bottom() - 3.0..=rect.bottom()),
+                    0.0,
+                    c.gamma_multiply(0.7),
+                );
+            }
+            if tl.shows(m.start) {
+                let x = tl.x_of(m.start);
+                painter.add(Shape::convex_polygon(
+                    vec![
+                        pos2(x - 6.0, rect.bottom()),
+                        pos2(x, rect.bottom() - 8.0),
+                        pos2(x + 6.0, rect.bottom()),
+                    ],
+                    c,
+                    Stroke::NONE,
+                ));
+            }
         }
-        let x = x_of(t);
-        painter.line_segment(
-            [pos2(x, rect.top()), pos2(x, rect.bottom())],
-            Stroke::new(2.0_f32, c),
-        );
-        painter.add(Shape::convex_polygon(
-            vec![
-                pos2(x - 6.0, rect.top()),
-                pos2(x + 6.0, rect.top()),
-                pos2(x, rect.top() + 8.0),
-            ],
-            c,
-            Stroke::NONE,
-        ));
-        if !label.is_empty() {
-            // A tag in the cue's colour beside the flag, like Rekordbox's.
-            let galley =
-                painter.layout_no_wrap(label.into(), egui::FontId::proportional(10.0), THEME.bg);
-            let tag = Rect::from_min_size(pos2(x + 1.0, rect.top() + 9.0), galley.size())
-                .expand2(vec2(2.0, 0.0))
-                .translate(vec2(2.0, 0.0));
-            painter.rect_filled(tag, 2.0, c);
-            painter.galley(tag.min + vec2(2.0, 0.0), galley, THEME.bg);
-        }
-    };
-    // Memory cues: a triangle on the bottom edge; a memory loop also underlines its span.
-    for m in marks.memories {
-        let c = THEME.memory_colour(m);
-        if let Some(end) = m.end
-            && end >= t_lo
-            && m.start <= t_hi
-        {
-            let span = x_of(m.start).max(rect.left())..=x_of(end).min(rect.right());
-            painter.rect_filled(
-                Rect::from_x_y_ranges(span, rect.bottom() - 3.0..=rect.bottom()),
-                0.0,
-                c.gamma_multiply(0.7),
+    }
+}
+
+/// The cue and hot cues: a flag on the top edge, a hot cue's with its tag.
+struct CueLayer<'a> {
+    cue: Option<f64>,
+    hotcues: &'a [Option<f64>],
+    hot_labels: &'a [Option<String>],
+}
+
+impl Layer for CueLayer<'_> {
+    fn draw(&self, tl: &Timeline) {
+        let (painter, rect) = (tl.painter, tl.rect);
+        let marker = |t: f64, c: Color32, label: &str| {
+            if !tl.shows(t) {
+                return;
+            }
+            let x = tl.x_of(t);
+            painter.line_segment(
+                [pos2(x, rect.top()), pos2(x, rect.bottom())],
+                Stroke::new(2.0_f32, c),
             );
-        }
-        if (t_lo..=t_hi).contains(&m.start) {
-            let x = x_of(m.start);
             painter.add(Shape::convex_polygon(
                 vec![
-                    pos2(x - 6.0, rect.bottom()),
-                    pos2(x, rect.bottom() - 8.0),
-                    pos2(x + 6.0, rect.bottom()),
+                    pos2(x - 6.0, rect.top()),
+                    pos2(x + 6.0, rect.top()),
+                    pos2(x, rect.top() + 8.0),
                 ],
                 c,
                 Stroke::NONE,
             ));
+            if !label.is_empty() {
+                // A tag in the cue's colour beside the flag, like Rekordbox's.
+                let galley = painter.layout_no_wrap(
+                    label.into(),
+                    egui::FontId::proportional(10.0),
+                    THEME.bg,
+                );
+                let tag = Rect::from_min_size(pos2(x + 1.0, rect.top() + 9.0), galley.size())
+                    .expand2(vec2(2.0, 0.0))
+                    .translate(vec2(2.0, 0.0));
+                painter.rect_filled(tag, 2.0, c);
+                painter.galley(tag.min + vec2(2.0, 0.0), galley, THEME.bg);
+            }
+        };
+        if let Some(cue) = self.cue {
+            marker(cue, THEME.accent, "");
         }
-    }
-    if let Some(cue) = marks.cue {
-        marker(cue, THEME.accent, "");
-    }
-    for (i, h) in marks.hotcues.iter().enumerate() {
-        if let Some(t) = h {
-            let letter = &"ABCDEFGH"[i..i + 1];
-            let label = match marks.hot_labels.get(i).and_then(Option::as_deref) {
-                Some(l) => format!("{letter} {l}"),
-                None => letter.to_string(),
-            };
-            marker(*t, THEME.hotcue_colour(i), &label);
+        for (i, h) in self.hotcues.iter().enumerate() {
+            if let Some(t) = h {
+                let letter = &"ABCDEFGH"[i..i + 1];
+                let label = match self.hot_labels.get(i).and_then(Option::as_deref) {
+                    Some(l) => format!("{letter} {l}"),
+                    None => letter.to_string(),
+                };
+                marker(*t, THEME.hotcue_colour(i), &label);
+            }
         }
-    }
-    if (t_lo..=t_hi).contains(&pos) {
-        painter.line_segment(
-            [pos2(cx, rect.top()), pos2(cx, rect.bottom())],
-            Stroke::new(2.0_f32, playhead_colour(marks)),
-        );
     }
 }
 
-fn playhead_colour(marks: &Marks) -> Color32 {
-    if marks.idle {
-        THEME.marker.gamma_multiply(0.45)
-    } else {
-        THEME.marker
+struct Playhead;
+
+impl Layer for Playhead {
+    fn draw(&self, tl: &Timeline) {
+        if tl.shows(tl.pos) {
+            let x = tl.x_of(tl.pos);
+            tl.painter.line_segment(
+                [pos2(x, tl.rect.top()), pos2(x, tl.rect.bottom())],
+                Stroke::new(2.0_f32, THEME.marker),
+            );
+        }
     }
+}
+
+/// Draw the scrolling waveform: `pos` at the centre, `half` track seconds each side.
+pub fn scrolling(
+    painter: &Painter,
+    rect: Rect,
+    wave: Option<&DeckWave>,
+    pos: f64,
+    half: f64,
+    marks: &Marks,
+) {
+    window(painter, rect, wave, (pos - half, pos + half), pos, marks);
+}
+
+/// Draw the waveform from `view.0` to `view.1` (track seconds) across `rect`, with the
+/// playhead at `pos` (anywhere, even off either edge): what's before it is dimmed as
+/// played. The layers, bottom up, as [`Layer`] lists them.
+pub fn window(
+    painter: &Painter,
+    rect: Rect,
+    wave: Option<&DeckWave>,
+    view: (f64, f64),
+    pos: f64,
+    marks: &Marks,
+) {
+    painter.rect_filled(rect, 4.0, THEME.wave_bg);
+    let tl = Timeline {
+        painter,
+        rect,
+        view,
+        pos,
+    };
+    let cues = CueLayer {
+        cue: marks.cue,
+        hotcues: marks.hotcues,
+        hot_labels: marks.hot_labels,
+    };
+    let built_in: [&dyn Layer; 5] = [
+        &LoopShade(marks.loop_range, marks.loop_active),
+        &WaveLayer(wave),
+        &GridLayer(marks.grid),
+        &MemoryLayer(marks.memories),
+        &cues,
+    ];
+    for l in built_in {
+        l.draw(&tl);
+    }
+    for o in marks.overlays {
+        o.layer.draw(&tl);
+    }
+    Playhead.draw(&tl);
 }
 
 fn overview_image(bands: &[u8], w: usize, h: usize) -> ColorImage {
@@ -483,7 +555,11 @@ pub fn overview(
         painter.rect_filled(
             Rect::from_x_y_ranges(x_of(a)..=x_of(b).max(x_of(a) + 2.0), rect.y_range()),
             0.0,
-            THEME.loop_shade_overview,
+            if marks.loop_active {
+                THEME.loop_shade_overview
+            } else {
+                THEME.loop_shade_overview_idle
+            },
         );
     }
     painter.rect_filled(
@@ -491,17 +567,6 @@ pub fn overview(
         0.0,
         THEME.played_shade,
     );
-    if let Some((a, b)) = marks.window {
-        let a = x_of(a.max(0.0));
-        let r = Rect::from_x_y_ranges(a..=x_of(b.min(duration)).max(a + 2.0), rect.y_range());
-        painter.rect_filled(r, 0.0, THEME.selection.gamma_multiply(0.25));
-        painter.rect_stroke(
-            r,
-            0.0,
-            Stroke::new(1.0_f32, THEME.selection),
-            egui::StrokeKind::Inside,
-        );
-    }
     let tri = |t: f64, c: Color32| {
         let x = x_of(t);
         painter.add(Shape::convex_polygon(
@@ -536,7 +601,7 @@ pub fn overview(
     }
     painter.line_segment(
         [pos2(x_of(pos), rect.top()), pos2(x_of(pos), rect.bottom())],
-        Stroke::new(2.0_f32, playhead_colour(marks)),
+        Stroke::new(2.0_f32, THEME.marker),
     );
     if let Some(p) = analysing {
         let r = Rect::from_min_size(
@@ -565,20 +630,6 @@ pub fn thumbnail(ctx: &egui::Context, id: i64, preview: &[u8]) -> TextureHandle 
 mod tests {
     use super::*;
     use earshot_engine::beatgrid::{Constant, GridModel};
-
-    /// A list of beats: only those in the window, bars counted from the first 1 in the
-    /// list (not the window).
-    #[test]
-    fn listed_beats_count_bars_from_the_first() {
-        let times = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0];
-        let downs = [true, false, true, false, true, false];
-        assert_eq!(
-            listed_beats(&times, &downs, 1.2, 2.5),
-            [(1.5, Some(2)), (2.0, None), (2.5, Some(3))]
-        );
-        // Fewer downbeat flags than beats: the rest are plain beats.
-        assert_eq!(listed_beats(&times, &downs[..1], 0.0, 1.0).len(), 2);
-    }
 
     /// The grid carries on into the lead-in and past the end, bars numbered as the
     /// deck counts them: 0, -1, … before the first 1.

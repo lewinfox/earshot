@@ -1,0 +1,1396 @@
+{
+  "name": "Pioneer DDJ-FLX4",
+  "about": "The DDJ-FLX4, from Mixxx's DDJ-FLX4 mapping (not checked on the hardware). Laid out as the DDJ-400, but: BEAT FX CH1 / CH2 on 94 10 / 95 11, with ON on 94 47 or 95 47; no headphone level message; the sampler's slots 1-4 and 9-12 on deck 1's pads, 5-8 and 13-16 on deck 2's. Its start message (Mixxx's, from Wireshark) asks where its controls are and has to be sent every 200 ms, or the unit stops talking. Mixxx lights the pad mode buttons itself; earshot doesn't yet.",
+  "usb": [],
+  "names": [
+    "DDJ-FLX4"
+  ],
+  "start": [
+    "F0 00 40 05 00 00 04 05 00 50 02 F7"
+  ],
+  "start_every_ms": 200,
+  "inputs": [
+    {
+      "command": "deck_1_loop_in",
+      "message": "90 10"
+    },
+    {
+      "command": "deck_1_loop_out",
+      "message": "90 11"
+    },
+    {
+      "command": "deck_1_beat_loop",
+      "message": "90 14",
+      "value": "4"
+    },
+    {
+      "command": "deck_1_set_pad_mode_hot_cue",
+      "message": "90 1B"
+    },
+    {
+      "command": "deck_1_set_pad_mode_pad_fx_1",
+      "message": "90 1E"
+    },
+    {
+      "command": "deck_1_set_pad_mode_beat_jump",
+      "message": "90 20"
+    },
+    {
+      "command": "deck_1_set_pad_mode_sampler",
+      "message": "90 22"
+    },
+    {
+      "command": "deck_1_cue_save_as_memory",
+      "message": "90 3D"
+    },
+    {
+      "command": "deck_1_cue_delete",
+      "message": "90 3E"
+    },
+    {
+      "command": "deck_1_loop_exit",
+      "message": "90 4D"
+    },
+    {
+      "command": "deck_1_loop_active_toggle",
+      "message": "90 50"
+    },
+    {
+      "command": "deck_1_cue_jump_to_prev",
+      "message": "90 51"
+    },
+    {
+      "command": "deck_1_cue_jump_to_next",
+      "message": "90 53"
+    },
+    {
+      "command": "deck_1_sync_set_master",
+      "message": "90 5C"
+    },
+    {
+      "command": "deck_1_tempo_range_next",
+      "message": "90 60"
+    },
+    {
+      "command": "deck_1_set_pad_mode_keyboard",
+      "message": "90 69"
+    },
+    {
+      "command": "deck_1_set_pad_mode_pad_fx_2",
+      "message": "90 6B"
+    },
+    {
+      "command": "deck_1_set_pad_mode_beat_loop",
+      "message": "90 6D"
+    },
+    {
+      "command": "deck_1_set_pad_mode_key_shift",
+      "message": "90 6F"
+    },
+    {
+      "command": "deck_2_loop_in",
+      "message": "91 10"
+    },
+    {
+      "command": "deck_2_loop_out",
+      "message": "91 11"
+    },
+    {
+      "command": "deck_2_beat_loop",
+      "message": "91 14",
+      "value": "4"
+    },
+    {
+      "command": "deck_2_set_pad_mode_hot_cue",
+      "message": "91 1B"
+    },
+    {
+      "command": "deck_2_set_pad_mode_pad_fx_1",
+      "message": "91 1E"
+    },
+    {
+      "command": "deck_2_set_pad_mode_beat_jump",
+      "message": "91 20"
+    },
+    {
+      "command": "deck_2_set_pad_mode_sampler",
+      "message": "91 22"
+    },
+    {
+      "command": "deck_2_cue_save_as_memory",
+      "message": "91 3D"
+    },
+    {
+      "command": "deck_2_cue_delete",
+      "message": "91 3E"
+    },
+    {
+      "command": "deck_2_loop_exit",
+      "message": "91 4D"
+    },
+    {
+      "command": "deck_2_loop_active_toggle",
+      "message": "91 50"
+    },
+    {
+      "command": "deck_2_cue_jump_to_prev",
+      "message": "91 51"
+    },
+    {
+      "command": "deck_2_cue_jump_to_next",
+      "message": "91 53"
+    },
+    {
+      "command": "deck_2_sync_set_master",
+      "message": "91 5C"
+    },
+    {
+      "command": "deck_2_tempo_range_next",
+      "message": "91 60"
+    },
+    {
+      "command": "deck_2_set_pad_mode_keyboard",
+      "message": "91 69"
+    },
+    {
+      "command": "deck_2_set_pad_mode_pad_fx_2",
+      "message": "91 6B"
+    },
+    {
+      "command": "deck_2_set_pad_mode_beat_loop",
+      "message": "91 6D"
+    },
+    {
+      "command": "deck_2_set_pad_mode_key_shift",
+      "message": "91 6F"
+    },
+    {
+      "command": "fx_1_channel_deck_1",
+      "message": "94 10"
+    },
+    {
+      "command": "fx_1_release",
+      "message": "94 43"
+    },
+    {
+      "command": "fx_1_on",
+      "message": "94 47"
+    },
+    {
+      "command": "fx_1_beats_halve",
+      "message": "94 4A"
+    },
+    {
+      "command": "fx_1_beats_double",
+      "message": "94 4B"
+    },
+    {
+      "command": "fx_1_effect_next",
+      "message": "94 63"
+    },
+    {
+      "command": "fx_1_effect_prev",
+      "message": "94 64"
+    },
+    {
+      "message": "95 11",
+      "command": "fx_1_channel_deck_2"
+    },
+    {
+      "message": "95 43",
+      "command": "fx_1_release"
+    },
+    {
+      "message": "95 47",
+      "command": "fx_1_on"
+    },
+    {
+      "command": "deck_1_load_selected",
+      "message": "96 46"
+    },
+    {
+      "command": "deck_2_load_selected",
+      "message": "96 47"
+    },
+    {
+      "command": "mixer_master_headphone_cue",
+      "display_only": true,
+      "message": "96 63"
+    },
+    {
+      "command": "library_related_tracks_toggle",
+      "message": "96 68"
+    },
+    {
+      "command": "ui_library_maximize_toggle",
+      "message": "96 7A"
+    },
+    {
+      "command": "deck_1_hot_cue_a",
+      "message": "97 00"
+    },
+    {
+      "command": "deck_1_hot_cue_b",
+      "message": "97 01"
+    },
+    {
+      "command": "deck_1_hot_cue_c",
+      "message": "97 02"
+    },
+    {
+      "command": "deck_1_hot_cue_d",
+      "message": "97 03"
+    },
+    {
+      "command": "deck_1_hot_cue_e",
+      "message": "97 04"
+    },
+    {
+      "command": "deck_1_hot_cue_f",
+      "message": "97 05"
+    },
+    {
+      "command": "deck_1_hot_cue_g",
+      "message": "97 06"
+    },
+    {
+      "command": "deck_1_hot_cue_h",
+      "message": "97 07"
+    },
+    {
+      "command": "deck_1_pad_fx_1_pad",
+      "message": "97 10",
+      "value": "1"
+    },
+    {
+      "command": "deck_1_pad_fx_1_pad",
+      "message": "97 11",
+      "value": "2"
+    },
+    {
+      "command": "deck_1_pad_fx_1_pad",
+      "message": "97 12",
+      "value": "3"
+    },
+    {
+      "command": "deck_1_pad_fx_1_pad",
+      "message": "97 13",
+      "value": "4"
+    },
+    {
+      "command": "deck_1_pad_fx_1_pad",
+      "message": "97 14",
+      "value": "5"
+    },
+    {
+      "command": "deck_1_pad_fx_1_pad",
+      "message": "97 15",
+      "value": "6"
+    },
+    {
+      "command": "deck_1_pad_fx_1_pad",
+      "message": "97 16",
+      "value": "7"
+    },
+    {
+      "command": "deck_1_pad_fx_1_pad",
+      "message": "97 17",
+      "value": "8"
+    },
+    {
+      "command": "deck_1_beat_jump",
+      "message": "97 20",
+      "value": "-1"
+    },
+    {
+      "command": "deck_1_beat_jump",
+      "message": "97 21",
+      "value": "1"
+    },
+    {
+      "command": "deck_1_beat_jump",
+      "message": "97 22",
+      "value": "-2"
+    },
+    {
+      "command": "deck_1_beat_jump",
+      "message": "97 23",
+      "value": "2"
+    },
+    {
+      "command": "deck_1_beat_jump",
+      "message": "97 24",
+      "value": "-4"
+    },
+    {
+      "command": "deck_1_beat_jump",
+      "message": "97 25",
+      "value": "4"
+    },
+    {
+      "command": "deck_1_beat_jump",
+      "message": "97 26",
+      "value": "-8"
+    },
+    {
+      "command": "deck_1_beat_jump",
+      "message": "97 27",
+      "value": "8"
+    },
+    {
+      "message": "97 30",
+      "command": "sampler_1_play"
+    },
+    {
+      "message": "97 31",
+      "command": "sampler_2_play"
+    },
+    {
+      "message": "97 32",
+      "command": "sampler_3_play"
+    },
+    {
+      "message": "97 33",
+      "command": "sampler_4_play"
+    },
+    {
+      "message": "97 34",
+      "command": "sampler_9_play"
+    },
+    {
+      "message": "97 35",
+      "command": "sampler_10_play"
+    },
+    {
+      "message": "97 36",
+      "command": "sampler_11_play"
+    },
+    {
+      "message": "97 37",
+      "command": "sampler_12_play"
+    },
+    {
+      "command": "deck_1_keyboard_pad",
+      "message": "97 40",
+      "value": "1"
+    },
+    {
+      "command": "deck_1_keyboard_pad",
+      "message": "97 41",
+      "value": "2"
+    },
+    {
+      "command": "deck_1_keyboard_pad",
+      "message": "97 42",
+      "value": "3"
+    },
+    {
+      "command": "deck_1_keyboard_pad",
+      "message": "97 43",
+      "value": "4"
+    },
+    {
+      "command": "deck_1_keyboard_pad",
+      "message": "97 44",
+      "value": "5"
+    },
+    {
+      "command": "deck_1_keyboard_pad",
+      "message": "97 45",
+      "value": "6"
+    },
+    {
+      "command": "deck_1_keyboard_pad",
+      "message": "97 46",
+      "value": "7"
+    },
+    {
+      "command": "deck_1_keyboard_pad",
+      "message": "97 47",
+      "value": "8"
+    },
+    {
+      "command": "deck_1_pad_fx_2_pad",
+      "message": "97 50",
+      "value": "1"
+    },
+    {
+      "command": "deck_1_pad_fx_2_pad",
+      "message": "97 51",
+      "value": "2"
+    },
+    {
+      "command": "deck_1_pad_fx_2_pad",
+      "message": "97 52",
+      "value": "3"
+    },
+    {
+      "command": "deck_1_pad_fx_2_pad",
+      "message": "97 53",
+      "value": "4"
+    },
+    {
+      "command": "deck_1_pad_fx_2_pad",
+      "message": "97 54",
+      "value": "5"
+    },
+    {
+      "command": "deck_1_pad_fx_2_pad",
+      "message": "97 55",
+      "value": "6"
+    },
+    {
+      "command": "deck_1_pad_fx_2_pad",
+      "message": "97 56",
+      "value": "7"
+    },
+    {
+      "command": "deck_1_pad_fx_2_pad",
+      "message": "97 57",
+      "value": "8"
+    },
+    {
+      "command": "deck_1_beat_loop",
+      "message": "97 60",
+      "value": "0.25"
+    },
+    {
+      "command": "deck_1_beat_loop",
+      "message": "97 61",
+      "value": "0.5"
+    },
+    {
+      "command": "deck_1_beat_loop",
+      "message": "97 62",
+      "value": "1"
+    },
+    {
+      "command": "deck_1_beat_loop",
+      "message": "97 63",
+      "value": "2"
+    },
+    {
+      "command": "deck_1_beat_loop",
+      "message": "97 64",
+      "value": "4"
+    },
+    {
+      "command": "deck_1_beat_loop",
+      "message": "97 65",
+      "value": "8"
+    },
+    {
+      "command": "deck_1_beat_loop",
+      "message": "97 66",
+      "value": "16"
+    },
+    {
+      "command": "deck_1_beat_loop",
+      "message": "97 67",
+      "value": "32"
+    },
+    {
+      "command": "deck_1_key_shift_pad",
+      "message": "97 70",
+      "value": "1"
+    },
+    {
+      "command": "deck_1_key_shift_pad",
+      "message": "97 71",
+      "value": "2"
+    },
+    {
+      "command": "deck_1_key_shift_pad",
+      "message": "97 72",
+      "value": "3"
+    },
+    {
+      "command": "deck_1_key_shift_pad",
+      "message": "97 73",
+      "value": "4"
+    },
+    {
+      "command": "deck_1_key_shift_pad",
+      "message": "97 74",
+      "value": "5"
+    },
+    {
+      "command": "deck_1_key_shift_pad",
+      "message": "97 75",
+      "value": "6"
+    },
+    {
+      "command": "deck_1_key_shift_pad",
+      "message": "97 76",
+      "value": "7"
+    },
+    {
+      "command": "deck_1_key_shift_pad",
+      "message": "97 77",
+      "value": "8"
+    },
+    {
+      "command": "deck_1_hot_cue_a_clear",
+      "message": "98 00"
+    },
+    {
+      "command": "deck_1_hot_cue_b_clear",
+      "message": "98 01"
+    },
+    {
+      "command": "deck_1_hot_cue_c_clear",
+      "message": "98 02"
+    },
+    {
+      "command": "deck_1_hot_cue_d_clear",
+      "message": "98 03"
+    },
+    {
+      "command": "deck_1_hot_cue_e_clear",
+      "message": "98 04"
+    },
+    {
+      "command": "deck_1_hot_cue_f_clear",
+      "message": "98 05"
+    },
+    {
+      "command": "deck_1_hot_cue_g_clear",
+      "message": "98 06"
+    },
+    {
+      "command": "deck_1_hot_cue_h_clear",
+      "message": "98 07"
+    },
+    {
+      "command": "deck_1_pad_fx_1_pad_shift",
+      "message": "98 10",
+      "value": "1"
+    },
+    {
+      "command": "deck_1_pad_fx_1_pad_shift",
+      "message": "98 11",
+      "value": "2"
+    },
+    {
+      "command": "deck_1_pad_fx_1_pad_shift",
+      "message": "98 12",
+      "value": "3"
+    },
+    {
+      "command": "deck_1_pad_fx_1_pad_shift",
+      "message": "98 13",
+      "value": "4"
+    },
+    {
+      "command": "deck_1_pad_fx_1_pad_shift",
+      "message": "98 14",
+      "value": "5"
+    },
+    {
+      "command": "deck_1_pad_fx_1_pad_shift",
+      "message": "98 15",
+      "value": "6"
+    },
+    {
+      "command": "deck_1_pad_fx_1_pad_shift",
+      "message": "98 16",
+      "value": "7"
+    },
+    {
+      "command": "deck_1_pad_fx_1_pad_shift",
+      "message": "98 17",
+      "value": "8"
+    },
+    {
+      "message": "98 30",
+      "command": "sampler_1_stop"
+    },
+    {
+      "message": "98 31",
+      "command": "sampler_2_stop"
+    },
+    {
+      "message": "98 32",
+      "command": "sampler_3_stop"
+    },
+    {
+      "message": "98 33",
+      "command": "sampler_4_stop"
+    },
+    {
+      "message": "98 34",
+      "command": "sampler_9_stop"
+    },
+    {
+      "message": "98 35",
+      "command": "sampler_10_stop"
+    },
+    {
+      "message": "98 36",
+      "command": "sampler_11_stop"
+    },
+    {
+      "message": "98 37",
+      "command": "sampler_12_stop"
+    },
+    {
+      "command": "deck_1_keyboard_pad_shift",
+      "message": "98 40",
+      "value": "1"
+    },
+    {
+      "command": "deck_1_keyboard_pad_shift",
+      "message": "98 41",
+      "value": "2"
+    },
+    {
+      "command": "deck_1_keyboard_pad_shift",
+      "message": "98 42",
+      "value": "3"
+    },
+    {
+      "command": "deck_1_keyboard_pad_shift",
+      "message": "98 43",
+      "value": "4"
+    },
+    {
+      "command": "deck_1_keyboard_pad_shift",
+      "message": "98 44",
+      "value": "5"
+    },
+    {
+      "command": "deck_1_keyboard_pad_shift",
+      "message": "98 45",
+      "value": "6"
+    },
+    {
+      "command": "deck_1_keyboard_pad_shift",
+      "message": "98 46",
+      "value": "7"
+    },
+    {
+      "command": "deck_1_keyboard_pad_shift",
+      "message": "98 47",
+      "value": "8"
+    },
+    {
+      "command": "deck_1_pad_fx_2_pad_shift",
+      "message": "98 50",
+      "value": "1"
+    },
+    {
+      "command": "deck_1_pad_fx_2_pad_shift",
+      "message": "98 51",
+      "value": "2"
+    },
+    {
+      "command": "deck_1_pad_fx_2_pad_shift",
+      "message": "98 52",
+      "value": "3"
+    },
+    {
+      "command": "deck_1_pad_fx_2_pad_shift",
+      "message": "98 53",
+      "value": "4"
+    },
+    {
+      "command": "deck_1_pad_fx_2_pad_shift",
+      "message": "98 54",
+      "value": "5"
+    },
+    {
+      "command": "deck_1_pad_fx_2_pad_shift",
+      "message": "98 55",
+      "value": "6"
+    },
+    {
+      "command": "deck_1_pad_fx_2_pad_shift",
+      "message": "98 56",
+      "value": "7"
+    },
+    {
+      "command": "deck_1_pad_fx_2_pad_shift",
+      "message": "98 57",
+      "value": "8"
+    },
+    {
+      "command": "deck_1_key_shift_pad_shift",
+      "message": "98 70",
+      "value": "1"
+    },
+    {
+      "command": "deck_1_key_shift_pad_shift",
+      "message": "98 71",
+      "value": "2"
+    },
+    {
+      "command": "deck_1_key_shift_pad_shift",
+      "message": "98 72",
+      "value": "3"
+    },
+    {
+      "command": "deck_1_key_shift_pad_shift",
+      "message": "98 73",
+      "value": "4"
+    },
+    {
+      "command": "deck_1_key_shift_pad_shift",
+      "message": "98 74",
+      "value": "5"
+    },
+    {
+      "command": "deck_1_key_shift_pad_shift",
+      "message": "98 75",
+      "value": "6"
+    },
+    {
+      "command": "deck_1_key_shift_pad_shift",
+      "message": "98 76",
+      "value": "7"
+    },
+    {
+      "command": "deck_1_key_shift_pad_shift",
+      "message": "98 77",
+      "value": "8"
+    },
+    {
+      "command": "deck_2_hot_cue_a",
+      "message": "99 00"
+    },
+    {
+      "command": "deck_2_hot_cue_b",
+      "message": "99 01"
+    },
+    {
+      "command": "deck_2_hot_cue_c",
+      "message": "99 02"
+    },
+    {
+      "command": "deck_2_hot_cue_d",
+      "message": "99 03"
+    },
+    {
+      "command": "deck_2_hot_cue_e",
+      "message": "99 04"
+    },
+    {
+      "command": "deck_2_hot_cue_f",
+      "message": "99 05"
+    },
+    {
+      "command": "deck_2_hot_cue_g",
+      "message": "99 06"
+    },
+    {
+      "command": "deck_2_hot_cue_h",
+      "message": "99 07"
+    },
+    {
+      "command": "deck_2_pad_fx_1_pad",
+      "message": "99 10",
+      "value": "1"
+    },
+    {
+      "command": "deck_2_pad_fx_1_pad",
+      "message": "99 11",
+      "value": "2"
+    },
+    {
+      "command": "deck_2_pad_fx_1_pad",
+      "message": "99 12",
+      "value": "3"
+    },
+    {
+      "command": "deck_2_pad_fx_1_pad",
+      "message": "99 13",
+      "value": "4"
+    },
+    {
+      "command": "deck_2_pad_fx_1_pad",
+      "message": "99 14",
+      "value": "5"
+    },
+    {
+      "command": "deck_2_pad_fx_1_pad",
+      "message": "99 15",
+      "value": "6"
+    },
+    {
+      "command": "deck_2_pad_fx_1_pad",
+      "message": "99 16",
+      "value": "7"
+    },
+    {
+      "command": "deck_2_pad_fx_1_pad",
+      "message": "99 17",
+      "value": "8"
+    },
+    {
+      "command": "deck_2_beat_jump",
+      "message": "99 20",
+      "value": "-1"
+    },
+    {
+      "command": "deck_2_beat_jump",
+      "message": "99 21",
+      "value": "1"
+    },
+    {
+      "command": "deck_2_beat_jump",
+      "message": "99 22",
+      "value": "-2"
+    },
+    {
+      "command": "deck_2_beat_jump",
+      "message": "99 23",
+      "value": "2"
+    },
+    {
+      "command": "deck_2_beat_jump",
+      "message": "99 24",
+      "value": "-4"
+    },
+    {
+      "command": "deck_2_beat_jump",
+      "message": "99 25",
+      "value": "4"
+    },
+    {
+      "command": "deck_2_beat_jump",
+      "message": "99 26",
+      "value": "-8"
+    },
+    {
+      "command": "deck_2_beat_jump",
+      "message": "99 27",
+      "value": "8"
+    },
+    {
+      "message": "99 30",
+      "command": "sampler_5_play"
+    },
+    {
+      "message": "99 31",
+      "command": "sampler_6_play"
+    },
+    {
+      "message": "99 32",
+      "command": "sampler_7_play"
+    },
+    {
+      "message": "99 33",
+      "command": "sampler_8_play"
+    },
+    {
+      "message": "99 34",
+      "command": "sampler_13_play"
+    },
+    {
+      "message": "99 35",
+      "command": "sampler_14_play"
+    },
+    {
+      "message": "99 36",
+      "command": "sampler_15_play"
+    },
+    {
+      "message": "99 37",
+      "command": "sampler_16_play"
+    },
+    {
+      "command": "deck_2_keyboard_pad",
+      "message": "99 40",
+      "value": "1"
+    },
+    {
+      "command": "deck_2_keyboard_pad",
+      "message": "99 41",
+      "value": "2"
+    },
+    {
+      "command": "deck_2_keyboard_pad",
+      "message": "99 42",
+      "value": "3"
+    },
+    {
+      "command": "deck_2_keyboard_pad",
+      "message": "99 43",
+      "value": "4"
+    },
+    {
+      "command": "deck_2_keyboard_pad",
+      "message": "99 44",
+      "value": "5"
+    },
+    {
+      "command": "deck_2_keyboard_pad",
+      "message": "99 45",
+      "value": "6"
+    },
+    {
+      "command": "deck_2_keyboard_pad",
+      "message": "99 46",
+      "value": "7"
+    },
+    {
+      "command": "deck_2_keyboard_pad",
+      "message": "99 47",
+      "value": "8"
+    },
+    {
+      "command": "deck_2_pad_fx_2_pad",
+      "message": "99 50",
+      "value": "1"
+    },
+    {
+      "command": "deck_2_pad_fx_2_pad",
+      "message": "99 51",
+      "value": "2"
+    },
+    {
+      "command": "deck_2_pad_fx_2_pad",
+      "message": "99 52",
+      "value": "3"
+    },
+    {
+      "command": "deck_2_pad_fx_2_pad",
+      "message": "99 53",
+      "value": "4"
+    },
+    {
+      "command": "deck_2_pad_fx_2_pad",
+      "message": "99 54",
+      "value": "5"
+    },
+    {
+      "command": "deck_2_pad_fx_2_pad",
+      "message": "99 55",
+      "value": "6"
+    },
+    {
+      "command": "deck_2_pad_fx_2_pad",
+      "message": "99 56",
+      "value": "7"
+    },
+    {
+      "command": "deck_2_pad_fx_2_pad",
+      "message": "99 57",
+      "value": "8"
+    },
+    {
+      "command": "deck_2_beat_loop",
+      "message": "99 60",
+      "value": "0.25"
+    },
+    {
+      "command": "deck_2_beat_loop",
+      "message": "99 61",
+      "value": "0.5"
+    },
+    {
+      "command": "deck_2_beat_loop",
+      "message": "99 62",
+      "value": "1"
+    },
+    {
+      "command": "deck_2_beat_loop",
+      "message": "99 63",
+      "value": "2"
+    },
+    {
+      "command": "deck_2_beat_loop",
+      "message": "99 64",
+      "value": "4"
+    },
+    {
+      "command": "deck_2_beat_loop",
+      "message": "99 65",
+      "value": "8"
+    },
+    {
+      "command": "deck_2_beat_loop",
+      "message": "99 66",
+      "value": "16"
+    },
+    {
+      "command": "deck_2_beat_loop",
+      "message": "99 67",
+      "value": "32"
+    },
+    {
+      "command": "deck_2_key_shift_pad",
+      "message": "99 70",
+      "value": "1"
+    },
+    {
+      "command": "deck_2_key_shift_pad",
+      "message": "99 71",
+      "value": "2"
+    },
+    {
+      "command": "deck_2_key_shift_pad",
+      "message": "99 72",
+      "value": "3"
+    },
+    {
+      "command": "deck_2_key_shift_pad",
+      "message": "99 73",
+      "value": "4"
+    },
+    {
+      "command": "deck_2_key_shift_pad",
+      "message": "99 74",
+      "value": "5"
+    },
+    {
+      "command": "deck_2_key_shift_pad",
+      "message": "99 75",
+      "value": "6"
+    },
+    {
+      "command": "deck_2_key_shift_pad",
+      "message": "99 76",
+      "value": "7"
+    },
+    {
+      "command": "deck_2_key_shift_pad",
+      "message": "99 77",
+      "value": "8"
+    },
+    {
+      "command": "deck_2_hot_cue_a_clear",
+      "message": "9A 00"
+    },
+    {
+      "command": "deck_2_hot_cue_b_clear",
+      "message": "9A 01"
+    },
+    {
+      "command": "deck_2_hot_cue_c_clear",
+      "message": "9A 02"
+    },
+    {
+      "command": "deck_2_hot_cue_d_clear",
+      "message": "9A 03"
+    },
+    {
+      "command": "deck_2_hot_cue_e_clear",
+      "message": "9A 04"
+    },
+    {
+      "command": "deck_2_hot_cue_f_clear",
+      "message": "9A 05"
+    },
+    {
+      "command": "deck_2_hot_cue_g_clear",
+      "message": "9A 06"
+    },
+    {
+      "command": "deck_2_hot_cue_h_clear",
+      "message": "9A 07"
+    },
+    {
+      "command": "deck_2_pad_fx_1_pad_shift",
+      "message": "9A 10",
+      "value": "1"
+    },
+    {
+      "command": "deck_2_pad_fx_1_pad_shift",
+      "message": "9A 11",
+      "value": "2"
+    },
+    {
+      "command": "deck_2_pad_fx_1_pad_shift",
+      "message": "9A 12",
+      "value": "3"
+    },
+    {
+      "command": "deck_2_pad_fx_1_pad_shift",
+      "message": "9A 13",
+      "value": "4"
+    },
+    {
+      "command": "deck_2_pad_fx_1_pad_shift",
+      "message": "9A 14",
+      "value": "5"
+    },
+    {
+      "command": "deck_2_pad_fx_1_pad_shift",
+      "message": "9A 15",
+      "value": "6"
+    },
+    {
+      "command": "deck_2_pad_fx_1_pad_shift",
+      "message": "9A 16",
+      "value": "7"
+    },
+    {
+      "command": "deck_2_pad_fx_1_pad_shift",
+      "message": "9A 17",
+      "value": "8"
+    },
+    {
+      "message": "9A 30",
+      "command": "sampler_5_stop"
+    },
+    {
+      "message": "9A 31",
+      "command": "sampler_6_stop"
+    },
+    {
+      "message": "9A 32",
+      "command": "sampler_7_stop"
+    },
+    {
+      "message": "9A 33",
+      "command": "sampler_8_stop"
+    },
+    {
+      "message": "9A 34",
+      "command": "sampler_13_stop"
+    },
+    {
+      "message": "9A 35",
+      "command": "sampler_14_stop"
+    },
+    {
+      "message": "9A 36",
+      "command": "sampler_15_stop"
+    },
+    {
+      "message": "9A 37",
+      "command": "sampler_16_stop"
+    },
+    {
+      "command": "deck_2_keyboard_pad_shift",
+      "message": "9A 40",
+      "value": "1"
+    },
+    {
+      "command": "deck_2_keyboard_pad_shift",
+      "message": "9A 41",
+      "value": "2"
+    },
+    {
+      "command": "deck_2_keyboard_pad_shift",
+      "message": "9A 42",
+      "value": "3"
+    },
+    {
+      "command": "deck_2_keyboard_pad_shift",
+      "message": "9A 43",
+      "value": "4"
+    },
+    {
+      "command": "deck_2_keyboard_pad_shift",
+      "message": "9A 44",
+      "value": "5"
+    },
+    {
+      "command": "deck_2_keyboard_pad_shift",
+      "message": "9A 45",
+      "value": "6"
+    },
+    {
+      "command": "deck_2_keyboard_pad_shift",
+      "message": "9A 46",
+      "value": "7"
+    },
+    {
+      "command": "deck_2_keyboard_pad_shift",
+      "message": "9A 47",
+      "value": "8"
+    },
+    {
+      "command": "deck_2_pad_fx_2_pad_shift",
+      "message": "9A 50",
+      "value": "1"
+    },
+    {
+      "command": "deck_2_pad_fx_2_pad_shift",
+      "message": "9A 51",
+      "value": "2"
+    },
+    {
+      "command": "deck_2_pad_fx_2_pad_shift",
+      "message": "9A 52",
+      "value": "3"
+    },
+    {
+      "command": "deck_2_pad_fx_2_pad_shift",
+      "message": "9A 53",
+      "value": "4"
+    },
+    {
+      "command": "deck_2_pad_fx_2_pad_shift",
+      "message": "9A 54",
+      "value": "5"
+    },
+    {
+      "command": "deck_2_pad_fx_2_pad_shift",
+      "message": "9A 55",
+      "value": "6"
+    },
+    {
+      "command": "deck_2_pad_fx_2_pad_shift",
+      "message": "9A 56",
+      "value": "7"
+    },
+    {
+      "command": "deck_2_pad_fx_2_pad_shift",
+      "message": "9A 57",
+      "value": "8"
+    },
+    {
+      "command": "deck_2_key_shift_pad_shift",
+      "message": "9A 70",
+      "value": "1"
+    },
+    {
+      "command": "deck_2_key_shift_pad_shift",
+      "message": "9A 71",
+      "value": "2"
+    },
+    {
+      "command": "deck_2_key_shift_pad_shift",
+      "message": "9A 72",
+      "value": "3"
+    },
+    {
+      "command": "deck_2_key_shift_pad_shift",
+      "message": "9A 73",
+      "value": "4"
+    },
+    {
+      "command": "deck_2_key_shift_pad_shift",
+      "message": "9A 74",
+      "value": "5"
+    },
+    {
+      "command": "deck_2_key_shift_pad_shift",
+      "message": "9A 75",
+      "value": "6"
+    },
+    {
+      "command": "deck_2_key_shift_pad_shift",
+      "message": "9A 76",
+      "value": "7"
+    },
+    {
+      "command": "deck_2_key_shift_pad_shift",
+      "message": "9A 77",
+      "value": "8"
+    },
+    {
+      "command": "deck_1_pitch_bend",
+      "input": "jog",
+      "message": "B0 21",
+      "ticks": 720
+    },
+    {
+      "command": "deck_1_scratch",
+      "input": "jog",
+      "message": "B0 22",
+      "ticks": 720
+    },
+    {
+      "command": "deck_1_pitch_bend",
+      "input": "jog",
+      "message": "B0 23",
+      "ticks": 720
+    },
+    {
+      "command": "deck_1_fast_search",
+      "input": "jog",
+      "message": "B0 29",
+      "ticks": 720
+    },
+    {
+      "command": "deck_2_pitch_bend",
+      "input": "jog",
+      "message": "B1 21",
+      "ticks": 720
+    },
+    {
+      "command": "deck_2_scratch",
+      "input": "jog",
+      "message": "B1 22",
+      "ticks": 720
+    },
+    {
+      "command": "deck_2_pitch_bend",
+      "input": "jog",
+      "message": "B1 23",
+      "ticks": 720
+    },
+    {
+      "command": "deck_2_fast_search",
+      "input": "jog",
+      "message": "B1 29",
+      "ticks": 720
+    },
+    {
+      "command": "fx_1_level",
+      "input": "msb",
+      "message": "B4 02"
+    },
+    {
+      "command": "fx_1_level",
+      "input": "lsb",
+      "message": "B4 22"
+    },
+    {
+      "command": "mixer_master_level",
+      "display_only": true,
+      "input": "msb",
+      "message": "B6 08"
+    },
+    {
+      "command": "mixer_headphone_mix",
+      "display_only": true,
+      "input": "msb",
+      "message": "B6 0C"
+    },
+    {
+      "command": "mixer_master_level",
+      "display_only": true,
+      "input": "lsb",
+      "message": "B6 28"
+    },
+    {
+      "command": "mixer_headphone_mix",
+      "display_only": true,
+      "input": "lsb",
+      "message": "B6 2C"
+    }
+  ],
+  "mirror": {
+    "90 10": "90 4C",
+    "90 11": "90 4E",
+    "90 4D": "90 50",
+    "90 58": "90 60",
+    "91 10": "91 4C",
+    "91 11": "91 4E",
+    "91 4D": "91 50",
+    "91 58": "91 60",
+    "95 47": "95 43"
+  },
+  "mirror_status": {
+    "97": "98",
+    "99": "9A"
+  },
+  "meters": [
+    {
+      "amber_at": 87,
+      "deck": 1,
+      "message": "B0 02",
+      "red_at": 119
+    },
+    {
+      "amber_at": 87,
+      "deck": 2,
+      "message": "B1 02",
+      "red_at": 119
+    }
+  ]
+}

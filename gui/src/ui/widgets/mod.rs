@@ -49,7 +49,7 @@ pub use intent::Intent;
 pub use knob::Knob;
 pub use meter::Meter;
 pub use pill::Pill;
-pub use round_button::{RoundButton, RoundSize};
+pub use round_button::RoundButton;
 pub use slider::Slider;
 pub use text::{Note, busy_line, heading, muted};
 pub use text_button::Button;

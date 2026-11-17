@@ -8,16 +8,15 @@ use super::*;
 use crate::core::edit::{EditCmd, Field, Value};
 use crate::core::view::Modal;
 
-/// Step until the editor shows where its values came from (they come from the
-/// Store just after it opens).
+/// The editor shows where its values came from, once the Store has said (it's asked
+/// as the editor opens).
+#[track_caller]
 fn sources_shown(h: &mut H, label: &str) {
-    for _ in 0..300 {
-        if h.query_all_by_label(label).next().is_some() {
-            return;
-        }
-        steps(h, 1);
-    }
-    panic!("no \"{label}\" in the editor");
+    settle(h);
+    assert!(
+        h.query_all_by_label(label).next().is_some(),
+        "no \"{label}\" in the editor"
+    );
 }
 
 /// The editor's text box holding `value`.

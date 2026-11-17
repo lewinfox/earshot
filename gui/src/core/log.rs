@@ -9,14 +9,24 @@
 //!
 //! Linux only for the copy (it moves fd 2 onto a pipe); elsewhere stderr is left as is.
 
+use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The log file, once started, and when.
 static LOG: OnceLock<(Mutex<File>, Instant)> = OnceLock::new();
+/// Where it is.
+static PATH: OnceLock<PathBuf> = OnceLock::new();
+/// Debug builds: the newest lines, as written, for Debug mode to show; and a count
+/// of lines ever written, so it knows when there are new ones.
+static RECENT: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+static WRITTEN: AtomicU64 = AtomicU64::new(0);
+/// How many lines [`recent`] keeps.
+const RECENT_LINES: usize = 2000;
 /// The terminal stderr was, once it's copied to the log.
 static TERMINAL: OnceLock<Mutex<File>> = OnceLock::new();
 
@@ -41,6 +51,7 @@ pub fn start(data_dir: &Path) -> Result<PathBuf, String> {
     let path = dir.join(format!("earshot-{}.log", stamp(SystemTime::now(), true)));
     let file = File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let _ = LOG.set((Mutex::new(file), Instant::now()));
+    let _ = PATH.set(path.clone());
     tee_stderr()?;
     install_panic_hook();
     eprintln!(
@@ -51,6 +62,26 @@ pub fn start(data_dir: &Path) -> Result<PathBuf, String> {
     );
     watch_memory();
     Ok(path)
+}
+
+/// This run's log file, once started.
+pub fn path() -> Option<&'static Path> {
+    PATH.get().map(PathBuf::as_path)
+}
+
+/// Debug builds: the newest lines (up to [`RECENT_LINES`]), oldest first, and how many
+/// lines have been written so far. Release builds keep none.
+pub fn recent() -> (Vec<String>, u64) {
+    let lines = RECENT.lock().unwrap_or_else(|e| e.into_inner());
+    (
+        lines.iter().cloned().collect(),
+        WRITTEN.load(Ordering::Relaxed),
+    )
+}
+
+/// How many lines have been written so far (debug builds).
+pub fn written() -> u64 {
+    WRITTEN.load(Ordering::Relaxed)
 }
 
 /// A line in the log file only (not the terminal): detail worth having after a
@@ -75,13 +106,21 @@ fn write_line(line: &[u8]) {
     };
     // A panic while it was held leaves the file as good as it was.
     let mut f = file.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = write!(
-        f,
+    let head = format!(
         "{} +{:.3} ",
         stamp(SystemTime::now(), false),
         started.elapsed().as_secs_f64()
     );
+    let _ = f.write_all(head.as_bytes());
     let _ = f.write_all(line);
+    if cfg!(debug_assertions) {
+        let mut recent = RECENT.lock().unwrap_or_else(|e| e.into_inner());
+        recent.push_back(head + &String::from_utf8_lossy(line));
+        if recent.len() > RECENT_LINES {
+            recent.pop_front();
+        }
+        WRITTEN.fetch_add(1, Ordering::Relaxed);
+    }
     let _ = f.write_all(b"\n");
     let _ = f.flush();
 }
@@ -130,6 +169,7 @@ fn tee_stderr() -> Result<(), String> {
     std::thread::Builder::new()
         .name("earshot-log".into())
         .spawn(move || {
+            use std::io::{BufRead, BufReader};
             for line in BufReader::new(pipe).split(b'\n').map_while(Result::ok) {
                 to_terminal(&line);
                 write_line(&line);

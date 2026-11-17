@@ -3,22 +3,23 @@
 //! No other UI file names a colour by its numbers; they read [`THEME`] (panels get it
 //! as `cx.theme`).
 
-use std::sync::atomic::{AtomicU32, Ordering};
-
 use earshot_engine::{DeckId, MAX_DECKS};
 use egui::{Color32, Margin, Stroke, Ui, Vec2, vec2};
 
 use crate::core::store::Memory;
 
-/// The text size, as a multiple of normal (View > Text size, Ctrl +/-). Only the
-/// lists, bars, menus and windows' text grows, with what sits in a line of it (table
-/// rows, their waveforms); the decks and mixer keep their hand-fitted sizes
-/// ([`normal_text`]). An `f32`'s bits.
-static TEXT_SCALE: AtomicU32 = AtomicU32::new(0x3f80_0000);
+thread_local! {
+    /// The text size, as a multiple of normal (View > Text size, Ctrl +/-). Only the
+    /// lists, bars, menus and windows' text grows, with what sits in a line of it (table
+    /// rows, their waveforms); the decks and mixer keep their hand-fitted sizes
+    /// ([`normal_text`]). The UI's thread's own: the app draws on one thread, and each
+    /// app test on its own, so one test's text size doesn't move another's widgets.
+    static TEXT_SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+}
 
 /// The text size, as a multiple of normal.
 pub fn text_scale() -> f32 {
-    f32::from_bits(TEXT_SCALE.load(Ordering::Relaxed))
+    TEXT_SCALE.get()
 }
 
 /// A font size (or a text line's height) at the chosen text size.
@@ -28,7 +29,7 @@ pub fn fs(size: f32) -> f32 {
 
 /// Set the text size: earshot's own fonts read [`fs`], egui's widgets its text styles.
 pub fn set_text_scale(ctx: &egui::Context, k: f32) {
-    TEXT_SCALE.store(k.to_bits(), Ordering::Relaxed);
+    TEXT_SCALE.set(k);
     ctx.all_styles_mut(|s| s.text_styles = text_styles(k));
 }
 
@@ -134,6 +135,9 @@ pub struct Theme {
     pub loop_shade: Color32,
     pub loop_shade_idle: Color32,
     pub loop_shade_overview: Color32,
+    /// A loop that's there but not playing (exited), on the overview: grey, as in
+    /// Rekordbox.
+    pub loop_shade_overview_idle: Color32,
     /// Over what's been played on the overview.
     pub played_shade: Color32,
 
@@ -233,6 +237,7 @@ pub const THEME: Theme = Theme {
     loop_shade: Color32::from_rgba_unmultiplied_const(255, 180, 40, 50),
     loop_shade_idle: Color32::from_rgba_premultiplied(18, 18, 18, 18),
     loop_shade_overview: Color32::from_rgba_unmultiplied_const(255, 180, 40, 80),
+    loop_shade_overview_idle: Color32::from_rgba_unmultiplied_const(200, 200, 200, 45),
     played_shade: Color32::from_black_alpha(115),
 
     face: rgb8(0x2a, 0x2c, 0x34),
@@ -293,6 +298,11 @@ impl Theme {
             s.spacing.item_spacing = item;
             s.spacing.button_padding = padding;
         });
+    }
+
+    /// The browse knob's highlight: an outline round what it's on.
+    pub fn cursor_stroke(&self) -> egui::Stroke {
+        egui::Stroke::new(2.0_f32, self.accent)
     }
 
     /// A deck's colour; Prepare's player has the accent.

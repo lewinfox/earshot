@@ -180,6 +180,8 @@ fn the_open_flow_and_its_view_come_back_from_the_database() {
     h.state_mut().flow().set_view(view);
     let reader = h.state().lib.store.reader.clone();
     let saved = |key: &str| reader.setting(key).ok().flatten();
+    // The view is saved once it has held still for a moment of frames.
+    steps(&mut h, 4);
     settle_until(&mut h, |_| {
         saved(settings::FLOW_OPEN).as_deref() == Some(id.to_string().as_str())
             && reader.flow_camera(id).ok().flatten().is_some()
@@ -195,9 +197,7 @@ fn the_open_flow_and_its_view_come_back_from_the_database() {
         worker: stand_in,
         midi: false,
     };
-    let mut h = egui_kittest::Harness::builder()
-        .with_size(vec2(1700.0, 1000.0))
-        .build_eframe(move |cc| EarshotApp::new(cc, services).expect("app"));
+    let mut h = super::tests::build(test, services);
     settle_until(&mut h, |a| a.panels.flow.flow == Some(id));
     let flow = &h.state().panels.flow;
     assert_eq!(flow.graph().nodes.len(), 2);
