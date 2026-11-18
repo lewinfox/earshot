@@ -13,10 +13,13 @@
 #   worker/           the worker's code (earshot_worker)
 #   models/           the Beat This! checkpoints (torch's cache layout)
 #   bin/, lib/        ffmpeg, ffprobe and rubberband, and the libraries they use
-#   licenses/         the bundled programs' licences, and where their source is
+#   licenses/         earshot's licence, the bundled programs', and where their source is
 #
 # Downloads are cached in packaging/.cache.
 set -euo pipefail
+# What it copies takes this umask (packages install it as it is): nothing writable
+# but by its owner, whatever the builder's own umask.
+umask 022
 
 platform=${1:?platform}
 exe=${2:?the earshot binary}
@@ -57,6 +60,7 @@ mkdir -p "$out"/{bin,lib,licenses,worker}
 out="$(cd "$out" && pwd)"
 cp "$exe" "$out/"
 cp "$repo/README.md" "$out/"
+cp "$repo/LICENSE" "$out/licenses/earshot.txt"
 
 # --- Python and the worker's packages -----------------------------------------------
 echo ">> python $PYTHON"
@@ -86,10 +90,13 @@ cp -r "$repo/worker/earshot_worker" "$out/worker/"
 find "$out/worker" -name __pycache__ -exec rm -rf {} +
 "$python" -m compileall -q "$out/worker"
 
+# Downloaded into the cache (torch skips what's already there), then copied.
 echo ">> Beat This! checkpoints"
-TORCH_HOME="$out/models" PYTHONPATH="$out/worker" PYTHONNOUSERSITE=1 "$python" -c "
+TORCH_HOME="$cache/torch" PYTHONPATH="$out/worker" PYTHONNOUSERSITE=1 "$python" -c "
 from earshot_worker.detectors import CHECKPOINT, SMALL_CHECKPOINT, get_beat_this
 for c in (CHECKPOINT, SMALL_CHECKPOINT): get_beat_this(c)"
+mkdir -p "$out/models"
+cp -R "$cache/torch/." "$out/models/"
 
 # --- ffmpeg and Rubber Band -----------------------------------------------------------
 
@@ -100,7 +107,11 @@ bundle_libs() {
   for f in "$@"; do
     ldd "$f" | awk '/=> \// {print $3}' | while read -r lib; do
       case "$(basename "$lib")" in
-        libc.so*|libm.so*|libdl.so*|libpthread.so*|librt.so*|ld-linux*|libgcc_s.so*|libstdc++.so*) ;;
+        # glibc's own libraries (all of them: a copy of one from the build machine's
+        # glibc breaks on any other system's), and the compiler's runtime.
+        libc.so*|libm.so*|libmvec.so*|libdl.so*|libpthread.so*|librt.so*|libresolv.so*|\
+        libutil.so*|libanl.so*|libnsl.so*|libnss_*|libthread_db.so*|libBrokenLocale.so*|\
+        ld-linux*|libgcc_s.so*|libstdc++.so*) ;;
         *) [ -e "$out/lib/$(basename "$lib")" ] || cp -L "$lib" "$out/lib/" ;;
       esac
     done
@@ -166,6 +177,14 @@ esac
 rmdir "$out/lib" 2>/dev/null || true
 
 cat > "$out/licenses/README.txt" <<EOF
+earshot itself is MIT licensed (earshot.txt). Source: https://github.com/lewinfox/earshot
+
+Its analysis worker uses mutagen, GPL v2 or later, through cratelib (MIT), to
+read and write the tags DJ software keeps in music files. It runs in the
+worker's Python, so this folder as a whole is distributed under the GPL's
+terms; mutagen's own source is in python/ as it is, and its licence in its
+*.dist-info folder. Source: https://github.com/quodlibet/mutagen
+
 earshot runs these programs, shipped with it unchanged, as separate programs:
 
 - Python $PYTHON (python-build-standalone $PYTHON_BUILD), PSF licence (python.txt).
@@ -177,5 +196,8 @@ earshot runs these programs, shipped with it unchanged, as separate programs:
 - Rubber Band $RUBBERBAND, GPL v2 or later (rubberband.txt).
   Source: https://breakfastquay.com/files/releases/rubberband-$RUBBERBAND.tar.bz2
 EOF
+
+# What uv installs keeps the modes in its cache, whatever the umask.
+chmod -R go-w "$out"
 
 echo ">> done: $out ($(du -sh "$out" | cut -f1))"

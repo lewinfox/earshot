@@ -1,8 +1,8 @@
 # Tests for every pull request into main or develop: the Rust workspace (`make test`) and the
 # Python worker (`make test-worker`). Tests that need a real track stay #[ignore]d.
 #
-# The Rust tests run on Linux and macOS (the platforms earshot ships for; Windows
-# builds but isn't tested yet). The worker is pure Python and runs on Linux only.
+# The Rust tests are rust-tests.yml (Linux and macOS). The worker is pure Python and
+# runs on Linux only.
 
 name: ci
 
@@ -20,41 +20,8 @@ env:
 
 jobs:
   rust:
-    name: Rust tests (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux
-            os: ubuntu-latest
-          - name: macos
-            os: macos-latest # Apple silicon, as the release builds
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      # Restore only: cache.yml saves this cache from develop, which every PR can read.
-      # (A cache a PR saves is only usable by re-runs of that PR.)
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: test-${{ matrix.name }}
-          save-if: false
-
-      # The same build packages as the release's Linux build. macOS needs none.
-      - name: Linux packages
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev \
-            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
-            libxrandr-dev libxi-dev libgl1-mesa-dev
-
-      - name: Test
-        run: cargo test --workspace --locked -- --test-threads=4
+    name: Rust tests
+    uses: ./.github/workflows/rust-tests.yml
 
   worker:
     name: Worker tests
@@ -64,9 +31,9 @@ jobs:
       run:
         working-directory: worker
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.3.3 # exact versions only: it has no major-version tags
         with:
           enable-cache: true
 

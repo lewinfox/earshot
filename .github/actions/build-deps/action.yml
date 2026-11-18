@@ -1,0 +1,23 @@
+# What compiling earshot needs besides Rust, on whichever runner this is: ALSA and
+# D-Bus for audio and real-time priority, PipeWire, libclang for the keylock
+# library's bindings, and the windowing libraries egui needs. macOS needs nothing.
+name: earshot build dependencies
+description: The system packages compiling earshot needs
+runs:
+  using: composite
+  steps:
+    - name: Linux packages
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          pkg-config libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev \
+          libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
+          libxrandr-dev libxi-dev libgl1-mesa-dev
+
+    # The runner has LLVM installed.
+    - name: Windows libclang
+      if: runner.os == 'Windows'
+      shell: bash
+      run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"

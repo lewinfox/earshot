@@ -1,9 +1,8 @@
-# Keeps the Rust build cache warm for ci.yml. PRs can only restore caches saved on
-# their base branch, so after each merge into develop this builds the tests (without
-# running them) and saves the cache the next PRs start from.
-#
-# The rust-cache setup (shared-key, env, toolchain, packages) must match ci.yml's
-# rust job, or PRs won't find this cache.
+# Keeps the Rust build caches warm for ci.yml and release.yml. A run can only restore
+# caches saved on its own branch or the default branch (develop), so after each merge
+# into develop this compiles the tests and the release builds (without running or
+# packaging them) and saves the caches every PR, branch and release tag starts from.
+# The jobs are the same ones they use (rust-tests.yml, build.yml), so the caches match.
 
 name: cache
 
@@ -16,39 +15,15 @@ concurrency:
   group: cache-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  rust:
-    name: Rust cache (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux
-            os: ubuntu-latest
-          - name: macos
-            os: macos-latest
-    steps:
-      - uses: actions/checkout@v4
+  tests:
+    name: Test cache
+    uses: ./.github/workflows/rust-tests.yml
+    with:
+      warm-cache: true
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: test-${{ matrix.name }}
-
-      - name: Linux packages
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev \
-            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
-            libxrandr-dev libxi-dev libgl1-mesa-dev
-
-      - name: Build tests
-        run: cargo test --workspace --locked --no-run
+  release:
+    name: Release cache
+    uses: ./.github/workflows/build.yml
+    with:
+      warm-cache: true

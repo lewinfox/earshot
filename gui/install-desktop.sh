@@ -17,3 +17,7 @@ chmod 644 "$data/applications/earshot.desktop"
 gtk-update-icon-cache -q "$data/icons/hicolor" 2>/dev/null || true
 update-desktop-database -q "$data/applications" 2>/dev/null || true
 echo "Installed: $data/applications/earshot.desktop (runs $exe)"
+if [ -e /usr/share/applications/earshot.desktop ]; then
+    echo "Note: the earshot package is installed too; this menu entry hides its one." >&2
+    echo "      rm $data/applications/earshot.desktop to use the package's again." >&2
+fi

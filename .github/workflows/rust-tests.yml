@@ -1,0 +1,58 @@
+# The Rust workspace's tests (`make test`) on Linux and macOS, the platforms earshot
+# ships for (Windows builds but isn't tested yet). Tests that need a real track stay
+# #[ignore]d. Called by ci.yml, which runs them, and cache.yml, which only compiles
+# them (warm-cache) and saves the cache ci.yml restores.
+#
+# A run can only restore caches saved on its own branch or the default branch
+# (develop): a cache a PR saved would only serve re-runs of that PR, so only
+# cache.yml, running on develop, saves one.
+
+name: rust tests
+
+on:
+  workflow_call:
+    inputs:
+      warm-cache:
+        description: Compile the tests without running them, and save the cache
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            # The oldest Ubuntu earshot's Linux packages support (build.yml says why).
+            os: ubuntu-24.04
+          - name: macos
+            os: macos-latest # Apple silicon, as the release builds
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The runner is in the key: build scripts' output (PipeWire's bindings) depends
+      # on its system headers.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-${{ matrix.name }}
+          key: ${{ matrix.os }}
+          save-if: ${{ inputs.warm-cache }}
+
+      - uses: ./.github/actions/build-deps
+
+      - name: Test
+        if: ${{ !inputs.warm-cache }}
+        run: cargo test --workspace --locked -- --test-threads=4
+
+      - name: Build tests
+        if: ${{ inputs.warm-cache }}
+        run: cargo test --workspace --locked --no-run
