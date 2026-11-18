@@ -173,7 +173,7 @@ pub(super) fn start_with(test: &str, worker: fn(Role, usize) -> WorkerConfig) ->
     let dir = scratch(test);
     link_tracks(&dir.join("music"));
     let services = Services {
-        db: dir.join(store::FILE_NAME),
+        folders: crate::core::folders::Folders::all_in(&dir),
         null_audio: true,
         worker,
         midi: false,
@@ -1896,7 +1896,7 @@ fn deck_options_survive_a_restart() {
     // The same database, a new app.
     let dir = scratch_dir("deck-options");
     let services = Services {
-        db: dir.join(store::FILE_NAME),
+        folders: crate::core::folders::Folders::all_in(&dir),
         null_audio: true,
         worker: stand_in,
         midi: false,

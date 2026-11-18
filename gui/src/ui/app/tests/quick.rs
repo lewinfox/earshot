@@ -87,7 +87,7 @@ fn the_setting_turns_quick_analysis_of_new_tracks_off() {
     let dir = scratch("quick-off");
     link_tracks(&dir.join("music"));
     let services = Services {
-        db: dir.join(store::FILE_NAME),
+        folders: crate::core::folders::Folders::all_in(&dir),
         null_audio: true,
         worker: stand_in,
         midi: false,

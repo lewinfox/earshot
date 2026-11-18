@@ -58,11 +58,11 @@ clean:
 clean-all:
 	cargo clean
 
-# The data folder, as core/services.rs `data_dir` finds it.
+# The data folder, as core/folders.rs `data_folder` finds it.
 ifeq ($(shell uname),Darwin)
 DATA_DIR ?= $(or $(EARSHOT_DATA_DIR),$(HOME)/Library/Application Support/io.github.lewinfox.earshot)
 else
-DATA_DIR ?= $(or $(EARSHOT_DATA_DIR),$(or $(XDG_DATA_HOME),$(HOME)/.local/share)/io.github.lewinfox.earshot)
+DATA_DIR ?= $(or $(EARSHOT_DATA_DIR),$(or $(XDG_DATA_HOME),$(HOME)/.local/share)/earshot)
 endif
 
 # The database (tracks, analysis, playlists and the settings kept in it) and its

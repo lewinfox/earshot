@@ -76,6 +76,13 @@ impl WorkerEnv {
                 ("PYTHONDONTWRITEBYTECODE".into(), "1".into()),
                 // Beat This! loads its checkpoints from torch's cache, found here.
                 ("TORCH_HOME".into(), s(&root.join("models"))),
+                // numba (through librosa) caches what it compiles beside the code,
+                // which an install can't take: into earshot's cache folder instead
+                // of a folder of its own in the home folder.
+                (
+                    "NUMBA_CACHE_DIR".into(),
+                    s(&super::folders::cache_folder().join("numba")),
+                ),
                 ("PATH".into(), path),
             ],
             python,

@@ -293,7 +293,7 @@ impl EarshotApp {
             ctx.request_repaint();
         });
 
-        let store = Store::open(&services.db, store_sink(&sink)).map_err(|e| e.to_string())?;
+        let store = Store::open(&services.db(), store_sink(&sink)).map_err(|e| e.to_string())?;
         let settings = Settings::load(&store.reader);
         let player = player::new_player();
         player.lock().unwrap().routing = settings.audio.routing;
@@ -329,8 +329,8 @@ impl EarshotApp {
             Analyser::start(sink.clone(), player.clone(), store.clone(), services.worker);
         let hasher = library::start_hasher(store.clone());
         let quick = library::start_quick_analyser(store.clone());
-        let data_dir = services.db.parent().unwrap_or(std::path::Path::new("."));
-        let keymap_path = data_dir.join(keymap::FILE_NAME);
+        let folders = &services.folders;
+        let keymap_path = folders.config.join(keymap::FILE_NAME);
         let (keymap, keymap_origin) = keymap::load_user(&keymap_path, spell_key);
         let background_workers = analyser.background_workers();
         let tempo_lock = {
@@ -340,11 +340,14 @@ impl EarshotApp {
                 (services.worker)(Role::Background, cores),
                 store.clone(),
                 Arc::new(move |e| sink(Event::TempoLock(e))),
-                data_dir,
+                &folders.cache,
                 Some(hasher.clone()),
             )
         };
-        crate::core::stems::init(data_dir, (settings.stems_cache_gb.max(0.0) * 1e9) as u64);
+        crate::core::stems::init(
+            &folders.cache,
+            (settings.stems_cache_gb.max(0.0) * 1e9) as u64,
+        );
         let jobs = {
             let ctx = cc.egui_ctx.clone();
             crate::core::jobs::Jobs::new(move || ctx.request_repaint())
@@ -446,7 +449,7 @@ impl EarshotApp {
         }
         app.panels.controller.lights = Some(app.lights_monitor.clone());
         // The user's own controller mappings (`core::controllers`).
-        app.panels.controller.mine = Some(data_dir.join("controllers"));
+        app.panels.controller.mine = Some(services.folders.config.join("controllers"));
         app.start_up(services.midi);
         app.lib.store.send(StoreCmd::ListSources);
         app.lib.store.send(StoreCmd::StartSession);
@@ -983,7 +986,10 @@ impl EarshotApp {
                 });
             }
             Command::App(AppCmd::CopyKeymap) => {
-                // Never over the user's own file.
+                // Never over the user's own file. Its folder may not be there yet.
+                if let Some(dir) = self.keymap_path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
                 let made = std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)

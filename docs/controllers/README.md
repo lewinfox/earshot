@@ -15,7 +15,7 @@ Nothing else in the code names a controller.
   `<maker>/controllers/<model>.json`.
   - **Built-in:** `gui/controllers/`, found by `gui/build.rs` and compiled in. Read
     only in the app; change them in the repo.
-  - **Your own:** `controllers/` in the data folder. Made with Controller mode's
+  - **Your own:** `controllers/` in the config folder (`~/.config/earshot` on Linux). Made with Controller mode's
     "New mapping…", saved as you edit (only the lines that differ from the
     maker's file).
 - **A model builds on its maker:** the maker's file (yours if you have one, else

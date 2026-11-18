@@ -28,6 +28,19 @@ env.update(
     TORCH_HOME=str(root / "models"),
     PATH=os.pathsep.join([str(root / "bin"), env.get("PATH", "")]),
 )
+# An empty home folder of its own, to check the worker writes nowhere in it but the
+# cache folder the app gives it (numba's, as WorkerEnv::bundle sets it).
+home = Path(tempfile.mkdtemp())
+cache = home / "earshot-cache"
+env.update(
+    HOME=str(home),
+    USERPROFILE=str(home),
+    APPDATA=str(home / "AppData" / "Roaming"),
+    LOCALAPPDATA=str(home / "AppData" / "Local"),
+    NUMBA_CACHE_DIR=str(cache / "numba"),
+)
+for k in ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
+    env.pop(k, None)
 # Ours too: Windows finds a program named without its folder on the PATH of the
 # process starting it, not the one it's given (the worker has the bundle's PATH as
 # its own, as the app starts it).
@@ -165,5 +178,9 @@ r = subprocess.run([str(python), "-m", "earshot_worker.libraries", "find"], cwd=
 last = json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else {}
 check("the library reader runs", "libraries" in last, (r.stdout + r.stderr)[-300:])
 
+strays = sorted(str(p.relative_to(home)) for p in home.rglob("*") if p.is_file() and cache not in p.parents)
+check("nothing written in the home folder but the cache", not strays, ", ".join(strays[:10]))
+
 shutil.rmtree(tmp)
+shutil.rmtree(home)
 print("all ok")

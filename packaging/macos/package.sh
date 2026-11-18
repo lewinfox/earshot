@@ -119,17 +119,33 @@ make_dmg() {
   fi
   if [[ -n "${NOTARY_KEY:-}" ]]; then
     echo ">> notarize"
-    xcrun notarytool submit "$dmg" --key "$NOTARY_KEY" --key-id "$NOTARY_KEY_ID" \
-      --issuer "$NOTARY_ISSUER" --wait --timeout 1h --output-format json \
-      > "$dmg.notary.json" || true
-    cat "$dmg.notary.json"
-    if ! grep -q '"status" *: *"Accepted"' "$dmg.notary.json"; then
-      id=$(sed -n 's/.*"id" *: *"\([^"]*\)".*/\1/p' "$dmg.notary.json" | head -1)
-      [[ -n "$id" ]] && xcrun notarytool log "$id" --key "$NOTARY_KEY" \
-        --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER" || true
+    local auth=(--key "$NOTARY_KEY" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER")
+    # Upload, then wait for Apple's answer, separately: CI machines' connections
+    # drop now and then, and waiting is asking Apple over and over, so a drop while
+    # waiting only means asking again (not uploading again).
+    local i out id="" status=""
+    for i in 1 2 3; do
+      out=$(xcrun notarytool submit "$dmg" "${auth[@]}" --output-format json) &&
+        id=$(sed -n 's/.*"id" *: *"\([^"]*\)".*/\1/p' <<< "$out" | head -1)
+      [[ -n "$id" ]] && break
+      echo "   upload failed, trying again: $out"
+      sleep 30
+    done
+    [[ -n "$id" ]] || exit 1
+    echo "   submission $id"
+    for i in 1 2 3 4 5 6; do
+      out=$(xcrun notarytool wait "$id" "${auth[@]}" --timeout 1h --output-format json) || true
+      status=$(sed -n 's/.*"status" *: *"\([^"]*\)".*/\1/p' <<< "$out" | head -1)
+      # Accepted, Invalid or Rejected: Apple has answered.
+      [[ -n "$status" ]] && break
+      echo "   lost touch with Apple, asking again: $out"
+      sleep 30
+    done
+    echo "   $status"
+    if [[ "$status" != Accepted ]]; then
+      xcrun notarytool log "$id" "${auth[@]}" || true
       exit 1
     fi
-    rm -f "$dmg.notary.json"
     xcrun stapler staple "$dmg"
     spctl --assess --type open --context context:primary-signature -v "$dmg"
   fi
