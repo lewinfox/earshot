@@ -23,7 +23,7 @@
 //! worker jobs run on the tool's own background worker process (started when needed,
 //! stopped after a minute idle), never the deck worker.
 //!
-//! Files: `<data dir>/tempo-lock/<track id>/` holds the decoded audio and the
+//! Files: `<cache folder>/tempo-lock/<track id>/` holds the decoded audio and the
 //! straightened MP3 until another track is analysed. The folder is the tool's own and
 //! is emptied at start-up.
 
@@ -463,7 +463,7 @@ struct Shared {
     worker: WorkerClient,
     store: Store,
     sink: TempoLockSink,
-    /// `<data dir>/tempo-lock`: the tool's own.
+    /// `<cache folder>/tempo-lock`: the tool's own.
     dir: PathBuf,
     /// Nudged after a file is saved to the library, so its audio hash is worked out.
     hasher: Option<Hasher>,
@@ -520,28 +520,28 @@ pub struct Current {
 const DECODED: f64 = 0.15;
 
 impl TempoLock {
-    /// The tool with its own background worker process. `data_dir` is the app's data
-    /// folder; the tool keeps its files in `tempo-lock` there.
+    /// The tool with its own background worker process. `cache` is the app's cache
+    /// folder; the tool keeps its working files in `tempo-lock` there.
     #[allow(dead_code)] // the app starts it with the worker its `Services` give
     pub fn start(
         store: Store,
         sink: TempoLockSink,
-        data_dir: &Path,
+        cache: &Path,
         hasher: Option<Hasher>,
     ) -> TempoLock {
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
         let config = WorkerConfig::python(Role::Background, cores);
-        TempoLock::with_worker(config, store, sink, data_dir, hasher)
+        TempoLock::with_worker(config, store, sink, cache, hasher)
     }
 
     pub fn with_worker(
         config: WorkerConfig,
         store: Store,
         sink: TempoLockSink,
-        data_dir: &Path,
+        cache: &Path,
         hasher: Option<Hasher>,
     ) -> TempoLock {
-        let dir = data_dir.join("tempo-lock");
+        let dir = cache.join("tempo-lock");
         // Leftovers from the last run: decodes, and MP3s that were never saved.
         let _ = std::fs::remove_dir_all(&dir);
         TempoLock {

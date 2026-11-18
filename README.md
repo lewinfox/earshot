@@ -18,16 +18,15 @@ docs/design.md decisions and roadmap
 
 Download the file for your computer from the
 [releases page](https://github.com/lewinfox/earshot/releases), unpack it and run
-`earshot-gui` in the folder it makes. Everything it needs is in that folder: the
+`earshot` in the folder it makes. Everything it needs is in that folder: the
 analysis worker with its own Python and models, ffmpeg and Rubber Band. Nothing else
-is installed, and deleting the folder removes it (your library stays in the data
-folder, below).
+is installed, and deleting the folder removes it (your library stays: see *Where
+earshot keeps things*, below).
 
 - **Linux** (x86_64): `tar xf earshot-*-linux-x86_64.tar.xz`. Needs ALSA, which every
   desktop has.
-- **macOS** (Apple silicon): the download isn't signed yet, so macOS refuses to open
-  it. After unpacking, run `xattr -dr com.apple.quarantine earshot-*-macos-arm64`
-  once.
+- **macOS** (Apple silicon, macOS 14 or later): open the `.dmg` and drag earshot to
+  Applications.
 
 ## Build it from source (Linux)
 
@@ -64,15 +63,36 @@ Environment variables:
 | `EARSHOT_NULL_AUDIO` | unset | `1` runs the engine on a timer with no sound card |
 | `PIPEWIRE_LATENCY` | `256/48000` under PipeWire | The audio chunk size PipeWire uses (frames/rate); earshot sets it unless you do |
 | `EARSHOT_WORKER_DIR` | the release's own, else `earshot/worker` | A worker folder with its own `.venv` to use instead |
-| `EARSHOT_DATA_DIR` | `~/.local/share/io.github.lewinfox.earshot` | Where `library.db` lives (e.g. to try things on a copy) |
+| `EARSHOT_DATA_DIR` | unset | Keep everything (library, config, cache, logs) in this one folder, e.g. to try things on a copy |
 
 If no audio device can be opened, earshot falls back to the null output and shows a
 ⚠ in the top bar. *Menu → Settings…* (or the audio pill) picks the device, buffer
 size and which channels master and headphones go to. With no deck cued, the headphones
 get the master mix. The same window sets how many tracks analyse at once, re-analyses
 tracks whose analysis is out of date, and shows the keymap file: a `keymap.txt` in the
-data folder replaces the built-in keys (*Make a copy to edit* writes one to start
+config folder replaces the built-in keys (*Make a copy to edit* writes one to start
 from).
+
+### Where earshot keeps things
+
+Nothing goes anywhere in your home folder but these four folders (on Linux, the XDG
+base directories; `$XDG_DATA_HOME` and the rest move them):
+
+| | Linux | macOS | What's in it |
+|---|---|---|---|
+| data | `~/.local/share/earshot` | `~/Library/Application Support/io.github.lewinfox.earshot` | `library.db`: your library and settings |
+| config | `~/.config/earshot` | as data | `keymap.txt`, `controllers/` (your own mappings) |
+| cache | `~/.cache/earshot` | `~/Library/Caches/io.github.lewinfox.earshot` | stems, tempo lock's working files: made again when needed |
+| state | `~/.local/state/earshot` | as data | logs, debug exports, the window's size and place |
+
+To remove every trace of earshot on Linux, delete those four (after uninstalling):
+
+```bash
+rm -rf ~/.local/share/earshot ~/.config/earshot ~/.cache/earshot ~/.local/state/earshot
+```
+
+Versions before 0.1.1 kept everything in `~/.local/share/io.github.lewinfox.earshot`;
+earshot moves it into these folders the first time it starts.
 
 The top bar shows live numbers: UI fps and the audio callback's worst time against
 its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.

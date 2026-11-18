@@ -6,6 +6,8 @@
 # Each download is the app and everything it runs, ready to use: a Python with the
 # worker's packages, the worker, the Beat This! models, ffmpeg and Rubber Band
 # (packaging/bundle.sh), checked by packaging/smoke_test.py before it's uploaded.
+# On macOS that's earshot.app in a disk image, signed and notarized
+# (packaging/macos/package.sh); Linux and Windows get the folder as an archive.
 # Windows is built too but nobody has tried it yet, so a failure there doesn't stop the
 # release.
 
@@ -36,15 +38,15 @@ jobs:
           - name: linux-x86_64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            exe: earshot-gui
+            exe: earshot
           - name: macos-arm64
             os: macos-latest
             target: aarch64-apple-darwin
-            exe: earshot-gui
+            exe: earshot
           - name: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            exe: earshot-gui.exe
+            exe: earshot.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -81,6 +83,45 @@ jobs:
       - name: Build
         run: cargo build --release --locked -p earshot-gui --target ${{ matrix.target }}
 
+      # The Developer ID certificate the Mac app is signed with, in a keychain of its
+      # own, and the App Store Connect API key that notarizes it. Without these
+      # secrets (a fork, say) the app is signed ad hoc and not notarized.
+      - name: Apple signing
+        if: runner.os == 'macOS'
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+        run: |
+          if [[ -n "$CERTIFICATE" ]]; then
+            keychain="$RUNNER_TEMP/signing.keychain-db"
+            password="$(uuidgen)"
+            echo "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+            security create-keychain -p "$password" "$keychain"
+            security set-keychain-settings -lut 21600 "$keychain"
+            security unlock-keychain -p "$password" "$keychain"
+            # The certificate, its private key and Apple's intermediate certificate.
+            security import "$RUNNER_TEMP/cert.p12" -P "$CERTIFICATE_PASSWORD" \
+              -f pkcs12 -T /usr/bin/codesign -k "$keychain"
+            security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain" > /dev/null
+            security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+            rm "$RUNNER_TEMP/cert.p12"
+            identity=$(security find-identity -v -p codesigning "$keychain" |
+              sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)
+            [[ -n "$identity" ]] || { echo "no Developer ID Application identity in MACOS_CERTIFICATE"; exit 1; }
+            echo "MACOS_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          fi
+          if [[ -n "$NOTARY_KEY_P8" ]]; then
+            echo "$NOTARY_KEY_P8" > "$RUNNER_TEMP/notary.p8"
+            {
+              echo "NOTARY_KEY=$RUNNER_TEMP/notary.p8"
+              echo "NOTARY_KEY_ID=$NOTARY_KEY_ID"
+              echo "NOTARY_ISSUER=$NOTARY_ISSUER"
+            } >> "$GITHUB_ENV"
+          fi
+
       - name: Package
         shell: bash
         run: |
@@ -88,7 +129,14 @@ jobs:
           [[ "$GITHUB_REF_TYPE" == tag ]] || version="dev-${GITHUB_SHA::7}"
           name="earshot-${version}-${{ matrix.name }}"
           packaging/bundle.sh ${{ matrix.name }} "target/${{ matrix.target }}/release/${{ matrix.exe }}" "$name"
-          if [[ "$RUNNER_OS" == Windows ]]; then
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            # The smoke test runs on the signed app, so it runs under the hardened
+            # runtime as users will.
+            packaging/macos/package.sh app "$name" app
+            PYTHONDONTWRITEBYTECODE=1 app/earshot.app/Contents/Resources/python/bin/python3 packaging/smoke_test.py app/earshot.app/Contents/Resources
+            packaging/macos/package.sh dmg app/earshot.app "$name.dmg"
+            echo "ASSET=$name.dmg" >> "$GITHUB_ENV"
+          elif [[ "$RUNNER_OS" == Windows ]]; then
             "$name/python/python.exe" packaging/smoke_test.py "$name"
             7z a "$name.zip" "$name" > /dev/null
             echo "ASSET=$name.zip" >> "$GITHUB_ENV"

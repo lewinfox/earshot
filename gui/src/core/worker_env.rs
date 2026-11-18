@@ -76,6 +76,13 @@ impl WorkerEnv {
                 ("PYTHONDONTWRITEBYTECODE".into(), "1".into()),
                 // Beat This! loads its checkpoints from torch's cache, found here.
                 ("TORCH_HOME".into(), s(&root.join("models"))),
+                // numba (through librosa) caches what it compiles beside the code,
+                // which an install can't take: into earshot's cache folder instead
+                // of a folder of its own in the home folder.
+                (
+                    "NUMBA_CACHE_DIR".into(),
+                    s(&super::folders::cache_folder().join("numba")),
+                ),
                 ("PATH".into(), path),
             ],
             python,
@@ -121,7 +128,7 @@ mod tests {
     #[test]
     fn a_bundle_beside_the_program_is_found_and_its_programs_come_first() {
         let root = std::env::temp_dir().join(format!("earshot-bundle-{}", std::process::id()));
-        let exe = root.join("earshot-gui");
+        let exe = root.join("earshot");
         assert_eq!(bundle_root(&exe), None, "no bundle yet");
         for d in ["python/bin", "worker"] {
             std::fs::create_dir_all(root.join(d)).unwrap();

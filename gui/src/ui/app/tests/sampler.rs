@@ -139,7 +139,7 @@ fn slots_are_assigned_played_from_the_pads_and_kept() {
 
     // The same database, a new app: the slot is back, sound and settings.
     let services = Services {
-        db: dir.join(store::FILE_NAME),
+        folders: crate::core::folders::Folders::all_in(&dir),
         null_audio: true,
         worker: stand_in,
         midi: false,

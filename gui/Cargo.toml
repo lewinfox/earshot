@@ -3,6 +3,11 @@ name = "earshot-gui"
 version = "0.1.1"
 edition = "2024"
 
+# The package is earshot-gui (cargo -p earshot-gui); the program is just earshot.
+[[bin]]
+name = "earshot"
+path = "src/main.rs"
+
 [dependencies]
 directories = "6.0.0"
 earshot-engine = { version = "0.1.1", path = "../engine" }

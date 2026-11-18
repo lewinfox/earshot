@@ -19,6 +19,7 @@ pub mod edit;
 pub mod embeddings;
 pub mod export;
 pub mod external;
+pub mod folders;
 pub mod hash;
 pub mod history;
 pub mod index;

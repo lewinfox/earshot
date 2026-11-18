@@ -1,6 +1,6 @@
 //! The keyboard map: which key does what, read from a data file (`keymap.txt`, built
 //! in), as controls from the registry ([`super::bus`]). The key help is made from it.
-//! A `keymap.txt` of the user's own in the data folder replaces the built-in one
+//! A `keymap.txt` of the user's own in the config folder replaces the built-in one
 //! ([`load_user`]).
 //!
 //! Keys are kept as names here (core doesn't know egui); the UI turns them into its
@@ -17,7 +17,7 @@ pub const BUILT_IN: &str = include_str!("keymap.txt");
 /// Which of the app's modes a binding works in.
 pub use super::view::Mode;
 
-/// The user's own keymap, in the data folder (beside the database).
+/// The user's own keymap, in the config folder (`core::folders`).
 pub const FILE_NAME: &str = "keymap.txt";
 
 /// Where the keymap in use came from.

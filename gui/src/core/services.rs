@@ -7,12 +7,14 @@
 
 use std::path::PathBuf;
 
+use super::folders::Folders;
 use super::store;
 use super::worker_client::{Role, WorkerConfig};
 
 pub struct Services {
-    /// The library database file (created if it isn't there).
-    pub db: PathBuf,
+    /// Where it keeps its files (`core::folders`). The library database is in `data`
+    /// (created if it isn't there).
+    pub folders: Folders,
     /// Always play to the null output (no sound card needed).
     pub null_audio: bool,
     /// How to start an analysis worker process for a role, with this many threads.
@@ -22,23 +24,17 @@ pub struct Services {
 }
 
 impl Services {
-    pub fn real() -> Services {
+    pub fn real(folders: Folders) -> Services {
         Services {
-            db: data_dir().join(store::FILE_NAME),
+            folders,
             null_audio: false,
             worker: WorkerConfig::python,
             midi: true,
         }
     }
-}
 
-/// Where earshot keeps its data (the name is the app id it was first released under).
-/// `EARSHOT_DATA_DIR` overrides it (e.g. to try things on a copy).
-pub fn data_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("EARSHOT_DATA_DIR") {
-        return PathBuf::from(d);
+    /// The library database file.
+    pub fn db(&self) -> PathBuf {
+        self.folders.data.join(store::FILE_NAME)
     }
-    directories::BaseDirs::new()
-        .map(|d| d.data_dir().join("io.github.lewinfox.earshot"))
-        .unwrap_or_else(|| PathBuf::from("."))
 }

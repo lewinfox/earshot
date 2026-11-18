@@ -8,14 +8,14 @@
 //!    it ([`crate::core::worker_client`], job type `stems`). It writes drums, bass
 //!    and vocals as FLAC; "other" is never stored (the engine works it out as the
 //!    track minus those three).
-//! 2. The stems land in the cache, `<data dir>/stems/<audio hash>/`, keyed by the
+//! 2. The stems land in the cache, `<cache folder>/stems/<audio hash>/`, keyed by the
 //!    track's audio hash, so a retagged or moved file (or a copy) keeps its stems.
 //! 3. Any deck with that track gets them ([`attach`]), as does every later load.
 //!    Decks with the same audio share one copy in memory.
 //!
 //! The track is the unit: a track has at most one job, and Calculate does nothing
 //! while it has one (cancelling included). Each job works in its track's own folder,
-//! `<data dir>/stems/<track id>.part`, renamed into place once it's all there; any
+//! `<cache folder>/stems/<track id>.part`, renamed into place once it's all there; any
 //! left from a crash are cleared at start-up. Jobs for different tracks wait their
 //! turn in the worker, one at a time (separation takes about 2.4 GB and most of the
 //! CPU). Each is listed in the status line's jobs, where it can be cancelled.
@@ -62,11 +62,11 @@ static CACHE: OnceLock<PathBuf> = OnceLock::new();
 /// added since.
 static USAGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Where stems are kept: `<data dir>/stems`. Set once at startup, which then (in the
+/// Where stems are kept: `<cache folder>/stems`. Set once at startup, which then (in the
 /// background) clears out half-written folders left by a crash, and removes the
 /// least recently used stems until the cache is within `limit` bytes.
-pub fn init(data_dir: &Path, limit: u64) {
-    let dir = data_dir.join("stems");
+pub fn init(cache: &Path, limit: u64) {
+    let dir = cache.join("stems");
     let _ = CACHE.set(dir.clone());
     spawn("earshot-stems-evict", move || {
         let used = tidy(&dir, limit);
