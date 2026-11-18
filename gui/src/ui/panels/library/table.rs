@@ -24,7 +24,7 @@ use crate::core::selection::{Mods, Selection};
 use crate::core::suggest::Scored;
 use crate::core::track::{Status, Track, TrackId};
 use crate::ui::panels::CoreView;
-use crate::ui::theme::{CUE_PALETTE, THEME, fs, rgb};
+use crate::ui::theme::{CUE_PALETTE, THEME, rgb};
 use crate::ui::util;
 use crate::ui::widgets::{Intent, Pill, key_chip};
 
@@ -779,11 +779,11 @@ impl TrackTable<'_> {
         let mut outlines: Vec<(egui::Rect, Color32)> = vec![];
         let two_lines = row_height > 30.0;
         // Rows (and the waveforms in them) grow with the text.
-        let row_height = fs(row_height);
+        let row_height = row_height;
         let state_now = state.clone();
         let mut menu_state: Option<TableState> = None;
         let body = table
-            .header(fs(20.0), |mut h| {
+            .header(20.0, |mut h| {
                 for &(c, _) in &shown {
                     // The column's width (not the header's contents').
                     let mut col_w = 0.0;
@@ -997,7 +997,7 @@ fn header_label(ui: &mut Ui, c: ColumnId, s: &TableState) {
         THEME.muted
     };
     let text = RichText::new(format!("{}{arrow}", d.title))
-        .size(fs(11.0))
+        .size(11.0)
         .color(colour);
     let tip = match d.field {
         Some(_) => format!(
@@ -1140,7 +1140,7 @@ fn filter_chips(ui: &mut Ui, s: &mut TableState) -> bool {
             }
         }
         if let Some(e) = &error {
-            ui.label(RichText::new(e).size(fs(11.0)).color(THEME.bad));
+            ui.label(RichText::new(e).size(11.0).color(THEME.bad));
         }
     });
     if let Some(c) = clear {
@@ -1316,10 +1316,8 @@ fn change_cell(ui: &mut Ui, c: &mut Cell) {
                 p => format!("{p:+.1}%"),
             })
             .unwrap_or_default();
-        ui.add(
-            egui::Label::new(RichText::new(ch).size(fs(11.0)).color(THEME.muted)).selectable(false),
-        )
-        .on_hover_text("Tempo change needed (allowing half or double time)");
+        ui.add(egui::Label::new(RichText::new(ch).size(11.0).color(THEME.muted)).selectable(false))
+            .on_hover_text("Tempo change needed (allowing half or double time)");
     });
 }
 

@@ -36,6 +36,8 @@ pub struct ModalEnv<'a> {
     pub cue_first_beat: bool,
     pub load_while_playing: bool,
     pub auto_hide_mixer: bool,
+    /// The UI size chosen (Settings > Display).
+    pub ui_scale: f32,
     pub stem_mode: crate::core::view::StemMode,
     pub keymap: &'a Keymap,
     pub mode: Mode,

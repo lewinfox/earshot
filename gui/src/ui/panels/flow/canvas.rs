@@ -14,7 +14,7 @@ use crate::core::outside::is_outside;
 use crate::ui::panels::library::drag::{self, DragPayload, Origin};
 use crate::ui::panels::library::tracks::Media;
 use crate::ui::panels::{CoreView, PreviewState};
-use crate::ui::theme::{THEME, fs};
+use crate::ui::theme::THEME;
 
 impl FlowUi {
     /// The toolbar and the canvas below it. `preview`: the track playing in the
@@ -98,7 +98,7 @@ impl FlowUi {
                 Align2::CENTER_CENTER,
                 "Add a track to start: Add track above, drag tracks here from the library,\n\
                  or right-click a track > Add to Flow.",
-                FontId::proportional(fs(13.0)),
+                FontId::proportional(13.0),
                 THEME.muted,
             );
         }

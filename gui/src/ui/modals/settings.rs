@@ -17,11 +17,12 @@ use earshot_engine::{HotcueMode, XfCurve};
 /// The window's title, which is also its id.
 pub const TITLE: &str = "Settings";
 
-const TABS: [(SettingsTab, &str); 4] = [
+const TABS: [(SettingsTab, &str); 5] = [
     (SettingsTab::Audio, "Audio"),
     (SettingsTab::Decks, "Decks"),
     (SettingsTab::Analysis, "Analysis"),
     (SettingsTab::Keymap, "Keymap"),
+    (SettingsTab::Display, "Display"),
 ];
 
 /// The analysis tab's facts, gathered by the shell.
@@ -63,6 +64,9 @@ pub struct KeymapEnv<'a> {
 pub struct SettingsUi {
     pub tab: SettingsTab,
     audio: AudioUi,
+    /// The UI size while its slider is dragged (applied on letting go: applying it
+    /// mid-drag would move the slider under the pointer).
+    ui_scale: Option<f32>,
 }
 
 impl SettingsUi {
@@ -97,10 +101,46 @@ impl SettingsUi {
                     SettingsTab::Decks => out.extend(decks(ui, env)),
                     SettingsTab::Analysis => out.extend(analysis(ui, &env.analysis)),
                     SettingsTab::Keymap => out.extend(keymap(ui, &env.keymap_file)),
+                    SettingsTab::Display => out.extend(display(ui, env, &mut self.ui_scale)),
                 }
             });
         out
     }
+}
+
+/// The UI size: everything (text, controls, spacing) drawn bigger or smaller.
+fn display(ui: &mut Ui, env: &ModalEnv, dragging: &mut Option<f32>) -> Vec<Command> {
+    use crate::ui::prefs::UI_SCALES;
+    let mut out = vec![];
+    ui.horizontal(|ui| {
+        ui.label("UI size");
+        let mut percent = dragging.unwrap_or(env.ui_scale) * 100.0;
+        let r = ui.add(
+            egui::Slider::new(
+                &mut percent,
+                UI_SCALES.start() * 100.0..=UI_SCALES.end() * 100.0,
+            )
+            .step_by(5.0)
+            .suffix("%"),
+        );
+        if r.dragged() {
+            *dragging = Some(percent / 100.0);
+        } else if r.drag_stopped() || r.changed() {
+            *dragging = None;
+            out.push(Command::View(ViewCmd::UiScale(percent / 100.0)));
+        }
+        if ui.button("Reset").clicked() {
+            *dragging = None;
+            out.push(Command::View(ViewCmd::UiScale(1.0)));
+        }
+    });
+    muted(
+        ui,
+        "Text, buttons and spacing all grow or shrink together, and the layout makes \
+         room. Also Ctrl + and Ctrl - (Ctrl 0 for 100%). A small screen limits how big \
+         it can go: the smallest window must still fit on it.",
+    );
+    out
 }
 
 fn decks(ui: &mut Ui, env: &ModalEnv) -> Vec<Command> {

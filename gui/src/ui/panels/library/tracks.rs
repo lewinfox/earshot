@@ -16,7 +16,7 @@ use crate::core::outside::is_outside;
 use crate::core::track::{AnalysisState, Track, TrackId};
 use crate::ui::panels::CoreView;
 use crate::ui::panels::deck::wave;
-use crate::ui::theme::{THEME, fs};
+use crate::ui::theme::THEME;
 
 // ---- thumbnails and art ------------------------------------------------------------
 
@@ -92,7 +92,7 @@ pub fn title_cell(ui: &mut Ui, t: &Track, played: bool, two_lines: bool) {
         ui.spacing_mut().item_spacing.y = 0.0;
         ui.add(egui::Label::new(title).truncate().selectable(false));
         ui.add(
-            egui::Label::new(RichText::new(&t.artist).size(fs(11.0)).color(THEME.muted))
+            egui::Label::new(RichText::new(&t.artist).size(11.0).color(THEME.muted))
                 .truncate()
                 .selectable(false),
         );
@@ -155,7 +155,7 @@ pub fn status_mark(ui: &mut Ui, t: &Track, state: Option<&AnalysisState>) {
                 c,
                 egui::Align2::CENTER_CENTER,
                 s,
-                egui::FontId::proportional(fs(11.0)),
+                egui::FontId::proportional(11.0),
                 col,
             );
         }

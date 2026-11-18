@@ -62,6 +62,9 @@ impl DeckUi {
         let mode = self.pad_mode;
         let shift = self.shift_held || ui.input(|i| i.modifiers.shift);
         egui::Grid::new(("controller-pads", self.id.index()))
+            // Columns as narrow as the pads: egui would keep each 40 points wide.
+            .min_col_width(0.0)
+            .min_row_height(0.0)
             .spacing(vec2(d.px(GAP_X), d.px(GAP_Y)))
             .show(ui, |ui| {
                 for row in 0..2 {

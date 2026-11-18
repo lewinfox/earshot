@@ -13,7 +13,6 @@ use crate::core::index::LibraryCmd;
 use crate::core::jobs::Running;
 use crate::core::notice::{Level, Notice};
 use crate::core::view::{Modal, Mode, SettingsTab};
-use crate::ui::theme::fs;
 use crate::ui::widgets::{Intent, Pill, Seg, Toggle, muted, segmented};
 
 /// Tracks being analysed, and failures since they were last dismissed.
@@ -73,31 +72,62 @@ pub struct TopBar<'a> {
     pub redo: Option<String>,
 }
 
+/// Between the top bar's groups.
+const GROUP_GAP: f32 = 12.0;
+
 impl Panel for TopBar<'_> {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        // Three groups in one row: the system's state on the right (laid out first,
-        // so it has its room), the app's controls and the jobs on the left, and the
-        // effect units centred in the gap between them, never over either.
-        let row = egui::Rect::from_min_size(
-            ui.max_rect().min,
-            egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
-        );
+        // Three groups: the app's controls and the jobs on the left, the system's state
+        // on the right, and the effect units centred between them. In a window too
+        // narrow for all three on a line, the effect units wrap onto a line of their
+        // own. Each group's width is last frame's (a frame is drawn again when one
+        // changes). The bar is exactly as wide as the window: a group with no room
+        // left is cut off at its place, never drawn past the edge.
+        let full = ui.max_rect();
+        let line = ui.spacing().interact_size.y;
+        let row = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), line));
+        let id = egui::Id::new("top-bar-widths");
+        let [left_w, right_w, fx_w]: [f32; 3] =
+            ui.ctx().data(|d| d.get_temp(id)).unwrap_or_default();
+        let one_line = left_w + fx_w + right_w + 2.0 * GROUP_GAP <= row.width();
         let child = |ui: &mut Ui, rect: egui::Rect, layout: egui::Layout| {
-            ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout))
+            let mut c = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout));
+            c.set_clip_rect(rect.expand(1.0).intersect(ui.clip_rect()));
+            c
         };
-        let mut right = child(ui, row, egui::Layout::right_to_left(egui::Align::Center));
-        self.right_group(&mut right, cx);
-        let right_edge = right.min_rect().left();
         let mut left = child(ui, row, egui::Layout::left_to_right(egui::Align::Center));
         self.left_group(&mut left, cx);
-        let left_edge = left.min_rect().right();
-        let gap = egui::Rect::from_x_y_ranges(left_edge + 12.0..=right_edge - 12.0, row.y_range());
-        let mut fx = child(ui, gap, egui::Layout::left_to_right(egui::Align::Center));
-        centred_fx(&mut fx, row.center().x, cx);
-        ui.allocate_rect(
-            row.union(left.min_rect()).union(right.min_rect()),
-            egui::Sense::hover(),
+        let left_now = left.min_rect().width();
+        // The right group has what the left leaves.
+        let room = row.with_min_x((row.left() + left_now + GROUP_GAP).min(row.right()));
+        let mut right = child(ui, room, egui::Layout::right_to_left(egui::Align::Center));
+        self.right_group(&mut right, cx);
+        let right_now = right.min_rect().width();
+        let (fx_room, centre, used) = if one_line {
+            let gap = row
+                .with_min_x(row.left() + left_now + GROUP_GAP)
+                .with_max_x(row.right() - right_now - GROUP_GAP);
+            (gap, row.center().x, row)
+        } else {
+            let second = row.translate(egui::vec2(0.0, line + ui.spacing().item_spacing.y));
+            (second, second.center().x, row.union(second))
+        };
+        let mut fx = child(
+            ui,
+            fx_room,
+            egui::Layout::left_to_right(egui::Align::Center),
         );
+        let fx_now = centred_fx(&mut fx, centre, fx_w, cx);
+        ui.allocate_rect(used, egui::Sense::hover());
+        let now = [left_now, right_now, fx_now];
+        if now
+            .iter()
+            .zip([left_w, right_w, fx_w])
+            .any(|(a, b)| (a - b).abs() > 0.5)
+        {
+            ui.ctx().data_mut(|d| d.insert_temp(id, now));
+            ui.ctx().request_discard("the top bar's groups' widths");
+        }
     }
 }
 
@@ -161,9 +191,10 @@ impl TopBar<'_> {
                     ui.close();
                 }
                 ui.menu_button("View", |ui| {
-                    ui.menu_button("Text size", |ui| {
+                    ui.menu_button("UI size", |ui| {
                         let now = cx.prefs.ui_scale;
-                        for (z, name) in crate::ui::prefs::TEXT_SIZES {
+                        for z in crate::ui::prefs::UI_SCALE_CHOICES {
+                            let name = format!("{:.0}%", z * 100.0);
                             if ui.radio((now - z).abs() < 0.01, name).clicked() {
                                 cx.send(ViewCmd::UiScale(z));
                                 ui.close();
@@ -385,7 +416,7 @@ impl TopBar<'_> {
             None => format!("No audio\n{}", self.hud.detail[0]),
         };
         r.on_hover_text(tip);
-        ui.label(RichText::new("CPU").size(fs(11.0)));
+        ui.label(RichText::new("CPU").size(11.0));
     }
 
     /// "MEM" and a bar: the machine's RAM in use. Amber when it's low (little free,
@@ -435,7 +466,7 @@ impl TopBar<'_> {
             None => "Memory: not measured".into(),
         };
         r.on_hover_text(tip);
-        ui.label(RichText::new("MEM").size(fs(11.0)));
+        ui.label(RichText::new("MEM").size(11.0));
     }
 
     /// "3 jobs", with a spinner, while any run or wait (summary rows like "5 tracks
@@ -455,7 +486,7 @@ impl TopBar<'_> {
         egui::Popup::menu(&r)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
-                ui.set_min_width(fs(320.0));
+                ui.set_min_width(320.0);
                 for j in self.jobs {
                     job_line(ui, j, cx);
                 }
@@ -522,22 +553,15 @@ fn panes(ui: &mut Ui, cx: &mut Cx) {
     }
 }
 
-/// The effect units, centred on `centre` (the bar's middle) as far as `ui` (the gap
-/// between the bar's other groups) allows. Their width is last frame's: the first
-/// frame they sit a little off, then settle.
-fn centred_fx(ui: &mut Ui, centre: f32, cx: &mut Cx) {
-    let id = egui::Id::new("top-bar-fx-width");
-    let width: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(0.0);
+/// The effect units, centred on `centre` as far as `ui` (the room they have) allows.
+/// `width`: theirs last frame. Returns what they took this frame.
+fn centred_fx(ui: &mut Ui, centre: f32, width: f32, cx: &mut Cx) -> f32 {
     let room = ui.max_rect().x_range();
     let at = (centre - width / 2.0).min(room.max - width).max(room.min);
     ui.add_space(at - ui.cursor().min.x);
     let start = ui.cursor().min.x;
     super::fx::show(ui, cx.engine.snap.as_ref(), cx.out);
-    let drawn = ui.cursor().min.x - start;
-    if (drawn - width).abs() > 0.5 {
-        ui.ctx().data_mut(|d| d.insert_temp(id, drawn));
-        ui.ctx().request_discard("the effects' width");
-    }
+    ui.cursor().min.x - start
 }
 
 /// Four decks and no controller: which deck each hand (the keyboard's) plays, as
@@ -635,13 +659,13 @@ fn job_line(ui: &mut Ui, j: &Running, cx: &mut Cx) {
         } else {
             ui.spinner();
         }
-        let text = RichText::new(j.text()).size(fs(11.0));
+        let text = RichText::new(j.text()).size(11.0);
         ui.label(if j.queued { text.color(t.muted) } else { text });
         if let Some(f) = j.fraction() {
             ui.add(
                 egui::ProgressBar::new(f)
-                    .desired_width(fs(160.0))
-                    .desired_height(fs(8.0))
+                    .desired_width(160.0)
+                    .desired_height(8.0)
                     .fill(t.accent),
             );
             muted(ui, format!("{:.0} %", f * 100.0));
@@ -685,14 +709,11 @@ impl Panel for StatusLine<'_> {
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new(format!("{icon}{}", n.text))
-                                    .size(fs(11.0))
+                                    .size(11.0)
                                     .color(colour),
                             );
                             if ui
-                                .add(
-                                    egui::Button::new(RichText::new("×").size(fs(13.0)))
-                                        .frame(false),
-                                )
+                                .add(egui::Button::new(RichText::new("×").size(13.0)).frame(false))
                                 .on_hover_text("Dismiss")
                                 .clicked()
                             {

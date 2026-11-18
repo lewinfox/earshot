@@ -4,57 +4,9 @@
 //! as `cx.theme`).
 
 use earshot_engine::{DeckId, MAX_DECKS};
-use egui::{Color32, Margin, Stroke, Ui, Vec2, vec2};
+use egui::{Color32, Margin, Stroke, Vec2, vec2};
 
 use crate::core::store::Memory;
-
-thread_local! {
-    /// The text size, as a multiple of normal (View > Text size, Ctrl +/-). Only the
-    /// lists, bars, menus and windows' text grows, with what sits in a line of it (table
-    /// rows, their waveforms); the decks and mixer keep their hand-fitted sizes
-    /// ([`normal_text`]). The UI's thread's own: the app draws on one thread, and each
-    /// app test on its own, so one test's text size doesn't move another's widgets.
-    static TEXT_SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
-}
-
-/// The text size, as a multiple of normal.
-pub fn text_scale() -> f32 {
-    TEXT_SCALE.get()
-}
-
-/// A font size (or a text line's height) at the chosen text size.
-pub fn fs(size: f32) -> f32 {
-    size * text_scale()
-}
-
-/// Set the text size: earshot's own fonts read [`fs`], egui's widgets its text styles.
-pub fn set_text_scale(ctx: &egui::Context, k: f32) {
-    TEXT_SCALE.set(k);
-    ctx.all_styles_mut(|s| s.text_styles = text_styles(k));
-}
-
-/// egui's text styles at `k` times their normal size.
-fn text_styles(k: f32) -> std::collections::BTreeMap<egui::TextStyle, egui::FontId> {
-    let mut styles = egui::Style::default().text_styles;
-    for font in styles.values_mut() {
-        font.size *= k;
-    }
-    styles
-}
-
-/// A resizable side panel's id, new for each text size: egui keeps a panel's width
-/// under its id, so a new id opens it at its saved width at this size.
-pub fn sized_panel(name: impl std::hash::Hash) -> egui::Id {
-    egui::Id::new((name, text_scale().to_bits()))
-}
-
-/// This part of the UI (a deck, the mixer) keeps normal-sized text whatever the
-/// text size: its layout is fitted by hand.
-pub fn normal_text(ui: &mut Ui) {
-    if text_scale() != 1.0 {
-        ui.style_mut().text_styles = text_styles(1.0);
-    }
-}
 
 const fn rgb8(r: u8, g: u8, b: u8) -> Color32 {
     Color32::from_rgb(r, g, b)
@@ -83,6 +35,16 @@ pub struct Spacing {
     pub panel_radius: u8,
     /// Inside the top and bottom bars.
     pub bar_margin: Margin,
+    /// Round the decks' row and the bars of tabs, and round the waveforms' row.
+    pub row_margin: Margin,
+    pub waves_margin: Margin,
+    /// A bar of tabs over the body (Prepare's tools), and a tab in it.
+    pub tab_bar_h: f32,
+    pub tab_h: f32,
+    /// An icon stack at the side of the library, margins and all.
+    pub stack_w: f32,
+    /// Inside a pane of the body that has no frame of its own (a tool, a tab).
+    pub pane_margin: i8,
 }
 
 pub struct Theme {
@@ -272,6 +234,12 @@ pub const THEME: Theme = Theme {
         panel_margin: Margin::symmetric(8, 6),
         panel_radius: 8,
         bar_margin: Margin::symmetric(10, 5),
+        row_margin: Margin::symmetric(6, 4),
+        waves_margin: Margin::same(6),
+        tab_bar_h: 30.0,
+        tab_h: 22.0,
+        stack_w: 36.0,
+        pane_margin: 6,
     },
 };
 

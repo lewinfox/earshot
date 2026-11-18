@@ -5,7 +5,7 @@
 use egui::{CornerRadius, Margin, Response, RichText, Stroke, Ui, Widget};
 
 use super::Intent;
-use crate::ui::theme::{THEME, fs};
+use crate::ui::theme::THEME;
 
 pub struct Pill<'a> {
     text: &'a str,
@@ -40,12 +40,10 @@ impl Widget for Pill<'_> {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 ui.horizontal(|ui| {
                     if self.busy {
-                        ui.add(egui::Spinner::new().size(fs(11.0)));
+                        ui.add(egui::Spinner::new().size(11.0));
                     }
                     // Not selectable: the pointer stays an arrow, not a text caret.
-                    ui.add(
-                        egui::Label::new(RichText::new(self.text).size(fs(11.0))).selectable(false),
-                    );
+                    ui.add(egui::Label::new(RichText::new(self.text).size(11.0)).selectable(false));
                 });
             })
             .response

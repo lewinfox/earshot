@@ -76,101 +76,116 @@ pub fn icon_stack_with_menu<T: Copy + PartialEq>(
     mut menu: impl FnMut(&mut Ui, T),
 ) -> Option<Option<T>> {
     let mut picked = None;
-    ui.vertical(|ui| {
-        ui.set_width(WIDTH);
-        ui.spacing_mut().item_spacing.y = 4.0;
-        for it in items {
-            if it.gap {
-                let (r, _) = ui.allocate_exact_size(vec2(WIDTH, 9.0), Sense::hover());
-                ui.painter().hline(
-                    r.x_range().shrink(6.0),
-                    r.center().y,
-                    Stroke::new(1.0_f32, THEME.line),
-                );
-            }
-            let on = open == Some(it.id);
-            let sense = if it.enabled {
-                Sense::click()
-            } else {
-                Sense::hover()
-            };
-            let (rect, resp) = ui.allocate_exact_size(vec2(WIDTH, WIDTH), sense);
-            // Named by its tip for screen readers (and tests).
-            resp.widget_info(|| {
-                egui::WidgetInfo::selected(egui::WidgetType::Button, it.enabled, on, &*it.tip)
+    // More icons than the pane is tall (a short window): they scroll, with no bar
+    // (there's no room for one), rather than run on under what's below.
+    egui::ScrollArea::vertical()
+        .id_salt(("icon-stack", opens == Opens::Left))
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.set_width(WIDTH);
+                ui.spacing_mut().item_spacing.y = 4.0;
+                for it in items {
+                    if it.gap {
+                        let (r, _) = ui.allocate_exact_size(vec2(WIDTH, 9.0), Sense::hover());
+                        ui.painter().hline(
+                            r.x_range().shrink(6.0),
+                            r.center().y,
+                            Stroke::new(1.0_f32, THEME.line),
+                        );
+                    }
+                    let on = open == Some(it.id);
+                    let sense = if it.enabled {
+                        Sense::click()
+                    } else {
+                        Sense::hover()
+                    };
+                    let (rect, resp) = ui.allocate_exact_size(vec2(WIDTH, WIDTH), sense);
+                    // Named by its tip for screen readers (and tests), while all of it shows
+                    // (one scrolled part-way out of the pane isn't there to press).
+                    if ui.clip_rect().expand(0.5).contains_rect(rect) {
+                        resp.widget_info(|| {
+                            egui::WidgetInfo::selected(
+                                egui::WidgetType::Button,
+                                it.enabled,
+                                on,
+                                &*it.tip,
+                            )
+                        });
+                    }
+                    let p = ui.painter();
+                    let fill = if on || (resp.hovered() && it.enabled) {
+                        THEME.panel_2
+                    } else {
+                        THEME.panel
+                    };
+                    p.rect(
+                        rect,
+                        4,
+                        fill,
+                        Stroke::new(1.0_f32, if on { THEME.line } else { fill }),
+                        StrokeKind::Inside,
+                    );
+                    if on {
+                        // A bar on the edge nearest the pane it opens.
+                        let bar = match opens {
+                            Opens::Left => {
+                                Rect::from_min_max(rect.min, pos2(rect.left() + 2.0, rect.bottom()))
+                            }
+                            Opens::Right => {
+                                Rect::from_min_max(pos2(rect.right() - 2.0, rect.top()), rect.max)
+                            }
+                        };
+                        p.rect_filled(bar, 1, THEME.accent);
+                        if cursor {
+                            p.rect_stroke(rect, 4, THEME.cursor_stroke(), StrokeKind::Outside);
+                        }
+                    }
+                    let colour = match (it.enabled, on) {
+                        (false, _) => THEME.line,
+                        (true, true) => THEME.text,
+                        (true, false) => THEME.muted,
+                    };
+                    // Letters are smaller than a glyph.
+                    let size = if it.icon.chars().count() > 1 {
+                        10.0
+                    } else {
+                        15.0
+                    };
+                    p.text(
+                        rect.center(),
+                        Align2::CENTER_CENTER,
+                        &*it.icon,
+                        FontId::proportional(size),
+                        colour,
+                    );
+                    if let Some(light) = it.light {
+                        p.circle_filled(rect.right_top() + vec2(-6.0, 6.0), 3.5, light);
+                    }
+                    let resp = resp.on_hover_text(&*it.tip);
+                    if resp.clicked() {
+                        picked = Some((!on).then_some(it.id));
+                    }
+                    if it.menu {
+                        resp.context_menu(|ui| menu(ui, it.id));
+                    }
+                    // Spring-loaded while something is dragged over it.
+                    let since = resp.id.with("drag-over");
+                    let dragging = egui::DragAndDrop::has_any_payload(ui.ctx());
+                    if dragging && it.enabled && !on && resp.contains_pointer() {
+                        let now = ui.input(|i| i.time);
+                        let start = ui.data_mut(|d| *d.get_temp_mut_or(since, now));
+                        if now - start >= SPRING {
+                            picked = Some(Some(it.id));
+                            ui.data_mut(|d| d.remove::<f64>(since));
+                        } else {
+                            ui.ctx().request_repaint();
+                        }
+                    } else {
+                        ui.data_mut(|d| d.remove::<f64>(since));
+                    }
+                }
             });
-            let p = ui.painter();
-            let fill = if on || (resp.hovered() && it.enabled) {
-                THEME.panel_2
-            } else {
-                THEME.panel
-            };
-            p.rect(
-                rect,
-                4,
-                fill,
-                Stroke::new(1.0_f32, if on { THEME.line } else { fill }),
-                StrokeKind::Inside,
-            );
-            if on {
-                // A bar on the edge nearest the pane it opens.
-                let bar = match opens {
-                    Opens::Left => {
-                        Rect::from_min_max(rect.min, pos2(rect.left() + 2.0, rect.bottom()))
-                    }
-                    Opens::Right => {
-                        Rect::from_min_max(pos2(rect.right() - 2.0, rect.top()), rect.max)
-                    }
-                };
-                p.rect_filled(bar, 1, THEME.accent);
-                if cursor {
-                    p.rect_stroke(rect, 4, THEME.cursor_stroke(), StrokeKind::Outside);
-                }
-            }
-            let colour = match (it.enabled, on) {
-                (false, _) => THEME.line,
-                (true, true) => THEME.text,
-                (true, false) => THEME.muted,
-            };
-            // Letters are smaller than a glyph.
-            let size = if it.icon.chars().count() > 1 {
-                10.0
-            } else {
-                15.0
-            };
-            p.text(
-                rect.center(),
-                Align2::CENTER_CENTER,
-                &*it.icon,
-                FontId::proportional(size),
-                colour,
-            );
-            if let Some(light) = it.light {
-                p.circle_filled(rect.right_top() + vec2(-6.0, 6.0), 3.5, light);
-            }
-            let resp = resp.on_hover_text(&*it.tip);
-            if resp.clicked() {
-                picked = Some((!on).then_some(it.id));
-            }
-            if it.menu {
-                resp.context_menu(|ui| menu(ui, it.id));
-            }
-            // Spring-loaded while something is dragged over it.
-            let since = resp.id.with("drag-over");
-            let dragging = egui::DragAndDrop::has_any_payload(ui.ctx());
-            if dragging && it.enabled && !on && resp.contains_pointer() {
-                let now = ui.input(|i| i.time);
-                let start = ui.data_mut(|d| *d.get_temp_mut_or(since, now));
-                if now - start >= SPRING {
-                    picked = Some(Some(it.id));
-                    ui.data_mut(|d| d.remove::<f64>(since));
-                } else {
-                    ui.ctx().request_repaint();
-                }
-            } else {
-                ui.data_mut(|d| d.remove::<f64>(since));
-            }
-        }
-    });
+        });
     picked
 }

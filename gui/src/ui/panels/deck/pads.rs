@@ -18,6 +18,9 @@ impl DeckUi {
         let d = self.dims;
         let (pad_w, gap_x) = (self.wx(BTN_W), self.wx(GAP_X));
         egui::Grid::new(("pads", self.id.index()))
+            // Columns as narrow as the pads: egui would keep each 40 points wide.
+            .min_col_width(0.0)
+            .min_row_height(0.0)
             .spacing(vec2(gap_x, d.px(GAP_Y)))
             .show(ui, |ui| {
                 for row in 0..2 {

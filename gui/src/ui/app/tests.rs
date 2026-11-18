@@ -190,7 +190,7 @@ pub(super) fn start_with(test: &str, worker: fn(Role, usize) -> WorkerConfig) ->
 pub(super) fn build(test: &str, services: Services) -> H {
     background::step_this_thread();
     let mut b = egui_kittest::Harness::builder()
-        .with_size(vec2(1700.0, 1000.0))
+        .with_size(crate::ui::window::DEFAULT_SIZE)
         .with_step_dt(FRAME);
     if shot_path(test).is_some() {
         b = b.wgpu();
@@ -347,23 +347,30 @@ fn perform() {
     render(&mut h, "perform-no-mixer");
 }
 
-/// Large text grows the lists and bars but leaves the decks' text (and egui's zoom)
-/// alone; Ctrl - steps back down.
+/// The UI size is egui's zoom, so everything grows together (the decks too); Ctrl -
+/// steps back down, and sizes out of range are kept in it.
 #[test]
-fn text_size() {
-    let mut h = start("text-size");
+fn ui_size() {
+    let mut h = start("ui-size");
     h.state_mut().dispatch(ViewCmd::UiScale(1.2).into());
     steps(&mut h, 3);
     let ctx = h.ctx.clone();
-    assert_eq!(ctx.zoom_factor(), 1.0);
-    let body = |ctx: &egui::Context| egui::TextStyle::Body.resolve(&ctx.style()).size;
-    let normal = egui::TextStyle::Body.resolve(&egui::Style::default()).size;
-    assert!((body(&ctx) - normal * 1.2).abs() < 0.01, "{}", body(&ctx));
-    render(&mut h, "text-size");
+    assert!(
+        (ctx.zoom_factor() - 1.2).abs() < 0.001,
+        "{}",
+        ctx.zoom_factor()
+    );
+    render(&mut h, "ui-size");
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Minus);
     steps(&mut h, 3);
+    assert!((h.state().prefs.ui_scale - 1.1).abs() < 0.001);
+    assert!((ctx.zoom_factor() - 1.1).abs() < 0.001);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num0);
+    steps(&mut h, 3);
     assert_eq!(h.state().prefs.ui_scale, 1.0);
-    assert!((body(&ctx) - normal).abs() < 0.01);
+    h.state_mut().dispatch(ViewCmd::UiScale(9.0).into());
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.ui_scale, *crate::ui::prefs::UI_SCALES.end());
 }
 
 /// The Duplicates view lists tracks with the same audio; removing one from the
@@ -2600,13 +2607,16 @@ fn library_tracks_in_the_table() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// At the narrowest the window can be, nothing in any view goes off its right edge:
-/// Perform with two decks or four, and Prepare.
+/// Every view lays out in every window, from the smallest the app allows to a big
+/// screen, at normal and large UI sizes: nothing goes off the window's edges, and
+/// nothing but the status bar's own widgets is in the status bar's place. Add a mode,
+/// a tool or a pane, and this is the test that says whether it fits.
 #[test]
-fn everything_fits_at_the_narrowest_window() {
+fn every_view_fits_every_window() {
+    use crate::core::view::Tool;
     use egui::accesskit;
     use egui_kittest::kittest::{NodeT, Queryable, by};
-    let mut h = start("narrowest");
+    let mut h = start("fits");
     let ids = ids(&h);
     for (i, d) in DeckId::first(4).enumerate() {
         h.state_mut().load(Some(d), ids[i]);
@@ -2614,29 +2624,107 @@ fn everything_fits_at_the_narrowest_window() {
     settle_until(&mut h, |a| {
         DeckId::first(4).all(|d| a.panels.decks[d.index()].wave.is_some())
     });
-    h.set_size(vec2(crate::MIN_WIDTH, 900.0));
-    for (mode, four) in [
-        (Mode::Perform, false),
-        (Mode::Perform, true),
-        (Mode::Prepare, false),
-    ] {
-        h.state_mut().dispatch(ViewCmd::SetMode(mode).into());
-        h.state_mut()
-            .dispatch(ViewCmd::DeckCount(if four { 4 } else { 2 }).into());
-        steps(&mut h, 30);
-        // Every widget with a place on screen (text runs are left out: a
-        // right-aligned label's is reported further right than it's drawn).
-        let past: Vec<String> = h
-            .query_all(by())
-            .filter(|n| n.accesskit_node().role() != accesskit::Role::TextRun)
-            .filter(|n| {
-                n.accesskit_node()
-                    .bounding_box()
-                    .is_some_and(|b| b.x1 as f32 > crate::MIN_WIDTH + 0.5)
-            })
-            .map(|n| format!("{n:?}"))
-            .collect();
-        assert!(past.is_empty(), "{mode:?}, four decks {four}: {past:#?}");
+    let min = crate::ui::window::MIN_SIZE;
+    let sizes = [
+        min,
+        vec2(1280.0, 720.0),
+        vec2(1440.0, 900.0),
+        vec2(1920.0, 1080.0),
+    ];
+    let views: [(&str, Mode, usize, Option<Tool>); 7] = [
+        ("perform", Mode::Perform, 2, None),
+        ("perform4", Mode::Perform, 4, None),
+        ("prepare-cues", Mode::Prepare, 1, Some(Tool::Cues)),
+        ("prepare-tempo", Mode::Prepare, 2, Some(Tool::TempoLock)),
+        ("prepare-flow", Mode::Prepare, 2, Some(Tool::Flow)),
+        ("prepare-export", Mode::Prepare, 4, Some(Tool::Export)),
+        ("controller", Mode::Controller, 2, None),
+    ];
+    for zoom in [1.0, 1.25] {
+        h.state_mut().dispatch(ViewCmd::UiScale(zoom).into());
+        // (The new size takes a frame to be applied.)
+        steps(&mut h, 3);
+        for size in sizes {
+            // The window in pixels; the layout gets it in points, fewer at a bigger
+            // UI size (but never fewer than the smallest window's).
+            let points = size / zoom;
+            if points.x < min.x - 0.5 || points.y < min.y - 0.5 {
+                continue;
+            }
+            // (The harness's size is in points.)
+            h.set_size(points);
+            for (name, mode, decks, tool) in views {
+                h.state_mut().dispatch(ViewCmd::SetMode(mode).into());
+                h.state_mut().dispatch(ViewCmd::DeckCount(decks).into());
+                if let Some(t) = tool {
+                    h.state_mut().dispatch(ViewCmd::Tool(t).into());
+                }
+                for mixer in [true, false] {
+                    h.state_mut().dispatch(ViewCmd::ShowMixer(mixer).into());
+                    steps(&mut h, 12);
+                    let what = format!(
+                        "{name}, mixer {mixer}, {}x{} at UI size {zoom}",
+                        size.x, size.y
+                    );
+                    if zoom == 1.0 && mixer {
+                        render(&mut h, &format!("{name}-{}x{}", size.x, size.y));
+                    }
+                    let window = h.ctx.content_rect();
+                    assert!(
+                        (window.width() - points.x).abs() < 1.0,
+                        "{what}: the window is {window:?}"
+                    );
+                    let status_top = h.state().shell_bottom();
+                    let boxes: Vec<(String, egui::Rect)> = h
+                        .query_all(by())
+                        // Text runs are left out: a right-aligned label's is reported
+                        // further right than it's drawn.
+                        .filter(|n| n.accesskit_node().role() != accesskit::Role::TextRun)
+                        .filter(|n| n.accesskit_node().role() != accesskit::Role::Window)
+                        // Nor what has no role: egui's own drag handles (a table's
+                        // column edges reach a few points past its last row).
+                        .filter(|n| n.accesskit_node().role() != accesskit::Role::Unknown)
+                        .filter_map(|n| {
+                            let b = n.accesskit_node().bounding_box()?;
+                            let r = egui::Rect::from_min_max(
+                                egui::pos2(b.x0 as f32, b.y0 as f32),
+                                egui::pos2(b.x1 as f32, b.y1 as f32),
+                            );
+                            (r.width() > 0.0 && r.height() > 0.0).then(|| (format!("{n:?}"), r))
+                        })
+                        .collect();
+                    assert!(boxes.len() > 20, "{what}: nothing drawn?");
+                    // Past the right edge: nothing scrolls sideways but the tables,
+                    // whose cells aren't widgets.
+                    let px = h.ctx.pixels_per_point();
+                    let past: Vec<_> = boxes
+                        .iter()
+                        .map(|(n, r)| (n, *r / px))
+                        .filter(|(_, r)| r.right() > window.right() + 0.5)
+                        .collect();
+                    assert!(past.is_empty(), "{what}: past the window's edge: {past:#?}");
+                    // Over the status bar: by what's painted (a list longer than its
+                    // pane is cut off at the pane's edge, and that's fine). Anything
+                    // that starts above the bar and still shows inside it is not.
+                    let over: Vec<_> = h
+                        .output()
+                        .shapes
+                        .iter()
+                        .filter_map(|s| {
+                            let all = s.shape.visual_bounding_rect();
+                            let seen = all.intersect(s.clip_rect);
+                            (all.is_positive()
+                                && seen.is_positive()
+                                && all.top() < status_top - 1.0
+                                && seen.bottom() > status_top + 1.5)
+                                .then(|| format!("{all:?} clipped to {:?}", s.clip_rect))
+                        })
+                        .take(5)
+                        .collect();
+                    assert!(over.is_empty(), "{what}: over the status bar: {over:#?}");
+                }
+            }
+        }
     }
 }
 

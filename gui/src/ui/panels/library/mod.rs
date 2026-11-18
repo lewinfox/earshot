@@ -43,7 +43,7 @@ use self::suggest::SuggestUi;
 use self::table::{TableView, Tables};
 use self::tracks::Media;
 use super::flow::FlowUi;
-use super::{Cx, Panel, resized};
+use super::{Cx, Panel, drag_to_resize};
 use crate::core::collections::{CollectionCmd, CollectionId, CollectionKind, Collections, Section};
 use crate::core::command::{Command, ViewCmd};
 use crate::core::external::NodePath;
@@ -52,8 +52,8 @@ use crate::core::sources::STREAMING;
 use crate::core::sources::SourceId;
 use crate::core::track::TrackId;
 use crate::core::view::{Aside, Mode, Pane, Region, Source};
-use crate::ui::theme::{fs, sized_panel, text_scale};
-use crate::ui::widgets::{Opens, StackItem, icon_stack, icon_stack::WIDTH, icon_stack_with_menu};
+use crate::ui::layout::{self, Edge};
+use crate::ui::widgets::{Opens, StackItem, icon_stack, icon_stack_with_menu};
 
 /// The left icon stack's views of earshot's own library (the other sources follow).
 const VIEWS: [StackItem<Source>; 4] = [
@@ -560,9 +560,14 @@ impl LibraryPane {
         match source {
             Source::AllTracks => {
                 let table = self.tables.get_mut(TableView::Library);
-                if self.browser.all_tracks(ui, &cx.core, table, cx.out)
-                    && let Some(row) = self.browser.nav_cursor.clone()
-                {
+                // More views than the pane is tall: they scroll.
+                let clicked = egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        self.browser.all_tracks(ui, &cx.core, table, cx.out)
+                    })
+                    .inner;
+                if clicked && let Some(row) = self.browser.nav_cursor.clone() {
                     // Clicked: the knob is there.
                     self.level = Level::Tree;
                     self.tree_cursor = Some(TreeKey::All(row));
@@ -666,30 +671,28 @@ impl LibraryPane {
     /// Draw it on the left of a Prepare tool (Flow, Tempo lock), without its own side
     /// panes. One width for every tool, so the library stays put when switching.
     pub fn show_beside(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        let saved = cx.prefs.prepare.sizes.flow_library;
-        let r = egui::SidePanel::left(sized_panel("tool-library"))
-            .resizable(true)
-            .default_width(fs(saved))
-            .width_range(fs(320.0)..=fs(1400.0))
+        let row = ui.available_width();
+        let width = layout::beside_row(row, cx.prefs.prepare.sizes.flow_library);
+        egui::SidePanel::left("tool-library")
+            .resizable(false)
+            .exact_width(width)
             .frame(egui::Frame::new().fill(cx.theme.bg))
             .show_inside(ui, |ui| {
-                // The panel keeps the width its contents take: all of it.
-                ui.expand_to_include_rect(ui.max_rect());
-                self.show(ui, cx, false)
+                self.show(ui, cx, false);
+                drag_to_resize(ui, Edge::Right, Region::FlowLibrary, row, cx);
             });
-        let w = r.response.rect.width() / text_scale();
-        resized(ui.ctx(), w, Region::FlowLibrary, saved, cx);
     }
 
     /// Draw it, with or without the right icon stack and its panes (`asides`; the
-    /// Flow editor has its own).
+    /// Flow editor has its own). Its panes' widths are the layout's
+    /// (`layout::library_row`), shared out of the width it's given.
     pub fn show(&mut self, ui: &mut Ui, cx: &mut Cx, asides: bool) {
         let layout = cx.prefs.layout().clone();
         self.source = layout.source;
         // The import and add-to-stick windows, wherever their drop was.
         self.external.set_music(&self.browser.folders);
         self.external.windows(ui.ctx(), &cx.core, cx.out);
-        // Panel ids per mode, so each mode keeps its own sizes.
+        // Panel ids per mode, so each mode keeps its own.
         let id = |name: &str| match cx.prefs.mode {
             Mode::Perform => format!("{name}-perform"),
             Mode::Prepare => format!("{name}-prepare"),
@@ -699,12 +702,19 @@ impl LibraryPane {
         let mut items: Vec<StackItem<Source>> = VIEWS.into_iter().collect();
         items.extend(self.external.stack_items(&cx.core));
         self.navigate(&items, cx);
+        let width = ui.available_width();
+        let row = layout::library_row(
+            width,
+            layout.source.map(|_| layout.sizes.source),
+            layout.aside.map(|_| layout.sizes.aside),
+            asides,
+        );
         let stack_frame = egui::Frame::new()
             .fill(cx.theme.bg)
             .inner_margin(egui::Margin::symmetric(3, 6));
         egui::SidePanel::left(id("source-stack"))
             .resizable(false)
-            .exact_width(WIDTH + 6.0)
+            .exact_width(row.stack)
             .frame(stack_frame)
             .show_inside(ui, |ui| {
                 let (external, core, out) = (&mut self.external, &cx.core, &mut *cx.out);
@@ -726,22 +736,17 @@ impl LibraryPane {
                 }
             });
         if let Some(source) = layout.source {
-            let r = egui::SidePanel::left(sized_panel(id("source")))
-                .resizable(true)
-                .default_width(fs(layout.sizes.source))
-                .width_range(fs(140.0)..=fs(600.0))
-                .show_inside(ui, |ui| self.source(ui, source, cx));
-            resized(
-                ui.ctx(),
-                r.response.rect.width() / text_scale(),
-                Region::Source,
-                layout.sizes.source,
-                cx,
-            );
+            egui::SidePanel::left(id("source"))
+                .resizable(false)
+                .exact_width(row.source)
+                .show_inside(ui, |ui| {
+                    self.source(ui, source, cx);
+                    drag_to_resize(ui, Edge::Right, Region::Source, width, cx);
+                });
         }
         egui::SidePanel::right(id("aside-stack"))
             .resizable(false)
-            .exact_width(WIDTH + 6.0)
+            .exact_width(cx.theme.spacing.stack_w)
             .frame(stack_frame)
             .show_animated_inside(ui, asides, |ui| {
                 if let Some(a) = icon_stack(ui, &ASIDES, layout.aside, Opens::Left) {
@@ -749,24 +754,16 @@ impl LibraryPane {
                 }
             });
         if let Some(aside) = layout.aside {
-            let r = egui::SidePanel::right(sized_panel(id("aside")))
-                .resizable(true)
-                .default_width(fs(layout.sizes.aside))
-                .width_range(fs(240.0)..=fs(700.0))
-                .show_animated_inside(ui, asides, |ui| self.aside(ui, aside, cx));
-            if let Some(r) = r {
-                resized(
-                    ui.ctx(),
-                    r.response.rect.width() / text_scale(),
-                    Region::Aside,
-                    layout.sizes.aside,
-                    cx,
-                );
-            }
+            egui::SidePanel::right(id("aside"))
+                .resizable(false)
+                .exact_width(row.aside.max(1.0))
+                .show_animated_inside(ui, asides, |ui| {
+                    self.aside(ui, aside, cx);
+                    drag_to_resize(ui, Edge::Left, Region::Aside, width, cx);
+                });
         }
-        // Room on the right: right against a panel's resize handle, the list's
-        // scroll bar and the handle take the hover in turns and its highlight
-        // flickers.
+        // Room on the right: right against a pane's drag handle, the list's scroll
+        // bar and the handle would take the hover in turns.
         let frame = egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin {
             left: 8,
             right: 8 + HANDLE_GAP,
@@ -787,7 +784,7 @@ const HANDLE_GAP: i8 = 4;
 fn heading(ui: &mut Ui, cx: &Cx, title: &str) {
     ui.label(
         RichText::new(title.to_uppercase())
-            .size(fs(10.0))
+            .size(10.0)
             .color(cx.theme.muted),
     );
     ui.add_space(2.0);
