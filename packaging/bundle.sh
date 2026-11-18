@@ -90,10 +90,13 @@ cp -r "$repo/worker/earshot_worker" "$out/worker/"
 find "$out/worker" -name __pycache__ -exec rm -rf {} +
 "$python" -m compileall -q "$out/worker"
 
+# Downloaded into the cache (torch skips what's already there), then copied.
 echo ">> Beat This! checkpoints"
-TORCH_HOME="$out/models" PYTHONPATH="$out/worker" PYTHONNOUSERSITE=1 "$python" -c "
+TORCH_HOME="$cache/torch" PYTHONPATH="$out/worker" PYTHONNOUSERSITE=1 "$python" -c "
 from earshot_worker.detectors import CHECKPOINT, SMALL_CHECKPOINT, get_beat_this
 for c in (CHECKPOINT, SMALL_CHECKPOINT): get_beat_this(c)"
+mkdir -p "$out/models"
+cp -R "$cache/torch/." "$out/models/"
 
 # --- ffmpeg and Rubber Band -----------------------------------------------------------
 
