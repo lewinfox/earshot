@@ -48,6 +48,8 @@ jobs:
           save-if: ${{ inputs.warm-cache }}
 
       - uses: ./.github/actions/build-deps
+        with:
+          save-cache: ${{ inputs.warm-cache }}
 
       - name: Test
         if: ${{ !inputs.warm-cache }}

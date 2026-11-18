@@ -82,11 +82,8 @@ jobs:
           save-if: ${{ inputs.warm-cache }}
 
       - uses: ./.github/actions/build-deps
-
-      # Building Rubber Band for the bundle.
-      - name: Rubber Band build packages
-        if: runner.os == 'Linux'
-        run: sudo apt-get install -y --no-install-recommends build-essential libsndfile1-dev
+        with:
+          save-cache: ${{ inputs.warm-cache }}
 
       - name: Build
         run: cargo build --release --locked -p earshot-gui --target ${{ matrix.target }}
