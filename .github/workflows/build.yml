@@ -63,7 +63,7 @@ jobs:
 
       # Not its own cache, which every run would save: the steps below keep uv's
       # cache, saved only when warming, like the others.
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3 # exact versions only: it has no major-version tags
         with:
           enable-cache: false
 
