@@ -28,7 +28,9 @@ jobs:
       matrix:
         include:
           - name: linux
-            os: ubuntu-latest
+            # The oldest Ubuntu earshot's Linux packages support: glibc only runs what
+            # was built against it or older, so test (and build) the release on the oldest.
+            os: ubuntu-24.04
           - name: macos
             os: macos-latest # Apple silicon, as the release builds
     steps:
@@ -41,6 +43,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test-${{ matrix.name }}
+          key: ${{ matrix.os }}
           save-if: false
 
       # The same build packages as the release's Linux build. macOS needs none.

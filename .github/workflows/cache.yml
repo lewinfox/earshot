@@ -29,7 +29,7 @@ jobs:
       matrix:
         include:
           - name: linux
-            os: ubuntu-latest
+            os: ubuntu-24.04 # as ci.yml
           - name: macos
             os: macos-latest
     steps:
@@ -40,6 +40,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test-${{ matrix.name }}
+          key: ${{ matrix.os }}
 
       - name: Linux packages
         if: runner.os == 'Linux'

@@ -100,7 +100,11 @@ bundle_libs() {
   for f in "$@"; do
     ldd "$f" | awk '/=> \// {print $3}' | while read -r lib; do
       case "$(basename "$lib")" in
-        libc.so*|libm.so*|libdl.so*|libpthread.so*|librt.so*|ld-linux*|libgcc_s.so*|libstdc++.so*) ;;
+        # glibc's own libraries (all of them: a copy of one from the build machine's
+        # glibc breaks on any other system's), and the compiler's runtime.
+        libc.so*|libm.so*|libmvec.so*|libdl.so*|libpthread.so*|librt.so*|libresolv.so*|\
+        libutil.so*|libanl.so*|libnsl.so*|libnss_*|libthread_db.so*|libBrokenLocale.so*|\
+        ld-linux*|libgcc_s.so*|libstdc++.so*) ;;
         *) [ -e "$out/lib/$(basename "$lib")" ] || cp -L "$lib" "$out/lib/" ;;
       esac
     done

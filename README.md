@@ -23,36 +23,60 @@ analysis worker with its own Python and models, ffmpeg and Rubber Band. Nothing 
 is installed, and deleting the folder removes it (your library stays: see *Where
 earshot keeps things*, below).
 
-- **Linux** (x86_64): `tar xf earshot-*-linux-x86_64.tar.xz`. Needs ALSA, which every
-  desktop has.
+- **Linux** (x86_64; Ubuntu 24.04, Debian 13, Fedora 40 or newer): install the
+  `.deb` (`sudo apt install ./earshot_*_amd64.deb`, or open it in your software
+  centre) or the `.rpm` (`sudo dnf install ./earshot-*.x86_64.rpm`). earshot is in the
+  app menu and runs as `earshot`; `sudo apt remove earshot` (or `dnf remove`)
+  removes it. On other distributions, unpack the `.tar.xz` and run `earshot` in it.
 - **macOS** (Apple silicon, macOS 14 or later): open the `.dmg` and drag earshot to
   Applications.
 
-## Build it from source (Linux)
+## Development
 
-System packages (Ubuntu/Debian names):
+earshot is a Rust app (`gui/`, `engine/`, `audio/`) with a Python analysis worker
+(`worker/`) it runs as a separate process. Building it needs a few system libraries,
+Rust and uv; running it from a checkout uses the worker's own venv.
 
-```bash
-sudo apt install build-essential pkg-config libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev
-```
+### What to install
 
-You also need Rust (stable) and [uv](https://docs.astral.sh/uv/). Your user should be
-in the `audio` group.
-
-Set up the analysis worker once (downloads CPU-only torch, about 1 GB). A build from
-source uses `worker/.venv`; a release ships a ready-made one instead
-(`packaging/bundle.sh`, see below).
+The reference system is **Ubuntu 24.04**: CI builds and tests the Linux release on it
+(the oldest system the Linux packages run on: glibc only runs what was built against
+it or older), so it's the safest base for development too. Other distributions work
+with the same libraries under their own names.
 
 ```bash
-cd earshot/worker && ./setup.sh
+# Building earshot: ALSA, D-Bus, PipeWire, libclang (for PipeWire's bindings)
+sudo apt install build-essential pkg-config libasound2-dev libdbus-1-dev \
+  libpipewire-0.3-dev libclang-dev
+# What the window loads as it starts (a desktop has these already)
+sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
+  libxrandr-dev libxi-dev libgl1-mesa-dev
+# Only for `make bundle` (it builds Rubber Band): libsndfile's headers
+sudo apt install libsndfile1-dev
 ```
 
-Then:
+- **Rust**, stable, from [rustup](https://rustup.rs).
+- **[uv](https://docs.astral.sh/uv/)**, recent (0.13 or newer: `make bundle` uses
+  `uv export --emit-index-url`). `uv self update` updates it.
+- **Docker**, only for `make packages` (nfpm runs from its image unless it's installed).
+- Your user in the **`audio` group**, for real-time audio and the controller's sound card.
+
+On macOS (Apple silicon), Xcode's command line tools, Rust and uv are all it needs.
+
+### Running it
 
 ```bash
-cd earshot && cargo run --release -p earshot-gui   # release build
-cd earshot && cargo run -p earshot-gui             # dev build: quicker to compile, still optimised enough to play
+make run            # dev build: quicker to compile, still optimised enough to play
+make run-release    # release build
 ```
+
+The first time (and after the worker's dependencies change) `make run` sets up the
+worker first, with `worker/setup.sh`: it downloads CPU-only torch and the Beat This!
+models into `worker/.venv` (about 1 GB), and installs ffmpeg and Rubber Band if
+they're missing (with `sudo apt`, so it may ask for your password). A release ships
+all of this ready-made instead (`packaging/bundle.sh`, below).
+
+`make install` adds the release build to your app menu. `make help` lists the rest.
 
 Environment variables:
 
@@ -183,6 +207,8 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
 
 ## Tests
 
+`make test` runs the Rust tests, `make test-worker` the worker's. Or one at a time:
+
 ```bash
 cd earshot && cargo test -p earshot-engine   # beatgrid, decks, loops, cue, sync on a drifting track
 cd earshot && cargo test -p earshot-gui      # app, incl. off-screen UI tests
@@ -209,8 +235,17 @@ The app finds these beside its binary (`gui/src/core/worker_env.rs`). Then
 `packaging/smoke_test.py` runs the folder's own worker, models and programs before
 it's uploaded. A download is about 400 MB, and about 1.7 GB unpacked.
 
-`make bundle` makes the Linux folder locally, in `target/bundle/earshot`. It needs uv
-and, to build Rubber Band, `sudo apt install build-essential libsndfile1-dev`.
+Linux also gets a `.deb` and an `.rpm` of the same folder (`packaging/linux/`,
+installed in `/opt/earshot`), and macOS a signed, notarized `.dmg`
+(`packaging/macos/package.sh`; signing needs the `MACOS_CERTIFICATE*` and `NOTARY_*`
+secrets, so it only happens in CI).
+
+To make the Linux downloads locally (see *What to install* for what they need):
+
+```bash
+make bundle      # the folder, checked by the smoke test: target/bundle/earshot
+make packages    # the .deb and .rpm of it: target/packages
+```
 
 ## Known gaps
 

@@ -2,7 +2,7 @@
 
 PACKAGES := earshot-gui earshot-engine earshot-audio
 
-.PHONY: help run run-release release install test test-worker fmt clean clean-all clean-db bundle
+.PHONY: help run run-release release install test test-worker fmt clean clean-all clean-db bundle packages
 
 help:
 	@echo "make run          run the app (debug build)"
@@ -16,6 +16,7 @@ help:
 	@echo "make clean-all    delete everything in target/ (next build is from scratch)"
 	@echo "make clean-db     delete the library database (after a schema change)"
 	@echo "make bundle       a Linux release folder, ready to run (target/bundle/earshot)"
+	@echo "make packages     the .deb and .rpm from that folder (target/packages)"
 
 # Running from a checkout uses the worker's own venv (worker/setup.sh), made or
 # brought up to date first when it's missing or older than the worker's lockfile.
@@ -56,6 +57,10 @@ bundle:
 	cargo build --release --locked -p earshot-gui
 	packaging/bundle.sh linux-x86_64 target/release/earshot target/bundle/earshot
 	target/bundle/earshot/python/bin/python3 packaging/smoke_test.py target/bundle/earshot
+
+# The Linux packages from what `make bundle` made (run that first).
+packages:
+	packaging/linux/package.sh target/bundle/earshot target/packages $$(git rev-parse --short HEAD)
 
 # Every build of our crates with different settings leaves its own ~400 MB binary,
 # and cargo never deletes old ones. The libraries we depend on rarely change, so
