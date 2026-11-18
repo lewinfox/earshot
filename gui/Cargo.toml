@@ -1,11 +1,11 @@
 [package]
 name = "earshot-gui"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
 directories = "6.0.0"
-earshot-engine = { version = "0.1.0", path = "../engine" }
+earshot-engine = { version = "0.1.1", path = "../engine" }
 eframe = { version = "0.33.3", features = ["persistence"] }
 egui = "0.33.3"
 egui_extras = "0.33.3"
