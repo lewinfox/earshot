@@ -1,0 +1,5 @@
+# Windows: the C runtime linked into earshot.exe, rather than needing Microsoft's
+# Visual C++ runtime (VCRUNTIME140.dll) installed, which a fresh Windows may not have.
+# (The cc crate builds the C and C++ code in it to match.)
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

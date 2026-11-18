@@ -33,8 +33,7 @@ stays unless you delete it: see *Where earshot keeps things*, below).
   only, with no administrator prompt (it offers all users instead), and adds earshot to
   the Start menu; *Settings → Apps* uninstalls it, and asks whether to delete your
   library and settings too. The installer isn't signed yet, so Windows warns about it
-  the first time: *More info → Run anyway*. Or unpack the `.zip` and run `earshot.exe`
-  in it.
+  the first time: *More info → Run anyway*.
 
 ## Development
 

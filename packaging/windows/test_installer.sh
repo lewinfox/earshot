@@ -21,6 +21,19 @@ echo ">> install"
 [[ -f "$menu" ]] || { echo "no Start menu entry: $menu"; exit 1; }
 echo "   ok: $dir, Start menu entry"
 
+# This machine has Microsoft's Visual C++ runtime, a fresh Windows may not: nothing may
+# need it unless it brings its own copy (as python\ does). earshot.exe links it in
+# (.cargo/config.toml).
+echo ">> Visual C++ runtime"
+missing=""
+while IFS= read -r -d '' f; do
+  if grep -qai 'vcruntime140' "$f" && [[ ! -e "$(dirname "$f")/vcruntime140.dll" ]]; then
+    missing+="  ${f#"$dir"/}"$'\n'
+  fi
+done < <(find "$dir" -path "$dir/python" -prune -o -type f \( -iname '*.exe' -o -iname '*.dll' \) ! -iname 'unins*' -print0)
+[[ -z "$missing" ]] || { printf 'need VCRUNTIME140.dll, which a fresh Windows may not have:\n%s' "$missing"; exit 1; }
+echo "   ok: nothing needs it"
+
 echo ">> smoke test, installed copy"
 PYTHONDONTWRITEBYTECODE=1 "$dir/python/python.exe" "$repo/packaging/smoke_test.py" "$dir"
 

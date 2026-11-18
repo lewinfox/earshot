@@ -9,8 +9,8 @@
 # On macOS that's earshot.app in a disk image, signed and notarized
 # (packaging/macos/package.sh); Linux gets a .deb and an .rpm
 # (packaging/linux/package.sh) and the folder as an archive; Windows an installer
-# (packaging/windows/package.sh, tried out by test_installer.sh) and the folder as a
-# zip. Windows is new and less tried, so a failure there doesn't stop the release.
+# (packaging/windows/package.sh, tried out by test_installer.sh). Windows is new and
+# less tried, so a failure there doesn't stop the release.
 
 name: build
 
@@ -212,7 +212,6 @@ jobs:
             packaging/macos/package.sh dmg app/earshot.app "out/$name.dmg"
           elif [[ "$RUNNER_OS" == Windows ]]; then
             "$name/python/python.exe" packaging/smoke_test.py "$name"
-            7z a "out/$name.zip" "$name" > /dev/null
             packaging/windows/package.sh "$name" "out/$name-setup.exe" $dev
             packaging/windows/test_installer.sh "out/$name-setup.exe"
           else
@@ -260,13 +259,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           path: out/*-setup.exe
-          archive: false
-          if-no-files-found: error
-
-      - name: Upload zip
-        if: ${{ !inputs.warm-cache && runner.os == 'Windows' }}
-        uses: actions/upload-artifact@v7
-        with:
-          path: out/*.zip
           archive: false
           if-no-files-found: error
