@@ -59,11 +59,11 @@ jobs:
             exe: earshot.exe
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      # Its own cache prunes the packages it downloaded (torch and the rest): the
-      # Downloads steps below keep them instead.
-      - uses: astral-sh/setup-uv@v6
+      # Not its own cache, which every run would save: the steps below keep uv's
+      # cache, saved only when warming, like the others.
+      - uses: astral-sh/setup-uv@v10
         with:
           enable-cache: false
 
@@ -105,7 +105,7 @@ jobs:
 
       - name: Restore uv's cache
         id: uv-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ${{ env.UV_CACHE_DIR }}
           key: uv-${{ matrix.name }}-${{ hashFiles('worker/uv.lock') }}
@@ -113,7 +113,7 @@ jobs:
 
       - name: Restore bundle downloads
         id: bundle-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: packaging/.cache
           key: bundle-${{ matrix.name }}-${{ steps.downloads.outputs.month }}-${{ hashFiles('packaging/bundle.sh', 'worker/earshot_worker/detectors.py') }}
@@ -126,14 +126,14 @@ jobs:
 
       - name: Save uv's cache
         if: ${{ inputs.warm-cache && steps.uv-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ${{ env.UV_CACHE_DIR }}
           key: ${{ steps.uv-cache.outputs.cache-primary-key }}
 
       - name: Save bundle downloads
         if: ${{ inputs.warm-cache && steps.bundle-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: packaging/.cache
           key: ${{ steps.bundle-cache.outputs.cache-primary-key }}
@@ -218,7 +218,7 @@ jobs:
             packaging/linux/package.sh "$name" out $dev
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ !inputs.warm-cache }}
         with:
           name: ${{ matrix.name }}
