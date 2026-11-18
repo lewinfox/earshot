@@ -13,10 +13,12 @@ repo="$(cd "$(dirname "$0")/../.." && pwd)"
 # In Git Bash's form (C:\... has backslashes, which find's -path takes as escapes).
 dir="$(cygpath -u "$LOCALAPPDATA")/Programs/earshot-test"
 menu="$(cygpath -u "$APPDATA")/Microsoft/Windows/Start Menu/Programs/earshot.lnk"
-export MSYS2_ARG_CONV_EXCL='*'  # Inno's /OPTIONS aren't paths
+# Inno's /OPTIONS aren't paths: Git Bash is told not to convert them (only for its
+# commands, as everything else here wants its paths converted).
+inno() { MSYS2_ARG_CONV_EXCL='*' "$@"; }
 
 echo ">> install"
-"$setup" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER "/DIR=$(cygpath -w "$dir")" \
+inno "$setup" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER "/DIR=$(cygpath -w "$dir")" \
   "/LOG=$(cygpath -w "$RUNNER_TEMP/install.log")"
 [[ -x "$dir/earshot.exe" ]] || { echo "not installed: $dir/earshot.exe"; cat "$RUNNER_TEMP/install.log"; exit 1; }
 [[ -f "$menu" ]] || { echo "no Start menu entry: $menu"; exit 1; }
@@ -36,10 +38,10 @@ done < <(find "$dir" -path "$dir/python" -prune -o -type f \( -iname '*.exe' -o 
 echo "   ok: nothing needs it"
 
 echo ">> smoke test, installed copy"
-PYTHONDONTWRITEBYTECODE=1 "$dir/python/python.exe" "$repo/packaging/smoke_test.py" "$dir"
+PYTHONDONTWRITEBYTECODE=1 "$dir/python/python.exe" "$(cygpath -w "$repo/packaging/smoke_test.py")" "$(cygpath -w "$dir")"
 
 echo ">> uninstall"
-"$dir/unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+inno "$dir/unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 # The uninstaller hands over to a copy of itself and returns at once: wait for it.
 for _ in $(seq 120); do
   [[ -e "$dir" || -e "$menu" ]] || break
