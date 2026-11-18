@@ -25,9 +25,8 @@ folder, below).
 
 - **Linux** (x86_64): `tar xf earshot-*-linux-x86_64.tar.xz`. Needs ALSA, which every
   desktop has.
-- **macOS** (Apple silicon): the download isn't signed yet, so macOS refuses to open
-  it. After unpacking, run `xattr -dr com.apple.quarantine earshot-*-macos-arm64`
-  once.
+- **macOS** (Apple silicon, macOS 14 or later): open the `.dmg` and drag earshot to
+  Applications.
 
 ## Build it from source (Linux)
 
