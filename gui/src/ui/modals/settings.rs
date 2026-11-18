@@ -88,12 +88,13 @@ impl SettingsUi {
                 });
                 ui.separator();
                 match self.tab {
-                    SettingsTab::Audio => {
-                        out.extend(
-                            self.audio
-                                .ui(ui, env.audio_settings, env.audio, env.routing),
-                        )
-                    }
+                    SettingsTab::Audio => out.extend(self.audio.ui(
+                        ui,
+                        env.audio_settings,
+                        env.audio,
+                        env.controller,
+                        env.routing,
+                    )),
                     SettingsTab::Decks => out.extend(decks(ui, env)),
                     SettingsTab::Analysis => out.extend(analysis(ui, &env.analysis)),
                     SettingsTab::Keymap => out.extend(keymap(ui, &env.keymap_file)),

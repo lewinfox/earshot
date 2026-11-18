@@ -69,7 +69,10 @@ fn windows_resources() {
         .set("ProductName", "earshot")
         .set("FileDescription", "earshot")
         .set("OriginalFilename", "earshot.exe")
-        .set("LegalCopyright", "Copyright (c) 2026 Lewin Appleton-Fox (MIT licence)")
+        .set(
+            "LegalCopyright",
+            "Copyright (c) 2026 Lewin Appleton-Fox (MIT licence)",
+        )
         .compile()
         .expect("couldn't add the icon and version details to earshot.exe");
 }

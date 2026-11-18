@@ -78,6 +78,9 @@ pub struct EarshotApp {
     /// stopped helping).
     audio_stalls: VecDeque<Instant>,
     audio_note: Option<(String, Option<Instant>)>,
+    /// What the output audio opened on is called (`core::outputs::name_for`), for the
+    /// top bar.
+    audio_name: Option<String>,
     /// Messages for the user, in the bottom bar.
     notices: Notices,
     /// "Do you really want to quit?" is showing; and the user said yes.
@@ -182,7 +185,12 @@ fn start_audio(
     // A thread that steps its background work (a test's) steps its audio too.
     opts.stepped = crate::core::background::stepped();
     opts.null |= null || opts.stepped;
+    // Another output chosen over the controller's card: PipeWire may have the card.
+    if !settings.use_controller {
+        controller.release();
+    }
     if !opts.null
+        && settings.use_controller
         && let Some(device) = controller.prepare()
     {
         opts.device = Some(device);
@@ -391,6 +399,7 @@ impl EarshotApp {
             controller,
             audio_stalls: VecDeque::new(),
             audio_note: None,
+            audio_name: None,
             loaded_from: Default::default(),
             load_taps: Default::default(),
             notices: Notices::default(),
@@ -542,6 +551,16 @@ impl EarshotApp {
             self.null_audio,
             &mut self.controller,
         );
+        self.audio_name = match &self.audio {
+            Ok(i) if !i.null => Some(crate::core::outputs::name_for(
+                &i.device,
+                self.controller
+                    .found
+                    .as_ref()
+                    .filter(|_| self.settings.audio.use_controller),
+            )),
+            _ => None,
+        };
         self.reread_monitor();
     }
 
@@ -1399,6 +1418,7 @@ impl EarshotApp {
                 }
                 TopBar {
                     audio: &self.audio,
+                    audio_name: self.audio_name.as_deref(),
                     alerts: &self.hud.alerts,
                     audio_note: self.audio_note.as_ref().map(|(n, _)| n.as_str()),
                     controller_busy: self
@@ -1436,6 +1456,7 @@ impl EarshotApp {
         let env = ModalEnv {
             audio_settings: &self.settings.audio,
             audio: &self.audio,
+            controller: self.controller.found.as_ref(),
             routing,
             hotcue_mode: self.settings.hotcue_mode,
             xf_curve: self.settings.xf_curve,

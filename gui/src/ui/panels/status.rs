@@ -51,6 +51,8 @@ pub struct Alert {
 
 pub struct TopBar<'a> {
     pub audio: &'a Result<OutputInfo, String>,
+    /// What that output is called ("Speakers", "DDJ-400"), if known.
+    pub audio_name: Option<&'a str>,
     /// The machine can't keep up, and what the audio is doing about it: real time
     /// lost, keylock on its lighter setting, a low-power profile (`EarshotApp::
     /// watch_strain`).
@@ -252,7 +254,7 @@ impl TopBar<'_> {
                     } else {
                         ""
                     },
-                    i.device,
+                    self.audio_name.unwrap_or(&i.device),
                     i.phones
                         .as_ref()
                         .map_or(String::new(), |(p, _)| format!(" · headphones: {p}")),
