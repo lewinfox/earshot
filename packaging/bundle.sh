@@ -2,13 +2,13 @@
 # Build an earshot release folder: the app and everything its Python worker needs,
 # ready to run, so nothing is set up on the user's computer.
 #
-#   packaging/bundle.sh <platform> <earshot-gui binary> <out dir>
+#   packaging/bundle.sh <platform> <earshot binary> <out dir>
 #
 # <platform> is linux-x86_64, macos-arm64 or windows-x86_64. Needs uv and curl (and,
 # for Linux, what building Rubber Band needs: a C++ compiler, libsndfile's headers).
 # The folder it makes (core/worker_env.rs finds it beside the binary):
 #
-#   earshot-gui       the app
+#   earshot           the app
 #   python/           a standalone Python with every package the worker uses
 #   worker/           the worker's code (earshot_worker)
 #   models/           the Beat This! checkpoints (torch's cache layout)
@@ -19,7 +19,7 @@
 set -euo pipefail
 
 platform=${1:?platform}
-exe=${2:?the earshot-gui binary}
+exe=${2:?the earshot binary}
 out=${3:?out dir}
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"

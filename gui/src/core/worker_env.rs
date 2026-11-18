@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn a_bundle_beside_the_program_is_found_and_its_programs_come_first() {
         let root = std::env::temp_dir().join(format!("earshot-bundle-{}", std::process::id()));
-        let exe = root.join("earshot-gui");
+        let exe = root.join("earshot");
         assert_eq!(bundle_root(&exe), None, "no bundle yet");
         for d in ["python/bin", "worker"] {
             std::fs::create_dir_all(root.join(d)).unwrap();

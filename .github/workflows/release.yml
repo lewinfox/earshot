@@ -36,15 +36,15 @@ jobs:
           - name: linux-x86_64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            exe: earshot-gui
+            exe: earshot
           - name: macos-arm64
             os: macos-latest
             target: aarch64-apple-darwin
-            exe: earshot-gui
+            exe: earshot
           - name: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            exe: earshot-gui.exe
+            exe: earshot.exe
 
     steps:
       - uses: actions/checkout@v4

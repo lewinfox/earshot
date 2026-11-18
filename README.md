@@ -18,7 +18,7 @@ docs/design.md decisions and roadmap
 
 Download the file for your computer from the
 [releases page](https://github.com/lewinfox/earshot/releases), unpack it and run
-`earshot-gui` in the folder it makes. Everything it needs is in that folder: the
+`earshot` in the folder it makes. Everything it needs is in that folder: the
 analysis worker with its own Python and models, ffmpeg and Rubber Band. Nothing else
 is installed, and deleting the folder removes it (your library stays in the data
 folder, below).

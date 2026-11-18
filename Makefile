@@ -27,7 +27,7 @@ run-release:
 release:
 	packaging/release.sh
 
-# The menu entry runs target/release/earshot-gui in this checkout: run again after
+# The menu entry runs target/release/earshot in this checkout: run again after
 # moving it.
 install:
 	cargo build --release -p earshot-gui
@@ -45,7 +45,7 @@ fmt:
 # What a release ships (README "Releases"), checked with its own Python.
 bundle:
 	cargo build --release --locked -p earshot-gui
-	packaging/bundle.sh linux-x86_64 target/release/earshot-gui target/bundle/earshot
+	packaging/bundle.sh linux-x86_64 target/release/earshot target/bundle/earshot
 	target/bundle/earshot/python/bin/python3 packaging/smoke_test.py target/bundle/earshot
 
 # Every build of our crates with different settings leaves its own ~400 MB binary,
