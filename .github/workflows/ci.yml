@@ -1,8 +1,7 @@
 # Tests for every pull request into main or develop: the Rust workspace (`make test`) and the
 # Python worker (`make test-worker`). Tests that need a real track stay #[ignore]d.
 #
-# The Rust tests are rust-tests.yml (Linux and macOS). The worker is pure Python and
-# runs on Linux only.
+# The Rust tests are rust-tests.yml (Linux and macOS), the worker's worker-tests.yml.
 
 name: ci
 
@@ -15,9 +14,6 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
   rust:
     name: Rust tests
@@ -25,26 +21,4 @@ jobs:
 
   worker:
     name: Worker tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    defaults:
-      run:
-        working-directory: worker
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: astral-sh/setup-uv@v10.3.3 # exact versions only: it has no major-version tags
-        with:
-          enable-cache: true
-
-      # The tempo lock tests run ffmpeg and Rubber Band as programs.
-      - name: Programs
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg rubberband-cli
-
-      - name: Install
-        run: uv sync --locked
-
-      - name: Test
-        run: .venv/bin/python -m pytest -q
+    uses: ./.github/workflows/worker-tests.yml
