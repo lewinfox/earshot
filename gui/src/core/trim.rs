@@ -8,7 +8,6 @@
 //!    A file saved in a library folder is scanned in.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use super::track::TrackId;
 
@@ -74,7 +73,7 @@ pub fn cut(src: &Source, start: f64, end: f64, to: &Path) -> Result<(), String> 
         return Err("choose another name: this is the original".into());
     }
     let part = partial(to);
-    let out = Command::new("ffmpeg")
+    let out = super::process::background("ffmpeg")
         .args(args(src, start, end, &part))
         .output()
         .map_err(|e| format!("ffmpeg: {e} (is it installed?)"))?;
