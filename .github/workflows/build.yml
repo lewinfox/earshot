@@ -218,8 +218,44 @@ jobs:
             packaging/linux/package.sh "$name" out $dev
           fi
 
-      - uses: actions/upload-artifact@v7
-        if: ${{ !inputs.warm-cache }}
+      # Each file as it is (archive: false), so the run's downloads are the .dmg, .deb
+      # and so on rather than zips of them; that takes one file per upload.
+      - name: Upload dmg
+        if: ${{ !inputs.warm-cache && runner.os == 'macOS' }}
+        uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.name }}
-          path: out/*
+          path: out/*.dmg
+          archive: false
+          if-no-files-found: error
+
+      - name: Upload deb
+        if: ${{ !inputs.warm-cache && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: out/*.deb
+          archive: false
+          if-no-files-found: error
+
+      - name: Upload rpm
+        if: ${{ !inputs.warm-cache && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: out/*.rpm
+          archive: false
+          if-no-files-found: error
+
+      - name: Upload tar.xz
+        if: ${{ !inputs.warm-cache && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: out/*.tar.xz
+          archive: false
+          if-no-files-found: error
+
+      - name: Upload zip
+        if: ${{ !inputs.warm-cache && runner.os == 'Windows' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: out/*.zip
+          archive: false
+          if-no-files-found: error
