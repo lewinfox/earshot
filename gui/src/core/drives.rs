@@ -227,6 +227,7 @@ fn parse_mounts(text: &str) -> Vec<(String, PathBuf, String)> {
 }
 
 /// Total and free bytes, and whether we may write to it.
+#[cfg(unix)]
 fn space(at: &Path) -> (u64, u64, bool) {
     use std::os::unix::ffi::OsStrExt;
     let Ok(c) = std::ffi::CString::new(at.as_os_str().as_bytes()) else {
@@ -245,6 +246,33 @@ fn space(at: &Path) -> (u64, u64, bool) {
         st.f_bavail as u64 * block,
         writable,
     )
+}
+
+/// Windows: [`list`] finds no drives there yet, so this is never asked.
+#[cfg(not(unix))]
+fn space(_: &Path) -> (u64, u64, bool) {
+    (0, 0, false)
+}
+
+/// Wait up to a second for the kernel to say the mount table changed (the open
+/// `/proc/self/mounts` is readable as "priority" data then).
+#[cfg(unix)]
+fn mounts_changed(mounts: &fs::File) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut p = libc::pollfd {
+        fd: mounts.as_raw_fd(),
+        events: libc::POLLPRI | libc::POLLERR,
+        revents: 0,
+    };
+    // SAFETY: one valid pollfd.
+    unsafe { libc::poll(&mut p, 1, 1000) != 0 }
+}
+
+/// Windows has no `/proc/self/mounts` to open, so [`watch`] never asks.
+#[cfg(not(unix))]
+fn mounts_changed(_: &fs::File) -> bool {
+    std::thread::sleep(Duration::from_secs(1));
+    false
 }
 
 /// The removable drives mounted now.
@@ -292,7 +320,6 @@ pub fn watch(stop: Arc<AtomicBool>, changed: impl Fn(Vec<Drive>) + Send + 'stati
     std::thread::Builder::new()
         .name("earshot-drives".into())
         .spawn(move || {
-            use std::os::fd::AsRawFd;
             let mounts = fs::File::open("/proc/self/mounts").ok();
             let mut last: Option<Vec<Drive>> = None;
             loop {
@@ -313,14 +340,7 @@ pub fn watch(stop: Arc<AtomicBool>, changed: impl Fn(Vec<Drive>) + Send + 'stati
                             if stop.load(Ordering::Relaxed) {
                                 return;
                             }
-                            let mut p = libc::pollfd {
-                                fd: f.as_raw_fd(),
-                                events: libc::POLLPRI | libc::POLLERR,
-                                revents: 0,
-                            };
-                            // SAFETY: one valid pollfd.
-                            let ready = unsafe { libc::poll(&mut p, 1, 1000) };
-                            if ready != 0 || std::time::Instant::now() >= until {
+                            if mounts_changed(f) || std::time::Instant::now() >= until {
                                 break;
                             }
                         }
@@ -364,7 +384,7 @@ pub fn flush(at: &Path) {
         // SAFETY: a valid open file descriptor.
         unsafe { libc::syncfs(f.as_raw_fd()) };
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     {
         // macOS (and other unixes) have no syncfs: flush all filesystems instead.
         // Heavier, but flush is best effort and only runs after a copy or on eject.
@@ -372,6 +392,9 @@ pub fn flush(at: &Path) {
         // SAFETY: sync takes no arguments and can't fail.
         unsafe { libc::sync() };
     }
+    // Windows: opening a folder fails above, so there's nothing to flush.
+    #[cfg(not(unix))]
+    let _ = f;
 }
 
 /// The drives jobs are using, shared between the UI and the jobs' threads.

@@ -7,7 +7,9 @@
 //! -l`), it says so once in the log and the audio plays as before.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(unix)]
+use std::sync::atomic::Ordering;
 
 use earshot_engine::decode::TrackAudio;
 use earshot_engine::stems::StemAudio;
