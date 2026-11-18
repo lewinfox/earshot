@@ -17,10 +17,19 @@ help:
 	@echo "make clean-db     delete the library database (after a schema change)"
 	@echo "make bundle       a Linux release folder, ready to run (target/bundle/earshot)"
 
-run:
+# Running from a checkout uses the worker's own venv (worker/setup.sh), made or
+# brought up to date first when it's missing or older than the worker's lockfile.
+# (A release ships its worker ready-made: packaging/bundle.sh.)
+WORKER_VENV := worker/.venv/.setup-done
+
+$(WORKER_VENV): worker/uv.lock worker/pyproject.toml
+	worker/setup.sh
+	touch $@
+
+run: $(WORKER_VENV)
 	cargo run -p earshot-gui
 
-run-release:
+run-release: $(WORKER_VENV)
 	cargo run --release -p earshot-gui
 
 # Builds and publishes a release on GitHub (packaging/release.sh says what it checks).
@@ -29,14 +38,14 @@ release:
 
 # The menu entry runs target/release/earshot in this checkout: run again after
 # moving it.
-install:
+install: $(WORKER_VENV)
 	cargo build --release -p earshot-gui
 	gui/install-desktop.sh
 
 test:
 	cargo test --workspace -- --test-threads=4
 
-test-worker:
+test-worker: $(WORKER_VENV)
 	cd worker && .venv/bin/python -m pytest -q
 
 fmt:
