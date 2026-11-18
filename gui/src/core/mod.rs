@@ -36,6 +36,7 @@ pub mod outside;
 pub mod pads;
 pub mod player;
 pub mod power;
+pub mod process;
 pub mod query;
 pub mod sampler;
 pub mod selection;

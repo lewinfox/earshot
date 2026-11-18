@@ -16,12 +16,11 @@ docs/design.md decisions and roadmap
 
 ## Install
 
-Download the file for your computer from the
-[releases page](https://github.com/lewinfox/earshot/releases), unpack it and run
-`earshot` in the folder it makes. Everything it needs is in that folder: the
-analysis worker with its own Python and models, ffmpeg and Rubber Band. Nothing else
-is installed, and deleting the folder removes it (your library stays: see *Where
-earshot keeps things*, below).
+Download the installer for your computer from the
+[releases page](https://github.com/lewinfox/earshot/releases). Everything earshot needs
+comes with it: the analysis worker with its own Python and models, ffmpeg and Rubber
+Band. Nothing else is installed, and uninstalling removes all of it (your library
+stays unless you delete it: see *Where earshot keeps things*, below).
 
 - **Linux** (x86_64; Ubuntu 24.04, Debian 13, Fedora 40 or newer): install the
   `.deb` (`sudo apt install ./earshot_*_amd64.deb`, or open it in your software
@@ -30,6 +29,11 @@ earshot keeps things*, below).
   removes it. On other distributions, unpack the `.tar.xz` and run `earshot` in it.
 - **macOS** (Apple silicon, macOS 14 or later): open the `.dmg` and drag earshot to
   Applications.
+- **Windows** (x64, Windows 10 or 11): run `earshot-*-setup.exe`. It installs for you
+  only, with no administrator prompt (it offers all users instead), and adds earshot to
+  the Start menu; *Settings → Apps* uninstalls it, and asks whether to delete your
+  library and settings too. The installer isn't signed yet, so Windows warns about it
+  the first time: *More info → Run anyway*.
 
 ## Development
 
@@ -102,12 +106,12 @@ from).
 Nothing goes anywhere in your home folder but these four folders (on Linux, the XDG
 base directories; `$XDG_DATA_HOME` and the rest move them):
 
-| | Linux | macOS | What's in it |
-|---|---|---|---|
-| data | `~/.local/share/earshot` | `~/Library/Application Support/io.github.lewinfox.earshot` | `library.db`: your library and settings |
-| config | `~/.config/earshot` | as data | `keymap.txt`, `controllers/` (your own mappings) |
-| cache | `~/.cache/earshot` | `~/Library/Caches/io.github.lewinfox.earshot` | stems, tempo lock's working files: made again when needed |
-| state | `~/.local/state/earshot` | as data | logs, debug exports, the window's size and place |
+| | Linux | macOS | Windows | What's in it |
+|---|---|---|---|---|
+| data | `~/.local/share/earshot` | `~/Library/Application Support/io.github.lewinfox.earshot` | `%APPDATA%\lewinfox\earshot\data` | `library.db`: your library and settings |
+| config | `~/.config/earshot` | as data | `%APPDATA%\lewinfox\earshot\config` | `keymap.txt`, `controllers/` (your own mappings) |
+| cache | `~/.cache/earshot` | `~/Library/Caches/io.github.lewinfox.earshot` | `%LOCALAPPDATA%\lewinfox\earshot\cache` | stems, tempo lock's working files: made again when needed |
+| state | `~/.local/state/earshot` | as data | `%LOCALAPPDATA%\lewinfox\earshot\data` | logs, debug exports, the window's size and place |
 
 To remove every trace of earshot on Linux, delete those four (after uninstalling):
 

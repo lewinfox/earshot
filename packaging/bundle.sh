@@ -133,17 +133,28 @@ case "$platform" in
     cp "$tmp/$name/LICENSE.txt" "$out/licenses/ffmpeg.txt"
     rm -rf "$tmp"
 
-    echo ">> rubberband $RUBBERBAND (built here)"
-    tmp="$(mktemp -d)"
-    tar -xjf "$(fetch "https://breakfastquay.com/files/releases/rubberband-$RUBBERBAND.tar.bz2")" -C "$tmp"
-    (cd "$tmp/rubberband-$RUBBERBAND" &&
-      uvx --with ninja meson setup build -Dfft=builtin -Dresampler=builtin -Ddefault_library=static \
-        -Dcmdline=enabled -Dtests=disabled -Dvamp=disabled -Dladspa=disabled -Dlv2=disabled \
-        -Djni=disabled --buildtype=release > /dev/null &&
-      uvx --with ninja meson compile -C build > /dev/null)
-    cp "$tmp/rubberband-$RUBBERBAND/build/rubberband" "$out/bin/"
-    cp "$tmp/rubberband-$RUBBERBAND/COPYING" "$out/licenses/rubberband.txt"
-    rm -rf "$tmp"
+    # Built once and kept in the cache, in a folder named for the version and how it's
+    # built, so changing either builds it again.
+    options=(-Dfft=builtin -Dresampler=builtin -Ddefault_library=static -Dcmdline=enabled
+      -Dtests=disabled -Dvamp=disabled -Dladspa=disabled -Dlv2=disabled -Djni=disabled
+      --buildtype=release)
+    built="$cache/rubberband-$RUBBERBAND-linux-x86_64-$(echo "${options[*]}" | sha256sum | cut -c1-8)"
+    if [ ! -x "$built/rubberband" ]; then
+      echo ">> rubberband $RUBBERBAND (building it)"
+      tmp="$(mktemp -d)"
+      tar -xjf "$(fetch "https://breakfastquay.com/files/releases/rubberband-$RUBBERBAND.tar.bz2")" -C "$tmp"
+      (cd "$tmp/rubberband-$RUBBERBAND" &&
+        uvx --with ninja meson setup build "${options[@]}" > /dev/null &&
+        uvx --with ninja meson compile -C build > /dev/null)
+      mkdir -p "$built.part"
+      cp "$tmp/rubberband-$RUBBERBAND/build/rubberband" "$tmp/rubberband-$RUBBERBAND/COPYING" "$built.part/"
+      rm -rf "$tmp" "$built"
+      mv "$built.part" "$built"
+    else
+      echo ">> rubberband $RUBBERBAND (built before)"
+    fi
+    cp "$built/rubberband" "$out/bin/"
+    cp "$built/COPYING" "$out/licenses/rubberband.txt"
     bundle_libs "$out/bin/rubberband"
     ;;
   macos-arm64)

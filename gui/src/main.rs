@@ -1,6 +1,10 @@
 //! earshot's native UI (egui): a DJ library explorer and performance decks. See
 //! ../README.md.
 
+// A release build on Windows is a windowed program: no console window beside it (its
+// log is in the state folder). Debug builds keep the console, for what they print.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod core;
 mod ui;
 

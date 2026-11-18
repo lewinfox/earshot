@@ -782,7 +782,7 @@ impl Supervisor {
                 c.missing.clone()
             });
         }
-        let mut command = std::process::Command::new(&c.program);
+        let mut command = super::process::background(&c.program);
         command
             .args(&c.args)
             .current_dir(&c.dir)

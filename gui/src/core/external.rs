@@ -333,7 +333,7 @@ pub(super) fn run_with<T: serde::de::DeserializeOwned>(
         return Err(why);
     }
     let python = &env.python;
-    let mut child = std::process::Command::new(python)
+    let mut child = super::process::background(python)
         .args(["-m", "earshot_worker.libraries"])
         .args(&args)
         .current_dir(&env.dir)
