@@ -15,6 +15,10 @@ section: sound
 priority: optional
 maintainer: ${MAINTAINER}
 homepage: https://github.com/lewinfox/earshot
+# earshot is MIT; what comes with it (Rubber Band, mutagen in the worker, FFmpeg)
+# brings the GPL and LGPL: /opt/earshot/licenses says which is which. (The rpm
+# shows this; a .deb has no licence field, it has /usr/share/doc/earshot/copyright.)
+license: MIT AND GPL-2.0-or-later AND LGPL-2.1-or-later
 description: |-
   DJ library explorer and performance decks
   earshot analyses your music (beats, key, stems), organises it and plays it on
@@ -78,6 +82,11 @@ contents:
     type: symlink
   - src: ${DESKTOP}
     dst: /usr/share/applications/earshot.desktop
+    file_info:
+      mode: 0644
+  - src: LICENSE
+    dst: /usr/share/doc/earshot/copyright
+    packager: deb
     file_info:
       mode: 0644
   - src: gui/assets/icons/earshot.svg

@@ -257,3 +257,12 @@ make packages    # the .deb and .rpm of it: target/packages
   each (`gui/src/core/pads.rs`): not rekordbox's own defaults, and not editable yet.
 - Hot cues are not saved.
 - The worker has no timeout: if it hangs, the analysis queue stops until restart.
+
+## Licence
+
+earshot is MIT licensed ([LICENSE](LICENSE)). A release also contains other people's
+work under their own licences, listed in its `licenses/` folder: notably mutagen
+(GPL v2 or later, through cratelib), which the worker uses to read and write the
+tags DJ software keeps in music files, and Rubber Band (GPL v2 or later) and FFmpeg
+(LGPL), which it runs as separate programs. So a release as a whole is distributed
+under the GPL's terms.

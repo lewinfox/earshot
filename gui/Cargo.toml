@@ -1,6 +1,7 @@
 [package]
 name = "earshot-gui"
 version = "0.1.1"
+license = "MIT"
 edition = "2024"
 
 # The package is earshot-gui (cargo -p earshot-gui); the program is just earshot.
