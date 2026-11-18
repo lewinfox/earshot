@@ -10,8 +10,9 @@ set -euo pipefail
 
 setup="$(cd "$(dirname "${1:?setup.exe}")" && pwd)/$(basename "$1")"
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
-dir="$LOCALAPPDATA/Programs/earshot-test"
-menu="$APPDATA/Microsoft/Windows/Start Menu/Programs/earshot.lnk"
+# In Git Bash's form (C:\... has backslashes, which find's -path takes as escapes).
+dir="$(cygpath -u "$LOCALAPPDATA")/Programs/earshot-test"
+menu="$(cygpath -u "$APPDATA")/Microsoft/Windows/Start Menu/Programs/earshot.lnk"
 export MSYS2_ARG_CONV_EXCL='*'  # Inno's /OPTIONS aren't paths
 
 echo ">> install"
