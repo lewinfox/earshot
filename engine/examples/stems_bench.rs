@@ -38,7 +38,7 @@ fn main() {
     );
 
     // 1. Delay.
-    let k = Keylock::new(sr, BLOCK);
+    let k = Keylock::new(sr, BLOCK, 0);
     let delay_s = k.lead(1.0 / sr as f64);
     println!(
         "keylock delay: {} frames = {:.0} ms",
@@ -51,7 +51,7 @@ fn main() {
     let n = (20 * sr as usize).min(audio.frames() - start);
     let clip = &audio.samples[start * 2..(start + n) * 2];
     for shifters in [1usize, 4] {
-        let mut ks: Vec<Keylock> = (0..shifters).map(|_| Keylock::new(sr, BLOCK)).collect();
+        let mut ks: Vec<Keylock> = (0..shifters).map(|i| Keylock::new(sr, BLOCK, i)).collect();
         let mut buf = vec![0.0f32; BLOCK * 2];
         let t = Instant::now();
         let mut blocks = 0usize;
