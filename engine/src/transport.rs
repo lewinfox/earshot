@@ -148,6 +148,15 @@ impl Player {
         }
     }
 
+    /// [`Player::restart_keylock`], with this player's shifter in step with
+    /// `other`'s for that restart (the decks' shifters are staggered otherwise:
+    /// `keylock`): an instant double and its original.
+    pub fn restart_keylock_with(&mut self, other: &Player) {
+        if let (Some(s), Some(o)) = (&mut self.shifter, &other.shifter) {
+            s.restart_in_phase(o.phase());
+        }
+    }
+
     /// The hand goes on the record (`true`) or comes off, at `now` (the engine's
     /// clock). Let go, a playing deck carries on at its speed.
     pub fn hand(&mut self, on: bool, now: f64) {

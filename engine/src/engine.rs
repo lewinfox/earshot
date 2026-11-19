@@ -1667,9 +1667,18 @@ impl Renderer {
         // Each deck's key-lock shifter has a state of its own, which can't be copied:
         // both start afresh here instead, so they stay sample for sample alike. (Out
         // of step by a few milliseconds, the two copies would sound like a flanger.)
+        // (The double takes the original's place in the shifters' cycle for this: the
+        // decks' are staggered otherwise.)
         self.decks[f].player.restart_keylock();
+        let (from, to) = if f < t {
+            let (a, b) = self.decks.split_at_mut(t);
+            (&a[f], &mut b[0])
+        } else {
+            let (a, b) = self.decks.split_at_mut(f);
+            (&b[0], &mut a[t])
+        };
+        to.player.restart_keylock_with(&from.player);
         let dk = &mut self.decks[t];
-        dk.player.restart_keylock();
         dk.range = range;
         dk.rate = rate;
         dk.check_pickup();
@@ -2463,7 +2472,8 @@ mod tests {
         for decks in [2usize, 4] {
             let mut rig = Rig::with_decks(decks);
             for d in 0..decks {
-                load_fn(&mut rig, d, 120.0, noise);
+                // Long enough for every row below (about 40 s each at these speeds).
+                load_fn(&mut rig, d, 300.0, noise);
             }
             time(&mut rig, &format!("{decks} decks loaded, stopped"));
             for d in 0..decks {
