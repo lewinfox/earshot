@@ -583,11 +583,11 @@ fn centred_fx(ui: &mut Ui, centre: f32, width: f32, cx: &mut Cx) -> f32 {
     ui.cursor().min.x - start
 }
 
-/// Four decks and no controller: which deck each hand (the keyboard's) plays, as
-/// `[1] | [2]` in the decks' colours. The left switches between 1 and 3, the right
-/// between 2 and 4. A controller has its own buttons.
+/// Four decks: which deck each hand plays (the keyboard's left and right keys, a
+/// controller's left and right decks), as `[1] | [2]` in the decks' colours. The left
+/// switches between 1 and 3 (G), the right between 2 and 4 (H).
 fn layers(ui: &mut Ui, cx: &mut Cx) {
-    if !cx.prefs.four_decks() || cx.prefs.controller() {
+    if !cx.prefs.four_decks() {
         return;
     }
     ui.scope(|ui| {
@@ -607,7 +607,9 @@ fn layers(ui: &mut Ui, cx: &mut Cx) {
                         .min_size(egui::vec2(24.0, 0.0)),
                 )
                 .on_hover_text(format!(
-                    "The {hand} hand's keys play deck {n}. Click for deck {}",
+                    "The {hand} hand (its keys, and the controller's {hand} deck) plays deck \
+                     {n}. Click or press {} for deck {}",
+                    if side == 0 { "G" } else { "H" },
                     if n == other[0] { other[1] } else { other[0] }
                 ));
             let name = format!("{}{} hand's deck", hand[..1].to_uppercase(), &hand[1..]);

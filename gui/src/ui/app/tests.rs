@@ -1184,10 +1184,71 @@ fn l_and_r_switch_the_hands_between_decks() {
     h.key_press(egui::Key::S);
     settle_until(&mut h, |a| playing(a, 2));
     assert!(!playing(h.state(), 0));
-    // Back to two decks: the left hand is on deck 1 again.
+    // G switches the left hand back, H the right hand (2 and 4); the controller's
+    // route and its lights are told.
+    let deck = |i: usize| DeckId::new(i).unwrap();
+    h.key_press(egui::Key::G);
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.active_decks(), [deck(0), deck(1)]);
+    h.key_press(egui::Key::H);
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.active_decks(), [deck(0), deck(3)]);
+    assert_eq!(h.state().midi_route.layers.deck(1), deck(3));
+    assert_eq!(h.state().midi_route.layers.deck(0), deck(0));
+    // With a controller the switch is still there, and still works.
+    h.state_mut()
+        .dispatch(ViewCmd::PretendController(true).into());
+    steps(&mut h, 3);
+    h.get_by_label("Right hand's deck").click();
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.active_decks(), [deck(0), deck(1)]);
+    h.state_mut()
+        .dispatch(ViewCmd::PretendController(false).into());
+    // Back to two decks: the left hand is on deck 1 again, and the keys do nothing.
+    h.key_press(egui::Key::G);
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.active_deck(0), deck(2));
     h.state_mut().dispatch(ViewCmd::DeckCount(2).into());
     steps(&mut h, 3);
-    assert_eq!(h.state().prefs.active_deck(0), DeckId::new(0).unwrap());
+    assert_eq!(h.state().prefs.active_deck(0), deck(0));
+    assert_eq!(h.state().midi_route.layers.deck(0), deck(0));
+}
+
+/// A controller's knob that hasn't reached its control's value yet (soft takeover) is
+/// marked on the mixer where it is, until it has; a hand switching decks clears its
+/// decks' marks.
+#[test]
+fn a_waiting_knob_is_marked_until_it_catches_up() {
+    use crate::core::bus::{Control, DeckControl};
+    use crate::ui::panels::mixer;
+    let mut h = start("takeover-mark");
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Perform).into());
+    h.state_mut().dispatch(ViewCmd::DeckCount(4).into());
+    h.state_mut()
+        .dispatch(ViewCmd::PretendController(true).into());
+    h.state_mut().dispatch(ViewCmd::ShowMixer(true).into());
+    steps(&mut h, 3);
+    let volume = Control::Deck(DeckId::new(2).unwrap(), DeckControl::Volume);
+    let waits = |at| {
+        Command::App(AppCmd::ControllerWaits {
+            control: volume,
+            at,
+        })
+    };
+    h.state_mut().dispatch(waits(Some(0.3)));
+    steps(&mut h, 2);
+    assert_eq!(mixer::waiting(&h.ctx, volume), Some(0.3));
+    render(&mut h, "takeover-mark");
+    h.state_mut().dispatch(waits(None));
+    steps(&mut h, 2);
+    assert_eq!(mixer::waiting(&h.ctx, volume), None);
+    // Marked again, then the left hand switches to deck 3: the mark is the old
+    // position's, so it goes (the route says where the knobs are now).
+    h.state_mut().dispatch(waits(Some(0.3)));
+    h.state_mut().dispatch(ViewCmd::SwitchLayer(0).into());
+    steps(&mut h, 2);
+    assert_eq!(mixer::waiting(&h.ctx, volume), None);
 }
 
 /// Perform's mixer hides from the top bar's Mixer switch, and while a controller is connected

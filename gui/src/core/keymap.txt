@@ -57,10 +57,15 @@ perform  Shift+0      deck_2_hot_cue_d_clear
 perform  Shift+Left   deck_1_load_selected
 perform  Shift+Right  deck_2_load_selected
 
+# With four decks showing: switch the left hand between decks 1 and 3, the right
+# between 2 and 4 (a controller's left and right decks follow too).
+perform  G            deck_1_layer_toggle
+perform  H            deck_2_layer_toggle
+
 # The effect unit, under the left hand.
-perform  G            fx_1_on
+perform  B            fx_1_on
 perform  T            fx_1_effect_next
-perform  Shift+G      fx_1_channel_next
+perform  Shift+B      fx_1_channel_next
 perform  C            fx_1_beats_halve
 perform  V            fx_1_beats_double
 

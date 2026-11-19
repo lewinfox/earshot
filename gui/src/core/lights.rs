@@ -41,6 +41,7 @@ use earshot_engine::{EngineSnapshot, FxTarget, Monitor};
 use midir::MidiOutputConnection;
 
 use super::bus::{Control, DeckControl, FxControl, SamplerControl};
+use super::layers::Layers;
 use super::midi::{Input, Learned, Meter};
 use super::pads::AllPads;
 
@@ -207,6 +208,7 @@ pub fn frame(
     learned: &Learned,
     snap: &EngineSnapshot,
     pads: &AllPads,
+    layers: &Layers,
     lit_half: bool,
 ) -> BTreeMap<(u8, u8), u8> {
     // A display-only button is the controller's to light.
@@ -215,9 +217,21 @@ pub fn frame(
         .into_iter()
         .filter(|(_, l)| l.input == Input::Note && !l.display_only)
         .collect();
+    // A deck 1 or 2 button shows the deck its hand plays now; the layer switch
+    // itself is lit while its hand is on its second deck.
+    let shows = |l: &super::midi::Learn| match l.control {
+        Control::Deck(d, DeckControl::LayerToggle) => {
+            if layers.on(d.index() % 2) {
+                Light::On
+            } else {
+                Light::Off
+            }
+        }
+        c => light(layers.layered(c), l.arg, snap, pads),
+    };
     let mut out: BTreeMap<(u8, u8), u8> = notes
         .iter()
-        .map(|(&k, l)| (k, value(light(l.control, l.arg, snap, pads), lit_half)))
+        .map(|(&k, l)| (k, value(shows(l), lit_half)))
         .collect();
     for (&k, _) in &notes {
         let Some(twin) = learned.mirror_of(k) else {
@@ -225,7 +239,7 @@ pub fn frame(
         };
         if notes
             .get(&twin)
-            .is_none_or(|l| !own_light(l.control, snap, pads))
+            .is_none_or(|l| !own_light(layers.layered(l.control), snap, pads))
         {
             out.insert(twin, out[&k]);
         }
@@ -258,10 +272,13 @@ pub fn meter_value(vu: f64, meter: &Meter) -> u8 {
 }
 
 /// Each meter's message and value now.
-pub fn meters(meters: &[Meter], snap: &EngineSnapshot) -> Vec<((u8, u8), u8)> {
+pub fn meters(meters: &[Meter], snap: &EngineSnapshot, layers: &Layers) -> Vec<((u8, u8), u8)> {
     meters
         .iter()
-        .map(|m| ((m.status, m.data1), meter_value(snap.deck(m.deck).vu, m)))
+        .map(|m| {
+            let deck = layers.deck_for(m.deck);
+            ((m.status, m.data1), meter_value(snap.deck(deck).vu, m))
+        })
         .collect()
 }
 
@@ -298,13 +315,18 @@ pub struct Lights {
 
 impl Lights {
     /// `outputs`: each port, with its controller's start messages.
-    pub fn start(mut outputs: Outputs, learned: Learned, monitor: MonitorSlot) -> Lights {
+    pub fn start(
+        mut outputs: Outputs,
+        learned: Learned,
+        monitor: MonitorSlot,
+        layers: Layers,
+    ) -> Lights {
         let sent = init(&mut outputs, &learned, &monitor);
         let stop = Arc::new(AtomicBool::new(false));
         let quit = stop.clone();
         let thread = std::thread::Builder::new()
             .name("midi-lights".into())
-            .spawn(move || run(outputs, sent, &learned, &monitor, &quit))
+            .spawn(move || run(outputs, sent, &learned, &monitor, &layers, &quit))
             .ok();
         Lights { stop, thread }
     }
@@ -418,8 +440,8 @@ fn init(outputs: &mut Outputs, learned: &Learned, monitor: &MonitorSlot) -> BTre
     };
     hello(outputs, &recorder, learned);
     let none = EngineSnapshot::default();
-    let mut lights = frame(learned, &none, &pads, true);
-    lights.extend(meters(&learned.meters(), &none));
+    let mut lights = frame(learned, &none, &pads, &Layers::default(), true);
+    lights.extend(meters(&learned.meters(), &none, &Layers::default()));
     for (&k, &v) in &lights {
         send(outputs, &recorder, k, v);
     }
@@ -489,6 +511,7 @@ fn run(
     mut sent: BTreeMap<(u8, u8), u8>,
     learned: &Learned,
     monitor: &MonitorSlot,
+    layers: &Layers,
     stop: &AtomicBool,
 ) {
     let start = Instant::now();
@@ -512,8 +535,8 @@ fn run(
         let lit_half = (start.elapsed().as_millis() / FLASH.as_millis()) % 2 == 0;
         // No audio (it's reopening): as at start-up, the decks empty.
         let s = snap.unwrap_or_default();
-        let mut now = frame(learned, &s, &pads, lit_half);
-        now.extend(meters(&learned.meters(), &s));
+        let mut now = frame(learned, &s, &pads, layers, lit_half);
+        now.extend(meters(&learned.meters(), &s, layers));
         for (&k, &v) in &now {
             if sent.get(&k) != Some(&v) {
                 send(&mut outputs, &recorder, k, v);
@@ -743,7 +766,13 @@ mod tests {
         // On the controller: deck 1's pad 1 lit, deck 2's pad 2 flashing, the rest dark,
         // and the same with SHIFT held.
         for lit_half in [true, false] {
-            let f = frame(&learned, &s, &AllPads::default(), lit_half);
+            let f = frame(
+                &learned,
+                &s,
+                &AllPads::default(),
+                &Layers::default(),
+                lit_half,
+            );
             assert_eq!(f[&(0x97, 0x30)], 0x7F);
             assert_eq!(f[&(0x98, 0x30)], 0x7F, "with SHIFT");
             assert_eq!(f[&(0x97, 0x31)], 0x00, "an empty slot");
@@ -755,6 +784,48 @@ mod tests {
 
     /// Only the lights on go out at exit: Mixxx sends a DDJ-400 a short list, and a
     /// burst of every mapped button can leave it deaf (#42).
+    /// With the left hand on deck 3, deck 1's buttons show deck 3 (deck 2's still deck
+    /// 2), and so do its level meter's LEDs.
+    #[test]
+    fn the_lights_follow_the_hands() {
+        let learned = Learned::default();
+        learned.seed_bundled("ddj-400");
+        let key = |c: Control| {
+            learned
+                .all()
+                .into_iter()
+                .find(|(_, l)| l.control == c && l.input == Input::Note)
+                .map(|(k, _)| k)
+                .expect("mapped")
+        };
+        let (play1, play2) = (
+            key(d(DeckControl::Play)),
+            key(Control::Deck(deck(1), DeckControl::Play)),
+        );
+        let mut s = loaded();
+        s.decks_live = 4;
+        s.decks[2].track_id = Some(3);
+        s.decks[2].playing = true;
+        s.decks[2].vu = 1.0;
+        let layers = Layers::default();
+        layers.set([false, false], true);
+        let pads = AllPads::default();
+        let lit = |layers: &Layers, k| frame(&learned, &s, &pads, layers, true)[&k];
+        // Deck 1 is paused on its cue point (its play flashes: lit this half), but not
+        // in the other half; deck 3 plays, so is lit in both.
+        let other_half = |layers: &Layers, k| frame(&learned, &s, &pads, layers, false)[&k];
+        assert_eq!(other_half(&layers, play1), 0);
+        layers.set([true, false], true);
+        assert_eq!(lit(&layers, play1), 0x7F);
+        assert_eq!(other_half(&layers, play1), 0x7F, "deck 3 is playing");
+        assert_eq!(other_half(&layers, play2), 0, "deck 2 isn't");
+        let ms = learned.meters();
+        if let Some(i) = ms.iter().position(|m| m.deck == deck(0)) {
+            let level = |layers: &Layers| meters(&ms, &s, layers)[i].1;
+            assert!(level(&layers) > level(&Layers::default()), "deck 3's level");
+        }
+    }
+
     #[test]
     fn only_lit_lights_go_out_at_exit() {
         let mut sent = BTreeMap::new();
@@ -788,10 +859,16 @@ mod tests {
         let learned = Learned::default();
         learned.seed_bundled("ddj-400");
         let none = EngineSnapshot::default();
-        let f = frame(&learned, &none, &AllPads::default(), true);
+        let f = frame(
+            &learned,
+            &none,
+            &AllPads::default(),
+            &Layers::default(),
+            true,
+        );
         assert!(f.contains_key(&(0x90, 0x0B)), "play is set");
         assert!(
-            meters(&learned.meters(), &none)
+            meters(&learned.meters(), &none, &Layers::default())
                 .iter()
                 .all(|(_, v)| *v == 0)
         );
@@ -810,7 +887,7 @@ mod tests {
         s.decks[0].loop_out = Some(3.0);
         s.decks[0].loop_active = true;
         s.decks[0].hotcues[0] = Some(2.0);
-        let f = frame(&learned, &s, &AllPads::default(), true);
+        let f = frame(&learned, &s, &AllPads::default(), &Layers::default(), true);
         for (button, twin, what) in [
             ((0x90, 0x0B), (0x90, 0x47), "PLAY"),
             ((0x90, 0x0C), (0x90, 0x48), "CUE"),
@@ -840,7 +917,7 @@ mod tests {
         let rows = r#"{"device":"DDJ-400","inputs":[{"command":"deck_1_beat_sync","message":"90 58"},{"command":"deck_1_tempo_range_next","message":"90 60"}],"mirror":{"90 58":"90 60"}}"#;
         let learned = Learned::default();
         learned.replace(crate::core::midi::from_json(rows).unwrap().1);
-        let f = frame(&learned, &s, &AllPads::default(), true);
+        let f = frame(&learned, &s, &AllPads::default(), &Layers::default(), true);
         assert_eq!(f[&(0x90, 0x60)], 0x7F, "tempo range shows BEAT SYNC's");
     }
 
@@ -876,6 +953,6 @@ mod tests {
         }
         let mut s = EngineSnapshot::default();
         s.decks[1].vu = 2.0;
-        assert_eq!(meters(&[m], &s), [((0xB1, 0x02), 127)]);
+        assert_eq!(meters(&[m], &s, &Layers::default()), [((0xB1, 0x02), 127)]);
     }
 }

@@ -131,6 +131,39 @@ pub fn set_shown(ctx: &egui::Context, control: Control, value: f64) {
     ctx.request_repaint();
 }
 
+fn waiting_id(control: Control) -> egui::Id {
+    egui::Id::new(("takeover-waiting", control.name().0))
+}
+
+/// Where the controller's knob for `control` is, while the control waits for it to
+/// reach its value (soft takeover after a hand switches decks: `core::midi::Route`).
+pub fn waiting(ctx: &egui::Context, control: Control) -> Option<f64> {
+    ctx.data(|d| d.get_temp(waiting_id(control)))
+}
+
+/// Mark (or with `None`, stop marking) where the controller's knob for `control` is.
+pub fn set_waiting(ctx: &egui::Context, control: Control, at: Option<f64>) {
+    ctx.data_mut(|d| match at {
+        Some(v) => d.insert_temp(waiting_id(control), v),
+        None => d.remove::<f64>(waiting_id(control)),
+    });
+    ctx.request_repaint();
+}
+
+/// The controls of a channel that take over softly, for `deck`.
+pub fn takeover_controls(deck: DeckId) -> impl Iterator<Item = Control> {
+    [
+        DeckControl::Volume,
+        DeckControl::Trim,
+        DeckControl::Filter,
+        DeckControl::Eq(EQ_LOW),
+        DeckControl::Eq(EQ_MID),
+        DeckControl::Eq(EQ_HIGH),
+    ]
+    .into_iter()
+    .map(move |c| Control::Deck(deck, c))
+}
+
 /// A knob or fader bound to `control`: shows the engine's value (the default without
 /// an engine) and sends what the user changes. One the controller acts on itself (a
 /// display-only mapping) shows the controller's knob, outlined, and can't be moved
@@ -221,7 +254,8 @@ pub fn show(
                         Knob::new(range, v)
                             .diameter(d.knob)
                             .label(label)
-                            .colour(colour),
+                            .colour(colour)
+                            .target(waiting(ui.ctx(), ch(DeckControl::Eq(band)))),
                     )
                 },
             );
@@ -232,7 +266,8 @@ pub fn show(
                 Knob::new(range, v)
                     .diameter(d.knob)
                     .label("FILTER")
-                    .colour(colour),
+                    .colour(colour)
+                    .target(waiting(ui.ctx(), ch(DeckControl::Filter))),
             )
         });
         // Gain over the headphone cue button over the fader.
@@ -242,7 +277,8 @@ pub fn show(
                 Knob::new(range, v)
                     .diameter(d.knob)
                     .label("GAIN")
-                    .colour(colour),
+                    .colour(colour)
+                    .target(waiting(ui.ctx(), ch(DeckControl::Trim))),
             )
         });
         if r.hovered() {
@@ -275,7 +311,8 @@ pub fn show(
             ui.put(
                 fader_rect,
                 Fader::vertical(range, v, vec2(d.fader_col - 8.0, fader_rect.height()))
-                    .colour(colour),
+                    .colour(colour)
+                    .target(waiting(ui.ctx(), ch(DeckControl::Volume))),
             )
         });
         // Which side of the crossfader the channel is on: click for the next.
