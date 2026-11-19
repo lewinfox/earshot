@@ -220,7 +220,13 @@ pub fn show(
     let top = area.min + vec2(0.0, d.master_h);
     let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(top + vec2(x, y), vec2(w, h));
     let row = |x: f32, r: usize| at(x, r as f32 * d.row, d.knob_col, d.row);
-    let left: Vec<DeckId> = decks.iter().copied().filter(|d| on_left(*d)).collect();
+    // Decks 1 and 2 nearest the middle, 3 and 4 outside them: 3 1 | 2 4.
+    let left: Vec<DeckId> = decks
+        .iter()
+        .rev()
+        .copied()
+        .filter(|d| on_left(*d))
+        .collect();
     let right: Vec<DeckId> = decks.iter().copied().filter(|d| !on_left(*d)).collect();
     let main_x = left.len() as f32 * d.strip_w;
     let channels_w = d.channels_w(decks.len());
