@@ -77,12 +77,14 @@ impl SettingsUi {
 
     pub fn show(&mut self, ctx: &egui::Context, env: &ModalEnv, open: &mut bool) -> Vec<Command> {
         let mut out = vec![];
-        egui::Window::new(TITLE)
-            .open(open)
-            .resizable(false)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                ui.set_width(460.0);
+        super::show_fitted(
+            ctx,
+            egui::Window::new(TITLE)
+                .open(open)
+                .resizable(false)
+                .collapsible(false),
+            |ui| {
+                ui.set_width(460.0_f32.min(ui.available_width()));
                 ui.horizontal(|ui| {
                     for (tab, name) in TABS {
                         if ui.selectable_label(self.tab == tab, name).clicked() {
@@ -103,7 +105,8 @@ impl SettingsUi {
                     SettingsTab::Keymap => out.extend(keymap(ui, &env.keymap_file)),
                     SettingsTab::Display => out.extend(display(ui, env, &mut self.ui_scale)),
                 }
-            });
+            },
+        );
         out
     }
 }

@@ -160,7 +160,7 @@ pub const BODY_MIN_H: f32 = 150.0;
 /// need more).
 const DECKS_SHARE: f32 = 0.45;
 /// A scrolling waveform's least height, and the gap between two.
-const WAVE_MIN_H: f32 = 16.0;
+const WAVE_MIN_H: f32 = 14.0;
 pub const WAVE_GAP: f32 = 3.0;
 /// The most of the window's height the waveforms can be dragged to.
 const WAVES_MAX_SHARE: f32 = 0.5;
@@ -234,7 +234,26 @@ fn waves_margins() -> Vec2 {
 }
 
 /// Divide a window of `size` (what the bars leave) for `input`.
+///
+/// What gives way when the window is short, in order: the waveforms shrink to their
+/// least height; the decks' row shrinks to decks just big enough to read; and if the
+/// body still wouldn't have its least height, the waveforms aren't shown.
 pub fn shell(size: Vec2, input: ShellInput) -> Shell {
+    let with_waves = rows(size, input);
+    if !input.waves || with_waves.body_h >= BODY_MIN_H - 0.01 {
+        return with_waves;
+    }
+    rows(
+        size,
+        ShellInput {
+            waves: false,
+            ..input
+        },
+    )
+}
+
+/// [`shell`], with the waveforms' row there or not as `input` says.
+fn rows(size: Vec2, input: ShellInput) -> Shell {
     let tabs_h = if input.tab_bar {
         THEME.spacing.tab_bar_h
     } else {
@@ -266,21 +285,18 @@ pub fn shell(size: Vec2, input: ShellInput) -> Shell {
         .min(size.y - tabs_h - decks_h - BODY_MIN_H)
         .max(waves_min);
     let waves = if input.waves {
-        Track::sized(
-            (size.y * input.waves_share).clamp(waves_min, waves_max),
-            waves_min,
-        )
-        .yields(1)
+        Track::fixed((size.y * input.waves_share).clamp(waves_min, waves_max))
     } else {
         Track::none()
     };
+    // (If even the decks and the tabs leave the body short, it is: they can't shrink.)
     let [waves_h, decks_h, tabs_h, body_h] = split(
         size.y,
         [
             waves,
             Track::fixed(decks_h),
             Track::fixed(tabs_h),
-            Track::fill(BODY_MIN_H),
+            Track::fill(0.0),
         ],
     );
     let wave_h = ((waves_h - waves_margins().y - (n - 1.0) * WAVE_GAP) / n).max(0.0);
@@ -318,7 +334,9 @@ fn deck_row(width: f32, most: f32, decks: usize, mixer_wanted: bool) -> DeckRow 
             let side = ((width - mixer_w - gap_x * (cells - 1.0)) / 2.0).max(0.0);
             k_wide = deck::scale_for_width(side, with_mixer);
             let k_tall = deck::scale_for_height((most - gaps) / per_side);
-            let k = k_wide.min(k_tall).clamp(deck::SCALE_MIN, deck::SCALE_MAX);
+            let k = k_wide
+                .min(k_tall)
+                .clamp(deck::scale_min(with_mixer), deck::SCALE_MAX);
             let mut height = per_side * deck::height(k) + gaps;
             if with_mixer {
                 m = (height / mixer::outer_size(decks, 1.0).y).clamp(MIXER_SCALE_MIN, 1.0);
@@ -348,7 +366,7 @@ fn deck_row(width: f32, most: f32, decks: usize, mixer_wanted: bool) -> DeckRow 
 /// The library's panes' least widths, and the track list's.
 const SOURCE_MIN_W: f32 = 140.0;
 const ASIDE_MIN_W: f32 = 220.0;
-const TABLE_MIN_W: f32 = 300.0;
+const TABLE_MIN_W: f32 = 240.0;
 /// A Prepare tool's, beside the library; and the library's beside it.
 const TOOL_MIN_W: f32 = 320.0;
 const BESIDE_MIN_W: f32 = 320.0;
@@ -370,6 +388,10 @@ pub struct LibraryRow {
 
 /// Divide the library's `width`. `source` and `aside`: each pane's share of the width
 /// as last dragged, if it's open. `asides`: the right icon stack shows.
+///
+/// A pane there's no room for at its least width (beside the track list at its) isn't
+/// shown at all, rather than squeezed: the aside goes first, then the source. Its icon
+/// stays lit, and it's back as soon as there's room.
 pub fn library_row(
     width: f32,
     source: Option<f32>,
@@ -377,11 +399,15 @@ pub fn library_row(
     asides: bool,
 ) -> LibraryRow {
     let stack = THEME.spacing.stack_w;
+    let aside_stack = if asides { stack } else { 0.0 };
+    let panes = width - stack - aside_stack - TABLE_MIN_W;
+    let source = source.filter(|_| panes >= SOURCE_MIN_W);
+    let aside =
+        aside.filter(|_| asides && panes >= ASIDE_MIN_W + source.map_or(0.0, |_| SOURCE_MIN_W));
     let pane = |share: Option<f32>, min: f32, order: u8| match share {
         Some(s) => Track::sized(width * s.min(PANE_MAX_SHARE), min).yields(order),
         None => Track::none(),
     };
-    let aside_stack = if asides { stack } else { 0.0 };
     let [stack, source, table, aside, aside_stack] = split(
         width,
         [
@@ -389,7 +415,7 @@ pub fn library_row(
             // The aside gives way first, then the source, and the list last.
             pane(source, SOURCE_MIN_W, 1),
             Track::fill(TABLE_MIN_W),
-            pane(aside.filter(|_| asides), ASIDE_MIN_W, 2),
+            pane(aside, ASIDE_MIN_W, 2),
             Track::fixed(aside_stack),
         ],
     );
@@ -546,7 +572,8 @@ mod tests {
     /// Window sizes from the smallest to a big desktop, as the bars leave them.
     fn windows() -> impl Iterator<Item = Vec2> {
         let widths = [MIN_SIZE.x, 1280.0, 1440.0, 1680.0, 1920.0, 2560.0, 3840.0];
-        let heights = [MIN_SIZE.y - 60.0, 700.0, 840.0, 1020.0, 1380.0, 2100.0];
+        // (The bars take up to 85 points: the top bar is two lines in a narrow window.)
+        let heights = [MIN_SIZE.y - 85.0, 700.0, 840.0, 1020.0, 1380.0, 2100.0];
         widths
             .into_iter()
             .flat_map(move |w| heights.into_iter().map(move |h| vec2(w, h)))
@@ -593,11 +620,14 @@ mod tests {
                 let mixer = s.decks.mixer.map_or(0.0, |(_, w)| w + THEME.spacing.item.x);
                 let across = 2.0 * side + mixer + THEME.spacing.item.x + row_margins().x;
                 assert!(across <= size.x + 0.5, "too wide ({across}): {what}");
-                if input.waves {
+                if s.waves_h > 0.0 {
+                    assert!(input.waves, "{what}");
                     assert!(s.wave_h >= WAVE_MIN_H - 0.01, "waveforms too thin: {what}");
                     assert!(s.waves_h <= s.waves_range.1 + 0.01, "{what}");
-                } else {
-                    assert_eq!(s.waves_h, 0.0, "{what}");
+                }
+                // The waveforms show whenever they're wanted and the window isn't tiny.
+                if input.waves && size.y >= 700.0 {
+                    assert!(s.waves_h > 0.0, "no waveforms: {what}");
                 }
             }
         }
@@ -605,7 +635,7 @@ mod tests {
 
     #[test]
     fn the_decks_are_readable_in_the_smallest_window() {
-        let size = vec2(MIN_SIZE.x, MIN_SIZE.y - 60.0);
+        let size = vec2(MIN_SIZE.x, MIN_SIZE.y - 85.0);
         for decks in [2, 4] {
             for mixer in [false, true] {
                 let s = shell(
@@ -655,7 +685,7 @@ mod tests {
             tab_bar: false,
             waves_share: 0.16,
         };
-        let small = shell(vec2(MIN_SIZE.x, MIN_SIZE.y - 60.0), input);
+        let small = shell(vec2(MIN_SIZE.x, MIN_SIZE.y - 85.0), input);
         assert!(
             small.decks.mixer_dropped && small.decks.mixer.is_none(),
             "{small:?}"
@@ -677,14 +707,22 @@ mod tests {
                         let r = library_row(w, source, aside, asides);
                         let total = r.stack + r.source + r.table + r.aside + r.aside_stack;
                         assert!(total <= w + 0.01, "{w} {source:?} {aside:?}: {r:?}");
-                        if w >= MIN_SIZE.x {
+                        // A pane is at least its least width, or not there at all.
+                        assert!(
+                            r.source == 0.0 || r.source >= SOURCE_MIN_W - 0.01,
+                            "{w}: {r:?}"
+                        );
+                        assert!(
+                            r.aside == 0.0 || r.aside >= ASIDE_MIN_W - 0.01,
+                            "{w}: {r:?}"
+                        );
+                        if w >= TABLE_MIN_W + 36.0 + 36.0 {
                             assert!(r.table >= TABLE_MIN_W - 0.01, "{w}: {r:?}");
-                            if source.is_some() {
-                                assert!(r.source >= SOURCE_MIN_W - 0.01, "{w}: {r:?}");
-                            }
                         }
-                        assert_eq!(r.source > 0.0, source.is_some());
-                        assert_eq!(r.aside > 0.0, aside.is_some() && asides);
+                        if w >= MIN_SIZE.x {
+                            assert_eq!(r.source > 0.0, source.is_some());
+                            assert_eq!(r.aside > 0.0, aside.is_some() && asides);
+                        }
                     }
                 }
             }

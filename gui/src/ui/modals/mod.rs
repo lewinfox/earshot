@@ -46,6 +46,35 @@ pub struct ModalEnv<'a> {
     pub sampler: sampler::SamplerEnv<'a>,
 }
 
+/// Room kept between a window over the app and the app's own edges.
+const WINDOW_MARGIN: egui::Vec2 = egui::vec2(24.0, 56.0);
+
+/// Show a window over the app that can't be bigger than the app's window: it's as big
+/// as what it holds, and anything taller than the room there is scrolls inside it.
+/// Every modal and dialog is shown through this, so none can run off the screen.
+pub fn show_fitted<R>(
+    ctx: &egui::Context,
+    window: egui::Window<'_>,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> Option<R> {
+    let room = (ctx.content_rect().size() - WINDOW_MARGIN).max(egui::vec2(200.0, 150.0));
+    window
+        .constrain(true)
+        .max_width(room.x)
+        .show(ctx, |ui| {
+            // (Not sideways: a window that scrolls both ways takes egui's default
+            // size, not its contents'. What's too wide lays itself out narrower: the
+            // key help wraps its sections, the sampler goes to one column.)
+            ui.set_max_width(room.x);
+            egui::ScrollArea::vertical()
+                .max_height(room.y)
+                .auto_shrink([true, true])
+                .show(ui, add)
+                .inner
+        })
+        .and_then(|r| r.inner)
+}
+
 #[derive(Default)]
 pub struct Modals {
     /// Open windows, bottom first.
@@ -127,25 +156,34 @@ impl Modals {
             match m {
                 Modal::Settings => out.extend(self.settings.show(ctx, env, &mut open)),
                 Modal::Keys => {
-                    egui::Window::new(keys::TITLE)
-                        .open(&mut open)
-                        .resizable(false)
-                        .show(ctx, |ui| keys::keys_help(ui, env.keymap, env.mode));
+                    show_fitted(
+                        ctx,
+                        egui::Window::new(keys::TITLE)
+                            .open(&mut open)
+                            .resizable(false),
+                        |ui| keys::keys_help(ui, env.keymap, env.mode),
+                    );
                 }
                 Modal::Metadata => {
                     let mut done = false;
-                    egui::Window::new(metadata::TITLE)
-                        .open(&mut open)
-                        .resizable(false)
-                        .collapsible(false)
-                        .show(ctx, |ui| done = self.meta.ui(ui, out));
+                    show_fitted(
+                        ctx,
+                        egui::Window::new(metadata::TITLE)
+                            .open(&mut open)
+                            .resizable(false)
+                            .collapsible(false),
+                        |ui| done = self.meta.ui(ui, out),
+                    );
                     open &= !done;
                 }
                 Modal::Sampler => {
-                    egui::Window::new(sampler::TITLE)
-                        .open(&mut open)
-                        .resizable(false)
-                        .show(ctx, |ui| sampler::ui(ui, &env.sampler, out));
+                    show_fitted(
+                        ctx,
+                        egui::Window::new(sampler::TITLE)
+                            .open(&mut open)
+                            .resizable(false),
+                        |ui| sampler::ui(ui, &env.sampler, out),
+                    );
                 }
             }
             if !open {

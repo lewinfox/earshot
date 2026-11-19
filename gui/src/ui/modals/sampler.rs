@@ -24,6 +24,9 @@ pub struct SamplerEnv<'a> {
     pub selected: bool,
 }
 
+/// One deck's slots: the room they need across.
+const SIDE_W: f32 = 525.0;
+
 pub fn ui(ui: &mut Ui, env: &SamplerEnv, out: &mut Vec<Command>) {
     ui.label(
         RichText::new(format!(
@@ -35,8 +38,18 @@ pub fn ui(ui: &mut Ui, env: &SamplerEnv, out: &mut Vec<Command>) {
         .color(THEME.muted),
     );
     ui.add_space(6.0);
-    ui.columns(2, |cols| {
-        for (side, ui) in cols.iter_mut().enumerate() {
+    // The two decks' slots side by side, or one under the other in a narrow window.
+    let sides = if ui.available_width() >= 2.0 * SIDE_W {
+        2
+    } else {
+        1
+    };
+    ui.set_max_width(sides as f32 * SIDE_W);
+    ui.columns(sides, |cols| {
+        // One column holds both sides, in turn.
+        let per = 2 / sides;
+        for side in 0..2 {
+            let ui = &mut cols[side / per];
             ui.label(RichText::new(format!("Deck {} pads", side + 1)).strong());
             egui::Grid::new(("sampler-slots", side))
                 .num_columns(6)

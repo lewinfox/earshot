@@ -201,8 +201,11 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   plays. Several can play at once, into the master mix. The slots are kept between
   runs (`sampler_N_play` / `sampler_N_stop` for keys and other controllers).
 - **Mixer and FX** switches in the top bar show or hide those panels mid-set.
-- **Layout**: drag the gaps between panes to resize. *Menu → View → Size* or
-  Ctrl −/=/0 scales the whole UI.
+- **Layout**: the window can be as small as 1024 × 640 and never starts bigger than
+  the screen; everything shares out the room there is. Drag the edges between panes to
+  resize them (they keep their proportions as the window changes). *Settings → Display*,
+  *Menu → View → UI size* or Ctrl −/=/0 make everything (text and controls) bigger or
+  smaller. How the layout works, for changing it: `docs/ui-layout.md`.
 - **Search** with free text plus `bpm:120-126` and `key:8A` (or `key:Am`). It searches
   within the selected folder.
 - **Beatgrids** are fixed in the grid editor (Prepare mode, or *GRID* on a deck): the

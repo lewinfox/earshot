@@ -2607,6 +2607,50 @@ fn library_tracks_in_the_table() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The windows over the app (settings, the keymap, the sampler) fit inside the
+/// smallest app window: what's too long for them scrolls.
+#[test]
+fn modals_fit_the_smallest_window() {
+    use crate::core::view::SettingsTab;
+    let mut h = start("modals-fit");
+    h.set_size(crate::ui::window::MIN_SIZE);
+    steps(&mut h, 2);
+    let inside = |h: &H, title: &str| {
+        let screen = h.ctx.content_rect();
+        let rect = h
+            .ctx
+            .memory(|m| m.area_rect(egui::Id::new(title)))
+            .unwrap_or_else(|| panic!("{title} isn't open"));
+        assert!(
+            screen.expand(0.5).contains_rect(rect),
+            "{title} is at {rect:?}, outside the window {screen:?}"
+        );
+    };
+    for (modal, title) in [
+        (Modal::Keys, crate::ui::modals::keys::TITLE),
+        (Modal::Sampler, crate::ui::modals::sampler::TITLE),
+    ] {
+        h.state_mut().dispatch(ViewCmd::ToggleModal(modal).into());
+        steps(&mut h, 4);
+        inside(&h, title);
+        render(&mut h, &format!("modal-{title}"));
+        h.state_mut().dispatch(ViewCmd::ToggleModal(modal).into());
+        steps(&mut h, 2);
+    }
+    for tab in [
+        SettingsTab::Audio,
+        SettingsTab::Decks,
+        SettingsTab::Analysis,
+        SettingsTab::Keymap,
+        SettingsTab::Display,
+    ] {
+        h.state_mut().dispatch(ViewCmd::Settings(tab).into());
+        steps(&mut h, 4);
+        inside(&h, crate::ui::modals::settings::TITLE);
+    }
+    render(&mut h, "modal-settings-display");
+}
+
 /// Every view lays out in every window, from the smallest the app allows to a big
 /// screen, at normal and large UI sizes: nothing goes off the window's edges, and
 /// nothing but the status bar's own widgets is in the status bar's place. Add a mode,

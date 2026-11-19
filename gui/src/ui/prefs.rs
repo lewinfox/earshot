@@ -303,7 +303,7 @@ impl Default for Sizes {
             waves: 0.16,
             source: 0.17,
             aside: 0.24,
-            flow_library: 0.4,
+            flow_library: 0.42,
         }
     }
 }

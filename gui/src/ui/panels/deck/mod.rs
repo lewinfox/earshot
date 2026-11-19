@@ -212,9 +212,12 @@ const ROW_H: f32 = design::JOG_D * design::JOG_SCALE;
 const CONTROLS_W: f32 = 574.0;
 /// The frame's margins and border, and the gap kept inside it, across.
 const FRAME_W: f32 = 18.0 + 6.0;
-/// The frame's margins, the header and the gaps between the three, down.
-const FIXED_H: f32 = 12.0 + HEADER_H + 2.0 * 5.0;
-const HEADER_H: f32 = 36.0;
+/// The frame's margins and border, the header and the gaps between the three, down.
+const FIXED_H: f32 = 14.0 + HEADER_H + 2.0 * 5.0;
+/// The header: the title over the BPM, or two lines of buttons.
+const HEADER_H: f32 = 39.0;
+/// The least a deck's panel is tall, whatever the scale: its tempo fader's height.
+const MIN_H: f32 = 153.0;
 /// The overview's least height, and its most: it grows with the scale between them.
 const OVERVIEW_MIN_H: f32 = 24.0;
 const OVERVIEW_MAX_H: f32 = 56.0;
@@ -224,6 +227,12 @@ const OVERVIEW_MAX_H: f32 = 56.0;
 /// says (never reached by choice: the layout drops the mixer first).
 pub const SCALE_MAX: f32 = 150.0 / ROW_H;
 pub const SCALE_MIN: f32 = 0.45;
+
+/// The smallest scale for a deck with or without its tempo fader: without, its header
+/// holds the fader's buttons too, and needs the width.
+pub fn scale_min(tempo_fader: bool) -> f32 {
+    if tempo_fader { SCALE_MIN } else { 0.55 }
+}
 
 /// The overview's height at scale `k`.
 fn overview_h(k: f32) -> f32 {
@@ -244,7 +253,7 @@ pub fn scale_for_width(w: f32, tempo_fader: bool) -> f32 {
 
 /// A deck's height at scale `k`.
 pub fn height(k: f32) -> f32 {
-    FIXED_H + overview_h(k) + ROW_H * k
+    (FIXED_H + overview_h(k) + ROW_H * k).max(MIN_H)
 }
 
 /// The biggest scale (up to [`SCALE_MAX`]) at which a deck is no taller than `h`; under
@@ -392,6 +401,8 @@ pub struct DeckUi {
     fit: Option<(f32, f32)>,
     /// Frames in a row the controls have been too wide for their place.
     too_wide: u8,
+    /// The panel's size as last drawn (its frame included).
+    drawn: egui::Vec2,
     bpm_text: String,
     /// The engine's state for this frame.
     state: DeckSnap,
@@ -440,6 +451,7 @@ impl DeckUi {
             dims: Dims::FULL,
             fit: None,
             too_wide: 0,
+            drawn: egui::Vec2::ZERO,
             bpm_text: String::new(),
             state: DeckSnap::default(),
             pending: None,
@@ -707,12 +719,14 @@ impl DeckUi {
             .panel_frame()
             .show(ui, |ui| {
                 ui.set_width(width - 18.0);
-                let inner_h = height - 12.0;
+                // (The frame's margins and its border.)
+                let inner_h = height - 14.0;
                 ui.set_min_height(inner_h);
                 ui.spacing_mut().item_spacing = vec2(4.0, 5.0);
                 body(self, ui, info, out, inner_h);
             })
             .response;
+        self.drawn = resp.rect.size();
         if self.active {
             ui.painter().rect_stroke(
                 resp.rect,
@@ -1247,9 +1261,12 @@ mod tests {
     /// drawn must agree, at every scale, on both sides, with and without the fader.
     #[test]
     fn the_controls_are_as_wide_as_the_layout_expects() {
-        for k in [SCALE_MIN, 0.5, 0.6, 0.75, 1.0, SCALE_MAX] {
+        for k in [SCALE_MIN, 0.55, 0.6, 0.75, 1.0, SCALE_MAX] {
             for side in [Side::Left, Side::Right] {
                 for tempo_fader in [false, true] {
+                    if k < scale_min(tempo_fader) {
+                        continue;
+                    }
                     let deck = DeckUi::new(DeckId::new(0).unwrap());
                     let info = info("A track", TrackCues::default());
                     let size = vec2(width(k, tempo_fader), height(k));
@@ -1272,6 +1289,11 @@ mod tests {
                     h.run_steps(6);
                     let d = h.state();
                     let what = format!("scale {k}, {side:?}, fader {tempo_fader}");
+                    assert!(
+                        (d.drawn.x - size.x).abs() < 0.5 && (d.drawn.y - size.y).abs() < 0.6,
+                        "{what}: drawn {:?}, but the layout expects {size:?}",
+                        d.drawn
+                    );
                     assert!(d.fit.is_none(), "{what}: refitted to {:?}", d.fit);
                     let drawn = d.controls_w / k;
                     assert!(

@@ -77,7 +77,7 @@ impl Icon {
 /// Room left between a button's label and its edges.
 const LABEL_PAD: f32 = 4.0;
 /// The smallest a label is shrunk to, to fit a fixed width.
-const MIN_FONT: f32 = 7.0;
+const MIN_FONT: f32 = 5.0;
 
 /// A controller-style button. Its size is fixed by default: a label too wide for it is
 /// drawn smaller, so the button never changes size with its label (a loop's "4" or

@@ -735,7 +735,7 @@ impl LibraryPane {
                     cx.send(ViewCmd::Source(s));
                 }
             });
-        if let Some(source) = layout.source {
+        if let Some(source) = layout.source.filter(|_| row.source > 0.0) {
             egui::SidePanel::left(id("source"))
                 .resizable(false)
                 .exact_width(row.source)
@@ -753,7 +753,7 @@ impl LibraryPane {
                     cx.send(ViewCmd::Aside(a));
                 }
             });
-        if let Some(aside) = layout.aside {
+        if let Some(aside) = layout.aside.filter(|_| row.aside > 0.0 || !asides) {
             egui::SidePanel::right(id("aside"))
                 .resizable(false)
                 .exact_width(row.aside.max(1.0))
@@ -770,9 +770,15 @@ impl LibraryPane {
             top: 8,
             bottom: 8,
         });
+        // Cut off at its own edges: a top row wider than a narrow list never paints
+        // over the pane beside it.
+        let place = ui.available_rect_before_wrap();
         egui::CentralPanel::default()
             .frame(frame)
-            .show_inside(ui, |ui| self.middle(ui, cx));
+            .show_inside(ui, |ui| {
+                ui.set_clip_rect(place.intersect(ui.clip_rect()));
+                self.middle(ui, cx)
+            });
     }
 }
 
