@@ -23,8 +23,9 @@ use crate::ui::theme::THEME;
 use crate::ui::widgets::{Fader, HwButton, Knob, Meter, Range, held};
 
 // Layout, in points from the channels' top left (under the master and headphone
-// knobs' row). Columns from the left: deck A's knobs, its gain / cue / fader, its
-// meter, the master meters, then deck B mirrored.
+// knobs' row). Columns from the left: deck A's knobs (gain, the EQ, the filter, one
+// under the other), its cue button over its fader, its meter, the master meters, then
+// deck B mirrored.
 const KNOB_COL: f32 = 34.0;
 const FADER_COL: f32 = 30.0;
 const VU_W: f32 = 7.0;
@@ -33,14 +34,16 @@ pub(super) const ROW: f32 = 40.0;
 pub(super) const KNOB: f32 = 24.0;
 /// The master and headphone knobs' row, over the channels, and the gap under it.
 const MASTER_H: f32 = ROW + 2.0;
-/// Headphone cue buttons, under the gain knobs.
-const PFL_TOP: f32 = ROW + 2.0;
+/// Headphone cue buttons, at the top of the faders' column (centred on the gain
+/// knobs' row beside them).
+const PFL_TOP: f32 = (ROW - PFL_H) / 2.0;
 pub(super) const PFL_H: f32 = 18.0;
 /// The master meters' label ("MASTER" / "LIMIT"), over them.
 const MASTER_LABEL_H: f32 = 12.0;
-/// Channel faders and meters, down to (at the least) the fourth knob row's bottom.
-const FADER_TOP: f32 = PFL_TOP + PFL_H + 6.0;
-const MIN_FADER_BOTTOM: f32 = 4.0 * ROW;
+/// Channel faders and meters, from under the gain knobs' row down to (at the least)
+/// the fifth knob row's bottom.
+const FADER_TOP: f32 = ROW + 2.0;
+const MIN_FADER_BOTTOM: f32 = 5.0 * ROW;
 /// The crossfader, under the faders.
 const XF_GAP: f32 = 6.0;
 const XF_H: f32 = 20.0;
@@ -241,8 +244,9 @@ pub fn show(
         } else {
             (base + d.vu_w + d.fader_col, base + d.vu_w, base)
         };
-        // High, mid, low, filter down the outside, like Mixxx.
-        for (r, band, label) in [(0, EQ_HIGH, "HIGH"), (1, EQ_MID, "MID"), (2, EQ_LOW, "LOW")] {
+        // Gain, then high, mid, low and the filter, down the outside: the channel's
+        // knobs in one column, as on a mixer.
+        for (r, band, label) in [(1, EQ_HIGH, "HIGH"), (2, EQ_MID, "MID"), (3, EQ_LOW, "LOW")] {
             bound(
                 ui,
                 shared,
@@ -262,7 +266,7 @@ pub fn show(
         }
         bound(ui, shared, ch(DeckControl::Filter), out, |ui, range, v| {
             ui.put(
-                row(knob_x, 3),
+                row(knob_x, 4),
                 Knob::new(range, v)
                     .diameter(d.knob)
                     .label("FILTER")
@@ -270,10 +274,10 @@ pub fn show(
                     .target(waiting(ui.ctx(), ch(DeckControl::Filter))),
             )
         });
-        // Gain over the headphone cue button over the fader.
+        // Gain at the top of the knobs.
         let r = bound(ui, shared, ch(DeckControl::Trim), out, |ui, range, v| {
             ui.put(
-                at(fader_x, 0.0, d.fader_col, d.row),
+                row(knob_x, 0),
                 Knob::new(range, v)
                     .diameter(d.knob)
                     .label("GAIN")
