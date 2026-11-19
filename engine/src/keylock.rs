@@ -8,6 +8,14 @@
 //! it, and after a jump the shifter is cleared and primed at the new place
 //! ([`Keylock::restart`]) so the old audio doesn't smear into the new.
 //!
+//! The shifter works on a new slice of audio every 30 ms, and left to itself does a
+//! whole slice's transforms in the one block where the slice starts: about one block in
+//! six costs many times the others, and a block can't borrow time from its neighbours.
+//! So it runs with the library's `splitComputation` on, which spreads a slice's work
+//! evenly over the 30 ms until the next one. The sound is the same, 30 ms later
+//! (`split_computation_only_delays_the_sound`), which the lead already allows for; a
+//! change of tempo or key is heard that much later too. (lewinfox/earshot#32)
+//!
 //! Everything is allocated in [`Keylock::new`]; nothing allocates on the audio thread.
 
 use signalsmith_stretch::Stretch;
@@ -40,7 +48,8 @@ pub struct Keylock {
 impl Keylock {
     /// `max_block`: the most frames [`Keylock::process`] is given at once.
     pub fn new(sample_rate: u32, max_block: usize) -> Keylock {
-        let stretch = Stretch::preset_default(2, sample_rate);
+        // Split: a slice's work spread over its interval (see the module's notes).
+        let stretch = Stretch::preset_default_split(2, sample_rate);
         let latency = stretch.input_latency() + stretch.output_latency();
         Keylock {
             stretch,
@@ -95,5 +104,51 @@ impl Keylock {
     /// Not used for a block (no keylock or key shift, deck stopped, or out of range).
     pub fn idle(&mut self) {
         self.live = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Spreading the shifter's work over the interval changes when the sound comes
+    /// out (one interval later) and nothing else: against the same shifter doing
+    /// each slice at once, the output is the same, sample for sample.
+    #[test]
+    fn split_computation_only_delays_the_sound() {
+        const SR: u32 = 48_000;
+        const BLOCK: usize = 256;
+        let frames = SR as usize * 2;
+        // A tone and some noise, different in each ear.
+        let input: Vec<f32> = (0..frames)
+            .flat_map(|i| {
+                let t = i as f32 / SR as f32;
+                let noise = ((i as u64).wrapping_mul(2654435761) % 1000) as f32 / 1000.0 - 0.5;
+                let tone = (t * 440.0 * std::f32::consts::TAU).sin();
+                [0.4 * tone + 0.2 * noise, 0.4 * tone - 0.2 * noise]
+            })
+            .collect();
+        let run = |mut stretch: Stretch| {
+            stretch.set_transpose_factor(1.0 / 1.08, None);
+            let mut out = vec![0.0; input.len()];
+            for (i, o) in input.chunks(BLOCK * 2).zip(out.chunks_mut(BLOCK * 2)) {
+                stretch.process(i, o);
+            }
+            (out, stretch.output_latency())
+        };
+        let (at_once, latency) = run(Stretch::preset_default(2, SR));
+        let (split, split_latency) = run(Stretch::preset_default_split(2, SR));
+        let delay = split_latency - latency;
+        assert_eq!(delay, (SR as f32 * 0.03) as usize, "one interval later");
+        // Past the start (the shifter filling up), the same sound, `delay` later.
+        let from = SR as usize / 2;
+        let worst = (from..frames - delay)
+            .flat_map(|i| [2 * i, 2 * i + 1].map(|a| (at_once[a] - split[a + 2 * delay]).abs()))
+            .fold(0.0_f32, f32::max);
+        assert!(worst < 1e-5, "differs by up to {worst}");
+        assert!(
+            at_once[2 * from..].iter().any(|v| v.abs() > 0.1),
+            "and there is sound"
+        );
     }
 }

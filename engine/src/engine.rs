@@ -2428,7 +2428,7 @@ mod tests {
         use crate::pad_fx::{PadFx, PadFxKind};
         fn time(rig: &mut Rig, what: &str) {
             rig.run(2.0);
-            let mut t: Vec<f64> = (0..3000)
+            let mut t: Vec<f64> = (0..6000)
                 .map(|_| {
                     let t0 = std::time::Instant::now();
                     rig.r.process(&mut rig.out, 4);
@@ -2438,10 +2438,15 @@ mod tests {
             t.sort_by(|a, b| a.total_cmp(b));
             let mean = t.iter().sum::<f64>() / t.len() as f64;
             let budget = 256.0 / SR as f64 * 1e6;
+            // The mean, then how the slow blocks go: the 99th and 99.9th percentiles
+            // (the worst block in a hundred, in a thousand) and the worst of all,
+            // which on a busy machine is mostly the machine's own hiccups.
             println!(
-                "{what:<44} mean {mean:7.1} us ({:4.1} %)  p99 {:7.1}  max {:7.1} ({:4.1} %)",
+                "{what:<44} mean {mean:7.1} us ({:4.1} %)  p99 {:7.1} ({:4.1} %)  p99.9 {:7.1}  max {:7.1} ({:4.1} %)",
                 100.0 * mean / budget,
                 t[t.len() * 99 / 100],
+                100.0 * t[t.len() * 99 / 100] / budget,
+                t[t.len() * 999 / 1000],
                 t[t.len() - 1],
                 100.0 * t[t.len() - 1] / budget
             );
