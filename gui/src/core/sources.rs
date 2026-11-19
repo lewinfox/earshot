@@ -136,6 +136,11 @@ pub struct SourceConfig {
     /// last, checked at startup ([`SourceConfig::revalidate`]).
     #[serde(skip_serializing_if = "PathRules::is_empty")]
     pub paths: PathRules,
+    /// Folders the user picked to look for its files in (besides the music
+    /// folders). Nothing above them is searched: on macOS, listing the home folder
+    /// raises a privacy prompt for each protected folder in it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<PathBuf>,
 }
 
 impl SourceConfig {
@@ -160,6 +165,20 @@ pub struct Source {
     pub config: SourceConfig,
     /// Its tracks are listed.
     pub enabled: bool,
+}
+
+impl Source {
+    /// Where to look for its files that its program stores under other paths:
+    /// `roots` (the music folders) and the folders picked for it.
+    pub fn search_roots(&self, roots: &[PathBuf]) -> Vec<PathBuf> {
+        let mut all = roots.to_vec();
+        for f in &self.config.folders {
+            if !all.contains(f) {
+                all.push(f.clone());
+            }
+        }
+        all
+    }
 }
 
 /// A source to add: what [`Source`] is before the Store gives it an id.
@@ -211,6 +230,7 @@ mod tests {
         let here = std::env::temp_dir().to_string_lossy().into_owned();
         let mut c = SourceConfig {
             volume_root: None,
+            folders: vec![],
             paths: PathRules::from([
                 (here.clone(), "C:/M".into()),
                 ("/no/such/dir".into(), "D:/".into()),

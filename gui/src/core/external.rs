@@ -388,10 +388,10 @@ pub fn find(at: Option<&Path>) -> Result<Vec<Found>, String> {
         .ok_or_else(|| "the worker sent no libraries".into())
 }
 
-/// Read a whole library. `roots` (earshot's music folders) are where to look for
-/// files the program stores under other paths (it runs under Wine, or the library
-/// came from another computer), starting from the source's path rules as found last
-/// time. `cues`: with
+/// Read a whole library. `roots` (earshot's music folders) and the folders picked
+/// for the source are where to look for files the program stores under other paths
+/// (it runs under Wine, or the library came from another computer), starting from
+/// the source's path rules as found last time; never above them. `cues`: with
 /// every track's cues and grid, which is slower (Serato keeps them in the audio
 /// files, Rekordbox its grids in analysis files). Blocking: call from a background
 /// thread.
@@ -413,8 +413,8 @@ pub fn read(
     if let Some(v) = &source.config.volume_root {
         args.extend(["--volume-root".into(), v.into()]);
     }
-    for r in roots {
-        args.extend(["--root".into(), r.as_os_str().to_owned()]);
+    for r in source.search_roots(roots) {
+        args.extend(["--root".into(), r.into_os_string()]);
     }
     if cues {
         args.push("--cues".into());
@@ -714,6 +714,13 @@ pub enum ExternalCmd {
         at: PathBuf,
     },
     Read(Source),
+    /// Ask for a folder to look for a library's missing files in (a picker).
+    PickFolder(Source),
+    /// Look for a library's files in this folder too, from now on, and read it again.
+    AddFolder {
+        source: SourceId,
+        folder: PathBuf,
+    },
     /// Open the import window for these outside tracks (`core::outside`).
     AskImport(Vec<TrackId>),
     /// Import these tracks (some are another library's), asking first unless told

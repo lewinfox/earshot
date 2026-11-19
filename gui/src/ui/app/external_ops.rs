@@ -103,6 +103,44 @@ impl EarshotApp {
                     }
                 });
             }
+            ExternalCmd::PickFolder(source) => {
+                let sink = self.sink.clone();
+                // Suggested, not searched: a folder the user picks raises no
+                // privacy prompt beyond that folder's own.
+                let suggest = directories::UserDirs::new()
+                    .and_then(|d| d.audio_dir().map(PathBuf::from))
+                    .or_else(|| directories::UserDirs::new().map(|d| d.home_dir().into()));
+                std::thread::spawn(move || {
+                    let mut dialog = rfd::FileDialog::new()
+                        .set_title(format!("Where are {}'s music files?", source.name));
+                    if let Some(dir) = suggest {
+                        dialog = dialog.set_directory(dir);
+                    }
+                    if let Some(folder) = dialog.pick_folder() {
+                        sink(Event::Command(
+                            ExternalCmd::AddFolder {
+                                source: source.id,
+                                folder,
+                            }
+                            .into(),
+                        ));
+                    }
+                });
+            }
+            ExternalCmd::AddFolder { source, folder } => {
+                let Some(s) = self.sources.iter_mut().find(|s| s.id == source) else {
+                    return;
+                };
+                if !s.config.folders.contains(&folder) {
+                    s.config.folders.push(folder);
+                }
+                // Kept here too at once, so a read finishing before the Store
+                // answers doesn't save its path rules over the folders.
+                let s = s.clone();
+                self.lib.store.send(StoreCmd::UpdateSource(s.clone()));
+                let read = self.panels.library.external.read_again(&s);
+                self.external_cmd(read);
+            }
             ExternalCmd::Import {
                 source,
                 target,
@@ -536,9 +574,12 @@ impl EarshotApp {
         });
     }
 
-    /// Where to start looking for files another program stores under other paths
-    /// (it runs under Wine, or the library came from another computer): the music
-    /// folders, and the system's Music folder. The search widens from there.
+    /// Where to look for files another program stores under other paths (it runs
+    /// under Wine, or the library came from another computer): the music folders,
+    /// and the system's Music folder (not a protected folder on macOS). Only inside
+    /// them: the search never widens to the home folder, whose Downloads, Documents
+    /// and other apps' data macOS asks about; for files elsewhere the user picks a
+    /// folder (`ExternalCmd::PickFolder`), kept with the source.
     pub(super) fn roots(&self) -> Vec<PathBuf> {
         let mut roots: Vec<PathBuf> = self
             .panels

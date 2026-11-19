@@ -85,19 +85,6 @@ def make_source(fmt: str, path: str, volume_root: str | None) -> cratelib.Source
     raise ValueError(f"unknown format {fmt!r}")
 
 
-def drives() -> list[Path]:
-    """Windows' drives (C:\\, D:\\, …): music may be on any of them. None elsewhere,
-    where other drives are mounted under the folders in `bounds`."""
-    return [Path(d) for d in os.listdrives()] if os.name == "nt" else []
-
-
-def bounds() -> list[Path]:
-    """Where looking for files may go: the home folder, where drives are mounted,
-    and (Windows) every drive."""
-    places = [Path.home(), Path("/media"), Path("/mnt"), Path("/Volumes"), *drives()]
-    return [p for p in places if p.is_dir()]
-
-
 def seed(known: dict[str, str]) -> dict[str, str]:
     """The rules to start from: those found before, and Wine's Z: drive, which is /."""
     return ({"/": "Z:/"} if os.name != "nt" else {}) | known
@@ -107,20 +94,18 @@ def find_files(library: cratelib.Library, roots: list[Path], known: dict[str, st
     """Find tracks' files that cratelib couldn't, when the program stores other paths
     (it runs under Wine or in a container, or the library came from another computer).
     `known`: rules found before ({our folder: the program's}). New ones are searched
-    for from `roots` (earshot's music folders) outwards, within the home folder and
-    mounted drives (cratelib's `discover`). Returns the rules that apply now."""
+    for only inside `roots`: earshot's music folders and the folders the user picked
+    for this library. Never above them: listing the home folder or whole drives
+    would go through Downloads, Documents and other programs' data, which macOS
+    asks the user about folder by folder. Returns the rules that apply now."""
     mapping = seed(known)
     tracks = [(t.location, t.file_size) for t in library.tracks.values() if t.file is None]
-    if not tracks:
+    start = [r for r in roots if r.is_dir()]
+    if not tracks or not start:
         return known
-    start = roots or [Path.home() / "Music"]
     progress = lambda m: send({"progress": m})
-    paths = discover(tracks, start, bounds(), cratelib.PathMap(mapping), progress=progress)
-    # Files still missing: the other drives too (Windows), only now, as listing a
-    # whole drive takes a while.
-    others = [d for d in drives() if not any(d == s or d in s.parents for s in map(Path, start))]
-    if others and any(paths.find(loc) is None for loc, _ in tracks):
-        paths = discover(tracks, others, bounds(), paths, progress=progress)
+    # The roots are the bounds too, so the search doesn't widen past them.
+    paths = discover(tracks, start, start, cratelib.PathMap(mapping), progress=progress)
     for t in library.tracks.values():
         if t.file is None:
             t.file = paths.find(t.location)
@@ -405,7 +390,9 @@ def main(argv: list[str] | None = None) -> int:
     rd.add_argument("format", choices=[str(f) for f in cratelib.Format])
     rd.add_argument("path")
     rd.add_argument("--volume-root")
-    rd.add_argument("--root", action="append", default=[], help="a music folder, to find files under")
+    rd.add_argument(
+        "--root", action="append", default=[], help="a folder to find files under (never above it)"
+    )
     rd.add_argument("--cues", action="store_true", help="with cues and grids, on earshot's timeline")
     rd.add_argument("--paths", default="{}", help="path rules found before, JSON {our folder: the program's}")
     sub.add_parser("write", help="write a library; the spec (JSON) comes on stdin")
