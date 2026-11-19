@@ -32,7 +32,43 @@ pub fn semitones(semitones: f64) -> f64 {
     (semitones / 12.0).exp2()
 }
 
+/// How the shifter's heavy work is spread (an experiment for lewinfox/earshot#32:
+/// `EARSHOT_KEYLOCK=plain|stagger|split`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Spread {
+    /// As the library does it: a slice's work in the block where the slice starts.
+    Plain,
+    /// The same, but each deck's slices start at its own offset in the 30 ms cycle,
+    /// so no block carries two decks' heavy work.
+    Stagger,
+    /// The library's `splitComputation`: a slice's work spread over its 30 ms.
+    Split,
+}
+
+impl Spread {
+    pub fn chosen() -> Spread {
+        match std::env::var("EARSHOT_KEYLOCK").as_deref() {
+            Ok("plain") => Spread::Plain,
+            Ok("stagger") => Spread::Stagger,
+            _ => Spread::Split,
+        }
+    }
+}
+
+/// Decks a cycle is shared between when staggering.
+const SLOTS: usize = 4;
+
 pub struct Keylock {
+    spread: Spread,
+    /// Frames between the starts of two slices: the shifter's cycle.
+    interval: usize,
+    /// Staggering: where in the cycle (in frames of the engine's clock) this deck's
+    /// slices start.
+    phase: usize,
+    /// Staggering: audio run through the shifter and thrown away at a restart, to
+    /// move its cycle (interleaved stereo, in and out).
+    warm: Vec<f32>,
+    warm_out: Vec<f32>,
     stretch: Stretch,
     /// Frames from input to output (the shifter's input plus output latency).
     latency: usize,
@@ -46,12 +82,24 @@ pub struct Keylock {
 }
 
 impl Keylock {
-    /// `max_block`: the most frames [`Keylock::process`] is given at once.
-    pub fn new(sample_rate: u32, max_block: usize) -> Keylock {
-        // Split: a slice's work spread over its interval (see the module's notes).
-        let stretch = Stretch::preset_default_split(2, sample_rate);
+    /// `max_block`: the most frames [`Keylock::process`] is given at once. `slot`:
+    /// which deck's this is (0-based), for its place in the cycle when staggering.
+    pub fn new(sample_rate: u32, max_block: usize, slot: usize) -> Keylock {
+        let spread = Spread::chosen();
+        let stretch = match spread {
+            // Split: a slice's work spread over its interval (see the module's notes).
+            Spread::Split => Stretch::preset_default_split(2, sample_rate),
+            _ => Stretch::preset_default(2, sample_rate),
+        };
         let latency = stretch.input_latency() + stretch.output_latency();
+        // The default preset's: 30 ms.
+        let interval = (sample_rate as f32 * 0.03) as usize;
         Keylock {
+            spread,
+            interval,
+            phase: (slot % SLOTS) * interval / SLOTS,
+            warm: vec![0.0; interval * 2],
+            warm_out: vec![0.0; interval * 2],
             stretch,
             latency,
             out: vec![0.0; max_block * 2],
@@ -74,16 +122,42 @@ impl Keylock {
         !self.live || (pos - self.next_pos).abs() > 1e-9
     }
 
+    /// Frames of audio a restart at `now` (the engine's clock, in frames) runs
+    /// through the shifter and throws away after the pre-roll, to put this deck's
+    /// slices at its own place in the cycle (staggering; else none).
+    pub fn warm_frames(&self, now: u64) -> usize {
+        if self.spread != Spread::Stagger {
+            return 0;
+        }
+        let i = self.interval as u64;
+        ((now % i + i - self.phase as u64) % i) as usize
+    }
+
     /// Clear the shifter and prime it so its very next output is from the playhead.
-    /// `fill(i)` gives the stereo frame at offset `i` of the pre-roll, which ends at
-    /// the playhead plus [`Keylock::lead`]: frames `-len..0` relative to that, in
-    /// order, where `len` is [`Keylock::preroll_frames`].
-    pub fn restart(&mut self, mut fill: impl FnMut(usize) -> (f32, f32)) {
+    /// `fill(i)` gives the stereo frame at offset `i` of the audio that ends at the
+    /// playhead plus [`Keylock::lead`]: [`Keylock::preroll_frames`] of pre-roll, then
+    /// `warm` frames ([`Keylock::warm_frames`]) that are processed and thrown away.
+    pub fn restart(
+        &mut self,
+        warm: usize,
+        transpose: f64,
+        mut fill: impl FnMut(usize) -> (f32, f32),
+    ) {
         self.stretch.reset();
         for (i, f) in self.preroll.chunks_exact_mut(2).enumerate() {
             (f[0], f[1]) = fill(i);
         }
         self.stretch.seek(&self.preroll, 1.0);
+        if warm > 0 {
+            let len = self.preroll.len() / 2;
+            let warm = warm.min(self.interval);
+            for (i, f) in self.warm[..warm * 2].chunks_exact_mut(2).enumerate() {
+                (f[0], f[1]) = fill(len + i);
+            }
+            self.stretch.set_transpose_factor(transpose as f32, None);
+            self.stretch
+                .process(&self.warm[..warm * 2], &mut self.warm_out[..warm * 2]);
+        }
     }
 
     pub fn preroll_frames(&self) -> usize {

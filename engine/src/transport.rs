@@ -128,13 +128,13 @@ pub struct Player {
 impl Player {
     /// `keylock`: allocate a pitch shifter (`sample_rate`, up to `max_block` frames)
     /// so the player can keep or shift its key.
-    pub fn new(lead_in: f64, keylock: Option<(u32, usize)>) -> Player {
+    pub fn new(lead_in: f64, keylock: Option<(u32, usize)>, slot: usize) -> Player {
         Player {
             transport: Transport::new(lead_in),
             speed: 1.0,
             keylock: false,
             key_shift: 0.0,
-            shifter: keylock.map(|(sr, block)| Keylock::new(sr, block)),
+            shifter: keylock.map(|(sr, block)| Keylock::new(sr, block, slot)),
             lead: 0.0,
             scratch: Scratch::default(),
         }
@@ -213,9 +213,12 @@ impl Player {
         let mut from = lead;
         if let Some(k) = shifter.as_deref_mut() {
             if k.needs_restart(t.pos) {
-                let len = k.preroll_frames();
+                let warm = k.warm_frames((now * sr).round() as u64);
+                let len = k.preroll_frames() + warm;
                 let start = t.pos + lead - len as f64 * step;
-                k.restart(|i| mix.sample(source(start + i as f64 * step) * src_rate, 0.0));
+                k.restart(warm, transpose, |i| {
+                    mix.sample(source(start + i as f64 * step) * src_rate, 0.0)
+                });
             } else {
                 from = self.lead;
             }
