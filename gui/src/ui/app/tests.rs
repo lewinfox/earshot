@@ -2607,6 +2607,47 @@ fn library_tracks_in_the_table() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Switching between two and four decks, or showing and hiding the mixer, changes the
+/// layout in one frame: where things are after the first frame is where they stay.
+#[test]
+fn a_new_layout_lands_in_one_frame() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = start("one-frame");
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Perform).into());
+    steps(&mut h, 5);
+    let places = |h: &H| {
+        ["CUE", "SYNC", "Player controls", "BEAT JUMP 4"]
+            .iter()
+            .flat_map(|l| {
+                h.query_all_by_label(l)
+                    .map(|n| n.rect())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let changes: [Command; 6] = [
+        ViewCmd::DeckCount(4).into(),
+        ViewCmd::ShowMixer(false).into(),
+        ViewCmd::DeckCount(2).into(),
+        ViewCmd::ShowMixer(true).into(),
+        ViewCmd::DeckCount(4).into(),
+        ViewCmd::DeckCount(2).into(),
+    ];
+    for (i, change) in changes.into_iter().enumerate() {
+        h.state_mut().dispatch(change);
+        steps(&mut h, 1);
+        let first = places(&h);
+        assert!(!first.is_empty());
+        steps(&mut h, 6);
+        assert_eq!(
+            first,
+            places(&h),
+            "change {i}: things moved after its first frame"
+        );
+    }
+}
+
 /// The windows over the app (settings, the keymap, the sampler) fit inside the
 /// smallest app window: what's too long for them scrolls.
 #[test]

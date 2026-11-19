@@ -635,6 +635,7 @@ impl DeckUi {
             tempo_fader,
         } = layout;
         self.side = side;
+        let before = (self.controls_w, self.page_spare, self.page_widths);
         // The scale is the layout's, which fits the deck to its place from `width` and
         // `height` above. Should the controls turn out wider than those say (a new
         // button, `CONTROLS_W` not kept up), they're still fitted here, a frame late.
@@ -698,6 +699,21 @@ impl DeckUi {
             self.too_wide = 0;
             self.fit = Some((width, cap.max(floor)));
             ui.ctx().request_discard("a deck's controls didn't fit");
+        }
+        // The row places its parts by their widths as last drawn. When those change (a
+        // new scale, two decks to four, the mixer shown or hidden), this frame isn't
+        // shown: it's drawn again until they hold, so the change lands all at once.
+        let moved = |a: f32, b: f32| (a - b).abs() > 0.05;
+        let pages = before
+            .2
+            .iter()
+            .zip(&self.page_widths)
+            .any(|(a, b)| match (a, b) {
+                (Some(a), Some(b)) => moved(*a, *b),
+                (a, b) => a.is_some() != b.is_some(),
+            });
+        if moved(before.0, self.controls_w) || moved(before.1, self.page_spare) || pages {
+            ui.ctx().request_discard("a deck's controls are settling");
         }
     }
 

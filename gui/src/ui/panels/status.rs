@@ -92,7 +92,12 @@ impl Panel for TopBar<'_> {
         let one_line = left_w + fx_w + right_w + 2.0 * GROUP_GAP <= row.width();
         let child = |ui: &mut Ui, rect: egui::Rect, layout: egui::Layout| {
             let mut c = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout));
-            c.set_clip_rect(rect.expand(1.0).intersect(ui.clip_rect()));
+            // Cut off at its sides only: a pill is taller than a line of text.
+            let clip = ui.clip_rect();
+            c.set_clip_rect(
+                clip.with_min_x(clip.left().max(rect.left() - 1.0))
+                    .with_max_x(clip.right().min(rect.right() + 1.0)),
+            );
             c
         };
         let mut left = child(ui, row, egui::Layout::left_to_right(egui::Align::Center));

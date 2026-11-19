@@ -377,7 +377,12 @@ impl EarshotApp {
         prefs.migrate();
         // The UI size is egui's zoom, set each frame from the preference and what the
         // screen has room for (`window::fit`); Ctrl +/- are ours (our steps and range).
-        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        cc.egui_ctx.options_mut(|o| {
+            o.zoom_with_keyboard = false;
+            // A frame whose layout hasn't settled (a deck's controls after its scale
+            // changes) is drawn again rather than shown, up to this many times.
+            o.max_passes = std::num::NonZeroUsize::new(10).expect("not zero");
+        });
         let tables = prefs.tables.clone();
         let mut app = EarshotApp {
             ctx: cc.egui_ctx.clone(),
