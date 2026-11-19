@@ -2437,6 +2437,8 @@ mod tests {
     /// audio thread works for a tenth of each block and sleeps the rest). With
     /// `EARSHOT_PACED=1` each block waits for its time, as the sound card's callback
     /// does: slower to run (about 8 s a row), and nearer what a set costs.
+    /// `EARSHOT_NO_STAGGER=1` measures as it was before the decks' shifters were
+    /// staggered (`keylock`), for a before and after on the same machine.
     #[test]
     #[ignore]
     fn cost_of_a_block() {

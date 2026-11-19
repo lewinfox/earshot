@@ -116,6 +116,12 @@ impl Keylock {
     /// slice on its first frame and every interval after: this many frames earlier,
     /// its slices fall on this deck's place in the cycle.
     pub fn warm_frames(&self, now: u64) -> usize {
+        // Measuring only (`cost_of_a_block`): as it was before the decks were
+        // staggered, to compare on the same machine.
+        #[cfg(test)]
+        if std::env::var_os("EARSHOT_NO_STAGGER").is_some() {
+            return 0;
+        }
         let i = self.interval as u64;
         let phase = self.phase_once.unwrap_or(self.phase) as u64 % i;
         ((now % i + i - phase) % i) as usize
