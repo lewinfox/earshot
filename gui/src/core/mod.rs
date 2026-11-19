@@ -26,6 +26,7 @@ pub mod index;
 pub mod jobs;
 pub mod keymap;
 pub mod keys;
+pub mod layers;
 pub mod library;
 pub mod lights;
 pub mod log;

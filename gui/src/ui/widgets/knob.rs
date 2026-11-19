@@ -17,6 +17,7 @@ pub struct Knob<'a> {
     diameter: f32,
     label: Option<&'a str>,
     colour: Color32,
+    target: Option<f64>,
 }
 
 impl<'a> Knob<'a> {
@@ -27,6 +28,7 @@ impl<'a> Knob<'a> {
             diameter: 26.0,
             label: None,
             colour: THEME.accent,
+            target: None,
         }
     }
 
@@ -38,6 +40,13 @@ impl<'a> Knob<'a> {
     /// A short caption under the knob.
     pub fn label(mut self, label: &'a str) -> Self {
         self.label = Some(label);
+        self
+    }
+
+    /// Mark `value` on the rim: where a controller's knob is, while this one waits
+    /// for it (soft takeover), like [`super::Fader::target`].
+    pub fn target(mut self, value: Option<f64>) -> Self {
+        self.target = value;
         self
     }
 
@@ -107,6 +116,12 @@ impl Widget for Knob<'_> {
             [c + dir * (r - 12.0).max(1.0), c + dir * (r - 4.5)],
             Stroke::new(2.0_f32, THEME.text),
         );
+        if let Some(v) = self.target {
+            // A dot on the rim, in the knob's colour, ringed so it shows on the arc.
+            let a = angle(self.range.to_pos(v));
+            let at = c + vec2(a.cos(), a.sin()) * r;
+            p.circle(at, 2.6, self.colour, Stroke::new(1.0_f32, THEME.text));
+        }
         if let Some(label) = self.label {
             p.text(
                 pos2(c.x, rect.bottom()),

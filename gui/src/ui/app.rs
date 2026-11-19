@@ -72,6 +72,9 @@ pub struct EarshotApp {
     monitor: Option<Monitor>,
     /// The same monitor, for the controller's lights thread.
     lights_monitor: crate::core::lights::MonitorSlot,
+    /// Where a controller's messages go: the deck each hand plays, held buttons, soft
+    /// takeover (`midi::Route`). Its layers are the lights' too.
+    midi_route: midi::Route,
     /// The mapping's version when the engine was last told whether the controller
     /// blends the headphones (see [`EarshotApp::sync_phones_cue_only`]); `None` sends
     /// it again (a new engine).
@@ -401,6 +404,7 @@ impl EarshotApp {
             lib,
             sink,
             rx,
+            midi_route: midi::Route::default(),
             lights_monitor: Arc::new(std::sync::Mutex::new(crate::core::lights::LightsState {
                 monitor: monitor.clone(),
                 ..Default::default()
@@ -642,12 +646,18 @@ impl EarshotApp {
             let key = crate::core::controllers::device_key(port, usb);
             store.find(port, usb, chosen.get(&key).map(String::as_str))
         };
-        (self.midi, self.midi_devices) =
-            midi::connect_all(&self.sink, &lane, &learned, &self.lights_monitor, &choose)
-                .unwrap_or_else(|e| {
-                    eprintln!("MIDI: {e}");
-                    (Midi::default(), vec![])
-                });
+        (self.midi, self.midi_devices) = midi::connect_all(
+            &self.sink,
+            &lane,
+            &learned,
+            &self.lights_monitor,
+            &self.midi_route,
+            &choose,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("MIDI: {e}");
+            (Midi::default(), vec![])
+        });
         self.midi_ports = self.midi_devices.iter().map(|p| p.name.clone()).collect();
         self.mappings = store
             .models()
@@ -913,6 +923,9 @@ impl EarshotApp {
                 Ok(()) => self.reopen_audio(),
                 Err(e) => self.controller.error = Some(e),
             },
+            Command::App(AppCmd::ControllerWaits { control, at }) => {
+                crate::ui::panels::mixer::set_waiting(&self.ctx, control, at);
+            }
             Command::App(AppCmd::ControllerShows { control, value }) => {
                 // A button toggles what's shown on each press (the controller keeps
                 // its own state; it starts off, as the controller does).
@@ -1202,11 +1215,7 @@ impl EarshotApp {
                     self.load(Some(deck), id);
                 }
             }
-            ViewCmd::SwitchLayer(side) => {
-                if let Some(l) = self.prefs.layers.get_mut(side) {
-                    *l = !*l;
-                }
-            }
+            ViewCmd::SwitchLayer(side) => self.switch_layer(side),
             ViewCmd::PadMode(d, m) => {
                 let ui = &mut self.panels.decks[d.index()];
                 let out = ui.set_pad_mode(m);
@@ -1507,6 +1516,48 @@ impl EarshotApp {
     }
 }
 
+impl EarshotApp {
+    /// Tell the controller and its lights which deck each hand plays (they read it on
+    /// their own threads).
+    fn sync_layers(&self) {
+        self.midi_route
+            .layers
+            .set(self.prefs.layers, self.prefs.four_decks());
+    }
+
+    /// Switch the left (`side` 0) or right (1) hand to its other deck (1 and 3, 2 and
+    /// 4), with four decks showing. A controller's deck follows: its pads keep the
+    /// mode they're in, and its knobs and faders wait to be moved to the new deck's
+    /// values (marked on screen where they are now).
+    fn switch_layer(&mut self, side: usize) {
+        if side > 1 || !self.prefs.four_decks() {
+            return;
+        }
+        let from = self.prefs.active_deck(side);
+        self.prefs.layers[side] = !self.prefs.layers[side];
+        self.sync_layers();
+        let to = self.prefs.active_deck(side);
+        if !self.prefs.controller() {
+            return;
+        }
+        // The controller's pads are in the mode they were: the new deck's follow.
+        let mode = self.panels.decks[from.index()].pad_mode;
+        if self.panels.decks[to.index()].pad_mode != mode {
+            self.view_cmd(ViewCmd::PadMode(to, mode));
+        }
+        use crate::ui::panels::mixer;
+        for control in mixer::takeover_controls(from).chain(mixer::takeover_controls(to)) {
+            mixer::set_waiting(&self.ctx, control, None);
+        }
+        let snap = self.frame.snap.as_ref();
+        for (control, at) in self.midi_route.waiting(|c| snap.and_then(|s| c.get(s))) {
+            if matches!(control, crate::core::bus::Control::Deck(d, _) if d == to) {
+                mixer::set_waiting(&self.ctx, control, Some(at));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 impl EarshotApp {
     /// Where the views end and the status bar begins, down the window, in points.
@@ -1544,6 +1595,7 @@ impl eframe::App for EarshotApp {
         self.keyboard(ctx);
         input::full_screen_key(ctx);
         self.window.fit(ctx, self.prefs.ui_scale);
+        self.sync_layers();
         // Ctrl +/- and Ctrl 0 change the UI size (egui's shortcuts, our steps).
         if let Some(z) = self.ui_size_keys(ctx) {
             self.dispatch(ViewCmd::UiScale(z).into());

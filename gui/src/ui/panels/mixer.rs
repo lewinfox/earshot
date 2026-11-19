@@ -23,8 +23,9 @@ use crate::ui::theme::THEME;
 use crate::ui::widgets::{Fader, HwButton, Knob, Meter, Range, held};
 
 // Layout, in points from the channels' top left (under the master and headphone
-// knobs' row). Columns from the left: deck A's knobs, its gain / cue / fader, its
-// meter, the master meters, then deck B mirrored.
+// knobs' row). Columns from the left: deck A's knobs (gain, the EQ, the filter, one
+// under the other), its cue button over its fader, its meter, the master meters, then
+// deck B mirrored.
 const KNOB_COL: f32 = 34.0;
 const FADER_COL: f32 = 30.0;
 const VU_W: f32 = 7.0;
@@ -33,14 +34,16 @@ pub(super) const ROW: f32 = 40.0;
 pub(super) const KNOB: f32 = 24.0;
 /// The master and headphone knobs' row, over the channels, and the gap under it.
 const MASTER_H: f32 = ROW + 2.0;
-/// Headphone cue buttons, under the gain knobs.
-const PFL_TOP: f32 = ROW + 2.0;
+/// Headphone cue buttons, at the top of the faders' column (centred on the gain
+/// knobs' row beside them).
+const PFL_TOP: f32 = (ROW - PFL_H) / 2.0;
 pub(super) const PFL_H: f32 = 18.0;
 /// The master meters' label ("MASTER" / "LIMIT"), over them.
 const MASTER_LABEL_H: f32 = 12.0;
-/// Channel faders and meters, down to (at the least) the fourth knob row's bottom.
-const FADER_TOP: f32 = PFL_TOP + PFL_H + 6.0;
-const MIN_FADER_BOTTOM: f32 = 4.0 * ROW;
+/// Channel faders and meters, from under the gain knobs' row down to (at the least)
+/// the fifth knob row's bottom.
+const FADER_TOP: f32 = ROW + 2.0;
+const MIN_FADER_BOTTOM: f32 = 5.0 * ROW;
 /// The crossfader, under the faders.
 const XF_GAP: f32 = 6.0;
 const XF_H: f32 = 20.0;
@@ -131,6 +134,39 @@ pub fn set_shown(ctx: &egui::Context, control: Control, value: f64) {
     ctx.request_repaint();
 }
 
+fn waiting_id(control: Control) -> egui::Id {
+    egui::Id::new(("takeover-waiting", control.name().0))
+}
+
+/// Where the controller's knob for `control` is, while the control waits for it to
+/// reach its value (soft takeover after a hand switches decks: `core::midi::Route`).
+pub fn waiting(ctx: &egui::Context, control: Control) -> Option<f64> {
+    ctx.data(|d| d.get_temp(waiting_id(control)))
+}
+
+/// Mark (or with `None`, stop marking) where the controller's knob for `control` is.
+pub fn set_waiting(ctx: &egui::Context, control: Control, at: Option<f64>) {
+    ctx.data_mut(|d| match at {
+        Some(v) => d.insert_temp(waiting_id(control), v),
+        None => d.remove::<f64>(waiting_id(control)),
+    });
+    ctx.request_repaint();
+}
+
+/// The controls of a channel that take over softly, for `deck`.
+pub fn takeover_controls(deck: DeckId) -> impl Iterator<Item = Control> {
+    [
+        DeckControl::Volume,
+        DeckControl::Trim,
+        DeckControl::Filter,
+        DeckControl::Eq(EQ_LOW),
+        DeckControl::Eq(EQ_MID),
+        DeckControl::Eq(EQ_HIGH),
+    ]
+    .into_iter()
+    .map(move |c| Control::Deck(deck, c))
+}
+
 /// A knob or fader bound to `control`: shows the engine's value (the default without
 /// an engine) and sends what the user changes. One the controller acts on itself (a
 /// display-only mapping) shows the controller's knob, outlined, and can't be moved
@@ -184,7 +220,13 @@ pub fn show(
     let top = area.min + vec2(0.0, d.master_h);
     let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(top + vec2(x, y), vec2(w, h));
     let row = |x: f32, r: usize| at(x, r as f32 * d.row, d.knob_col, d.row);
-    let left: Vec<DeckId> = decks.iter().copied().filter(|d| on_left(*d)).collect();
+    // Decks 1 and 2 nearest the middle, 3 and 4 outside them: 3 1 | 2 4.
+    let left: Vec<DeckId> = decks
+        .iter()
+        .rev()
+        .copied()
+        .filter(|d| on_left(*d))
+        .collect();
     let right: Vec<DeckId> = decks.iter().copied().filter(|d| !on_left(*d)).collect();
     let main_x = left.len() as f32 * d.strip_w;
     let channels_w = d.channels_w(decks.len());
@@ -208,8 +250,9 @@ pub fn show(
         } else {
             (base + d.vu_w + d.fader_col, base + d.vu_w, base)
         };
-        // High, mid, low, filter down the outside, like Mixxx.
-        for (r, band, label) in [(0, EQ_HIGH, "HIGH"), (1, EQ_MID, "MID"), (2, EQ_LOW, "LOW")] {
+        // Gain, then high, mid, low and the filter, down the outside: the channel's
+        // knobs in one column, as on a mixer.
+        for (r, band, label) in [(1, EQ_HIGH, "HIGH"), (2, EQ_MID, "MID"), (3, EQ_LOW, "LOW")] {
             bound(
                 ui,
                 shared,
@@ -221,28 +264,31 @@ pub fn show(
                         Knob::new(range, v)
                             .diameter(d.knob)
                             .label(label)
-                            .colour(colour),
+                            .colour(colour)
+                            .target(waiting(ui.ctx(), ch(DeckControl::Eq(band)))),
                     )
                 },
             );
         }
         bound(ui, shared, ch(DeckControl::Filter), out, |ui, range, v| {
             ui.put(
-                row(knob_x, 3),
+                row(knob_x, 4),
                 Knob::new(range, v)
                     .diameter(d.knob)
                     .label("FILTER")
-                    .colour(colour),
+                    .colour(colour)
+                    .target(waiting(ui.ctx(), ch(DeckControl::Filter))),
             )
         });
-        // Gain over the headphone cue button over the fader.
+        // Gain at the top of the knobs.
         let r = bound(ui, shared, ch(DeckControl::Trim), out, |ui, range, v| {
             ui.put(
-                at(fader_x, 0.0, d.fader_col, d.row),
+                row(knob_x, 0),
                 Knob::new(range, v)
                     .diameter(d.knob)
                     .label("GAIN")
-                    .colour(colour),
+                    .colour(colour)
+                    .target(waiting(ui.ctx(), ch(DeckControl::Trim))),
             )
         });
         if r.hovered() {
@@ -275,7 +321,8 @@ pub fn show(
             ui.put(
                 fader_rect,
                 Fader::vertical(range, v, vec2(d.fader_col - 8.0, fader_rect.height()))
-                    .colour(colour),
+                    .colour(colour)
+                    .target(waiting(ui.ctx(), ch(DeckControl::Volume))),
             )
         });
         // Which side of the crossfader the channel is on: click for the next.

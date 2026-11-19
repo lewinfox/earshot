@@ -190,9 +190,17 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   switched off or the fader comes down) or *Trans* (cuts the sound on the beat). Per
   unit: the effect, its length in beats (◀ ▶ halve and double it, from 1/16 to 16), *Level* (how loud the
   repeats are, how deep the cuts go), what it's on (deck A/B…, or *MAIN*, which
-  follows the sync leader or the playing deck) and *ON*. Keys: `G`/`H` switch units
-  1/2 on and off, `T`/`Y` pick the next effect, `Shift+G`/`Shift+H` the next target, `C`/`V` halve and double unit 1's length and
-  `B`/`N` unit 2's.
+  follows the sync leader or the playing deck) and *ON*. Keys, for unit 1: `B`
+  switches it on and off, `T` picks the next effect, `Shift+B` the next target, and
+  `C`/`V` halve and double its length.
+- **Four decks, two hands**: with four decks showing, the top bar's `[1] | [2]` switch
+  (or `G` for the left hand, `H` for the right) sets which deck each hand plays: 1 or
+  3, and 2 or 4. The keyboard's deck keys follow, and so does a controller: its left
+  and right decks, their lights and level meters. A button held while switching still
+  lets go on the deck it was pressed on. The controller's channel fader, gain, EQ and
+  filter do nothing on the new deck until moved to that deck's value (soft takeover);
+  a mark on the on-screen control shows where the controller's is until then. A
+  controller with a spare button can map `deck_1_layer_toggle` / `deck_2_layer_toggle`.
 - **Sampler** (*Menu → Sampler…*): 16 slots, each a short sound (a file, or the
   track selected in the library; its first two minutes, kept in memory) with its own
   volume and a *Loop* switch. With the DDJ-400's pads in SAMPLER mode a pad plays its

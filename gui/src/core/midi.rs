@@ -9,16 +9,22 @@
 //! A message becomes a [`Command`]: one the engine can take as it is goes straight to
 //! it on MIDI's own ring ([`Lane`]), without the player lock; anything else (a beat
 //! jump by the deck's step, library browsing) goes to the UI as [`Event::Command`].
+//!
+//! On the way, a deck 1 or deck 2 control goes to the deck that hand plays now
+//! (`core::layers`, with four decks showing), a button's release goes to the deck its
+//! press went to, and a knob or fader waits for its deck's value before it acts on a
+//! deck it wasn't last moved on (soft takeover): see [`Route`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use midir::{MidiInput, MidiInputConnection, MidiOutput};
 
 use earshot_engine::{DeckId, MasterParam};
 
-use super::bus::{Control, Kind};
-use super::command::{self, Command, Lane};
+use super::bus::{Control, DeckControl, Kind};
+use super::command::{self, AppCmd, Command, Lane};
+use super::layers::Layers;
 use super::{Event, Sink};
 
 /// How a message's data byte becomes the control's value.
@@ -584,6 +590,7 @@ pub fn connect_all(
     lane: &Lane,
     learned: &Learned,
     monitor: &super::lights::MonitorSlot,
+    route: &Route,
     choose: &dyn Fn(&str, Option<&str>) -> Option<super::controllers::Profile>,
 ) -> Result<(Midi, Vec<Port>), String> {
     let t0 = std::time::Instant::now();
@@ -634,11 +641,14 @@ pub fn connect_all(
                 )
             });
         let (sink, lane, learned) = (sink.clone(), lane.clone(), learned.clone());
+        let (route_in, monitor_in) = (route.clone(), monitor.clone());
         let index = names.len();
         match input.connect(
             port,
             "earshot-in",
-            move |_, bytes, _| on_message(&sink, &lane, bytes, &learned, index),
+            move |_, bytes, _| {
+                on_message(&sink, &lane, bytes, &learned, index, &route_in, &monitor_in)
+            },
             (),
         ) {
             Ok(c) => {
@@ -672,8 +682,14 @@ pub fn connect_all(
             "on"
         }
     );
-    let lights = (!outputs.is_empty())
-        .then(|| super::lights::Lights::start(outputs, learned.clone(), monitor.clone()));
+    let lights = (!outputs.is_empty()).then(|| {
+        super::lights::Lights::start(
+            outputs,
+            learned.clone(),
+            monitor.clone(),
+            route.layers.clone(),
+        )
+    });
     Ok((
         Midi {
             _connections: connections,
@@ -718,9 +734,202 @@ fn connect_outputs(inputs: &[String], starts: &[super::lights::Start]) -> super:
     out
 }
 
+/// A port and a message on it (its status and first data byte): one physical button,
+/// knob or fader.
+type Physical = (usize, (u8, u8));
+
+/// How far apart, as a share of its travel, a knob and a value still count as the same.
+const TAKEOVER_NEAR: f64 = 0.025;
+/// A value that differs from what the knob last sent, this long after: something else
+/// moved it (the mouse, a load), not a message still on its way.
+const TAKEOVER_SETTLE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// One knob or fader's soft takeover.
+struct Take {
+    /// What it's mapped to (deck 1 or 2), and the deck it last acted on.
+    control: Control,
+    deck: DeckId,
+    /// Where the physical control is.
+    at: f64,
+    /// It has its deck's value: moving it acts.
+    caught: bool,
+    /// What it last sent, and when.
+    sent: f64,
+    sent_at: std::time::Instant,
+}
+
+/// Where a controller's messages go, shared by every port's thread and the app.
+///
+/// - **Layers.** A deck 1 or 2 control goes to the deck its hand plays now.
+/// - **Held buttons.** A button's release goes to the deck its press went to, even if
+///   the hand has switched decks in between, so nothing is left held (a cue, a
+///   nudge, a scratch).
+/// - **Soft takeover.** A channel's volume, gain, EQ and filter do nothing on a deck
+///   they weren't last moved on, or whose value something else has changed, until
+///   the knob passes that value. (The tempo fader has the engine's own pickup.)
+#[derive(Clone, Default)]
+pub struct Route {
+    pub layers: Layers,
+    state: Arc<Mutex<RouteState>>,
+}
+
+#[derive(Default)]
+struct RouteState {
+    held: HashMap<Physical, DeckId>,
+    takes: HashMap<Physical, Take>,
+}
+
+/// What a knob's message does.
+#[derive(Debug, PartialEq)]
+enum Taken {
+    /// It acts. `was_waiting`: it had been waiting until now.
+    Acts { was_waiting: bool },
+    /// It waits for the knob to pass the control's value.
+    Waits,
+}
+
+/// Whether a control takes over softly: a channel's continuous controls.
+fn takes_over(control: Control) -> bool {
+    matches!(
+        control,
+        Control::Deck(
+            _,
+            DeckControl::Volume | DeckControl::Trim | DeckControl::Eq(_) | DeckControl::Filter
+        )
+    )
+}
+
+impl Route {
+    /// The control a message mapped to `mapped` runs now. `button`: for a button,
+    /// whether this is its press (true) or its release.
+    fn control(&self, from: Physical, mapped: Control, button: Option<bool>) -> Control {
+        let Control::Deck(d, c) = mapped else {
+            return mapped;
+        };
+        if d.index() >= 2 || c == DeckControl::LayerToggle {
+            return mapped;
+        }
+        let now = self.layers.deck_for(d);
+        let deck = match button {
+            Some(true) => {
+                self.state.lock().unwrap().held.insert(from, now);
+                now
+            }
+            Some(false) => self.state.lock().unwrap().held.remove(&from).unwrap_or(now),
+            None => now,
+        };
+        Control::Deck(deck, c)
+    }
+
+    /// A knob mapped to `mapped` and now sent to `control` (on the hand's deck) moved
+    /// to `value`, while the control is at `current` (`None` without an engine).
+    fn take(
+        &self,
+        from: Physical,
+        mapped: Control,
+        control: Control,
+        value: f64,
+        current: impl FnOnce() -> Option<f64>,
+        now: std::time::Instant,
+    ) -> Taken {
+        let (Control::Deck(deck, _), Some(range)) = (control, control.range()) else {
+            return Taken::Acts { was_waiting: false };
+        };
+        let pos = |v: f64| range.to_pos(v);
+        let mut state = self.state.lock().unwrap();
+        let Some(t) = state.takes.get_mut(&from) else {
+            // Its first message (a controller says where its knobs are as it
+            // connects): it acts, as the knob is all there is to go by.
+            state.takes.insert(
+                from,
+                Take {
+                    control: mapped,
+                    deck,
+                    at: value,
+                    caught: true,
+                    sent: value,
+                    sent_at: now,
+                },
+            );
+            return Taken::Acts { was_waiting: false };
+        };
+        t.control = mapped;
+        let mut current = Some(current);
+        let mut read = || current.take().and_then(|f| f());
+        let mut cur = None;
+        if t.deck != deck {
+            // The hand is on its other deck now.
+            t.deck = deck;
+            t.caught = false;
+        } else if t.caught && now.duration_since(t.sent_at) > TAKEOVER_SETTLE {
+            cur = read();
+            if cur.is_some_and(|c| (pos(c) - pos(t.sent)).abs() > TAKEOVER_NEAR) {
+                t.caught = false;
+            }
+        }
+        // (Waiting as far as the screen knows: a mark may be showing.)
+        let was_waiting = !t.caught;
+        if !t.caught {
+            cur = cur.or_else(&mut read);
+            t.caught = match cur {
+                // No engine to compare with: the knob has it.
+                None => true,
+                Some(c) => {
+                    let (c, a, b) = (pos(c), pos(t.at), pos(value));
+                    (c - b).abs() <= TAKEOVER_NEAR || (a.min(b)..=a.max(b)).contains(&c)
+                }
+            };
+        }
+        t.at = value;
+        if t.caught {
+            t.sent = value;
+            t.sent_at = now;
+            Taken::Acts { was_waiting }
+        } else {
+            Taken::Waits
+        }
+    }
+
+    /// The knobs and faders that aren't where their control is on the deck their hand
+    /// plays now (`value`: a control's value now): each control and where its knob
+    /// is. For the marks on screen after a hand switches decks, before a knob moves.
+    pub fn waiting(&self, value: impl Fn(Control) -> Option<f64>) -> Vec<(Control, f64)> {
+        let state = self.state.lock().unwrap();
+        state
+            .takes
+            .values()
+            .filter_map(|t| {
+                let control = self.layers.layered(t.control);
+                let range = control.range()?;
+                let cur = value(control)?;
+                ((range.to_pos(cur) - range.to_pos(t.at)).abs() > TAKEOVER_NEAR)
+                    .then_some((control, t.at))
+            })
+            .collect()
+    }
+}
+
+/// A message, as the mapping reads it.
+struct Translated {
+    /// What it's mapped to, and what it runs now (on the hand's deck).
+    mapped: Control,
+    control: Control,
+    /// The command it makes, if that value does anything.
+    command: Option<Command>,
+    /// A knob or fader's value, for soft takeover.
+    knob: Option<f64>,
+}
+
 /// The control a message runs, and the command it makes (if that value does
-/// anything).
+/// anything), with every control on the deck it's mapped to.
+#[cfg(test)]
 fn translate(bytes: &[u8], learned: &Learned) -> Option<(Control, Option<Command>)> {
+    let t = translate_on(bytes, learned, 0, &Route::default())?;
+    Some((t.control, t.command))
+}
+
+/// A message from `port`, read by the mapping and sent where `route` says.
+fn translate_on(bytes: &[u8], learned: &Learned, port: usize, route: &Route) -> Option<Translated> {
     if bytes.len() < 3 {
         return None;
     }
@@ -732,6 +941,14 @@ fn translate(bytes: &[u8], learned: &Learned) -> Option<(Control, Option<Command
         _ => t,
     };
     let l = learned.get(key)?;
+    let nothing = |l: &Learn| {
+        Some(Translated {
+            mapped: l.control,
+            control: route.layers.layered(l.control),
+            command: None,
+            knob: None,
+        })
+    };
     let value = match l.input {
         // A 14-bit control's coarse half: kept for the fine half, which sends the
         // value. Without a fine half, it's a 7-bit knob.
@@ -740,14 +957,14 @@ fn translate(bytes: &[u8], learned: &Learned) -> Option<(Control, Option<Command
                 travel(&l, data2 as f64 / 127.0)
             } else {
                 learned.0.lock().unwrap().coarse.insert(key, data2);
-                return Some((l.control, None));
+                return nothing(&l);
             }
         }
         Input::Lsb => {
             let coarse = learned.partner(key, &l)?;
             let high = learned.0.lock().unwrap().coarse.get(&coarse).copied();
             let Some(high) = high else {
-                return Some((l.control, None));
+                return nothing(&l);
             };
             travel(&l, ((high as u32) << 7 | data2 as u32) as f64 / 16383.0)
         }
@@ -758,19 +975,37 @@ fn translate(bytes: &[u8], learned: &Learned) -> Option<(Control, Option<Command
         Input::Relative => data2 as f64 - 128.0,
         Input::Jog(ticks) => (data2 as f64 - 64.0) * SECS_PER_TURN / ticks as f64,
     };
+    let button = (l.input == Input::Note).then_some(data2 > 0);
+    let control = route.control((port, key), l.control, button);
     // Display only: show it, don't apply it.
     if l.display_only && can_be_display_only(l.control) {
-        let cmd = Command::App(crate::core::command::AppCmd::ControllerShows {
-            control: l.control,
-            value,
+        let cmd = Command::App(AppCmd::ControllerShows { control, value });
+        return Some(Translated {
+            mapped: l.control,
+            control,
+            command: Some(cmd),
+            knob: None,
         });
-        return Some((l.control, Some(cmd)));
     }
-    Some((l.control, l.control.command(value)))
+    let knob = matches!(l.input, Input::Msb | Input::Lsb | Input::Cc) && takes_over(control);
+    Some(Translated {
+        mapped: l.control,
+        control,
+        command: control.command(value),
+        knob: knob.then_some(value),
+    })
 }
 
-fn on_message(sink: &Sink, lane: &Lane, bytes: &[u8], learned: &Learned, port: usize) {
-    let found = translate(bytes, learned);
+fn on_message(
+    sink: &Sink,
+    lane: &Lane,
+    bytes: &[u8],
+    learned: &Learned,
+    port: usize,
+    route: &Route,
+    monitor: &super::lights::MonitorSlot,
+) {
+    let found = translate_on(bytes, learned, port, route);
     // Mapped to nothing: an error, so a button earshot ignores can be tracked down.
     // Once a message (a knob sends a stream); system messages (clock, SysEx) aside.
     if found.is_none()
@@ -785,15 +1020,41 @@ fn on_message(sink: &Sink, lane: &Lane, bytes: &[u8], learned: &Learned, port: u
             hex.join(" ")
         );
     }
+    let now = std::time::Instant::now();
     sink(Event::Midi(MidiMsg {
         port,
         bytes: bytes.to_vec(),
-        at: std::time::Instant::now(),
-        did: found.as_ref().map(|(c, _)| *c),
+        at: now,
+        did: found.as_ref().map(|t| t.control),
     }));
-    let Some((_, Some(cmd))) = found else {
+    let Some(Translated {
+        mapped,
+        control,
+        command: Some(cmd),
+        knob,
+    }) = found
+    else {
         return;
     };
+    // A knob waits for its deck's value before it acts on it (soft takeover); the UI
+    // marks where the knob is meanwhile.
+    if let Some(value) = knob
+        && let Some(k) = key(bytes)
+    {
+        let current = || {
+            let snap = monitor.lock().unwrap().monitor.as_ref()?.snapshot();
+            control.get(&snap)
+        };
+        let waits = |at| Event::Command(Command::App(AppCmd::ControllerWaits { control, at }));
+        match route.take((port, k), mapped, control, value, current, now) {
+            Taken::Waits => {
+                sink(waits(Some(value)));
+                return;
+            }
+            Taken::Acts { was_waiting: true } => sink(waits(None)),
+            Taken::Acts { was_waiting: false } => {}
+        }
+    }
     match command::direct(cmd) {
         Ok(c) => {
             if let Err(e) = lane.send(c) {
@@ -1348,6 +1609,168 @@ mod tests {
         assert_eq!(d, deck(1));
         assert!((by - 0.08).abs() < 1e-9, "{by}");
         assert!(command::direct(cmd([0xB0, 0x29, 62]).unwrap()).is_ok());
+    }
+
+    /// A route with four decks showing and the left hand on deck 3 or not.
+    fn route(left_on_3: bool) -> Route {
+        let r = Route::default();
+        r.layers.set([left_on_3, false], true);
+        r
+    }
+
+    /// The message a DDJ-400 button mapped to `control` sends.
+    fn note_of(control: Control) -> (u8, u8) {
+        ddj()
+            .all()
+            .into_iter()
+            .find(|(_, l)| l.control == control && l.input == Input::Note)
+            .map(|(k, _)| k)
+            .expect("mapped")
+    }
+
+    #[test]
+    fn a_hands_messages_go_to_the_deck_it_plays() {
+        let learned = ddj();
+        let play = [0x90, 0x0B, 0x7F];
+        let on = |r: &Route, bytes: &[u8]| translate_on(bytes, &learned, 0, r).unwrap();
+        let r = route(false);
+        assert_eq!(
+            on(&r, &play).control,
+            Control::Deck(deck(0), DeckControl::Play)
+        );
+        // The left hand on deck 3: its play button plays deck 3, the right's deck 2.
+        r.layers.set([true, false], true);
+        let t = on(&r, &play);
+        assert_eq!(t.control, Control::Deck(deck(2), DeckControl::Play));
+        assert!(matches!(t.command, Some(Command::Deck(d, _)) if d == deck(2)));
+        assert_eq!(
+            on(&r, &[0x91, 0x0B, 0x7F]).control,
+            Control::Deck(deck(1), DeckControl::Play)
+        );
+        // A fader too.
+        on(&r, &[0xB0, 0x13, 64]);
+        assert!(matches!(
+            on(&r, &[0xB0, 0x33, 0]).command,
+            Some(Command::Param(ParamId::Channel(d, ChannelParam::Volume), _)) if d == deck(2)
+        ));
+        // With two decks showing the layers don't count.
+        r.layers.set([true, true], false);
+        assert_eq!(
+            on(&r, &play).control,
+            Control::Deck(deck(0), DeckControl::Play)
+        );
+        // A four-deck controller's own decks 3 and 4, and the switch, stay put.
+        r.layers.set([true, true], true);
+        for c in [
+            Control::Deck(deck(2), DeckControl::Play),
+            Control::Deck(deck(3), DeckControl::Play),
+            Control::Deck(deck(0), DeckControl::LayerToggle),
+        ] {
+            assert_eq!(r.control((0, (0x90, 0x01)), c, Some(true)), c);
+        }
+    }
+
+    #[test]
+    fn a_release_goes_to_the_deck_that_got_the_press() {
+        let learned = ddj();
+        let (status, note) = note_of(Control::Deck(deck(0), DeckControl::Cue));
+        let r = route(false);
+        let press = translate_on(&[status, note, 0x7F], &learned, 0, &r).unwrap();
+        assert_eq!(press.control, Control::Deck(deck(0), DeckControl::Cue));
+        // The hand switches to deck 3 with cue still held: letting go is deck 1's.
+        r.layers.set([true, false], true);
+        let release = translate_on(&[status, note, 0], &learned, 0, &r).unwrap();
+        assert_eq!(release.control, Control::Deck(deck(0), DeckControl::Cue));
+        assert!(matches!(release.command, Some(Command::Deck(d, _)) if d == deck(0)));
+        // The next press is deck 3's, and so is its release.
+        let press = translate_on(&[status, note, 0x7F], &learned, 0, &r).unwrap();
+        assert_eq!(press.control, Control::Deck(deck(2), DeckControl::Cue));
+        let release = translate_on(&[status, note, 0], &learned, 0, &r).unwrap();
+        assert_eq!(release.control, Control::Deck(deck(2), DeckControl::Cue));
+        // The same note on another port is another button.
+        let other = translate_on(&[status, note, 0], &learned, 1, &r).unwrap();
+        assert_eq!(other.control, Control::Deck(deck(2), DeckControl::Cue));
+    }
+
+    #[test]
+    fn a_fader_waits_for_the_new_decks_value() {
+        let r = route(false);
+        let from = (0, (0xB0, 0x33));
+        let mapped = Control::Deck(deck(0), DeckControl::Volume);
+        let t0 = std::time::Instant::now();
+        let ms = |n: u64| t0 + std::time::Duration::from_millis(n);
+        let acts = |was_waiting| Taken::Acts { was_waiting };
+        // Its first message acts (the controller saying where its faders are).
+        let on1 = Control::Deck(deck(0), DeckControl::Volume);
+        assert_eq!(
+            r.take(from, mapped, on1, 0.8, || Some(0.0), ms(0)),
+            acts(false)
+        );
+        assert_eq!(
+            r.take(from, mapped, on1, 0.7, || Some(0.8), ms(10)),
+            acts(false)
+        );
+        // The hand switches to deck 3, whose volume is 0.2: the fader (at 0.7) does
+        // nothing until it reaches it.
+        r.layers.set([true, false], true);
+        let on3 = Control::Deck(deck(2), DeckControl::Volume);
+        assert_eq!(r.waiting(|_| Some(0.2)), vec![(on3, 0.7)]);
+        assert_eq!(
+            r.take(from, mapped, on3, 0.6, || Some(0.2), ms(20)),
+            Taken::Waits
+        );
+        assert_eq!(
+            r.take(from, mapped, on3, 0.4, || Some(0.2), ms(30)),
+            Taken::Waits
+        );
+        // Past it (a fast move can skip over): it has it, and acts from then on.
+        assert_eq!(
+            r.take(from, mapped, on3, 0.1, || Some(0.2), ms(40)),
+            acts(true)
+        );
+        assert_eq!(
+            r.take(from, mapped, on3, 0.5, || Some(0.1), ms(50)),
+            acts(false)
+        );
+        assert!(r.waiting(|_| Some(0.5)).is_empty());
+        // Back on deck 1 (still at 0.7): close enough counts as there.
+        r.layers.set([false, false], true);
+        assert_eq!(
+            r.take(from, mapped, on1, 0.69, || Some(0.7), ms(60)),
+            acts(true)
+        );
+    }
+
+    #[test]
+    fn a_fader_waits_when_something_else_moved_the_value() {
+        let r = route(false);
+        let from = (0, (0xB0, 0x33));
+        let c = Control::Deck(deck(0), DeckControl::Volume);
+        let t0 = std::time::Instant::now();
+        let ms = |n: u64| t0 + std::time::Duration::from_millis(n);
+        assert_eq!(
+            r.take(from, c, c, 0.5, || Some(0.0), ms(0)),
+            Taken::Acts { was_waiting: false }
+        );
+        // Moving: the engine's value is a message behind, which isn't "something else".
+        assert_eq!(
+            r.take(from, c, c, 0.6, || Some(0.3), ms(20)),
+            Taken::Acts { was_waiting: false }
+        );
+        // Later, the on-screen fader has been dragged to 0.9: the controller's waits.
+        assert_eq!(
+            r.take(from, c, c, 0.62, || Some(0.9), ms(2000)),
+            Taken::Waits
+        );
+        assert_eq!(
+            r.take(from, c, c, 0.95, || Some(0.9), ms(2020)),
+            Taken::Acts { was_waiting: true }
+        );
+        // Without an engine there's nothing to wait for.
+        assert_eq!(
+            r.take(from, c, c, 0.1, || None, ms(9000)),
+            Taken::Acts { was_waiting: false }
+        );
     }
 
     #[test]

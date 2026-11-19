@@ -166,6 +166,13 @@ pub enum AppCmd {
         control: super::bus::Control,
         value: f64,
     },
+    /// A knob or fader on the controller is at `at`, but `control` hasn't taken it up
+    /// yet (soft takeover: it will once the knob passes the control's value); `None`
+    /// once it has. For the mark on screen.
+    ControllerWaits {
+        control: super::bus::Control,
+        at: Option<f64>,
+    },
     /// A tap on effect unit `unit`'s TAP button, at `at` (when the message came in):
     /// from the second tap on, the unit runs on the tapped tempo.
     FxTap { unit: usize, at: std::time::Instant },

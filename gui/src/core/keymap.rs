@@ -349,6 +349,34 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// G and H switch the hands between their decks; the effect unit's switch is on B.
+    #[test]
+    fn the_layer_keys() {
+        use crate::core::bus::FxControl;
+        let km = Keymap::built_in();
+        let on = |key: &str, shift: bool| km.find(Mode::Perform, key, shift).map(|b| b.control);
+        let deck = |i| earshot_engine::DeckId::new(i).unwrap();
+        assert_eq!(
+            on("G", false),
+            Some(Control::Deck(deck(0), DeckControl::LayerToggle))
+        );
+        assert_eq!(
+            on("H", false),
+            Some(Control::Deck(deck(1), DeckControl::LayerToggle))
+        );
+        assert_eq!(on("B", false), Some(Control::Fx(0, FxControl::On)));
+        assert!(matches!(on("B", true), Some(Control::Fx(0, c)) if c != FxControl::On));
+        // The key help says so.
+        let help = km.help(Mode::Perform);
+        let rows: Vec<&(String, String)> = help.iter().flat_map(|s| &s.rows).collect();
+        assert!(
+            rows.iter()
+                .any(|(k, what)| k == "G" && what.contains("between its two decks")),
+            "{rows:?}"
+        );
+        assert!(rows.iter().any(|(k, _)| k == "H"), "{rows:?}");
+    }
+
     #[test]
     fn keys_are_spelt_as_the_ui_names_them() {
         let ui_name = |n: &str| egui::Key::from_name(n).map(|k| k.name().to_string());

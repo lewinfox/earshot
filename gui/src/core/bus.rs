@@ -554,6 +554,9 @@ pub enum DeckControl {
     /// SHIFT + RELOOP/EXIT: make the memory loop just called (or the nearest) the
     /// track's active loop, which turns itself on when played onto; or stop it being.
     LoopActiveToggle,
+    /// With four decks showing: switch this deck's hand (the left for decks 1 and 3,
+    /// the right for 2 and 4) to its other deck (`core::layers`).
+    LayerToggle,
     /// Halve or double the loop, or the next loop's size when not looping.
     LoopHalve,
     LoopDouble,
@@ -669,6 +672,11 @@ impl DeckControl {
                 "make the nearest memory loop the active loop, or not",
                 Button,
             ),
+            LayerToggle => spec(
+                "layer_toggle",
+                "switch this hand between its two decks (1 and 3, or 2 and 4)",
+                Button,
+            ),
             LoopHalve => spec("loop_halve", "halve the loop", Button),
             LoopDouble => spec("loop_double", "double the loop", Button),
             NudgeDown => spec("pitch_bend_down", "slow down while held", Button),
@@ -759,7 +767,7 @@ impl DeckControl {
 
     /// Every deck control, with sample parameters for the parametrised ones (for
     /// looking names up and for tests).
-    pub const ALL: [DeckControl; 63] = {
+    pub const ALL: [DeckControl; 64] = {
         use DeckControl::*;
         [
             Play,
@@ -785,6 +793,7 @@ impl DeckControl {
             LoopOut,
             Reloop,
             LoopActiveToggle,
+            LayerToggle,
             LoopHalve,
             LoopDouble,
             NudgeDown,
@@ -1031,6 +1040,7 @@ impl DeckControl {
             LoopOut if pressed => engine(EngineCmd::LoopOut),
             Reloop if pressed => engine(EngineCmd::Reloop(Set::Toggle)),
             LoopActiveToggle => on_press(DeckCmd::ToggleActiveLoop),
+            LayerToggle => pressed.then_some(Command::View(ViewCmd::SwitchLayer(deck.index() % 2))),
             LoopHalve => on_press(DeckCmd::ScaleLoop(0.5)),
             LoopDouble => on_press(DeckCmd::ScaleLoop(2.0)),
             NudgeDown => engine(EngineCmd::Nudge(if pressed { -NUDGE } else { 0.0 })),
@@ -1129,6 +1139,7 @@ impl DeckControl {
             | CueJumpNext
             | CueDelete
             | LoopActiveToggle
+            | LayerToggle
             | GridNudge(_)
             | LoadStep(_)
             | SetPadMode(_)
