@@ -270,13 +270,23 @@ fn rows(size: Vec2, input: ShellInput) -> Shell {
         // What the row may take: its share of the height, or all the body and the
         // waveforms can spare if that's less.
         let spare = size.y - tabs_h - waves_min - BODY_MIN_H;
+        let width = size.x - row_margins().x;
         // Its share, or what decks just big enough to read need if that's more.
-        let per_side = input.decks.div_ceil(2).max(1) as f32;
-        let readable = per_side * deck::height(DECK_SCALE_FLOOR)
-            + STACK_GAP * (per_side - 1.0)
-            + row_margins().y;
-        let most = (size.y * DECKS_SHARE).max(readable).min(spare) - row_margins().y;
-        let row = deck_row(size.x - row_margins().x, most, input.decks, input.mixer);
+        let most = |decks: usize| {
+            let per_side = decks.div_ceil(2).max(1) as f32;
+            let readable = per_side * deck::height(DECK_SCALE_FLOOR)
+                + STACK_GAP * (per_side - 1.0)
+                + row_margins().y;
+            (size.y * DECKS_SHARE).max(readable).min(spare) - row_margins().y
+        };
+        // One or two decks are drawn no bigger than four would be here: that's size
+        // enough for a deck, and the room saved goes to the library.
+        let cap = if input.decks < 4 {
+            deck_row(width, most(4), 4, input.mixer, deck::SCALE_MAX).scale
+        } else {
+            deck::SCALE_MAX
+        };
+        let row = deck_row(width, most(input.decks), input.decks, input.mixer, cap);
         (row, row.height + row_margins().y)
     } else {
         (DeckRow::default(), 0.0)
@@ -313,8 +323,9 @@ fn rows(size: Vec2, input: ShellInput) -> Shell {
 }
 
 /// The decks' row in `width`, no taller than `most` if the smallest decks allow: the
-/// biggest scale at which the decks fit both, and the mixer scaled to the row.
-fn deck_row(width: f32, most: f32, decks: usize, mixer_wanted: bool) -> DeckRow {
+/// biggest scale (up to `cap`) at which the decks fit both, and the mixer scaled to
+/// the row.
+fn deck_row(width: f32, most: f32, decks: usize, mixer_wanted: bool, cap: f32) -> DeckRow {
     let per_side = decks.div_ceil(2).max(1) as f32;
     let gaps = STACK_GAP * (per_side - 1.0);
     let gap_x = THEME.spacing.item.x;
@@ -336,6 +347,7 @@ fn deck_row(width: f32, most: f32, decks: usize, mixer_wanted: bool) -> DeckRow 
             let k_tall = deck::scale_for_height((most - gaps) / per_side);
             let k = k_wide
                 .min(k_tall)
+                .min(cap)
                 .clamp(deck::scale_min(with_mixer), deck::SCALE_MAX);
             let mut height = per_side * deck::height(k) + gaps;
             if with_mixer {
@@ -657,22 +669,37 @@ mod tests {
         }
     }
 
+    /// Two decks are the size four would be in the same window, so the decks' row is
+    /// shorter and the library gets the rest.
     #[test]
-    fn a_big_window_shows_the_decks_and_mixer_at_full_size() {
-        let s = shell(
-            vec2(1920.0, 1020.0),
-            ShellInput {
-                decks: 2,
-                mixer: true,
-                waves: true,
-                decks_row: true,
-                tab_bar: false,
-                waves_share: 0.16,
-            },
-        );
-        assert!((s.decks.scale - deck::SCALE_MAX).abs() < 0.001, "{s:?}");
-        assert_eq!(s.decks.mixer.map(|(m, _)| m), Some(1.0), "{s:?}");
-        assert!(!s.decks.mixer_dropped);
+    fn two_decks_are_the_size_of_four() {
+        for size in windows() {
+            for mixer in [false, true] {
+                let at = |decks| {
+                    shell(
+                        size,
+                        ShellInput {
+                            decks,
+                            mixer,
+                            waves: true,
+                            decks_row: true,
+                            tab_bar: false,
+                            waves_share: 0.16,
+                        },
+                    )
+                };
+                let (two, four) = (at(2), at(4));
+                let what = format!("{size:?}, mixer {mixer}: {two:?} / {four:?}");
+                assert!(two.decks.scale <= four.decks.scale + 0.001, "{what}");
+                assert!(two.decks_h < four.decks_h, "{what}");
+                assert!(two.body_h > four.body_h, "{what}");
+                // The same size exactly, unless two decks have a mixer that four had
+                // no room for (and so a tempo fader each, taking some of the width).
+                if two.decks.mixer.is_some() == four.decks.mixer.is_some() {
+                    assert!((two.decks.scale - four.decks.scale).abs() < 0.001, "{what}");
+                }
+            }
+        }
     }
 
     #[test]

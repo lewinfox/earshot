@@ -13,7 +13,7 @@ use crate::core::index::LibraryCmd;
 use crate::core::jobs::Running;
 use crate::core::notice::{Level, Notice};
 use crate::core::view::{Modal, Mode, SettingsTab};
-use crate::ui::widgets::{Intent, Pill, Seg, Toggle, muted, segmented};
+use crate::ui::widgets::{HwButton, Icon, Intent, Pill, Seg, muted, segmented};
 
 /// Tracks being analysed, and failures since they were last dismissed.
 #[derive(Default)]
@@ -84,11 +84,13 @@ impl Panel for TopBar<'_> {
         // changes). The bar is exactly as wide as the window: a group with no room
         // left is cut off at its place, never drawn past the edge.
         let full = ui.max_rect();
-        let line = ui.spacing().interact_size.y;
-        let row = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), line));
-        let id = egui::Id::new("top-bar-widths");
-        let [left_w, right_w, fx_w]: [f32; 3] =
+        let id = egui::Id::new("top-bar-sizes");
+        let [left_w, right_w, fx_w, tallest]: [f32; 4] =
             ui.ctx().data(|d| d.get_temp(id)).unwrap_or_default();
+        // A line as tall as the tallest thing in it (a pill is taller than text), so
+        // the bar is tall enough for all of it.
+        let line = ui.spacing().interact_size.y.max(tallest);
+        let row = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), line));
         let one_line = left_w + fx_w + right_w + 2.0 * GROUP_GAP <= row.width();
         let child = |ui: &mut Ui, rect: egui::Rect, layout: egui::Layout| {
             let mut c = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout));
@@ -124,14 +126,14 @@ impl Panel for TopBar<'_> {
         );
         let fx_now = centred_fx(&mut fx, centre, fx_w, cx);
         ui.allocate_rect(used, egui::Sense::hover());
-        let now = [left_now, right_now, fx_now];
-        if now
+        let tallest_now = [left.min_rect(), right.min_rect(), fx.min_rect()]
             .iter()
-            .zip([left_w, right_w, fx_w])
-            .any(|(a, b)| (a - b).abs() > 0.5)
-        {
+            .fold(0.0_f32, |h, r| h.max(r.height()));
+        let now = [left_now, right_now, fx_now, tallest_now];
+        let was = [left_w, right_w, fx_w, tallest];
+        if now.iter().zip(was).any(|(a, b)| (a - b).abs() > 0.5) {
             ui.ctx().data_mut(|d| d.insert_temp(id, now));
-            ui.ctx().request_discard("the top bar's groups' widths");
+            ui.ctx().request_discard("the top bar's groups' sizes");
         }
     }
 }
@@ -548,13 +550,23 @@ impl TopBar<'_> {
 /// nothing plays out of sight.
 /// The switch for Perform's mixer, to show or hide it mid-set.
 fn panes(ui: &mut Ui, cx: &mut Cx) {
-    let mut mixer = cx.prefs.mixer_shown();
-    if ui
-        .add(Toggle::new(&mut mixer, "Mixer"))
-        .on_hover_text("The mixer, between the decks")
-        .changed()
-    {
-        cx.send(ViewCmd::ShowMixer(mixer));
+    let mixer = cx.prefs.mixer_shown();
+    // A square button with a fader icon, lit while the mixer shows.
+    let side = ui.spacing().interact_size.y;
+    let r = ui
+        .add(
+            HwButton::new("Mixer", cx.theme.accent, egui::vec2(side, side))
+                .icon(Icon::Faders)
+                .font(side * 0.6)
+                .lit(mixer),
+        )
+        .on_hover_text(if mixer {
+            "Hide the mixer between the decks"
+        } else {
+            "Show the mixer between the decks"
+        });
+    if r.clicked() {
+        cx.send(ViewCmd::ShowMixer(!mixer));
     }
 }
 
