@@ -2431,14 +2431,29 @@ mod tests {
 
     /// Measurement, not a test: what a block costs. `cargo test --release -p
     /// earshot-engine cost_of_a_block -- --ignored --nocapture`
+    ///
+    /// As it is, blocks run back to back, which keeps the CPU busy: a power-saving
+    /// system then raises its clock, as it wouldn't for real playback (where the
+    /// audio thread works for a tenth of each block and sleeps the rest). With
+    /// `EARSHOT_PACED=1` each block waits for its time, as the sound card's callback
+    /// does: slower to run (about 8 s a row), and nearer what a set costs.
     #[test]
     #[ignore]
     fn cost_of_a_block() {
         use crate::pad_fx::{PadFx, PadFxKind};
         fn time(rig: &mut Rig, what: &str) {
             rig.run(2.0);
-            let mut t: Vec<f64> = (0..6000)
-                .map(|_| {
+            let paced = std::env::var_os("EARSHOT_PACED").is_some();
+            let block = std::time::Duration::from_secs_f64(256.0 / SR as f64);
+            let start = std::time::Instant::now();
+            let mut t: Vec<f64> = (0..if paced { 1500u32 } else { 6000 })
+                .map(|i| {
+                    if paced {
+                        let due = start + block * i;
+                        std::thread::sleep(
+                            due.saturating_duration_since(std::time::Instant::now()),
+                        );
+                    }
                     let t0 = std::time::Instant::now();
                     rig.r.process(&mut rig.out, 4);
                     t0.elapsed().as_secs_f64() * 1e6
