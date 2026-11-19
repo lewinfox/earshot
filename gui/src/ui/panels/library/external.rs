@@ -38,6 +38,15 @@ use crate::ui::panels::library::tracks::{Media, MenuAt};
 use crate::ui::theme::THEME;
 use crate::ui::widgets::{self, Button, Choice, Note, busy_line, go_cancel, muted};
 
+/// Looking for libraries in each program's usual place.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Scan {
+    #[default]
+    NotYet,
+    Scanning,
+    Done,
+}
+
 /// How far reading a library has got.
 pub enum Status {
     Reading(String),
@@ -79,8 +88,9 @@ pub struct ExternalUi {
     open_nodes: std::collections::HashSet<(SourceId, NodePath)>,
     /// Every source, as the Store has them (the libraries are drawn from these).
     sources: Vec<Source>,
-    /// Looked in the usual places yet (done the first time the pane shows).
-    searched: bool,
+    /// Looked in each program's usual place yet: only when the user asks
+    /// (Scan for library), never by itself.
+    scan: Scan,
     /// What the last search said, if it failed.
     find_error: Option<String>,
     /// Each library's read.
@@ -277,6 +287,13 @@ impl ExternalUi {
         self.status.get(&id)
     }
 
+    /// Look for libraries in each program's usual place (and only there).
+    pub fn scan(&mut self, out: &mut Vec<Command>) {
+        self.scan = Scan::Scanning;
+        self.find_error = None;
+        out.push(ExternalCmd::Find.into());
+    }
+
     /// Read a library, unless it has been.
     pub fn ensure_read(&mut self, source: &Source, out: &mut Vec<Command>) {
         self.read_once(source, out);
@@ -285,7 +302,10 @@ impl ExternalUi {
     /// Take in what came of an `ExternalCmd` (the app keeps the locations first).
     pub fn event(&mut self, e: ExternalEvent) {
         match e {
-            ExternalEvent::Found { at: None, result } => self.find_error = result.err(),
+            ExternalEvent::Found { at: None, result } => {
+                self.scan = Scan::Done;
+                self.find_error = result.err();
+            }
             ExternalEvent::Found {
                 at: Some(at),
                 result,

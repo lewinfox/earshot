@@ -135,7 +135,13 @@ fn a_folder_picked_for_missing_files_is_kept() {
             .iter()
             .any(|s| s.id == lib && s.config.folders == [folder.clone()])
     });
-    let s = h.state().sources.iter().find(|s| s.id == lib).unwrap().clone();
+    let s = h
+        .state()
+        .sources
+        .iter()
+        .find(|s| s.id == lib)
+        .unwrap()
+        .clone();
     assert!(s.search_roots(&[]).contains(&folder));
     assert!(
         h.state().panels.library.external.status(lib).is_some(),
