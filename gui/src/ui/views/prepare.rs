@@ -5,10 +5,10 @@
 //! To add a tool: a variant of `core::view::Tool`, an entry in [`TOOLS`] and an arm
 //! in [`tool`].
 
-use egui::{Margin, Ui, vec2};
+use egui::Ui;
 
 use super::perform::decks_rows;
-use super::{Panels, row_frame};
+use super::{Panels, body, pane_frame, tab_bar};
 use crate::core::command::ViewCmd;
 use crate::core::view::Tool;
 use crate::ui::panels::deck::CuePane;
@@ -56,22 +56,16 @@ const TOOLS: [Tab<Tool>; 6] = [
 
 pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
     let current = cx.prefs.prepare.tool;
-    // The Flow editor's full screen hides the decks.
-    let planning = current == Tool::Flow && panels.flow.full;
-    decks_rows(ctx, panels, cx, "prepare", !planning);
-    egui::TopBottomPanel::top("tools-prepare")
-        .exact_height(30.0)
-        .frame(row_frame(cx, Margin::symmetric(6, 4)))
-        .show(ctx, |ui| {
-            ui.allocate_ui(vec2(ui.available_width(), 22.0), |ui| {
-                if let Some(t) = tool_tabs(ui, &TOOLS, current) {
-                    cx.send(ViewCmd::Tool(t));
-                }
-            });
-        });
-    egui::CentralPanel::default()
-        .frame(egui::Frame::new().fill(cx.theme.bg))
-        .show(ctx, |ui| match current {
+    decks_rows(ctx, panels, cx, "prepare");
+    tab_bar(ctx, "tools-prepare", cx.theme, |ui| {
+        if let Some(t) = tool_tabs(ui, &TOOLS, current) {
+            cx.send(ViewCmd::Tool(t));
+        }
+    });
+    body(
+        ctx,
+        egui::Frame::new().fill(cx.theme.bg),
+        |ui| match current {
             Tool::Flow => FlowTab {
                 flow: &mut panels.flow,
                 library: &mut panels.library,
@@ -80,10 +74,11 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
             _ => {
                 panels.library.show_beside(ui, cx);
                 egui::CentralPanel::default()
-                    .frame(egui::Frame::new().fill(cx.theme.bg).inner_margin(6))
+                    .frame(pane_frame(cx.theme))
                     .show_inside(ui, |ui| tool(ui, current, panels, cx));
             }
-        });
+        },
+    );
 }
 
 /// A tool's body, right of the library.

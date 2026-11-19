@@ -22,6 +22,8 @@ pub enum Icon {
     Pause,
     /// A bar line, red over white, as Rekordbox marks "put the 1 here".
     Downbeat,
+    /// Three faders at different heights: the mixer.
+    Faders,
 }
 
 impl Icon {
@@ -31,6 +33,24 @@ impl Icon {
         let c = rect.center();
         match self {
             Icon::PlayPause => play_pause(p, rect, size, colour),
+            Icon::Faders => {
+                // Each a thin rail with a cap across it, part-way up.
+                for (dx, up) in [(-0.34, 0.2), (0.0, -0.22), (0.34, 0.05)] {
+                    let x = c.x + dx * size;
+                    p.line_segment(
+                        [pos2(x, c.y - size / 2.0), pos2(x, c.y + size / 2.0)],
+                        Stroke::new(1.0_f32, colour.gamma_multiply(0.6)),
+                    );
+                    p.rect_filled(
+                        Rect::from_center_size(
+                            pos2(x, c.y + up * size),
+                            vec2(size * 0.26, size * 0.2),
+                        ),
+                        1,
+                        colour,
+                    );
+                }
+            }
             Icon::Play => {
                 // Right of centre: a triangle's weight is towards its flat side.
                 let (h, w) = (size, size * 0.85);
@@ -77,7 +97,7 @@ impl Icon {
 /// Room left between a button's label and its edges.
 const LABEL_PAD: f32 = 4.0;
 /// The smallest a label is shrunk to, to fit a fixed width.
-const MIN_FONT: f32 = 7.0;
+const MIN_FONT: f32 = 5.0;
 
 /// A controller-style button. Its size is fixed by default: a label too wide for it is
 /// drawn smaller, so the button never changes size with its label (a loop's "4" or

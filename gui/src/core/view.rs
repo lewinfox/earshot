@@ -177,6 +177,8 @@ pub enum SettingsTab {
     Analysis,
     /// The keymap file.
     Keymap,
+    /// The UI size.
+    Display,
 }
 
 /// Which list has focus: the keyboard and the controller's browse knob move through

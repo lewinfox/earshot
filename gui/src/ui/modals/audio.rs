@@ -10,7 +10,7 @@ use egui::{RichText, Ui};
 
 use crate::core::command::{AudioCmd, Command};
 use crate::core::player::{AudioSettings, DEFAULT_BUFFER};
-use crate::ui::theme::{THEME, fs};
+use crate::ui::theme::THEME;
 use crate::ui::widgets::{Button, muted};
 
 const BUFFERS: [u32; 6] = [64, 128, 256, 512, 1024, 2048];
@@ -101,7 +101,7 @@ impl AudioUi {
         {
             ui.label(
                 RichText::new("EARSHOT_AUDIO_DEVICE / EARSHOT_BUFFER are set and win over these.")
-                    .size(fs(11.0))
+                    .size(11.0)
                     .color(THEME.warn),
             );
         }
@@ -311,7 +311,7 @@ fn routing_section(
     if r.phones == Out::Off {
         ui.label(
             RichText::new("Headphones are off, so previews and headphone cue are silent.")
-                .size(fs(11.0))
+                .size(11.0)
                 .color(THEME.warn),
         );
     }

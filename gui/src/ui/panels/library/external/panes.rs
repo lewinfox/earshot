@@ -19,7 +19,7 @@ use crate::core::sources::{Source, SourceKind};
 use crate::core::view::Source as Pane;
 use crate::ui::panels::CoreView;
 use crate::ui::panels::export::short_kind;
-use crate::ui::theme::{THEME, fs};
+use crate::ui::theme::THEME;
 use crate::ui::widgets::{Note, StackItem, heading, muted};
 
 /// What the middle shows for a source's pane.
@@ -200,7 +200,7 @@ impl ExternalUi {
             self.light(ui, v, d);
             let selected = self.stick.open.as_ref() == Some(&d.path);
             if ui
-                .selectable_label(selected, RichText::new(&d.label).strong().size(fs(14.0)))
+                .selectable_label(selected, RichText::new(&d.label).strong().size(14.0))
                 .on_hover_text("What's on it, and its files")
                 .clicked()
             {

@@ -68,8 +68,8 @@ impl EarshotApp {
 }
 
 impl EarshotApp {
-    /// The text size Ctrl +/- or Ctrl 0 asks for: the next of View > Text size's.
-    pub(super) fn text_size_keys(&self, ctx: &egui::Context) -> Option<f32> {
+    /// The UI size Ctrl +/- or Ctrl 0 asks for: a step up or down, or back to normal.
+    pub(super) fn ui_size_keys(&self, ctx: &egui::Context) -> Option<f32> {
         use egui::gui_zoom::kb_shortcuts as k;
         let (bigger, smaller, reset) = ctx.input_mut(|i| {
             (
@@ -79,16 +79,19 @@ impl EarshotApp {
             )
         });
         let now = self.prefs.ui_scale;
-        let steps = crate::ui::prefs::TEXT_SIZES.map(|(z, _)| z);
-        if reset {
-            Some(1.0)
+        let step = crate::ui::prefs::UI_SCALE_STEP;
+        let to = if reset {
+            1.0
         } else if bigger {
-            steps.iter().copied().find(|&z| z > now + 0.01)
+            now + step
         } else if smaller {
-            steps.iter().rev().copied().find(|&z| z < now - 0.01)
+            now - step
         } else {
-            None
-        }
+            return None;
+        };
+        // Whole steps, so going up and back down lands where it started.
+        let to = crate::ui::prefs::ui_scale((to / step).round() * step);
+        ((to - now).abs() > 0.001).then_some(to)
     }
 }
 

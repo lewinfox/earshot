@@ -36,14 +36,16 @@ pub fn dialog<T>(
     body: impl FnOnce(&mut Ui) -> Choice<T>,
 ) -> Choice<T> {
     let mut open = true;
-    let choice = egui::Window::new(title)
-        .collapsible(false)
-        .resizable(false)
-        .open(&mut open)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, body)
-        .and_then(|r| r.inner)
-        .unwrap_or(Choice::Stay);
+    let choice = crate::ui::modals::show_fitted(
+        ctx,
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]),
+        body,
+    )
+    .unwrap_or(Choice::Stay);
     if open { choice } else { Choice::Close }
 }
 

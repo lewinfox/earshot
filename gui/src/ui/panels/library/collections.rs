@@ -16,7 +16,7 @@ use crate::core::collections::{
 use crate::core::drives::Drive;
 use crate::core::export::TargetKind;
 use crate::ui::panels::library::external::send_menu;
-use crate::ui::theme::{THEME, fs};
+use crate::ui::theme::THEME;
 
 #[derive(Default)]
 pub struct CollectionsUi {
@@ -101,7 +101,7 @@ impl CollectionsUi {
                     .horizontal(|ui| {
                         ui.label(
                             RichText::new(section.label().to_uppercase())
-                                .size(fs(10.0))
+                                .size(10.0)
                                 .color(THEME.muted),
                         );
                         ui.menu_button(RichText::new("+").color(THEME.muted), |ui| {
@@ -120,7 +120,7 @@ impl CollectionsUi {
                             Section::Crates => "Crates you make are kept here.",
                             Section::Flows => "Flows you plan are kept here.",
                         })
-                        .size(fs(11.0))
+                        .size(11.0)
                         .color(THEME.muted),
                     );
                 }

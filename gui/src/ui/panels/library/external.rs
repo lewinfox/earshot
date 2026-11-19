@@ -35,7 +35,7 @@ use crate::ui::panels::library::drag::DragPayload;
 use crate::ui::panels::library::drag::Origin;
 use crate::ui::panels::library::table::{TableState, TableView, TrackTable};
 use crate::ui::panels::library::tracks::{Media, MenuAt};
-use crate::ui::theme::{THEME, fs};
+use crate::ui::theme::THEME;
 use crate::ui::widgets::{self, Button, Choice, Note, busy_line, go_cancel, muted};
 
 /// How far reading a library has got.
@@ -692,7 +692,7 @@ impl ExternalUi {
                 if n == 1 { "" } else { "s" }
             );
             ui.add(
-                egui::Label::new(RichText::new(text).size(fs(11.0)).color(THEME.warn))
+                egui::Label::new(RichText::new(text).size(11.0).color(THEME.warn))
                     .selectable(false)
                     .sense(egui::Sense::hover()),
             )

@@ -156,7 +156,8 @@ const TEMPO_W: f32 = 76.0;
 const BUTTONS_W: f32 = 2.0 * TEMPO_W + 4.0 + 6.0;
 
 /// The controls row's scale: every size in it is [`design`]'s times `k`, so the row
-/// grows and shrinks as one piece.
+/// grows and shrinks as one piece. The layout picks it (`ui::layout::shell`), from
+/// [`width`] and [`height`] below: the biggest at which the deck fits its place.
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct Dims {
     k: f32,
@@ -164,21 +165,6 @@ struct Dims {
 
 impl Dims {
     const FULL: Dims = Dims { k: 1.0 };
-
-    /// While Perform shows two decks: the row this tall at least.
-    fn full() -> Dims {
-        Dims::for_row(FULL_ROW)
-    }
-
-    /// While Perform shows four decks: the row this tall at least.
-    fn compact() -> Dims {
-        Dims::for_row(COMPACT_ROW)
-    }
-
-    /// The scale for a controls row `h` tall.
-    fn for_row(h: f32) -> Dims {
-        Dims { k: h / row_h() }
-    }
 
     /// A design size, scaled.
     fn px(self, v: f32) -> f32 {
@@ -196,7 +182,7 @@ impl Dims {
 
     /// The controls row: the two rows of buttons, or the jog ring if it's taller.
     fn controls_h(self) -> f32 {
-        self.px(row_h())
+        self.px(ROW_H)
     }
 
     fn jog(self) -> f32 {
@@ -211,19 +197,82 @@ impl Dims {
     }
 }
 
-/// The controls row's height at its design size.
-fn row_h() -> f32 {
-    (design::JOG_D * design::JOG_SCALE).max(2.0 * design::BTN_H + design::GAP_Y)
+// ---- the deck's size, for the layout ----
+//
+// A deck is a frame round a header, the overview and the controls row, with the tempo
+// fader beside them. Only the controls row scales; the rest is fixed, so the deck's
+// size at a scale is simple arithmetic, and the layout can ask for it before drawing.
+
+/// The controls row's height at its design size: the jog ring's, which two rows of
+/// buttons match.
+const ROW_H: f32 = design::JOG_D * design::JOG_SCALE;
+/// The controls row's width at its design size, without the tabs: CUE / play, the jog
+/// ring and the widest page (`the_controls_are_as_wide_as_the_layout_expects` checks
+/// it against what's drawn: change it when the row gains or loses a button).
+const CONTROLS_W: f32 = 574.0;
+/// The frame's margins and border, and the gap kept inside it, across.
+const FRAME_W: f32 = 18.0 + 6.0;
+/// The frame's margins and border, the header and the gaps between the three, down.
+const FIXED_H: f32 = 14.0 + HEADER_H + 2.0 * 5.0;
+/// The header: the title over the BPM, or two lines of buttons.
+const HEADER_H: f32 = 39.0;
+/// The least a deck's panel is tall, whatever the scale: its tempo fader's height.
+const MIN_H: f32 = 153.0;
+/// The overview's least height, and its most: it grows with the scale between them.
+const OVERVIEW_MIN_H: f32 = 24.0;
+const OVERVIEW_MAX_H: f32 = 56.0;
+
+/// The biggest the controls are drawn (a controls row 150 points tall), and the
+/// smallest: under it some labels stop shrinking, and the row is wider than [`width`]
+/// says (never reached by choice: the layout drops the mixer first).
+pub const SCALE_MAX: f32 = 150.0 / ROW_H;
+pub const SCALE_MIN: f32 = 0.45;
+
+/// The smallest scale for a deck with or without its tempo fader: without, its header
+/// holds the fader's buttons too, and needs the width.
+pub fn scale_min(tempo_fader: bool) -> f32 {
+    if tempo_fader { SCALE_MIN } else { 0.55 }
 }
 
-/// The controls row's least height while Perform shows two decks, and four.
-const FULL_ROW: f32 = 150.0;
-const COMPACT_ROW: f32 = 90.0;
+/// The overview's height at scale `k`.
+fn overview_h(k: f32) -> f32 {
+    (0.4 * ROW_H * k - 4.0).clamp(OVERVIEW_MIN_H, OVERVIEW_MAX_H)
+}
 
-/// A deck panel's least height, full size or while Perform shows four decks. Given
-/// more, its controls grow to fill it (the overview keeps its height).
-pub fn min_height(compact: bool) -> f32 {
-    if compact { 180.0 } else { 264.0 }
+/// A deck's width at scale `k`, with or without its tempo fader.
+pub fn width(k: f32, tempo_fader: bool) -> f32 {
+    let fader = if tempo_fader { TEMPO_W + 8.0 } else { 0.0 };
+    FRAME_W + fader + k * (CONTROLS_W + TABS_W + GAP_X)
+}
+
+/// The biggest scale at which a deck is no wider than `w`.
+pub fn scale_for_width(w: f32, tempo_fader: bool) -> f32 {
+    // A hair under, so rounding never pushes the row a pixel past its place.
+    (w - width(0.0, tempo_fader)) / (CONTROLS_W + TABS_W + GAP_X) * 0.995
+}
+
+/// A deck's height at scale `k`.
+pub fn height(k: f32) -> f32 {
+    (FIXED_H + overview_h(k) + ROW_H * k).max(MIN_H)
+}
+
+/// The biggest scale (up to [`SCALE_MAX`]) at which a deck is no taller than `h`; under
+/// [`SCALE_MIN`] if even that is too tall.
+pub fn scale_for_height(h: f32) -> f32 {
+    if height(SCALE_MIN) > h {
+        return SCALE_MIN * h / height(SCALE_MIN);
+    }
+    // `height` only grows with the scale: close in on the one that gives `h`.
+    let (mut lo, mut hi) = (SCALE_MIN, SCALE_MAX);
+    for _ in 0..24 {
+        let mid = (lo + hi) / 2.0;
+        if height(mid) <= h {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
 }
 
 /// The pages of a player's controls, picked with the tabs on their outer edge (as in
@@ -350,6 +399,10 @@ pub struct DeckUi {
     /// The largest scale that fits the deck's width (the width it was found for, and
     /// the scale), once its controls turned out too wide for it.
     fit: Option<(f32, f32)>,
+    /// Frames in a row the controls have been too wide for their place.
+    too_wide: u8,
+    /// The panel's size as last drawn (its frame included).
+    drawn: egui::Vec2,
     bpm_text: String,
     /// The engine's state for this frame.
     state: DeckSnap,
@@ -397,6 +450,8 @@ impl DeckUi {
             side: Side::Left,
             dims: Dims::FULL,
             fit: None,
+            too_wide: 0,
+            drawn: egui::Vec2::ZERO,
             bpm_text: String::new(),
             state: DeckSnap::default(),
             pending: None,
@@ -576,25 +631,20 @@ impl DeckUi {
             width,
             height,
             side,
-            compact,
+            scale,
             tempo_fader,
         } = layout;
         self.side = side;
-        // The controls as big as the panel's height allows, but no bigger than fits
-        // its width: the frame, the tempo fader, the controls, the tabs and the least
-        // gap between.
+        let before = (self.controls_w, self.page_spare, self.page_widths);
+        // The scale is the layout's, which fits the deck to its place from `width` and
+        // `height` above. Should the controls turn out wider than those say (a new
+        // button, `CONTROLS_W` not kept up), they're still fitted here, a frame late.
         let fader_w = if tempo_fader { TEMPO_W + 8.0 } else { 0.0 };
-        let least = if compact {
-            Dims::compact()
-        } else {
-            Dims::full()
-        };
-        let extra = (height - min_height(compact)).max(0.0);
-        let mut k = Dims::for_row(least.controls_h() + extra).k;
+        let mut k = scale.clamp(SCALE_MIN, SCALE_MAX);
         if self.fit.is_some_and(|(w, _)| w != width) {
             self.fit = None;
         }
-        let floor = Dims::compact().k;
+        let floor = SCALE_MIN;
         if let Some((_, cap)) = self.fit {
             k = k.min(cap).max(floor);
         }
@@ -626,7 +676,7 @@ impl DeckUi {
                         let used = ui.cursor().min.y - top;
                         let overview_h =
                             (inner_h - used - deck.dims.controls_h() - ui.spacing().item_spacing.y)
-                                .max(24.0);
+                                .max(OVERVIEW_MIN_H);
                         deck.overview(ui, info, out, overview_h);
                         deck.controls(ui, info, out);
                     });
@@ -637,15 +687,33 @@ impl DeckUi {
                 });
             },
         );
-        // Controls that turn out too wide: draw this frame again at the scale that
-        // fits (everything in the row scales with it), so nothing is pushed off the
-        // edge.
-        let fixed = 18.0 + fader_w + 6.0;
+        // The safety net: controls that stay wider than `CONTROLS_W` says (not for a
+        // frame or two while a page settles) are drawn at the scale that does fit from
+        // then on, so nothing is pushed off the edge.
+        let asked = scale.clamp(SCALE_MIN, SCALE_MAX);
         let tabs = TABS_W + GAP_X;
-        if self.controls_w + k * tabs > width - fixed && k > floor {
-            let cap = ((width - fixed) / (self.controls_w / k + tabs) * 0.995).max(floor);
-            self.fit = Some((width, cap));
+        let cap = (width - FRAME_W - fader_w) / (self.controls_w / k + tabs) * 0.995;
+        let too_wide = self.fit.is_none() && self.controls_w > 0.0 && cap < asked * 0.99;
+        self.too_wide = if too_wide { self.too_wide + 1 } else { 0 };
+        if self.too_wide >= 3 {
+            self.too_wide = 0;
+            self.fit = Some((width, cap.max(floor)));
             ui.ctx().request_discard("a deck's controls didn't fit");
+        }
+        // The row places its parts by their widths as last drawn. When those change (a
+        // new scale, two decks to four, the mixer shown or hidden), this frame isn't
+        // shown: it's drawn again until they hold, so the change lands all at once.
+        let moved = |a: f32, b: f32| (a - b).abs() > 0.05;
+        let pages = before
+            .2
+            .iter()
+            .zip(&self.page_widths)
+            .any(|(a, b)| match (a, b) {
+                (Some(a), Some(b)) => moved(*a, *b),
+                (a, b) => a.is_some() != b.is_some(),
+            });
+        if moved(before.0, self.controls_w) || moved(before.1, self.page_spare) || pages {
+            ui.ctx().request_discard("a deck's controls are settling");
         }
     }
 
@@ -667,12 +735,14 @@ impl DeckUi {
             .panel_frame()
             .show(ui, |ui| {
                 ui.set_width(width - 18.0);
-                let inner_h = height - 12.0;
+                // (The frame's margins and its border.)
+                let inner_h = height - 14.0;
                 ui.set_min_height(inner_h);
                 ui.spacing_mut().item_spacing = vec2(4.0, 5.0);
                 body(self, ui, info, out, inner_h);
             })
             .response;
+        self.drawn = resp.rect.size();
         if self.active {
             ui.painter().rect_stroke(
                 resp.rect,
@@ -707,7 +777,7 @@ impl DeckUi {
             // Title and details on the left, as wide as the times (and buttons) allow.
             let right = 90.0 + if buttons { BUTTONS_W } else { 0.0 };
             let left = (ui.available_width() - right).max(60.0);
-            ui.allocate_ui_with_layout(vec2(left, 36.0), Layout::top_down(Align::Min), |ui| {
+            ui.allocate_ui_with_layout(vec2(left, HEADER_H), Layout::top_down(Align::Min), |ui| {
                 ui.set_width(left);
                 let title = if info.artist.is_empty() || info.title.is_empty() {
                     info.title.clone()
@@ -1028,8 +1098,8 @@ pub struct DeckLayout {
     pub height: f32,
     /// Which side of the mixer it's on.
     pub side: Side,
-    /// Smaller buttons (while Perform shows four decks).
-    pub compact: bool,
+    /// The scale its controls are drawn at (`ui::layout::DeckRow::scale`).
+    pub scale: f32,
     /// The tempo fader on its outer edge (off while the mixer's controls are hidden:
     /// a controller has its own); without it SYNC, Q and KEY go in the header.
     pub tempo_fader: bool,
@@ -1044,7 +1114,6 @@ pub struct DeckPanel<'a> {
 
 impl Panel for DeckPanel<'_> {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        crate::ui::theme::normal_text(ui);
         let info = cx.engine.deck(self.deck.id);
         self.deck.show(ui, self.layout, info, cx.out);
     }
@@ -1189,7 +1258,7 @@ mod tests {
                         width: 680.0,
                         height: 200.0,
                         side: Side::Left,
-                        compact: false,
+                        scale: 0.9,
                         tempo_fader: true,
                     };
                     deck.show(ui, layout, &info, &mut out);
@@ -1202,6 +1271,54 @@ mod tests {
         h.state_mut().finish_load(7);
         h.run_steps(2);
         assert!(h.query_by_label("Old track").is_some());
+    }
+
+    /// The layout sizes a deck from `width` and `height` without drawing it: what's
+    /// drawn must agree, at every scale, on both sides, with and without the fader.
+    #[test]
+    fn the_controls_are_as_wide_as_the_layout_expects() {
+        for k in [SCALE_MIN, 0.55, 0.6, 0.75, 1.0, SCALE_MAX] {
+            for side in [Side::Left, Side::Right] {
+                for tempo_fader in [false, true] {
+                    if k < scale_min(tempo_fader) {
+                        continue;
+                    }
+                    let deck = DeckUi::new(DeckId::new(0).unwrap());
+                    let info = info("A track", TrackCues::default());
+                    let size = vec2(width(k, tempo_fader), height(k));
+                    let mut h = egui_kittest::Harness::builder()
+                        .with_size(size + vec2(20.0, 20.0))
+                        .build_ui_state(
+                            move |ui, deck: &mut DeckUi| {
+                                let layout = DeckLayout {
+                                    width: size.x,
+                                    height: size.y,
+                                    side,
+                                    scale: k,
+                                    tempo_fader,
+                                };
+                                deck.show(ui, layout, &info, &mut vec![]);
+                            },
+                            deck,
+                        );
+                    THEME.install(&h.ctx);
+                    h.run_steps(6);
+                    let d = h.state();
+                    let what = format!("scale {k}, {side:?}, fader {tempo_fader}");
+                    assert!(
+                        (d.drawn.x - size.x).abs() < 0.5 && (d.drawn.y - size.y).abs() < 0.6,
+                        "{what}: drawn {:?}, but the layout expects {size:?}",
+                        d.drawn
+                    );
+                    assert!(d.fit.is_none(), "{what}: refitted to {:?}", d.fit);
+                    let drawn = d.controls_w / k;
+                    assert!(
+                        (CONTROLS_W - 4.0..=CONTROLS_W + 0.5).contains(&drawn),
+                        "{what}: the controls are {drawn} wide at scale 1, not {CONTROLS_W}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

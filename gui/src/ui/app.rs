@@ -26,7 +26,7 @@ use super::panels::library::{Level, LibraryPane, LoadedFrom, Nav, drag};
 use super::panels::status::{AnalysisSummary, Meter, StatusLine, TopBar};
 use super::panels::{CoreView, Cx, EngineFrame, Panel, PreviewState};
 use super::prefs::{self, UiPrefs};
-use super::theme::{self, THEME};
+use super::theme::THEME;
 use super::views::{self, Panels};
 use crate::core::analysis::{self, Analyser, Mode as AnalysisMode};
 use crate::core::audio_watch;
@@ -58,6 +58,12 @@ const SETTLE: Duration = Duration::from_millis(500);
 
 pub struct EarshotApp {
     ctx: egui::Context,
+    /// The window kept to the screen, and the UI size applied.
+    window: super::window::WindowFit,
+    /// How the window was divided last frame (`layout::shell`).
+    shell: super::layout::Shell,
+    /// The part of the window that was divided: between the bars.
+    shell_rect: egui::Rect,
     // ---- services ----------------------------------------------------------------------
     player: Player,
     lib: Arc<Library>,
@@ -368,15 +374,21 @@ impl EarshotApp {
             .storage
             .and_then(|s| eframe::get_value(s, prefs::KEY))
             .unwrap_or_default();
-        prefs.ui_scale = prefs::text_size(prefs.ui_scale);
-        // View > Text size changes the text, not everything: egui's own zoom stays at 1
-        // (Ctrl +/- are ours, below).
-        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
-        cc.egui_ctx.set_zoom_factor(1.0);
-        theme::set_text_scale(&cc.egui_ctx, prefs.ui_scale);
+        prefs.migrate();
+        // The UI size is egui's zoom, set each frame from the preference and what the
+        // screen has room for (`window::fit`); Ctrl +/- are ours (our steps and range).
+        cc.egui_ctx.options_mut(|o| {
+            o.zoom_with_keyboard = false;
+            // A frame whose layout hasn't settled (a deck's controls after its scale
+            // changes) is drawn again rather than shown, up to this many times.
+            o.max_passes = std::num::NonZeroUsize::new(10).expect("not zero");
+        });
         let tables = prefs.tables.clone();
         let mut app = EarshotApp {
             ctx: cc.egui_ctx.clone(),
+            window: Default::default(),
+            shell: Default::default(),
+            shell_rect: egui::Rect::ZERO,
             player,
             lib,
             sink,
@@ -1248,10 +1260,7 @@ impl EarshotApp {
             ViewCmd::AutoHideMixer(on) => self.prefs.auto_hide_mixer = on,
             ViewCmd::StemMode(m) => self.prefs.stem_mode = m,
             ViewCmd::PretendController(on) => self.prefs.set_pretend_controller(on),
-            ViewCmd::UiScale(z) => {
-                self.prefs.ui_scale = z;
-                theme::set_text_scale(&self.ctx, z);
-            }
+            ViewCmd::UiScale(z) => self.prefs.ui_scale = prefs::ui_scale(z),
             ViewCmd::Resize(region, size) => {
                 let sizes = &mut self.prefs.layout_mut().sizes;
                 match region {
@@ -1385,6 +1394,7 @@ impl EarshotApp {
             engine: &self.frame,
             theme: &THEME,
             prefs: &self.prefs,
+            shell: self.shell,
             out: &mut out,
         };
         egui::TopBottomPanel::top("top")
@@ -1429,6 +1439,10 @@ impl EarshotApp {
                 }
                 .ui(ui, &mut cx)
             });
+        // The bars have taken their room: divide the rest, then draw it as divided.
+        let shell_rect = ctx.available_rect().intersect(ctx.content_rect());
+        cx.shell = views::shell(ctx, &self.panels, &cx);
+        let shell = cx.shell;
         views::show(ctx, &mut self.panels, &mut cx);
         drag::paint_ghost(ctx, cx.core.lib);
 
@@ -1442,6 +1456,7 @@ impl EarshotApp {
             cue_first_beat: self.settings.cue_first_beat,
             load_while_playing: self.settings.load_while_playing,
             auto_hide_mixer: self.prefs.auto_hide_mixer,
+            ui_scale: self.prefs.ui_scale,
             stem_mode: self.prefs.stem_mode,
             keymap: &self.keymap,
             mode: self.prefs.mode,
@@ -1465,7 +1480,17 @@ impl EarshotApp {
             },
         };
         self.modals.show(ctx, &env, cx.out);
+        self.shell = shell;
+        self.shell_rect = shell_rect;
         out
+    }
+}
+
+#[cfg(test)]
+impl EarshotApp {
+    /// Where the views end and the status bar begins, down the window, in points.
+    pub(super) fn shell_bottom(&self) -> f32 {
+        self.shell_rect.bottom()
     }
 }
 
@@ -1497,8 +1522,9 @@ impl eframe::App for EarshotApp {
         self.confirm_quit(ctx);
         self.keyboard(ctx);
         input::full_screen_key(ctx);
-        // Ctrl +/- and Ctrl 0 change the text size too (egui's shortcuts, our steps).
-        if let Some(z) = self.text_size_keys(ctx) {
+        self.window.fit(ctx, self.prefs.ui_scale);
+        // Ctrl +/- and Ctrl 0 change the UI size (egui's shortcuts, our steps).
+        if let Some(z) = self.ui_size_keys(ctx) {
             self.dispatch(ViewCmd::UiScale(z).into());
         }
         self.tick_hud(ctx);

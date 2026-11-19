@@ -32,7 +32,8 @@ pub struct UiPrefs {
     pub debug_view: Layout,
     /// Real seconds of waveform either side of the playhead, shared by every deck.
     pub wave_zoom: f64,
-    /// The text size, as a multiple of normal (see [`crate::ui::theme::fs`]).
+    /// The UI's size, as a multiple of normal: egui's zoom (see [`ui_scale`] and
+    /// `ui::window`), so text, controls and spacing all grow together.
     pub ui_scale: f32,
     /// How many decks show: 1, 2 or 4. The engine always runs four. Read
     /// [`UiPrefs::deck_total`]: one deck is for Prepare only.
@@ -73,16 +74,22 @@ pub struct UiPrefs {
     pub controller_mappings: std::collections::BTreeMap<String, String>,
 }
 
-/// View > Text size's sizes, which Ctrl +/- step through, with their names.
-pub const TEXT_SIZES: [(f32, &str); 3] = [(0.9, "Small"), (1.0, "Normal"), (1.2, "Large")];
+/// The UI size's range (Settings > Display, Ctrl +/-): everything is drawn this many
+/// times its normal size, text and controls alike.
+pub const UI_SCALES: std::ops::RangeInclusive<f32> = 0.8..=1.5;
+/// What Ctrl +/- changes it by.
+pub const UI_SCALE_STEP: f32 = 0.1;
+/// Menu > View > UI size's choices.
+pub const UI_SCALE_CHOICES: [f32; 6] = [0.8, 0.9, 1.0, 1.1, 1.25, 1.5];
 
-/// The nearest of [`TEXT_SIZES`] to `k` (a size saved before there were three).
-pub fn text_size(k: f32) -> f32 {
-    TEXT_SIZES
-        .iter()
-        .map(|&(z, _)| z)
-        .min_by(|a, b| (a - k).abs().total_cmp(&(b - k).abs()))
-        .unwrap_or(1.0)
+/// A UI size within [`UI_SCALES`] (a saved one may be from an older version, or not a
+/// number at all).
+pub fn ui_scale(k: f32) -> f32 {
+    if k.is_finite() {
+        k.clamp(*UI_SCALES.start(), *UI_SCALES.end())
+    } else {
+        1.0
+    }
 }
 
 impl Default for UiPrefs {
@@ -213,6 +220,19 @@ impl UiPrefs {
         }
     }
 
+    /// Bring what was saved by an older version up to date.
+    pub fn migrate(&mut self) {
+        self.ui_scale = ui_scale(self.ui_scale);
+        for l in [
+            &mut self.perform,
+            &mut self.prepare,
+            &mut self.controller_view,
+            &mut self.debug_view,
+        ] {
+            l.sizes = l.sizes.as_shares();
+        }
+    }
+
     pub fn layout(&self) -> &Layout {
         match self.mode {
             Mode::Perform => &self.perform,
@@ -261,27 +281,49 @@ impl Default for Layout {
     }
 }
 
-/// Panel sizes in points, as last dragged.
+/// Panel sizes as last dragged, each as a share (0 to 1) of the row it's in, so they
+/// keep their proportions in any window: `ui::layout` turns them into points, within
+/// what there's room for.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(default)]
 pub struct Sizes {
-    /// The waveforms' row.
+    /// The waveforms' row, of the window's height.
     pub waves: f32,
-    /// The library's left pane (the source).
+    /// The library's left pane (the source), of the library's width.
     pub source: f32,
-    /// The library's right pane.
+    /// The library's right pane, of the library's width.
     pub aside: f32,
-    /// The library beside the Flow canvas.
+    /// The library beside a Prepare tool, of the two's width.
     pub flow_library: f32,
 }
 
 impl Default for Sizes {
     fn default() -> Sizes {
         Sizes {
-            waves: 150.0,
-            source: 250.0,
-            aside: 380.0,
-            flow_library: 640.0,
+            waves: 0.16,
+            source: 0.17,
+            aside: 0.24,
+            flow_library: 0.42,
+        }
+    }
+}
+
+impl Sizes {
+    /// Sizes saved by an older version were in points: those go back to the defaults.
+    pub fn as_shares(self) -> Sizes {
+        let d = Sizes::default();
+        let share = |v: f32, d: f32| {
+            if v.is_finite() && (0.0..=1.0).contains(&v) {
+                v
+            } else {
+                d
+            }
+        };
+        Sizes {
+            waves: share(self.waves, d.waves),
+            source: share(self.source, d.source),
+            aside: share(self.aside, d.aside),
+            flow_library: share(self.flow_library, d.flow_library),
         }
     }
 }

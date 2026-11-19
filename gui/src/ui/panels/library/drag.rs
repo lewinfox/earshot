@@ -19,7 +19,7 @@ use crate::core::external::NodePath;
 use crate::core::index::LibraryIndex;
 use crate::core::sources::SourceId;
 use crate::core::track::TrackId;
-use crate::ui::theme::{THEME, fs};
+use crate::ui::theme::THEME;
 
 /// Where a track drag started, so a drop target can tell (a playlist reorders its
 /// own rows; it adds anyone else's).
@@ -124,7 +124,7 @@ pub fn ghost(ctx: &egui::Context, label: &str, count: usize) {
         return;
     };
     let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("drag-ghost")));
-    let font = FontId::proportional(fs(12.0));
+    let font = FontId::proportional(12.0);
     let text: String = if label.chars().count() > 40 {
         label.chars().take(39).chain(['…']).collect()
     } else {
