@@ -30,6 +30,8 @@ use crate::core::view::{Modal, Mode, SettingsTab};
 pub struct ModalEnv<'a> {
     pub audio_settings: &'a AudioSettings,
     pub audio: &'a Result<OutputInfo, String>,
+    /// The connected controller's sound card, if it has one.
+    pub controller: Option<&'a crate::core::controller_audio::ControllerAudio>,
     pub routing: Routing,
     pub hotcue_mode: earshot_engine::HotcueMode,
     pub xf_curve: earshot_engine::XfCurve,

@@ -4,21 +4,26 @@
 
 use std::sync::{Arc, Mutex};
 
-use earshot_engine::output::{DeviceSummary, can_split, list_devices};
+use earshot_engine::output::can_split;
 use earshot_engine::{Out, OutputInfo, Routing};
 use egui::{RichText, Ui};
 
 use crate::core::command::{AudioCmd, Command};
+use crate::core::controller_audio::ControllerAudio;
+use crate::core::outputs::{self, Kind, Output};
 use crate::core::player::{AudioSettings, DEFAULT_BUFFER};
 use crate::ui::theme::THEME;
 use crate::ui::widgets::{Button, muted};
+
+/// An output picker's width, when there's room.
+const PICK_W: f32 = 330.0;
 
 const BUFFERS: [u32; 6] = [64, 128, 256, 512, 1024, 2048];
 
 #[derive(Default)]
 pub struct AudioUi {
     /// Filled by a background thread (listing devices can take a moment).
-    devices: Arc<Mutex<Option<Vec<DeviceSummary>>>>,
+    devices: Arc<Mutex<Option<Vec<Output>>>>,
     listed: bool,
     /// Device and buffer as edited, applied with the Apply button.
     draft: Option<AudioSettings>,
@@ -31,12 +36,13 @@ impl AudioUi {
         self.draft = None;
     }
 
-    fn list(&mut self, ctx: &egui::Context) {
+    fn list(&mut self, ctx: &egui::Context, controller: Option<&ControllerAudio>) {
         self.listed = true;
         *self.devices.lock().unwrap() = None;
         let (out, ctx) = (self.devices.clone(), ctx.clone());
+        let card = controller.map(|c| c.card);
         std::thread::spawn(move || {
-            *out.lock().unwrap() = Some(list_devices());
+            *out.lock().unwrap() = Some(outputs::list(card));
             ctx.request_repaint();
         });
     }
@@ -46,12 +52,13 @@ impl AudioUi {
         ui: &mut Ui,
         saved: &AudioSettings,
         info: &Result<OutputInfo, String>,
+        controller: Option<&ControllerAudio>,
         routing: Routing,
     ) -> Option<Command> {
         if !self.listed {
-            self.list(ui.ctx());
+            self.list(ui.ctx(), controller);
         }
-        let mut action = self.device_section(ui, saved, info);
+        let mut action = self.device_section(ui, saved, info, controller);
         ui.separator();
         let (channels, phones) = match info {
             Ok(i) => (i.channels, i.phones.as_ref().map(|p| p.1)),
@@ -68,13 +75,15 @@ impl AudioUi {
         ui: &mut Ui,
         saved: &AudioSettings,
         info: &Result<OutputInfo, String>,
+        controller: Option<&ControllerAudio>,
     ) -> Option<Command> {
         let mut action = None;
+        let devices = self.devices.lock().unwrap().clone();
         match info {
             Ok(i) => ui.label(
                 RichText::new(format!(
                     "Now: {} · {} kHz · {} channels · {} frames",
-                    i.device,
+                    now_name(&i.device, controller, &devices),
                     i.sample_rate / 1000,
                     i.channels,
                     i.buffer_frames.map_or("default".into(), |b| b.to_string())
@@ -106,26 +115,36 @@ impl AudioUi {
             );
         }
         let draft = self.draft.get_or_insert_with(|| saved.clone());
-        let devices = self.devices.lock().unwrap().clone();
+        let on_controller = controller.is_some() && draft.use_controller;
         egui::Grid::new("audio-device")
             .num_columns(2)
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
-                ui.label("Device");
+                ui.label("Output");
                 ui.horizontal(|ui| {
-                    device_pick(
-                        ui,
-                        "audio-device-pick",
-                        &mut draft.device,
-                        &devices,
-                        "System default",
-                    );
+                    output_pick(ui, draft, &devices, controller);
                     if ui.add(Button::subtle("Refresh").small()).clicked() {
                         self.listed = false;
                     }
                 });
                 ui.end_row();
-                if can_split() {
+                if !on_controller
+                    && let Some(o) = picked(&draft.device, &devices)
+                    && o.kind == Kind::Bluetooth
+                {
+                    ui.label("");
+                    ui.label(
+                        RichText::new(
+                            "Bluetooth adds about a fifth of a second of delay: fine for \
+                             listening, too late for mixing.",
+                        )
+                        .size(11.0)
+                        .color(THEME.warn),
+                    );
+                    ui.end_row();
+                }
+                // The controller has its own headphone socket.
+                if can_split() && !on_controller {
                     ui.label("Headphones");
                     device_pick(
                         ui,
@@ -161,6 +180,7 @@ impl AudioUi {
                 ui.end_row();
             });
         let changed = draft.device != saved.device
+            || draft.use_controller != saved.use_controller
             || draft.buffer_frames != saved.buffer_frames
             || draft.phones_device != saved.phones_device;
         ui.horizontal(|ui| {
@@ -180,45 +200,148 @@ impl AudioUi {
     }
 }
 
-/// A device, or `none` (the default, or the master's).
+/// The output chosen in `device`, if it's one there is now.
+fn picked<'a>(device: &Option<String>, devices: &'a Option<Vec<Output>>) -> Option<&'a Output> {
+    let id = device.as_ref()?;
+    devices.as_ref()?.iter().find(|d| &d.id == id)
+}
+
+fn label(o: &Output) -> String {
+    o.shown()
+}
+
+/// Its hardware and channels, for hovering over it.
+fn hover(o: &Output) -> String {
+    let channels = format!("{} channels", o.channels);
+    match &o.detail {
+        Some(d) => format!("{d} · {channels}"),
+        None => channels,
+    }
+}
+
+/// "Same as the system", and which output that is now.
+fn system_label(devices: &Option<Vec<Output>>) -> String {
+    match devices
+        .as_ref()
+        .and_then(|l| l.iter().find(|d| d.is_default))
+    {
+        Some(d) => format!("Same as the system (now: {})", label(d)),
+        None => "Same as the system".into(),
+    }
+}
+
+/// What the engine says it's playing to, by the name it has in the list.
+fn now_name(
+    device: &str,
+    controller: Option<&ControllerAudio>,
+    devices: &Option<Vec<Output>>,
+) -> String {
+    if let Some(c) = controller
+        && device.starts_with(&c.name)
+    {
+        return c.name.clone();
+    }
+    devices
+        .as_ref()
+        .and_then(|l| l.iter().find(|d| d.name == device))
+        .map_or_else(|| device.to_string(), label)
+}
+
+/// Where the master goes: the system's output, the controller's sound card (by its
+/// own name) or one of the outputs. Choosing other than the controller with one
+/// connected turns [`AudioSettings::use_controller`] off.
+fn output_pick(
+    ui: &mut Ui,
+    draft: &mut AudioSettings,
+    devices: &Option<Vec<Output>>,
+    controller: Option<&ControllerAudio>,
+) {
+    let on_controller = controller.is_some() && draft.use_controller;
+    let current = match (controller, on_controller) {
+        (Some(c), true) => c.name.clone(),
+        _ => match (&draft.device, devices) {
+            (None, _) => system_label(devices),
+            (Some(id), _) => picked(&draft.device, devices).map_or(id.clone(), label),
+        },
+    };
+    egui::ComboBox::from_id_salt("audio-device-pick")
+        // (No wider than the window has room for.)
+        .width(PICK_W.min(ui.available_width()))
+        .selected_text(current)
+        .show_ui(ui, |ui| {
+            if let Some(c) = controller
+                && ui
+                    .selectable_label(on_controller, &c.name)
+                    .on_hover_text(
+                        "Master on its master outputs, headphones on its headphone socket",
+                    )
+                    .clicked()
+            {
+                draft.use_controller = true;
+            }
+            if ui
+                .selectable_label(
+                    !on_controller && draft.device.is_none(),
+                    system_label(devices),
+                )
+                .on_hover_text("Whatever the system plays to: it follows the system's choice")
+                .clicked()
+            {
+                draft.device = None;
+                draft.use_controller = false;
+            }
+            match devices {
+                None => {
+                    ui.label(RichText::new("Looking for outputs…").color(THEME.muted));
+                }
+                Some(list) => {
+                    for d in list {
+                        let chosen = !on_controller && draft.device.as_ref() == Some(&d.id);
+                        if ui
+                            .selectable_label(chosen, label(d))
+                            .on_hover_text(hover(d))
+                            .clicked()
+                        {
+                            draft.device = Some(d.id.clone());
+                            draft.use_controller = false;
+                        }
+                    }
+                }
+            }
+        });
+}
+
+/// An output for the headphones of their own, or `none` (on the master's).
 fn device_pick(
     ui: &mut Ui,
     id: &str,
     pick: &mut Option<String>,
-    devices: &Option<Vec<DeviceSummary>>,
+    devices: &Option<Vec<Output>>,
     none: &str,
 ) -> egui::Response {
-    let current = match (&*pick, devices) {
-        (None, _) => none.to_string(),
-        (Some(id), Some(list)) => list.iter().find(|d| &d.id == id).map_or(id.clone(), label),
-        (Some(id), None) => id.clone(),
+    let current = match &*pick {
+        None => none.to_string(),
+        Some(id) => picked(pick, devices).map_or(id.clone(), label),
     };
     egui::ComboBox::from_id_salt(id)
-        .width(330.0)
+        // (No wider than the window has room for.)
+        .width(PICK_W.min(ui.available_width()))
         .selected_text(current)
         .show_ui(ui, |ui| {
             ui.selectable_value(pick, None, none);
             match devices {
                 None => {
-                    ui.label(RichText::new("Looking for devices…").color(THEME.muted));
+                    ui.label(RichText::new("Looking for outputs…").color(THEME.muted));
                 }
                 Some(list) => {
                     for d in list {
-                        ui.selectable_value(pick, Some(d.id.clone()), label(d));
+                        ui.selectable_value(pick, Some(d.id.clone()), label(d))
+                            .on_hover_text(hover(d));
                     }
                 }
             }
         })
         .response
-}
-
-fn label(d: &DeviceSummary) -> String {
-    format!(
-        "{}{} ({} ch)",
-        d.name,
-        if d.is_default { ", default" } else { "" },
-        d.max_channels
-    )
 }
 
 fn out_name(o: Out) -> String {

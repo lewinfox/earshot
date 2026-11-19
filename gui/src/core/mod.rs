@@ -32,6 +32,7 @@ pub mod log;
 pub mod memlock;
 pub mod midi;
 pub mod notice;
+pub mod outputs;
 pub mod outside;
 pub mod pads;
 pub mod player;
