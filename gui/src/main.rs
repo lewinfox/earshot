@@ -24,6 +24,9 @@ fn main() -> eframe::Result {
     }
     // Whether the system is holding the CPU back (a low-power profile), for the top bar.
     core::power::watch();
+    // The screen stays on while earshot is open. On this thread: Windows drops the
+    // request when the thread that made it ends.
+    core::awake::hold();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("earshot")

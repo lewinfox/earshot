@@ -320,9 +320,10 @@ const SYNC_PHASE_SECS: f64 = 0.25;
 const SYNC_DEADBAND: f64 = 0.008;
 
 /// A jog wheel's bend: turning it as fast as a record goes (1.8 s a turn at 33⅓ rpm)
-/// speeds the deck up by this much (0.1 = 10%). The turning speed is measured over
+/// speeds the deck up by this much (0.05 = 5%): a full turn moves the track 90 ms
+/// against the others, however fast it's turned. The turning speed is measured over
 /// [`BEND_SECS`], and springs back over it.
-const BEND: f64 = 0.1;
+const BEND: f64 = 0.05;
 /// On a stopped deck, the jog wheel moves the track this fraction of its turn.
 const STOPPED_JOG: f64 = 0.2;
 const BEND_SECS: f64 = 0.1;
@@ -3105,10 +3106,10 @@ mod tests {
             rig.run(0.01);
         }
         // 50 blocks, the wheel turning 0.01 s a block: about 1.7 times as fast as a
-        // record, so about a sixth faster.
+        // record, so about a twelfth faster.
         let secs = 50.0 * 256.0 / SR as f64;
         let moved = (rig.pos(0) - start) / secs;
-        assert!(moved > 1.1 && moved < 1.2, "{moved}");
+        assert!(moved > 1.05 && moved < 1.1, "{moved}");
         // Then it springs back to normal speed.
         rig.run(0.5);
         let t = rig.pos(0);
