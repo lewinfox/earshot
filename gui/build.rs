@@ -1,11 +1,13 @@
 //! Finds the bundled controller files (`controllers/<maker>/<maker>.json` and
 //! `controllers/<maker>/controllers/<model>.json`) and writes the list that
-//! `core::controllers` compiles in, so a new file needs no code.
+//! `core::controllers` compiles in, so a new file needs no code. For Windows, also
+//! puts the icon and version details in earshot.exe.
 
 use std::fmt::Write;
 use std::path::Path;
 
 fn main() {
+    windows_resources();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("controllers");
     println!("cargo:rerun-if-changed={}", root.display());
     let mut entries = vec![];
@@ -51,4 +53,26 @@ fn main() {
     out.push_str("]\n");
     let dest = Path::new(&std::env::var("OUT_DIR").unwrap()).join("bundled_controllers.rs");
     std::fs::write(dest, out).unwrap();
+}
+
+/// The icon Explorer, the taskbar and the Start menu show for earshot.exe, and the
+/// details in its Properties. (The build machine's resource compiler does it: the
+/// Windows SDK's on Windows.)
+fn windows_resources() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    let icon = "assets/icons/earshot.ico";
+    println!("cargo:rerun-if-changed={icon}");
+    winresource::WindowsResource::new()
+        .set_icon(icon)
+        .set("ProductName", "earshot")
+        .set("FileDescription", "earshot")
+        .set("OriginalFilename", "earshot.exe")
+        .set(
+            "LegalCopyright",
+            "Copyright (c) 2026 Lewin Appleton-Fox (MIT licence)",
+        )
+        .compile()
+        .expect("couldn't add the icon and version details to earshot.exe");
 }

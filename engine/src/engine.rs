@@ -354,7 +354,7 @@ impl Deck {
             id,
             track: None,
             grid: None,
-            player: Player::new(LEAD_IN, keylock),
+            player: Player::new(LEAD_IN, keylock, id.index()),
             rate: 0.0,
             range: TempoRange::default(),
             fader: 0.0,
@@ -1072,7 +1072,7 @@ impl Renderer {
             routing: Routing::default(),
             phones_tap: None,
             preview: None,
-            preview_player: Player::new(0.0, None),
+            preview_player: Player::new(0.0, None, 0),
             preview_gain: 1.0,
             sampler: Sampler::new(sr),
             master_chain: MasterChain::new(sr),
@@ -1667,9 +1667,18 @@ impl Renderer {
         // Each deck's key-lock shifter has a state of its own, which can't be copied:
         // both start afresh here instead, so they stay sample for sample alike. (Out
         // of step by a few milliseconds, the two copies would sound like a flanger.)
+        // (The double takes the original's place in the shifters' cycle for this: the
+        // decks' are staggered otherwise.)
         self.decks[f].player.restart_keylock();
+        let (from, to) = if f < t {
+            let (a, b) = self.decks.split_at_mut(t);
+            (&a[f], &mut b[0])
+        } else {
+            let (a, b) = self.decks.split_at_mut(f);
+            (&b[0], &mut a[t])
+        };
+        to.player.restart_keylock_with(&from.player);
         let dk = &mut self.decks[t];
-        dk.player.restart_keylock();
         dk.range = range;
         dk.rate = rate;
         dk.check_pickup();
@@ -2422,14 +2431,31 @@ mod tests {
 
     /// Measurement, not a test: what a block costs. `cargo test --release -p
     /// earshot-engine cost_of_a_block -- --ignored --nocapture`
+    ///
+    /// As it is, blocks run back to back, which keeps the CPU busy: a power-saving
+    /// system then raises its clock, as it wouldn't for real playback (where the
+    /// audio thread works for a tenth of each block and sleeps the rest). With
+    /// `EARSHOT_PACED=1` each block waits for its time, as the sound card's callback
+    /// does: slower to run (about 8 s a row), and nearer what a set costs.
+    /// `EARSHOT_NO_STAGGER=1` measures as it was before the decks' shifters were
+    /// staggered (`keylock`), for a before and after on the same machine.
     #[test]
     #[ignore]
     fn cost_of_a_block() {
         use crate::pad_fx::{PadFx, PadFxKind};
         fn time(rig: &mut Rig, what: &str) {
             rig.run(2.0);
-            let mut t: Vec<f64> = (0..3000)
-                .map(|_| {
+            let paced = std::env::var_os("EARSHOT_PACED").is_some();
+            let block = std::time::Duration::from_secs_f64(256.0 / SR as f64);
+            let start = std::time::Instant::now();
+            let mut t: Vec<f64> = (0..if paced { 1500u32 } else { 6000 })
+                .map(|i| {
+                    if paced {
+                        let due = start + block * i;
+                        std::thread::sleep(
+                            due.saturating_duration_since(std::time::Instant::now()),
+                        );
+                    }
                     let t0 = std::time::Instant::now();
                     rig.r.process(&mut rig.out, 4);
                     t0.elapsed().as_secs_f64() * 1e6
@@ -2438,10 +2464,15 @@ mod tests {
             t.sort_by(|a, b| a.total_cmp(b));
             let mean = t.iter().sum::<f64>() / t.len() as f64;
             let budget = 256.0 / SR as f64 * 1e6;
+            // The mean, then how the slow blocks go: the 99th and 99.9th percentiles
+            // (the worst block in a hundred, in a thousand) and the worst of all,
+            // which on a busy machine is mostly the machine's own hiccups.
             println!(
-                "{what:<44} mean {mean:7.1} us ({:4.1} %)  p99 {:7.1}  max {:7.1} ({:4.1} %)",
+                "{what:<44} mean {mean:7.1} us ({:4.1} %)  p99 {:7.1} ({:4.1} %)  p99.9 {:7.1}  max {:7.1} ({:4.1} %)",
                 100.0 * mean / budget,
                 t[t.len() * 99 / 100],
+                100.0 * t[t.len() * 99 / 100] / budget,
+                t[t.len() * 999 / 1000],
                 t[t.len() - 1],
                 100.0 * t[t.len() - 1] / budget
             );
@@ -2458,7 +2489,8 @@ mod tests {
         for decks in [2usize, 4] {
             let mut rig = Rig::with_decks(decks);
             for d in 0..decks {
-                load_fn(&mut rig, d, 120.0, noise);
+                // Long enough for every row below (about 40 s each at these speeds).
+                load_fn(&mut rig, d, 300.0, noise);
             }
             time(&mut rig, &format!("{decks} decks loaded, stopped"));
             for d in 0..decks {

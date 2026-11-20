@@ -92,7 +92,7 @@ impl DebugUi {
                     self.exported.clone(),
                     self.mapping.clone(),
                 );
-                let data = crate::core::services::data_dir();
+                let data = crate::core::folders::state_folder();
                 std::thread::spawn(move || {
                     // The controller mapping as it is now.
                     let extra = mapping

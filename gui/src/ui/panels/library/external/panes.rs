@@ -11,7 +11,7 @@ use std::borrow::Cow;
 
 use egui::{RichText, Ui};
 
-use super::ExternalUi;
+use super::{ExternalUi, Scan};
 use crate::core::command::Command;
 use crate::core::drives::Drive;
 use crate::core::external::ExternalCmd;
@@ -19,8 +19,8 @@ use crate::core::sources::{Source, SourceKind};
 use crate::core::view::Source as Pane;
 use crate::ui::panels::CoreView;
 use crate::ui::panels::export::short_kind;
-use crate::ui::theme::{THEME, fs};
-use crate::ui::widgets::{Note, StackItem, heading, muted};
+use crate::ui::theme::THEME;
+use crate::ui::widgets::{Note, StackItem, busy_line, heading, muted};
 
 /// What the middle shows for a source's pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,7 +52,12 @@ impl ExternalUi {
                 (Some(s), true) => (Pane::Program(kind), format!("{}: {}", kind.label(), s.name)),
                 (None, _) => (
                     Pane::Program(kind),
-                    format!("{}: not found (click to say where it is)", kind.label()),
+                    match self.scan {
+                        Scan::Done => {
+                            format!("{}: not found (click to say where it is)", kind.label())
+                        }
+                        _ => format!("{}: not set up (click to scan for it)", kind.label()),
+                    },
                 ),
                 (Some(s), false) => (Pane::Library(s.id), s.name.clone()),
             };
@@ -127,10 +132,6 @@ impl ExternalUi {
 
     /// A pane: the source's name, then what it has.
     pub fn pane(&mut self, ui: &mut Ui, pane: Pane, v: &CoreView, out: &mut Vec<Command>) {
-        if !self.searched {
-            self.searched = true;
-            out.push(ExternalCmd::Find.into());
-        }
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| match pane {
@@ -157,24 +158,36 @@ impl ExternalUi {
         match found {
             Some((_, Some(source))) => self.library(ui, &source, out),
             _ => {
-                muted(
-                    ui,
-                    format!(
-                        "No {} library found in its usual place. If it's somewhere else \
-                         (another drive, Wine, a container), say where.",
-                        kind.label()
+                let label = kind.label();
+                match self.scan {
+                    Scan::NotYet => muted(
+                        ui,
+                        format!(
+                            "earshot hasn't looked for a {label} library yet. Scan looks \
+                             only in {label}'s usual place; if it's somewhere else (another \
+                             drive, Wine, a container), say where."
+                        ),
                     ),
-                );
+                    Scan::Scanning => busy_line(ui, "", "Scanning…"),
+                    Scan::Done => muted(
+                        ui,
+                        format!(
+                            "No {label} library found in its usual place. If it's somewhere \
+                             else (another drive, Wine, a container), say where."
+                        ),
+                    ),
+                };
                 ui.add_space(4.0);
-                if ui.button("+ Add library location").clicked() {
-                    out.push(ExternalCmd::SetLocation { kind }.into());
-                }
+                let scanning = self.scan == Scan::Scanning;
                 if ui
-                    .button("Look again")
-                    .on_hover_text("Look in each program's usual place")
+                    .add_enabled(!scanning, egui::Button::new("Scan for library"))
+                    .on_hover_text(format!("Look in {label}'s usual place, and nowhere else"))
                     .clicked()
                 {
-                    out.push(ExternalCmd::Find.into());
+                    self.scan(out);
+                }
+                if ui.button("+ Add library location").clicked() {
+                    out.push(ExternalCmd::SetLocation { kind }.into());
                 }
                 if let Some(e) = &self.find_error {
                     ui.add(Note::danger(e).small());
@@ -200,7 +213,7 @@ impl ExternalUi {
             self.light(ui, v, d);
             let selected = self.stick.open.as_ref() == Some(&d.path);
             if ui
-                .selectable_label(selected, RichText::new(&d.label).strong().size(fs(14.0)))
+                .selectable_label(selected, RichText::new(&d.label).strong().size(14.0))
                 .on_hover_text("What's on it, and its files")
                 .clicked()
             {
@@ -240,11 +253,16 @@ impl ExternalUi {
                 out.push(ExternalCmd::Pick.into());
             }
             if ui
-                .button("Look again")
-                .on_hover_text("Look for libraries in each program's usual place")
+                .add_enabled(
+                    self.scan != Scan::Scanning,
+                    egui::Button::new("Scan for libraries"),
+                )
+                .on_hover_text(
+                    "Look in Rekordbox's, Serato's and Mixxx's usual places, and nowhere else",
+                )
                 .clicked()
             {
-                out.push(ExternalCmd::Find.into());
+                self.scan(out);
             }
         });
         muted(

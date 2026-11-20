@@ -15,6 +15,8 @@ pub struct ControllerAudio {
     /// ALSA's card number, and its name for it (`DDJ400`).
     pub card: i32,
     pub id: String,
+    /// What to call it: the controller's own name, from its MIDI port (`DDJ-400`).
+    pub name: String,
     /// The device for the engine to open (`alsa:hw:CARD=DDJ400,DEV=0`).
     pub device: String,
 }
@@ -112,6 +114,7 @@ mod linux {
             Some(ControllerAudio {
                 card,
                 device: format!("alsa:hw:CARD={id},DEV=0"),
+                name: p.split(':').next().unwrap_or(&id).to_string(),
                 id,
             })
         });

@@ -35,8 +35,17 @@ use crate::ui::panels::library::drag::DragPayload;
 use crate::ui::panels::library::drag::Origin;
 use crate::ui::panels::library::table::{TableState, TableView, TrackTable};
 use crate::ui::panels::library::tracks::{Media, MenuAt};
-use crate::ui::theme::{THEME, fs};
+use crate::ui::theme::THEME;
 use crate::ui::widgets::{self, Button, Choice, Note, busy_line, go_cancel, muted};
+
+/// Looking for libraries in each program's usual place.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Scan {
+    #[default]
+    NotYet,
+    Scanning,
+    Done,
+}
 
 /// How far reading a library has got.
 pub enum Status {
@@ -79,8 +88,9 @@ pub struct ExternalUi {
     open_nodes: std::collections::HashSet<(SourceId, NodePath)>,
     /// Every source, as the Store has them (the libraries are drawn from these).
     sources: Vec<Source>,
-    /// Looked in the usual places yet (done the first time the pane shows).
-    searched: bool,
+    /// Looked in each program's usual place yet: only when the user asks
+    /// (Scan for library), never by itself.
+    scan: Scan,
     /// What the last search said, if it failed.
     find_error: Option<String>,
     /// Each library's read.
@@ -277,6 +287,13 @@ impl ExternalUi {
         self.status.get(&id)
     }
 
+    /// Look for libraries in each program's usual place (and only there).
+    pub fn scan(&mut self, out: &mut Vec<Command>) {
+        self.scan = Scan::Scanning;
+        self.find_error = None;
+        out.push(ExternalCmd::Find.into());
+    }
+
     /// Read a library, unless it has been.
     pub fn ensure_read(&mut self, source: &Source, out: &mut Vec<Command>) {
         self.read_once(source, out);
@@ -285,7 +302,10 @@ impl ExternalUi {
     /// Take in what came of an `ExternalCmd` (the app keeps the locations first).
     pub fn event(&mut self, e: ExternalEvent) {
         match e {
-            ExternalEvent::Found { at: None, result } => self.find_error = result.err(),
+            ExternalEvent::Found { at: None, result } => {
+                self.scan = Scan::Done;
+                self.find_error = result.err();
+            }
             ExternalEvent::Found {
                 at: Some(at),
                 result,
@@ -443,6 +463,14 @@ impl ExternalUi {
                 self.read(source, out);
                 ui.close();
             }
+            if ui
+                .button("Look for its files in…")
+                .on_hover_text("A folder its music is in, when it isn't where the library says")
+                .clicked()
+            {
+                out.push(ExternalCmd::PickFolder(source.clone()).into());
+                ui.close();
+            }
             ui.separator();
             if source.kind.is_program() && ui.button("Change location…").clicked() {
                 out.push(ExternalCmd::SetLocation { kind: source.kind }.into());
@@ -588,9 +616,14 @@ impl ExternalUi {
     }
 
     fn read(&mut self, source: &Source, out: &mut Vec<Command>) {
+        out.push(self.read_again(source).into());
+    }
+
+    /// Read a library again (shown as being read meanwhile): the command to run.
+    pub fn read_again(&mut self, source: &Source) -> ExternalCmd {
         self.status
             .insert(source.id, Status::Reading(String::new()));
-        out.push(ExternalCmd::Read(source.clone()).into());
+        ExternalCmd::Read(source.clone())
     }
 
     /// The list's focused track: what "load selected" loads from it.
@@ -692,7 +725,7 @@ impl ExternalUi {
                 if n == 1 { "" } else { "s" }
             );
             ui.add(
-                egui::Label::new(RichText::new(text).size(fs(11.0)).color(THEME.warn))
+                egui::Label::new(RichText::new(text).size(11.0).color(THEME.warn))
                     .selectable(false)
                     .sense(egui::Sense::hover()),
             )
@@ -700,6 +733,25 @@ impl ExternalUi {
                 ui.set_max_width(600.0);
                 for w in &lib.warnings {
                     ui.label(w);
+                }
+            });
+        }
+        let unfound = lib.tracks.iter().filter(|t| t.file.is_none()).count();
+        if unfound > 0 {
+            ui.horizontal_wrapped(|ui| {
+                let s = if unfound == 1 { "" } else { "s" };
+                ui.add(
+                    Note::warning(format!(
+                        "{unfound} track{s}' files weren't found where the library says."
+                    ))
+                    .small(),
+                );
+                if ui
+                    .small_button("Choose folder…")
+                    .on_hover_text("Pick the folder its music is in; earshot looks only there")
+                    .clicked()
+                {
+                    out.push(ExternalCmd::PickFolder(source.clone()).into());
                 }
             });
         }

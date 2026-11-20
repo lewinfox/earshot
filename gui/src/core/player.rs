@@ -214,10 +214,17 @@ pub fn poll(player: &Player, store: &Store) -> Option<EngineSnapshot> {
 }
 
 /// Audio settings kept between runs. Environment variables override them.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct AudioSettings {
-    /// Device id (or a substring of its name); `None` = the system default.
+    /// Device id (or a substring of its name); `None` = the system default. With a
+    /// controller connected and [`use_controller`](Self::use_controller), the
+    /// controller's sound card instead.
     pub device: Option<String>,
+    /// Play through a connected controller's own sound card (its master and headphone
+    /// outputs) rather than `device`. Picking another output in the settings turns it
+    /// off, so the controller is then only for MIDI.
+    #[serde(default = "yes")]
+    pub use_controller: bool,
     pub buffer_frames: Option<u32>,
     pub routing: Option<Routing>,
     /// The headphones on a device of their own (laptop-only: master on the speakers,
@@ -225,6 +232,22 @@ pub struct AudioSettings {
     /// PipeWire ([`earshot_engine::output::can_split`]).
     #[serde(default)]
     pub phones_device: Option<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        AudioSettings {
+            device: None,
+            use_controller: true,
+            buffer_frames: None,
+            routing: None,
+            phones_device: None,
+        }
+    }
 }
 
 /// The buffer size when none is chosen, in frames: about 5 ms, two of them queued.
@@ -1075,6 +1098,15 @@ mod tests {
 
     use super::testing::*;
     use super::*;
+
+    #[test]
+    fn settings_from_before_the_controller_choice_still_use_the_controller() {
+        let old: AudioSettings =
+            serde_json::from_str(r#"{"device": null, "buffer_frames": 256, "routing": null}"#)
+                .unwrap();
+        assert!(old.use_controller);
+        assert!(AudioSettings::default().use_controller);
+    }
 
     /// More events than the ring holds, unread: the cue, hot cue and loop changes
     /// among the dropped ones still reach the session, from a snapshot.

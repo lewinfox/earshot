@@ -465,6 +465,7 @@ fn out_track(store: &Reader, id: TrackId) -> Result<Option<OutTrack>, String> {
 
 /// The worker's spec for `x`. `roots`: where to look for another library's files.
 fn spec(store: &Reader, x: &Export, roots: &[PathBuf]) -> Result<(Value, usize), String> {
+    let mut roots = roots.to_vec();
     let (from, skipped) = match &x.from {
         From::Earshot(picked) => {
             let (nodes, order) = resolve(store, picked)?;
@@ -482,6 +483,7 @@ fn spec(store: &Reader, x: &Export, roots: &[PathBuf]) -> Result<(Value, usize),
             let Some(path) = &source.location else {
                 return Err(format!("{}: where it is isn't set", source.name));
             };
+            roots = source.search_roots(&roots);
             (
                 json!({
                     "source": {

@@ -192,7 +192,7 @@ fn the_open_flow_and_its_view_come_back_from_the_database() {
 
     // A second run on the same database.
     let services = Services {
-        db: super::tests::scratch_dir(test).join(store::FILE_NAME),
+        folders: crate::core::folders::Folders::all_in(&super::tests::scratch_dir(test)),
         null_audio: true,
         worker: stand_in,
         midi: false,

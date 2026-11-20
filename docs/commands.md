@@ -28,6 +28,7 @@ A name goes from the general to the particular: where, what, which part, what to
 | `deck_N_loop_out` | pressed (1) or let go (0) | loop out |
 | `deck_N_loop_exit` | pressed (1) or let go (0) | leave the loop / reloop |
 | `deck_N_loop_active_toggle` | pressed (1) or let go (0) | make the nearest memory loop the active loop, or not |
+| `deck_N_layer_toggle` | pressed (1) or let go (0) | switch this hand between its two decks (1 and 3, or 2 and 4) |
 | `deck_N_loop_halve` | pressed (1) or let go (0) | halve the loop |
 | `deck_N_loop_double` | pressed (1) or let go (0) | double the loop |
 | `deck_N_pitch_bend_down` | pressed (1) or let go (0) | slow down while held |

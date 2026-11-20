@@ -16,44 +16,71 @@ docs/design.md decisions and roadmap
 
 ## Install
 
-Download the file for your computer from the
-[releases page](https://github.com/lewinfox/earshot/releases), unpack it and run
-`earshot-gui` in the folder it makes. Everything it needs is in that folder: the
-analysis worker with its own Python and models, ffmpeg and Rubber Band. Nothing else
-is installed, and deleting the folder removes it (your library stays in the data
-folder, below).
+Download the installer for your computer from the
+[releases page](https://github.com/lewinfox/earshot/releases). Everything earshot needs
+comes with it: the analysis worker with its own Python and models, ffmpeg and Rubber
+Band. Nothing else is installed, and uninstalling removes all of it (your library
+stays unless you delete it: see *Where earshot keeps things*, below).
 
-- **Linux** (x86_64): `tar xf earshot-*-linux-x86_64.tar.xz`. Needs ALSA, which every
-  desktop has.
-- **macOS** (Apple silicon): the download isn't signed yet, so macOS refuses to open
-  it. After unpacking, run `xattr -dr com.apple.quarantine earshot-*-macos-arm64`
-  once.
+- **Linux** (x86_64; Ubuntu 24.04, Debian 13, Fedora 40 or newer): install the
+  `.deb` (`sudo apt install ./earshot_*_amd64.deb`, or open it in your software
+  centre) or the `.rpm` (`sudo dnf install ./earshot-*.x86_64.rpm`). earshot is in the
+  app menu and runs as `earshot`; `sudo apt remove earshot` (or `dnf remove`)
+  removes it. On other distributions, unpack the `.tar.xz` and run `earshot` in it.
+- **macOS** (Apple silicon, macOS 14 or later): open the `.dmg` and drag earshot to
+  Applications.
+- **Windows** (x64, Windows 10 or 11): run `earshot-*-setup.exe`. It installs for you
+  only, with no administrator prompt (it offers all users instead), and adds earshot to
+  the Start menu; *Settings → Apps* uninstalls it, and asks whether to delete your
+  library and settings too. The installer isn't signed yet, so Windows warns about it
+  the first time: *More info → Run anyway*.
 
-## Build it from source (Linux)
+## Development
 
-System packages (Ubuntu/Debian names):
+earshot is a Rust app (`gui/`, `engine/`, `audio/`) with a Python analysis worker
+(`worker/`) it runs as a separate process. Building it needs a few system libraries,
+Rust and uv; running it from a checkout uses the worker's own venv.
 
-```bash
-sudo apt install build-essential pkg-config libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev
-```
+### What to install
 
-You also need Rust (stable) and [uv](https://docs.astral.sh/uv/). Your user should be
-in the `audio` group.
-
-Set up the analysis worker once (downloads CPU-only torch, about 1 GB). A build from
-source uses `worker/.venv`; a release ships a ready-made one instead
-(`packaging/bundle.sh`, see below).
-
-```bash
-cd earshot/worker && ./setup.sh
-```
-
-Then:
+The reference system is **Ubuntu 24.04**: CI builds and tests the Linux release on it
+(the oldest system the Linux packages run on: glibc only runs what was built against
+it or older), so it's the safest base for development too. Other distributions work
+with the same libraries under their own names.
 
 ```bash
-cd earshot && cargo run --release -p earshot-gui   # release build
-cd earshot && cargo run -p earshot-gui             # dev build: quicker to compile, still optimised enough to play
+# Building earshot: ALSA, D-Bus, PipeWire, libclang (for PipeWire's bindings)
+sudo apt install build-essential pkg-config libasound2-dev libdbus-1-dev \
+  libpipewire-0.3-dev libclang-dev
+# What the window loads as it starts (a desktop has these already)
+sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
+  libxrandr-dev libxi-dev libgl1-mesa-dev
+# Only for `make bundle` (it builds Rubber Band): libsndfile's headers
+sudo apt install libsndfile1-dev
 ```
+
+- **Rust**, stable, from [rustup](https://rustup.rs).
+- **[uv](https://docs.astral.sh/uv/)**, recent (0.13 or newer: `make bundle` uses
+  `uv export --emit-index-url`). `uv self update` updates it.
+- **Docker**, only for `make packages` (nfpm runs from its image unless it's installed).
+- Your user in the **`audio` group**, for real-time audio and the controller's sound card.
+
+On macOS (Apple silicon), Xcode's command line tools, Rust and uv are all it needs.
+
+### Running it
+
+```bash
+make run            # dev build: quicker to compile, still optimised enough to play
+make run-release    # release build
+```
+
+The first time (and after the worker's dependencies change) `make run` sets up the
+worker first, with `worker/setup.sh`: it downloads CPU-only torch and the Beat This!
+models into `worker/.venv` (about 1 GB), and installs ffmpeg and Rubber Band if
+they're missing (with `sudo apt`, so it may ask for your password). A release ships
+all of this ready-made instead (`packaging/bundle.sh`, below).
+
+`make install` adds the release build to your app menu. `make help` lists the rest.
 
 Environment variables:
 
@@ -64,15 +91,36 @@ Environment variables:
 | `EARSHOT_NULL_AUDIO` | unset | `1` runs the engine on a timer with no sound card |
 | `PIPEWIRE_LATENCY` | `256/48000` under PipeWire | The audio chunk size PipeWire uses (frames/rate); earshot sets it unless you do |
 | `EARSHOT_WORKER_DIR` | the release's own, else `earshot/worker` | A worker folder with its own `.venv` to use instead |
-| `EARSHOT_DATA_DIR` | `~/.local/share/io.github.lewinfox.earshot` | Where `library.db` lives (e.g. to try things on a copy) |
+| `EARSHOT_DATA_DIR` | unset | Keep everything (library, config, cache, logs) in this one folder, e.g. to try things on a copy |
 
 If no audio device can be opened, earshot falls back to the null output and shows a
 ⚠ in the top bar. *Menu → Settings…* (or the audio pill) picks the device, buffer
 size and which channels master and headphones go to. With no deck cued, the headphones
 get the master mix. The same window sets how many tracks analyse at once, re-analyses
 tracks whose analysis is out of date, and shows the keymap file: a `keymap.txt` in the
-data folder replaces the built-in keys (*Make a copy to edit* writes one to start
+config folder replaces the built-in keys (*Make a copy to edit* writes one to start
 from).
+
+### Where earshot keeps things
+
+Nothing goes anywhere in your home folder but these four folders (on Linux, the XDG
+base directories; `$XDG_DATA_HOME` and the rest move them):
+
+| | Linux | macOS | Windows | What's in it |
+|---|---|---|---|---|
+| data | `~/.local/share/earshot` | `~/Library/Application Support/io.github.lewinfox.earshot` | `%APPDATA%\lewinfox\earshot\data` | `library.db`: your library and settings |
+| config | `~/.config/earshot` | as data | `%APPDATA%\lewinfox\earshot\config` | `keymap.txt`, `controllers/` (your own mappings) |
+| cache | `~/.cache/earshot` | `~/Library/Caches/io.github.lewinfox.earshot` | `%LOCALAPPDATA%\lewinfox\earshot\cache` | stems, tempo lock's working files: made again when needed |
+| state | `~/.local/state/earshot` | as data | `%LOCALAPPDATA%\lewinfox\earshot\data` | logs, debug exports, the window's size and place |
+
+To remove every trace of earshot on Linux, delete those four (after uninstalling):
+
+```bash
+rm -rf ~/.local/share/earshot ~/.config/earshot ~/.cache/earshot ~/.local/state/earshot
+```
+
+Versions before 0.1.1 kept everything in `~/.local/share/io.github.lewinfox.earshot`;
+earshot moves it into these folders the first time it starts.
 
 The top bar shows live numbers: UI fps and the audio callback's worst time against
 its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
@@ -142,9 +190,17 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   switched off or the fader comes down) or *Trans* (cuts the sound on the beat). Per
   unit: the effect, its length in beats (◀ ▶ halve and double it, from 1/16 to 16), *Level* (how loud the
   repeats are, how deep the cuts go), what it's on (deck A/B…, or *MAIN*, which
-  follows the sync leader or the playing deck) and *ON*. Keys: `G`/`H` switch units
-  1/2 on and off, `T`/`Y` pick the next effect, `Shift+G`/`Shift+H` the next target, `C`/`V` halve and double unit 1's length and
-  `B`/`N` unit 2's.
+  follows the sync leader or the playing deck) and *ON*. Keys, for unit 1: `B`
+  switches it on and off, `T` picks the next effect, `Shift+B` the next target, and
+  `C`/`V` halve and double its length.
+- **Four decks, two hands**: with four decks showing, the top bar's `[1] | [2]` switch
+  (or `G` for the left hand, `H` for the right) sets which deck each hand plays: 1 or
+  3, and 2 or 4. The keyboard's deck keys follow, and so does a controller: its left
+  and right decks, their lights and level meters. A button held while switching still
+  lets go on the deck it was pressed on. The controller's channel fader, gain, EQ and
+  filter do nothing on the new deck until moved to that deck's value (soft takeover);
+  a mark on the on-screen control shows where the controller's is until then. A
+  controller with a spare button can map `deck_1_layer_toggle` / `deck_2_layer_toggle`.
 - **Sampler** (*Menu → Sampler…*): 16 slots, each a short sound (a file, or the
   track selected in the library; its first two minutes, kept in memory) with its own
   volume and a *Loop* switch. With the DDJ-400's pads in SAMPLER mode a pad plays its
@@ -153,8 +209,11 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   plays. Several can play at once, into the master mix. The slots are kept between
   runs (`sampler_N_play` / `sampler_N_stop` for keys and other controllers).
 - **Mixer and FX** switches in the top bar show or hide those panels mid-set.
-- **Layout**: drag the gaps between panes to resize. *Menu → View → Size* or
-  Ctrl −/=/0 scales the whole UI.
+- **Layout**: the window can be as small as 1024 × 640 and never starts bigger than
+  the screen; everything shares out the room there is. Drag the edges between panes to
+  resize them (they keep their proportions as the window changes). *Settings → Display*,
+  *Menu → View → UI size* or Ctrl −/=/0 make everything (text and controls) bigger or
+  smaller. How the layout works, for changing it: `docs/ui-layout.md`.
 - **Search** with free text plus `bpm:120-126` and `key:8A` (or `key:Am`). It searches
   within the selected folder.
 - **Beatgrids** are fixed in the grid editor (Prepare mode, or *GRID* on a deck): the
@@ -162,6 +221,8 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   `<file>.beats.json` sidecar next to a file is still used if there's no analysed grid.
 
 ## Tests
+
+`make test` runs the Rust tests, `make test-worker` the worker's. Or one at a time:
 
 ```bash
 cd earshot && cargo test -p earshot-engine   # beatgrid, decks, loops, cue, sync on a drifting track
@@ -189,8 +250,17 @@ The app finds these beside its binary (`gui/src/core/worker_env.rs`). Then
 `packaging/smoke_test.py` runs the folder's own worker, models and programs before
 it's uploaded. A download is about 400 MB, and about 1.7 GB unpacked.
 
-`make bundle` makes the Linux folder locally, in `target/bundle/earshot`. It needs uv
-and, to build Rubber Band, `sudo apt install build-essential libsndfile1-dev`.
+Linux also gets a `.deb` and an `.rpm` of the same folder (`packaging/linux/`,
+installed in `/opt/earshot`), and macOS a signed, notarized `.dmg`
+(`packaging/macos/package.sh`; signing needs the `MACOS_CERTIFICATE*` and `NOTARY_*`
+secrets, so it only happens in CI).
+
+To make the Linux downloads locally (see *What to install* for what they need):
+
+```bash
+make bundle      # the folder, checked by the smoke test: target/bundle/earshot
+make packages    # the .deb and .rpm of it: target/packages
+```
 
 ## Known gaps
 
@@ -202,3 +272,12 @@ and, to build Rubber Band, `sudo apt install build-essential libsndfile1-dev`.
   each (`gui/src/core/pads.rs`): not rekordbox's own defaults, and not editable yet.
 - Hot cues are not saved.
 - The worker has no timeout: if it hangs, the analysis queue stops until restart.
+
+## Licence
+
+earshot is MIT licensed ([LICENSE](LICENSE)). A release also contains other people's
+work under their own licences, listed in its `licenses/` folder: notably mutagen
+(GPL v2 or later, through cratelib), which the worker uses to read and write the
+tags DJ software keeps in music files, and Rubber Band (GPL v2 or later) and FFmpeg
+(LGPL), which it runs as separate programs. So a release as a whole is distributed
+under the GPL's terms.

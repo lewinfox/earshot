@@ -44,6 +44,9 @@ pub struct Cx<'a> {
     pub theme: &'a Theme,
     /// The UI's preferences (mode, layout, zoom), to read; change them by command.
     pub prefs: &'a UiPrefs,
+    /// How the window is divided this frame (`ui::layout`): the sizes the views give
+    /// their rows. (The top bar, drawn before it's worked out, sees last frame's.)
+    pub shell: crate::ui::layout::Shell,
     pub out: &'a mut Vec<Command>,
 }
 
@@ -53,11 +56,21 @@ impl Cx<'_> {
     }
 }
 
-/// Note a resizable panel's size (`now`, in points) once it has been dragged to a
-/// new one; not while it slides in or out.
-pub fn resized(ctx: &egui::Context, now: f32, region: Region, saved: f32, cx: &mut Cx) {
-    if (now - saved).abs() >= 1.0 && ctx.input(|i| i.pointer.primary_down()) {
-        cx.send(ViewCmd::Resize(region, now));
+/// A handle on `edge` of the pane `ui` draws, to drag it bigger or smaller (call it
+/// last in the pane). `row`: the length the pane's size is a share of (its row's
+/// width, or the window's height); the share dragged to is saved for `region`, and
+/// the layout sizes the pane from it next frame.
+pub fn drag_to_resize(
+    ui: &mut egui::Ui,
+    edge: crate::ui::layout::Edge,
+    region: Region,
+    row: f32,
+    cx: &mut Cx,
+) {
+    if let Some(size) = crate::ui::layout::splitter(ui, edge)
+        && row > 0.0
+    {
+        cx.send(ViewCmd::Resize(region, (size / row).clamp(0.0, 1.0)));
     }
 }
 

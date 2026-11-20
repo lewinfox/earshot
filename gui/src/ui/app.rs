@@ -26,7 +26,7 @@ use super::panels::library::{Level, LibraryPane, LoadedFrom, Nav, drag};
 use super::panels::status::{AnalysisSummary, Meter, StatusLine, TopBar};
 use super::panels::{CoreView, Cx, EngineFrame, Panel, PreviewState};
 use super::prefs::{self, UiPrefs};
-use super::theme::{self, THEME};
+use super::theme::THEME;
 use super::views::{self, Panels};
 use crate::core::analysis::{self, Analyser, Mode as AnalysisMode};
 use crate::core::audio_watch;
@@ -58,6 +58,12 @@ const SETTLE: Duration = Duration::from_millis(500);
 
 pub struct EarshotApp {
     ctx: egui::Context,
+    /// The window kept to the screen, and the UI size applied.
+    window: super::window::WindowFit,
+    /// How the window was divided last frame (`layout::shell`).
+    shell: super::layout::Shell,
+    /// The part of the window that was divided: between the bars.
+    shell_rect: egui::Rect,
     // ---- services ----------------------------------------------------------------------
     player: Player,
     lib: Arc<Library>,
@@ -66,6 +72,9 @@ pub struct EarshotApp {
     monitor: Option<Monitor>,
     /// The same monitor, for the controller's lights thread.
     lights_monitor: crate::core::lights::MonitorSlot,
+    /// Where a controller's messages go: the deck each hand plays, held buttons, soft
+    /// takeover (`midi::Route`). Its layers are the lights' too.
+    midi_route: midi::Route,
     /// The mapping's version when the engine was last told whether the controller
     /// blends the headphones (see [`EarshotApp::sync_phones_cue_only`]); `None` sends
     /// it again (a new engine).
@@ -78,6 +87,9 @@ pub struct EarshotApp {
     /// stopped helping).
     audio_stalls: VecDeque<Instant>,
     audio_note: Option<(String, Option<Instant>)>,
+    /// What the output audio opened on is called (`core::outputs::name_for`), for the
+    /// top bar.
+    audio_name: Option<String>,
     /// Messages for the user, in the bottom bar.
     notices: Notices,
     /// "Do you really want to quit?" is showing; and the user said yes.
@@ -182,7 +194,12 @@ fn start_audio(
     // A thread that steps its background work (a test's) steps its audio too.
     opts.stepped = crate::core::background::stepped();
     opts.null |= null || opts.stepped;
+    // Another output chosen over the controller's card: PipeWire may have the card.
+    if !settings.use_controller {
+        controller.release();
+    }
     if !opts.null
+        && settings.use_controller
         && let Some(device) = controller.prepare()
     {
         opts.device = Some(device);
@@ -293,7 +310,7 @@ impl EarshotApp {
             ctx.request_repaint();
         });
 
-        let store = Store::open(&services.db, store_sink(&sink)).map_err(|e| e.to_string())?;
+        let store = Store::open(&services.db(), store_sink(&sink)).map_err(|e| e.to_string())?;
         let settings = Settings::load(&store.reader);
         let player = player::new_player();
         player.lock().unwrap().routing = settings.audio.routing;
@@ -329,8 +346,8 @@ impl EarshotApp {
             Analyser::start(sink.clone(), player.clone(), store.clone(), services.worker);
         let hasher = library::start_hasher(store.clone());
         let quick = library::start_quick_analyser(store.clone());
-        let data_dir = services.db.parent().unwrap_or(std::path::Path::new("."));
-        let keymap_path = data_dir.join(keymap::FILE_NAME);
+        let folders = &services.folders;
+        let keymap_path = folders.config.join(keymap::FILE_NAME);
         let (keymap, keymap_origin) = keymap::load_user(&keymap_path, spell_key);
         let background_workers = analyser.background_workers();
         let tempo_lock = {
@@ -340,11 +357,14 @@ impl EarshotApp {
                 (services.worker)(Role::Background, cores),
                 store.clone(),
                 Arc::new(move |e| sink(Event::TempoLock(e))),
-                data_dir,
+                &folders.cache,
                 Some(hasher.clone()),
             )
         };
-        crate::core::stems::init(data_dir, (settings.stems_cache_gb.max(0.0) * 1e9) as u64);
+        crate::core::stems::init(
+            &folders.cache,
+            (settings.stems_cache_gb.max(0.0) * 1e9) as u64,
+        );
         let jobs = {
             let ctx = cc.egui_ctx.clone();
             crate::core::jobs::Jobs::new(move || ctx.request_repaint())
@@ -365,19 +385,26 @@ impl EarshotApp {
             .storage
             .and_then(|s| eframe::get_value(s, prefs::KEY))
             .unwrap_or_default();
-        prefs.ui_scale = prefs::text_size(prefs.ui_scale);
-        // View > Text size changes the text, not everything: egui's own zoom stays at 1
-        // (Ctrl +/- are ours, below).
-        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
-        cc.egui_ctx.set_zoom_factor(1.0);
-        theme::set_text_scale(&cc.egui_ctx, prefs.ui_scale);
+        prefs.migrate();
+        // The UI size is egui's zoom, set each frame from the preference and what the
+        // screen has room for (`window::fit`); Ctrl +/- are ours (our steps and range).
+        cc.egui_ctx.options_mut(|o| {
+            o.zoom_with_keyboard = false;
+            // A frame whose layout hasn't settled (a deck's controls after its scale
+            // changes) is drawn again rather than shown, up to this many times.
+            o.max_passes = std::num::NonZeroUsize::new(10).expect("not zero");
+        });
         let tables = prefs.tables.clone();
         let mut app = EarshotApp {
             ctx: cc.egui_ctx.clone(),
+            window: Default::default(),
+            shell: Default::default(),
+            shell_rect: egui::Rect::ZERO,
             player,
             lib,
             sink,
             rx,
+            midi_route: midi::Route::default(),
             lights_monitor: Arc::new(std::sync::Mutex::new(crate::core::lights::LightsState {
                 monitor: monitor.clone(),
                 ..Default::default()
@@ -388,6 +415,7 @@ impl EarshotApp {
             controller,
             audio_stalls: VecDeque::new(),
             audio_note: None,
+            audio_name: None,
             loaded_from: Default::default(),
             load_taps: Default::default(),
             notices: Notices::default(),
@@ -446,7 +474,7 @@ impl EarshotApp {
         }
         app.panels.controller.lights = Some(app.lights_monitor.clone());
         // The user's own controller mappings (`core::controllers`).
-        app.panels.controller.mine = Some(data_dir.join("controllers"));
+        app.panels.controller.mine = Some(services.folders.config.join("controllers"));
         app.start_up(services.midi);
         app.lib.store.send(StoreCmd::ListSources);
         app.lib.store.send(StoreCmd::StartSession);
@@ -539,6 +567,16 @@ impl EarshotApp {
             self.null_audio,
             &mut self.controller,
         );
+        self.audio_name = match &self.audio {
+            Ok(i) if !i.null => Some(crate::core::outputs::name_for(
+                &i.device,
+                self.controller
+                    .found
+                    .as_ref()
+                    .filter(|_| self.settings.audio.use_controller),
+            )),
+            _ => None,
+        };
         self.reread_monitor();
     }
 
@@ -608,12 +646,18 @@ impl EarshotApp {
             let key = crate::core::controllers::device_key(port, usb);
             store.find(port, usb, chosen.get(&key).map(String::as_str))
         };
-        (self.midi, self.midi_devices) =
-            midi::connect_all(&self.sink, &lane, &learned, &self.lights_monitor, &choose)
-                .unwrap_or_else(|e| {
-                    eprintln!("MIDI: {e}");
-                    (Midi::default(), vec![])
-                });
+        (self.midi, self.midi_devices) = midi::connect_all(
+            &self.sink,
+            &lane,
+            &learned,
+            &self.lights_monitor,
+            &self.midi_route,
+            &choose,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("MIDI: {e}");
+            (Midi::default(), vec![])
+        });
         self.midi_ports = self.midi_devices.iter().map(|p| p.name.clone()).collect();
         self.mappings = store
             .models()
@@ -879,6 +923,9 @@ impl EarshotApp {
                 Ok(()) => self.reopen_audio(),
                 Err(e) => self.controller.error = Some(e),
             },
+            Command::App(AppCmd::ControllerWaits { control, at }) => {
+                crate::ui::panels::mixer::set_waiting(&self.ctx, control, at);
+            }
             Command::App(AppCmd::ControllerShows { control, value }) => {
                 // A button toggles what's shown on each press (the controller keeps
                 // its own state; it starts off, as the controller does).
@@ -983,7 +1030,10 @@ impl EarshotApp {
                 });
             }
             Command::App(AppCmd::CopyKeymap) => {
-                // Never over the user's own file.
+                // Never over the user's own file. Its folder may not be there yet.
+                if let Some(dir) = self.keymap_path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
                 let made = std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
@@ -1165,11 +1215,7 @@ impl EarshotApp {
                     self.load(Some(deck), id);
                 }
             }
-            ViewCmd::SwitchLayer(side) => {
-                if let Some(l) = self.prefs.layers.get_mut(side) {
-                    *l = !*l;
-                }
-            }
+            ViewCmd::SwitchLayer(side) => self.switch_layer(side),
             ViewCmd::PadMode(d, m) => {
                 let ui = &mut self.panels.decks[d.index()];
                 let out = ui.set_pad_mode(m);
@@ -1242,10 +1288,7 @@ impl EarshotApp {
             ViewCmd::AutoHideMixer(on) => self.prefs.auto_hide_mixer = on,
             ViewCmd::StemMode(m) => self.prefs.stem_mode = m,
             ViewCmd::PretendController(on) => self.prefs.set_pretend_controller(on),
-            ViewCmd::UiScale(z) => {
-                self.prefs.ui_scale = z;
-                theme::set_text_scale(&self.ctx, z);
-            }
+            ViewCmd::UiScale(z) => self.prefs.ui_scale = prefs::ui_scale(z),
             ViewCmd::Resize(region, size) => {
                 let sizes = &mut self.prefs.layout_mut().sizes;
                 match region {
@@ -1379,6 +1422,7 @@ impl EarshotApp {
             engine: &self.frame,
             theme: &THEME,
             prefs: &self.prefs,
+            shell: self.shell,
             out: &mut out,
         };
         egui::TopBottomPanel::top("top")
@@ -1393,6 +1437,7 @@ impl EarshotApp {
                 }
                 TopBar {
                     audio: &self.audio,
+                    audio_name: self.audio_name.as_deref(),
                     alerts: &self.hud.alerts,
                     audio_note: self.audio_note.as_ref().map(|(n, _)| n.as_str()),
                     controller_busy: self
@@ -1423,6 +1468,10 @@ impl EarshotApp {
                 }
                 .ui(ui, &mut cx)
             });
+        // The bars have taken their room: divide the rest, then draw it as divided.
+        let shell_rect = ctx.available_rect().intersect(ctx.content_rect());
+        cx.shell = views::shell(ctx, &self.panels, &cx);
+        let shell = cx.shell;
         views::show(ctx, &mut self.panels, &mut cx);
         drag::paint_ghost(ctx, cx.core.lib);
 
@@ -1430,12 +1479,14 @@ impl EarshotApp {
         let env = ModalEnv {
             audio_settings: &self.settings.audio,
             audio: &self.audio,
+            controller: self.controller.found.as_ref(),
             routing,
             hotcue_mode: self.settings.hotcue_mode,
             xf_curve: self.settings.xf_curve,
             cue_first_beat: self.settings.cue_first_beat,
             load_while_playing: self.settings.load_while_playing,
             auto_hide_mixer: self.prefs.auto_hide_mixer,
+            ui_scale: self.prefs.ui_scale,
             stem_mode: self.prefs.stem_mode,
             keymap: &self.keymap,
             mode: self.prefs.mode,
@@ -1459,7 +1510,59 @@ impl EarshotApp {
             },
         };
         self.modals.show(ctx, &env, cx.out);
+        self.shell = shell;
+        self.shell_rect = shell_rect;
         out
+    }
+}
+
+impl EarshotApp {
+    /// Tell the controller and its lights which deck each hand plays (they read it on
+    /// their own threads).
+    fn sync_layers(&self) {
+        self.midi_route
+            .layers
+            .set(self.prefs.layers, self.prefs.four_decks());
+    }
+
+    /// Switch the left (`side` 0) or right (1) hand to its other deck (1 and 3, 2 and
+    /// 4), with four decks showing. A controller's deck follows: its pads keep the
+    /// mode they're in, and its knobs and faders wait to be moved to the new deck's
+    /// values (marked on screen where they are now).
+    fn switch_layer(&mut self, side: usize) {
+        if side > 1 || !self.prefs.four_decks() {
+            return;
+        }
+        let from = self.prefs.active_deck(side);
+        self.prefs.layers[side] = !self.prefs.layers[side];
+        self.sync_layers();
+        let to = self.prefs.active_deck(side);
+        if !self.prefs.controller() {
+            return;
+        }
+        // The controller's pads are in the mode they were: the new deck's follow.
+        let mode = self.panels.decks[from.index()].pad_mode;
+        if self.panels.decks[to.index()].pad_mode != mode {
+            self.view_cmd(ViewCmd::PadMode(to, mode));
+        }
+        use crate::ui::panels::mixer;
+        for control in mixer::takeover_controls(from).chain(mixer::takeover_controls(to)) {
+            mixer::set_waiting(&self.ctx, control, None);
+        }
+        let snap = self.frame.snap.as_ref();
+        for (control, at) in self.midi_route.waiting(|c| snap.and_then(|s| c.get(s))) {
+            if matches!(control, crate::core::bus::Control::Deck(d, _) if d == to) {
+                mixer::set_waiting(&self.ctx, control, Some(at));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl EarshotApp {
+    /// Where the views end and the status bar begins, down the window, in points.
+    pub(super) fn shell_bottom(&self) -> f32 {
+        self.shell_rect.bottom()
     }
 }
 
@@ -1491,8 +1594,10 @@ impl eframe::App for EarshotApp {
         self.confirm_quit(ctx);
         self.keyboard(ctx);
         input::full_screen_key(ctx);
-        // Ctrl +/- and Ctrl 0 change the text size too (egui's shortcuts, our steps).
-        if let Some(z) = self.text_size_keys(ctx) {
+        self.window.fit(ctx, self.prefs.ui_scale);
+        self.sync_layers();
+        // Ctrl +/- and Ctrl 0 change the UI size (egui's shortcuts, our steps).
+        if let Some(z) = self.ui_size_keys(ctx) {
             self.dispatch(ViewCmd::UiScale(z).into());
         }
         self.tick_hud(ctx);

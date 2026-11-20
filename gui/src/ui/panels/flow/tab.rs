@@ -7,11 +7,11 @@ use egui::Ui;
 use super::FlowUi;
 use crate::core::command::ViewCmd;
 use crate::core::view::{Aside, Pane, Region};
+use crate::ui::layout::{self, Edge};
 use crate::ui::panels::library::LibraryPane;
 use crate::ui::panels::library::table::TableView;
-use crate::ui::panels::{Cx, Panel, resized};
-use crate::ui::theme::{fs, sized_panel, text_scale};
-use crate::ui::widgets::{Opens, StackItem, icon_stack, icon_stack::WIDTH};
+use crate::ui::panels::{Cx, Panel, drag_to_resize};
+use crate::ui::widgets::{Opens, StackItem, icon_stack};
 
 /// The right icon stack.
 const ASIDES: [StackItem<Aside>; 1] = [StackItem::new(
@@ -31,36 +31,36 @@ impl Panel for FlowTab<'_> {
         let stack_frame = egui::Frame::new()
             .fill(cx.theme.bg)
             .inner_margin(egui::Margin::symmetric(3, 6));
+        let row = ui.available_width();
+        let aside_w = layout::flow_aside(row, layout.aside.map(|_| layout.sizes.aside));
         egui::SidePanel::right("flow-aside-stack")
             .resizable(false)
-            .exact_width(WIDTH + 6.0)
+            .exact_width(cx.theme.spacing.stack_w)
             .frame(stack_frame)
             .show_inside(ui, |ui| {
                 if let Some(a) = icon_stack(ui, &ASIDES, layout.aside, Opens::Left) {
                     cx.send(ViewCmd::Aside(a));
                 }
             });
-        let r = egui::SidePanel::right(sized_panel("flow-aside"))
-            .resizable(true)
-            .default_width(fs(layout.sizes.aside))
-            .width_range(fs(240.0)..=fs(700.0))
-            .show_animated_inside(ui, layout.aside.is_some(), |ui| match layout.aside {
-                Some(Aside::Suggestions) | None => {
-                    let lib = &mut *self.library;
-                    let focus = lib.focused_pane == Pane::Suggest;
-                    let table = lib.tables.get_mut(TableView::Suggest);
-                    if lib
-                        .suggest
-                        .show(ui, &cx.core, focus, &mut lib.media, table, cx.out)
-                    {
-                        cx.send(ViewCmd::FocusPane(Pane::Suggest));
+        egui::SidePanel::right("flow-aside")
+            .resizable(false)
+            .exact_width(aside_w.max(1.0))
+            .show_animated_inside(ui, layout.aside.is_some(), |ui| {
+                match layout.aside {
+                    Some(Aside::Suggestions) | None => {
+                        let lib = &mut *self.library;
+                        let focus = lib.focused_pane == Pane::Suggest;
+                        let table = lib.tables.get_mut(TableView::Suggest);
+                        if lib
+                            .suggest
+                            .show(ui, &cx.core, focus, &mut lib.media, table, cx.out)
+                        {
+                            cx.send(ViewCmd::FocusPane(Pane::Suggest));
+                        }
                     }
                 }
+                drag_to_resize(ui, Edge::Left, Region::Aside, row, cx);
             });
-        if let Some(r) = r {
-            let w = r.response.rect.width() / text_scale();
-            resized(ui.ctx(), w, Region::Aside, layout.sizes.aside, cx);
-        }
         self.library.show_beside(ui, cx);
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(cx.theme.bg).inner_margin(4))

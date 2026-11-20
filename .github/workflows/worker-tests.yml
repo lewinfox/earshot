@@ -1,0 +1,45 @@
+# The Python worker's tests (`make test-worker`). It's pure Python, so Linux only.
+# Called by ci.yml, which runs them, and cache.yml, which only installs the worker's
+# packages (warm-cache) and saves uv's cache, from develop, where every PR can read
+# it (a cache a PR saved would only serve re-runs of that PR).
+
+name: worker tests
+
+on:
+  workflow_call:
+    inputs:
+      warm-cache:
+        description: Install the packages without running the tests, and save the cache
+        type: boolean
+        default: false
+
+jobs:
+  worker:
+    name: worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.3 # exact versions only: it has no major-version tags
+        with:
+          enable-cache: true
+          save-cache: ${{ inputs.warm-cache }}
+          cache-dependency-glob: worker/uv.lock
+
+      # The tempo lock tests run ffmpeg and Rubber Band as programs.
+      - name: Programs
+        if: ${{ !inputs.warm-cache }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg rubberband-cli
+
+      - name: Install
+        run: uv sync --locked
+
+      - name: Test
+        if: ${{ !inputs.warm-cache }}
+        run: .venv/bin/python -m pytest -q

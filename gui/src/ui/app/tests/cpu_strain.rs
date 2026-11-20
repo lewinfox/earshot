@@ -90,7 +90,7 @@ fn short_of_resources_analysis_is_quick_only_and_the_full_one_runs_once_there_is
     let dir = scratch("cpu-strain-analysis");
     link_tracks(&dir.join("music"));
     let services = Services {
-        db: dir.join(store::FILE_NAME),
+        folders: crate::core::folders::Folders::all_in(&dir),
         null_audio: true,
         worker: stand_in,
         midi: false,

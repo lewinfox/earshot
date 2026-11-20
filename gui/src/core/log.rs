@@ -2,7 +2,7 @@
 //!
 //! Everything written to stderr (ours, and the analysis workers', which inherit it)
 //! still reaches the terminal and is also copied, a line at a time with the time, to
-//! `<data folder>/logs/earshot-<UTC time>.log`. The newest [`KEEP`] logs are kept.
+//! `<state folder>/logs/earshot-<UTC time>.log`. The newest [`KEEP`] logs are kept.
 //! A panic writes its message and a backtrace there; a memory watch notes when the
 //! app grows by another [`STEP`] or the machine runs low (the kernel's out-of-memory
 //! kill can end the whole desktop session, so it's worth seeing coming).
@@ -43,9 +43,10 @@ const LOW: u64 = 1 << 30;
 /// minute at most).
 const STALL: f64 = 5.0;
 
-/// Start logging into `data_dir/logs`. Returns the log's path, or why not.
-pub fn start(data_dir: &Path) -> Result<PathBuf, String> {
-    let dir = data_dir.join("logs");
+/// Start logging into `logs` in `state` (the state folder). Returns the log's path,
+/// or why not.
+pub fn start(state: &Path) -> Result<PathBuf, String> {
+    let dir = state.join("logs");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     prune(&dir);
     let path = dir.join(format!("earshot-{}.log", stamp(SystemTime::now(), true)));

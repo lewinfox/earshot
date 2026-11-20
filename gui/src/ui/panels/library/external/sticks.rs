@@ -33,7 +33,7 @@ use crate::core::view::Source as Pane;
 use crate::ui::panels::CoreView;
 use crate::ui::panels::export::short_kind;
 use crate::ui::panels::library::drag::{self, DragPayload};
-use crate::ui::theme::{THEME, fs};
+use crate::ui::theme::THEME;
 use crate::ui::widgets::{Button, Choice, Note, busy_line, close_only, dialog, go_cancel, muted};
 
 /// What's going onto a stick: dropped on it, or sent with a playlist's menu.
@@ -277,7 +277,7 @@ impl ExternalUi {
         } else {
             (THEME.ok, "Safe to remove")
         };
-        let size = fs(9.0);
+        let size = 9.0;
         let (rect, r) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
         ui.painter()
             .circle_filled(rect.center(), size / 2.0, colour);
@@ -320,11 +320,7 @@ impl ExternalUi {
             return;
         };
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("💾 {}", d.label))
-                    .strong()
-                    .size(fs(15.0)),
-            );
+            ui.label(RichText::new(format!("💾 {}", d.label)).strong().size(15.0));
             let busy = self.light(ui, v, &d);
             muted(ui, if busy { "In use" } else { "Safe to remove" });
             self.eject_button(ui, v, &d, out);
@@ -759,7 +755,7 @@ impl ExternalUi {
         };
         let in_use = v.uses.busy(&f.drive.path) && !f.running;
         let choice = dialog(ctx, format!("Format {}", f.drive.label), |ui| {
-            ui.set_max_width(fs(380.0));
+            ui.set_max_width(380.0);
             match &f.result {
                 Some(Ok(at)) => {
                     let name = at
@@ -797,7 +793,7 @@ impl ExternalUi {
                 let r = ui.add(
                     egui::TextEdit::singleline(&mut f.label)
                         .char_limit(11)
-                        .desired_width(fs(120.0)),
+                        .desired_width(120.0),
                 );
                 if r.changed() {
                     f.label = f

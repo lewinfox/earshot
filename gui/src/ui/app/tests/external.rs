@@ -102,3 +102,49 @@ fn an_imported_playlist_lists_its_tracks() {
         "the first track's row"
     );
 }
+
+/// A folder picked for a library's missing files is kept with it (and searched on
+/// every read from then on), and the library is read again.
+#[test]
+fn a_folder_picked_for_missing_files_is_kept() {
+    let mut h = start_with("pick-folder", crate::core::worker_client::testing::stand_in);
+    let store = h.state().lib.store.clone();
+    let lib = store
+        .call(|w| {
+            w.add_source(&NewSource {
+                kind: SourceKind::RekordboxXml,
+                name: "Rekordbox XML".into(),
+                location: Some("/test/rekordbox.xml".into()),
+                config: Default::default(),
+            })
+        })
+        .unwrap();
+    settle_until(&mut h, |a| a.sources.iter().any(|s| s.id == lib));
+    let folder = scratch("pick-folder-music");
+    for _ in 0..2 {
+        h.state_mut().dispatch(
+            crate::core::external::ExternalCmd::AddFolder {
+                source: lib,
+                folder: folder.clone(),
+            }
+            .into(),
+        );
+    }
+    settle_until(&mut h, |a| {
+        a.sources
+            .iter()
+            .any(|s| s.id == lib && s.config.folders == [folder.clone()])
+    });
+    let s = h
+        .state()
+        .sources
+        .iter()
+        .find(|s| s.id == lib)
+        .unwrap()
+        .clone();
+    assert!(s.search_roots(&[]).contains(&folder));
+    assert!(
+        h.state().panels.library.external.status(lib).is_some(),
+        "read again"
+    );
+}

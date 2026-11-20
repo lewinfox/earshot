@@ -1,6 +1,6 @@
 //! The keyboard map: which key does what, read from a data file (`keymap.txt`, built
 //! in), as controls from the registry ([`super::bus`]). The key help is made from it.
-//! A `keymap.txt` of the user's own in the data folder replaces the built-in one
+//! A `keymap.txt` of the user's own in the config folder replaces the built-in one
 //! ([`load_user`]).
 //!
 //! Keys are kept as names here (core doesn't know egui); the UI turns them into its
@@ -17,7 +17,7 @@ pub const BUILT_IN: &str = include_str!("keymap.txt");
 /// Which of the app's modes a binding works in.
 pub use super::view::Mode;
 
-/// The user's own keymap, in the data folder (beside the database).
+/// The user's own keymap, in the config folder (`core::folders`).
 pub const FILE_NAME: &str = "keymap.txt";
 
 /// Where the keymap in use came from.
@@ -347,6 +347,34 @@ mod tests {
         assert!(e.contains("line 2"), "{e}");
         assert_eq!(k.bindings.len(), Keymap::built_in().bindings.len());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// G and H switch the hands between their decks; the effect unit's switch is on B.
+    #[test]
+    fn the_layer_keys() {
+        use crate::core::bus::FxControl;
+        let km = Keymap::built_in();
+        let on = |key: &str, shift: bool| km.find(Mode::Perform, key, shift).map(|b| b.control);
+        let deck = |i| earshot_engine::DeckId::new(i).unwrap();
+        assert_eq!(
+            on("G", false),
+            Some(Control::Deck(deck(0), DeckControl::LayerToggle))
+        );
+        assert_eq!(
+            on("H", false),
+            Some(Control::Deck(deck(1), DeckControl::LayerToggle))
+        );
+        assert_eq!(on("B", false), Some(Control::Fx(0, FxControl::On)));
+        assert!(matches!(on("B", true), Some(Control::Fx(0, c)) if c != FxControl::On));
+        // The key help says so.
+        let help = km.help(Mode::Perform);
+        let rows: Vec<&(String, String)> = help.iter().flat_map(|s| &s.rows).collect();
+        assert!(
+            rows.iter()
+                .any(|(k, what)| k == "G" && what.contains("between its two decks")),
+            "{rows:?}"
+        );
+        assert!(rows.iter().any(|(k, _)| k == "H"), "{rows:?}");
     }
 
     #[test]

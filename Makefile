@@ -2,7 +2,7 @@
 
 PACKAGES := earshot-gui earshot-engine earshot-audio
 
-.PHONY: help run run-release release install test test-worker fmt clean clean-all clean-db bundle
+.PHONY: help run run-release release install test test-worker fmt clean clean-all clean-db bundle packages
 
 help:
 	@echo "make run          run the app (debug build)"
@@ -16,27 +16,37 @@ help:
 	@echo "make clean-all    delete everything in target/ (next build is from scratch)"
 	@echo "make clean-db     delete the library database (after a schema change)"
 	@echo "make bundle       a Linux release folder, ready to run (target/bundle/earshot)"
+	@echo "make packages     the .deb and .rpm from that folder (target/packages)"
 
-run:
+# Running from a checkout uses the worker's own venv (worker/setup.sh), made or
+# brought up to date first when it's missing or older than the worker's lockfile.
+# (A release ships its worker ready-made: packaging/bundle.sh.)
+WORKER_VENV := worker/.venv/.setup-done
+
+$(WORKER_VENV): worker/uv.lock worker/pyproject.toml
+	worker/setup.sh
+	touch $@
+
+run: $(WORKER_VENV)
 	cargo run -p earshot-gui
 
-run-release:
+run-release: $(WORKER_VENV)
 	cargo run --release -p earshot-gui
 
 # Builds and publishes a release on GitHub (packaging/release.sh says what it checks).
 release:
 	packaging/release.sh
 
-# The menu entry runs target/release/earshot-gui in this checkout: run again after
+# The menu entry runs target/release/earshot in this checkout: run again after
 # moving it.
-install:
+install: $(WORKER_VENV)
 	cargo build --release -p earshot-gui
 	gui/install-desktop.sh
 
 test:
 	cargo test --workspace -- --test-threads=4
 
-test-worker:
+test-worker: $(WORKER_VENV)
 	cd worker && .venv/bin/python -m pytest -q
 
 fmt:
@@ -45,8 +55,12 @@ fmt:
 # What a release ships (README "Releases"), checked with its own Python.
 bundle:
 	cargo build --release --locked -p earshot-gui
-	packaging/bundle.sh linux-x86_64 target/release/earshot-gui target/bundle/earshot
+	packaging/bundle.sh linux-x86_64 target/release/earshot target/bundle/earshot
 	target/bundle/earshot/python/bin/python3 packaging/smoke_test.py target/bundle/earshot
+
+# The Linux packages from what `make bundle` made (run that first).
+packages:
+	packaging/linux/package.sh target/bundle/earshot target/packages $$(git rev-parse --short HEAD)
 
 # Every build of our crates with different settings leaves its own ~400 MB binary,
 # and cargo never deletes old ones. The libraries we depend on rarely change, so
@@ -58,11 +72,11 @@ clean:
 clean-all:
 	cargo clean
 
-# The data folder, as core/services.rs `data_dir` finds it.
+# The data folder, as core/folders.rs `data_folder` finds it.
 ifeq ($(shell uname),Darwin)
 DATA_DIR ?= $(or $(EARSHOT_DATA_DIR),$(HOME)/Library/Application Support/io.github.lewinfox.earshot)
 else
-DATA_DIR ?= $(or $(EARSHOT_DATA_DIR),$(or $(XDG_DATA_HOME),$(HOME)/.local/share)/io.github.lewinfox.earshot)
+DATA_DIR ?= $(or $(EARSHOT_DATA_DIR),$(or $(XDG_DATA_HOME),$(HOME)/.local/share)/earshot)
 endif
 
 # The database (tracks, analysis, playlists and the settings kept in it) and its

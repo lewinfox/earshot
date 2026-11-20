@@ -147,26 +147,38 @@ def test_cues_and_grids_come_on_earshots_timeline(tmp_path):
         assert m == pytest.approx({"start_s": 0.5 - s, "bpm": 120.0, "beat": 1})
 
 
-def test_files_on_another_drive_are_found(tmp_path, monkeypatch):
-    """On Windows, a library from another computer whose music is now on another
-    drive: searched only once the usual places have been."""
+def test_files_are_looked_for_only_inside_the_roots(tmp_path, monkeypatch):
+    """A library from another computer whose music is elsewhere here: not searched
+    for above the roots (on macOS listing the home folder raises privacy prompts),
+    found once the user picks the folder it's in."""
     from earshot_worker import libraries
 
-    music, other = tmp_path / "C/Users/me/Music", tmp_path / "E"
+    home = tmp_path / "home"
+    music, elsewhere = home / "Music", home / "Elsewhere"
     music.mkdir(parents=True)
-    (other / "DJ/house").mkdir(parents=True)
+    (elsewhere / "DJ/house").mkdir(parents=True)
     for name, data in (("a.mp3", b"aaaa"), ("b.mp3", b"bbbbbb")):
-        (other / "DJ/house" / name).write_bytes(data)
+        (elsewhere / "DJ/house" / name).write_bytes(data)
     lib = cratelib.Library("test")
     lib.add_track(cratelib.Track("1", "D:/Music/house/a.mp3", title="A", file_size=4))
     lib.add_track(cratelib.Track("2", "D:/Music/house/b.mp3", title="B", file_size=6))
     monkeypatch.setattr(libraries, "send", lambda _: None)
+    monkeypatch.setattr(Path, "home", lambda: home)
 
-    monkeypatch.setattr(libraries, "drives", list)
-    assert libraries.find_files(lib, [music], {}) == {}, "not without other drives"
-    monkeypatch.setattr(libraries, "drives", lambda: [other])
-    assert libraries.find_files(lib, [music], {}) == {str(other / "DJ"): "D:/Music"}
-    assert lib.tracks["1"].file == other / "DJ/house/a.mp3"
+    assert libraries.find_files(lib, [music], {}) == {}, "not above the music folder"
+    assert lib.tracks["1"].file is None
+    assert libraries.find_files(lib, [music, elsewhere], {}) == {str(elsewhere / "DJ"): "D:/Music"}
+    assert lib.tracks["1"].file == elsewhere / "DJ/house/a.mp3"
+
+
+def test_without_roots_nothing_is_searched(tmp_path, monkeypatch):
+    from earshot_worker import libraries
+
+    lib = cratelib.Library("test")
+    lib.add_track(cratelib.Track("1", "D:/Music/a.mp3", title="A", file_size=4))
+    monkeypatch.setattr(libraries, "discover", lambda *a, **k: pytest.fail("searched"))
+    assert libraries.find_files(lib, [], {"x": "y"}) == {"x": "y"}
+    assert libraries.find_files(lib, [tmp_path / "gone"], {}) == {}
 
 
 def write(spec: dict) -> list[dict]:

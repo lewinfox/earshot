@@ -222,9 +222,12 @@ python -m earshot_worker.libraries write < SPEC    # write a library (gui/src/co
 - Finding the files when the program stores other paths (Wine, a container, another
   computer, a changed drive letter): `--paths` gives the rules found before (JSON
   `{our folder: the program's}`; Wine's `Z:` is `/` anyway). Tracks still missing are
-  looked for by name and size (cratelib's `discover`), from the `--root` folders
-  (earshot's music folders and the system Music folder) outwards, never above the
-  home folder or `/media`, `/mnt`, `/Volumes`. A found file's path and its location
+  looked for by name and size (cratelib's `discover`), only inside the `--root`
+  folders (earshot's music folders, the system Music folder and the folders the user
+  picked for that library), never above them: listing the home folder would go
+  through Downloads, Documents and other apps' data, which macOS asks the user about
+  folder by folder. For files elsewhere the app has the user pick the folder they're
+  in. A found file's path and its location
   share an ending; what's before it is a rule. `read` returns the rules that apply as
   `paths`, for earshot to keep (and check at startup).
 - `--cues` adds each track's `cues` (`role`, `start_s`, `end_s`, `slot`: hot cue pad
