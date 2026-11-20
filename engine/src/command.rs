@@ -146,8 +146,8 @@ pub enum DeckCmd {
     },
     /// A jog wheel's side (or its top, out of vinyl mode) turned this many seconds of
     /// track, at this time: a playing deck speeds up or slows down while it turns and
-    /// springs back; a stopped one moves through the track as far as the bend would
-    /// have taken it (a fifth of the turn: see `BEND`), playing what passes.
+    /// springs back (see `BEND`); a stopped one moves through the track a fifth of
+    /// the turn (`STOPPED_JOG`), playing what passes.
     Bend {
         by: f64,
         at: Instant,
