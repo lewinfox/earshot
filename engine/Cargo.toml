@@ -1,12 +1,12 @@
 [package]
 name = "earshot-engine"
-version = "0.1.1"
+version = "0.1.2"
 license = "MIT"
 edition = "2024"
 
 [dependencies]
 cpal = "0.18.2"
-earshot-audio = { version = "0.1.1", path = "../audio" }
+earshot-audio = { version = "0.1.2", path = "../audio" }
 rtrb = "0.4.0"
 serde = { version = "1.0.229", features = ["derive"] }
 # Keylock: pitch-shifting (C++, built with the system compiler; bindgen needs libclang).

@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 directories = "6.0.0"
-earshot-engine = { version = "0.1.1", path = "../engine" }
+earshot-engine = { version = "0.1.2", path = "../engine" }
 eframe = { version = "0.33.3", features = ["persistence"] }
 egui = "0.33.3"
 egui_extras = "0.33.3"

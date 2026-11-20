@@ -1272,7 +1272,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "earshot-audio"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "half",
  "realfft",
@@ -1282,7 +1282,7 @@ dependencies = [
 
 [[package]]
 name = "earshot-engine"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cpal",
  "earshot-audio",
@@ -1295,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "earshot-gui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "alsa",
  "crc32fast",
