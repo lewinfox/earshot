@@ -1596,6 +1596,18 @@ mod tests {
         };
         assert!((by + 0.005).abs() < 1e-9, "{by}");
         assert!(command::direct(cmd([0xB0, 0x22, 65]).unwrap()).is_ok());
+        // The top turned while touched (what the DDJ-400 sends while scratching)
+        // scratches too, on both decks: it isn't a bend.
+        for (status, d) in [(0xB0, 0), (0xB1, 1)] {
+            assert!(
+                matches!(
+                    cmd([status, 0x23, 66]),
+                    Some(Command::Deck(dk, DeckCmd::Engine(EngineCmd::HandMove { by, .. })))
+                        if dk == deck(d) && by > 0.0
+                ),
+                "{status:02X} 23 scratches"
+            );
+        }
         // The side bends.
         assert!(matches!(
             cmd([0xB1, 0x21, 66]),

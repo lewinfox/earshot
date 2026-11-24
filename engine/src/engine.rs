@@ -3117,6 +3117,43 @@ mod tests {
         assert!((rig.pos(0) - t - 1.0).abs() < 0.01);
     }
 
+    /// In vinyl mode, a hand on the jog wheel moves the track as far as the wheel turns
+    /// (a record's worth: 1.8 s a turn), playing or stopped: the bend's strength has
+    /// nothing to do with it.
+    #[test]
+    fn a_scratch_moves_the_track_as_far_as_the_hand() {
+        for playing in [false, true] {
+            let mut rig = Rig::new();
+            rig.load(0, 124.0, 124.0);
+            if playing {
+                rig.deck(0, DeckCmd::Play(Set::On));
+            }
+            rig.run(0.2);
+            assert!(rig.snap().decks[0].vinyl);
+            rig.deck(0, DeckCmd::Hand(true));
+            rig.run(0.05);
+            let start = rig.pos(0);
+            // Half a second of track, over 50 blocks.
+            for _ in 0..50 {
+                rig.deck(
+                    0,
+                    DeckCmd::HandMove {
+                        by: 0.01,
+                        at: Instant::now(),
+                    },
+                );
+                rig.run(0.01);
+            }
+            // Still held, the hand still: the record catches up with it.
+            rig.run(1.0);
+            let moved = rig.pos(0) - start;
+            assert!(
+                (moved - 0.5).abs() < 0.05,
+                "playing {playing}: moved {moved}"
+            );
+        }
+    }
+
     /// Turning the jog wheel out of vinyl mode bends the speed smoothly, with keylock
     /// or a key shift too: no clicks where the speed changes, block to block.
     #[test]

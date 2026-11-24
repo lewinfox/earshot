@@ -1291,7 +1291,7 @@
       "ticks": 720
     },
     {
-      "command": "deck_1_pitch_bend",
+      "command": "deck_1_scratch",
       "input": "jog",
       "message": "B0 23",
       "ticks": 720
@@ -1315,7 +1315,7 @@
       "ticks": 720
     },
     {
-      "command": "deck_2_pitch_bend",
+      "command": "deck_2_scratch",
       "input": "jog",
       "message": "B1 23",
       "ticks": 720
