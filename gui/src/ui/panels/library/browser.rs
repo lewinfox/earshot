@@ -621,8 +621,8 @@ impl LibraryUi {
                     };
                     ui.label(RichText::new(text).color(THEME.warn))
                         .on_hover_text(format!(
-                            "{n} track{} in a bucket that can't be reached now, and not \
-                             downloaded, so {} couldn't be loaded. Back when the bucket is.",
+                            "{n} track{} in a bucket and not downloaded, so {} couldn't \
+                             be loaded while this computer is offline. Back when it's online.",
                             if n == 1 { " is" } else { "s are" },
                             if n == 1 { "it" } else { "they" },
                         ));

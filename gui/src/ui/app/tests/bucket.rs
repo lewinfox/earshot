@@ -135,27 +135,20 @@ fn a_bucket_is_added_browsed_and_downloaded_from_when_a_track_is_loaded() {
         .unwrap();
     assert_eq!(h.state().index.downloaded(local), None);
 
-    // No connection: the bucket's tracks that aren't downloaded leave the lists (they
-    // couldn't be loaded), the downloaded one and the folder's stay.
-    let bucket = h
-        .state()
-        .sources
-        .iter()
-        .find(|s| s.kind.is_bucket())
-        .unwrap()
-        .id;
+    // The computer offline: the bucket tracks that aren't downloaded leave the lists
+    // (they couldn't be loaded); the downloaded one and the folder's stay.
     let listed = |a: &EarshotApp| {
         let all = crate::core::query::parse("").unwrap();
         a.index.query(&all, &a.collections, None)
     };
     assert_eq!(listed(h.state()).len(), TRACKS.len() + 3);
-    service.unplug(true);
-    h.state_mut().dispatch(BucketCmd::Scan(bucket).into());
-    settle_until(&mut h, |a| {
-        a.index.is_hidden(two.0) && a.index.is_hidden(three.0) && !a.index.is_hidden(one.0)
-    });
+    service.asked();
+    h.state_mut().set_online(false);
+    assert!(h.state().index.is_hidden(two.0) && h.state().index.is_hidden(three.0));
+    assert!(!h.state().index.is_hidden(one.0));
     let now = listed(h.state());
     assert_eq!(now.len(), TRACKS.len() + 1);
+    assert!(now.contains(&one.0) && now.contains(&local));
     // The list says how many it leaves out; the Sources pane, why.
     h.state_mut()
         .dispatch(ViewCmd::SetMode(Mode::Perform).into());
@@ -163,16 +156,16 @@ fn a_bucket_is_added_browsed_and_downloaded_from_when_a_track_is_loaded() {
         .dispatch(ViewCmd::Source(Some(crate::core::view::Source::Manage)).into());
     steps(&mut h, 2);
     h.get_by_label("☁ 2 hidden");
-    h.get_by_label_contains("Can't be reached");
+    h.get_by_label_contains("This computer is offline");
     render(&mut h, "bucket-offline");
-    assert!(now.contains(&one.0) && now.contains(&local));
-    assert_eq!(h.state().buckets.unreachable(), [bucket]);
-    // Connected again, and asked (as it is every so often): they're back.
-    service.unplug(false);
-    h.state().buckets.probe(bucket);
+    // Nothing was asked of the bucket meanwhile.
+    settle(&mut h);
+    assert_eq!(service.asked(), []);
+    // Online again: they're back, and the bucket is read through for changes.
+    h.state_mut().set_online(true);
     settle_until(&mut h, |a| a.index.hidden_count() == 0);
     assert_eq!(listed(h.state()).len(), TRACKS.len() + 3);
-    assert!(h.state().buckets.unreachable().is_empty());
+    assert!(service.asked().iter().any(|r| r.what == "LIST"));
 
     // A crate kept offline: its bucket tracks are downloaded now, and one added to it
     // later is too.

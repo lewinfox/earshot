@@ -1,5 +1,5 @@
-//! Where tracks come from: earshot's music folders, S3-compatible buckets, other DJ
-//! programs' libraries and, later, streaming services. Each is a [`Source`], a row of the Store's
+//! Where tracks come from: earshot's music folders, S3-compatible buckets and other DJ
+//! programs' libraries. Each is a [`Source`], a row of the Store's
 //! `sources` table; the library pane's Sources lists them, and a track is in the
 //! library while an enabled source has it (`track_sources`). What reads each kind is
 //! elsewhere: folders are scanned by `core::library`, buckets are listed and read by
@@ -232,9 +232,6 @@ impl Source {
             .map(|l| l.to_string_lossy().into_owned())
     }
 }
-
-/// Streaming services the pane lists as coming (not sources yet).
-pub const STREAMING: [&str; 3] = ["SoundCloud", "Beatport", "Spotify"];
 
 #[cfg(test)]
 mod tests {

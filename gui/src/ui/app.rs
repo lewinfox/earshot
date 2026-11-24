@@ -129,9 +129,9 @@ pub struct EarshotApp {
     /// Buckets being read through that the user didn't ask to be (at startup): a
     /// failure is logged, not shown (there may just be no connection).
     bucket_quiet: std::collections::HashSet<crate::core::sources::SourceId>,
-    /// When the buckets that can't be reached are next asked whether they're there
-    /// again (`None`: they all can be).
-    bucket_probe_at: Option<Instant>,
+    /// The computer is online (`core::online`). While it isn't, bucket tracks that
+    /// aren't downloaded are left out of the lists.
+    online: bool,
 
     // ---- core state the UI holds ---------------------------------------------------------
     /// The library, collections and play history: the domain state the panes read.
@@ -355,6 +355,12 @@ impl EarshotApp {
             let sink = sink.clone();
             crate::core::drives::watch(drives_stop.0.clone(), move |d| sink(Event::Drives(d)));
         }
+        // Whether the computer is online (a test says: it's taken to be until then).
+        let online = !watching || crate::core::online::online();
+        if watching {
+            let sink = sink.clone();
+            crate::core::online::watch(drives_stop.0.clone(), move |on| sink(Event::Online(on)));
+        }
         let analyser =
             Analyser::start(sink.clone(), player.clone(), store.clone(), services.worker);
         let hasher = library::start_hasher(store.clone());
@@ -460,7 +466,7 @@ impl EarshotApp {
             offline: settings.s3_offline.iter().copied().collect(),
             offline_asked: Default::default(),
             bucket_quiet: Default::default(),
-            bucket_probe_at: None,
+            online,
             index: LibraryIndex::default(),
             collections: Collections::default(),
             history: History::default(),
@@ -1640,7 +1646,6 @@ impl eframe::App for EarshotApp {
             self.dispatch(ViewCmd::UiScale(z).into());
         }
         self.tick_hud(ctx);
-        self.probe_buckets();
         self.track_plays();
         self.refresh_suggestions();
         self.save_tempo_ranges();

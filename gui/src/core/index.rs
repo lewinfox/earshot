@@ -22,8 +22,8 @@ pub struct LibraryIndex {
     /// Tracks whose audio is in a bucket: whether each has been downloaded (it plays
     /// without a connection). Local tracks aren't here.
     downloaded: HashMap<TrackId, bool>,
-    /// Bucket tracks that can't be played now: not downloaded, and their bucket
-    /// can't be reached. Lists and suggestions leave them out.
+    /// Bucket tracks that can't be played now: not downloaded, with the computer
+    /// offline. Lists and suggestions leave them out.
     hidden: std::collections::HashSet<TrackId>,
     /// Bumped whenever track data changes, so views built from it know to refresh.
     rev: u64,
@@ -105,8 +105,8 @@ impl LibraryIndex {
         self.downloaded.get(&id).copied()
     }
 
-    /// The track can't be played now (its bucket can't be reached, and it isn't
-    /// downloaded): lists leave it out until it can.
+    /// The track can't be played now (it's in a bucket, not downloaded, and the
+    /// computer is offline): lists leave it out until it can.
     pub fn is_hidden(&self, id: TrackId) -> bool {
         self.hidden.contains(&id)
     }

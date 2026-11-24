@@ -107,8 +107,9 @@ pub enum Source {
     Library(SourceId),
     /// A USB stick, while it's plugged in, by [`Drive::id`](crate::core::drives::Drive::id).
     Stick(u64),
-    /// Managing where music comes from: the music folders, adding libraries, and
-    /// (to come) streaming services.
+    /// Managing where music comes from: the music folders, buckets, and adding
+    /// libraries. (The streaming services' names are what older saved layouts called
+    /// panes that never were.)
     #[serde(alias = "Sources", alias = "Explorer", alias = "External")]
     #[serde(alias = "SoundCloud", alias = "Beatport", alias = "Spotify")]
     Manage,

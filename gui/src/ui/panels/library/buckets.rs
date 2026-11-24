@@ -38,8 +38,8 @@ pub struct BucketsUi {
     scanning: HashSet<SourceId>,
     /// How each one's last read went: what it found, or why it failed.
     last: HashMap<SourceId, Result<Scan, String>>,
-    /// The ones whose service can't be reached now (no connection).
-    unreachable: HashSet<SourceId>,
+    /// The computer is offline: only downloaded tracks are listed.
+    offline: bool,
 }
 
 impl BucketsUi {
@@ -59,9 +59,9 @@ impl BucketsUi {
         !self.sources.is_empty()
     }
 
-    /// The buckets whose service can't be reached now, whenever that changes.
-    pub fn set_unreachable(&mut self, sources: Vec<SourceId>) {
-        self.unreachable = sources.into_iter().collect();
+    /// The computer went offline, or is online again.
+    pub fn set_online(&mut self, online: bool) {
+        self.offline = !online;
     }
 
     /// A bucket is being read through.
@@ -110,6 +110,14 @@ impl BucketsUi {
         let mut picked = None;
         if self.sources.is_empty() {
             muted(ui, "No buckets yet.");
+        } else if self.offline {
+            ui.add(
+                Note::warning(
+                    "This computer is offline: only the tracks already downloaded are \
+                     listed. The rest are back when it's online.",
+                )
+                .small(),
+            );
         }
         for s in self.sources.clone() {
             let Some(url) = s.bucket_url() else { continue };
@@ -153,15 +161,7 @@ impl BucketsUi {
                     ui.close();
                 }
             });
-            if self.unreachable.contains(&s.id) {
-                ui.add(
-                    Note::warning(
-                        "Can't be reached: only its downloaded tracks are listed. \
-                         Trying again every so often.",
-                    )
-                    .small(),
-                );
-            } else if self.scanning.contains(&s.id) {
+            if self.scanning.contains(&s.id) {
                 busy_line(ui, "", "Reading…");
             } else {
                 match self.last.get(&s.id) {

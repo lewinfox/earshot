@@ -49,7 +49,6 @@ use crate::core::collections::{CollectionCmd, CollectionId, CollectionKind, Coll
 use crate::core::command::{Command, ViewCmd};
 use crate::core::external::NodePath;
 use crate::core::outside::is_outside;
-use crate::core::sources::STREAMING;
 use crate::core::sources::SourceId;
 use crate::core::track::TrackId;
 use crate::core::view::{Aside, Mode, Pane, Region, Source};
@@ -604,7 +603,7 @@ impl LibraryPane {
     }
 
     /// Managing sources: the music folders (picking one lists its files in the
-    /// middle), adding libraries, and streaming services to come.
+    /// middle), buckets, and adding libraries.
     fn manage(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let before = self.browser.scope().clone();
         egui::ScrollArea::vertical()
@@ -621,11 +620,6 @@ impl LibraryPane {
                 ui.add_space(10.0);
                 heading(ui, cx, "Other libraries");
                 self.external.manage(ui, cx.out);
-                ui.add_space(10.0);
-                heading(ui, cx, "Streaming");
-                for name in STREAMING {
-                    ui.label(RichText::new(format!("{name}  ·  coming")).color(cx.theme.muted));
-                }
             });
         // A folder was picked: it's what the middle lists now.
         if *self.browser.scope() != before && matches!(self.browser.scope(), Scope::Folder(_)) {

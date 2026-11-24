@@ -19,6 +19,7 @@ impl EarshotApp {
                 Event::Store(e) => self.store_event(e),
                 Event::External(e) => self.external_event(e),
                 Event::Bucket(e) => self.bucket_event(e),
+                Event::Online(online) => self.set_online(online),
                 Event::Export(e) => self.export_event(e),
                 Event::Drives(d) => self.drives_changed(d),
                 Event::Duplicates(Ok(groups)) => self.panels.library.browser.set_duplicates(groups),
@@ -144,10 +145,6 @@ impl EarshotApp {
                     .collect();
                 self.buckets.set_sources(&list);
                 self.sources = list;
-                self.panels
-                    .library
-                    .buckets
-                    .set_unreachable(self.buckets.unreachable());
                 self.refresh_downloads();
             }
             StoreEvent::Library(tracks) => {

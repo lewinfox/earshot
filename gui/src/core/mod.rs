@@ -34,6 +34,7 @@ pub mod log;
 pub mod memlock;
 pub mod midi;
 pub mod notice;
+pub mod online;
 pub mod outputs;
 pub mod outside;
 pub mod pads;
@@ -100,6 +101,8 @@ pub enum Event {
     Export(export::ExportEvent),
     /// Bucket sources: one saved, read through, a track downloaded.
     Bucket(bucket::BucketEvent),
+    /// The computer went offline, or is online again (`online::watch`).
+    Online(bool),
     /// News from the tempo lock tool.
     #[allow(dead_code)] // read by the tempo lock tab (step 7, B4)
     TempoLock(tempo_lock::TempoLockEvent),
