@@ -278,6 +278,24 @@ pub fn aspect(tempo_fader: bool) -> f32 {
     width(1.0, tempo_fader) / height(1.0)
 }
 
+/// The size of each deck when four show in a decks' row `row` big (inside its
+/// margins; its height the most it may take): two to a side, `stack` apart, either
+/// side of the mixer `mixer` wide (0 if none), `gap` between the columns and the
+/// mixer. They keep their design shape ([`aspect`]), as wide as their column, or as
+/// tall as the row lets two of them be.
+pub fn four_deck_size(
+    row: egui::Vec2,
+    mixer: f32,
+    gap: f32,
+    stack: f32,
+    tempo_fader: bool,
+) -> egui::Vec2 {
+    let gaps = if mixer > 0.0 { 2.0 } else { 1.0 } * gap;
+    let w = ((row.x - mixer - gaps) / 2.0).max(0.0);
+    let h = (w / aspect(tempo_fader)).min(((row.y - stack) / 2.0).max(0.0));
+    vec2(w, h)
+}
+
 /// The biggest scale at which a deck's controls fit a deck `size` big (its frame
 /// included): as wide as it is, under the header and the overview at its least.
 pub fn scale_to_fit(size: egui::Vec2, tempo_fader: bool) -> f32 {
@@ -617,17 +635,22 @@ impl DeckUi {
         info: &DeckInfo,
         out: &mut Vec<Command>,
     ) {
-        let DeckLayout { side, tempo_fader } = layout;
+        let DeckLayout {
+            side,
+            tempo_fader,
+            four,
+        } = layout;
         self.side = side;
         let loading = self.pending.as_ref().map(PendingLoad::info);
         let info = loading.as_ref().unwrap_or(info);
-        // `width: 100%; flex: 1 1 auto` with its aspect ratio: its height follows its
-        // width, and it stretches if the column is taller.
-        let mut style = leaf().w_pct(1.0).aspect(aspect(tempo_fader));
-        style.flex_grow = 1.0;
+        // As tall as a deck of four (`flex: 1 1 <four.y>`), and taller if the column is
+        // (the overview takes the room).
+        let mut style = leaf().grow();
+        style.flex_basis = flex::taffy::style_helpers::length(four.y);
         let rect = flex::framed(t, style, THEME.panel_frame(), |t, rect| {
+            // Never bigger than a deck of four, so every deck is drawn the same.
             self.dims = Dims {
-                k: scale_to_fit(rect.size(), tempo_fader),
+                k: scale_to_fit(rect.size(), tempo_fader).min(scale_to_fit(four, tempo_fader)),
             };
             t.egui_style_mut().spacing.item_spacing = vec2(4.0, 5.0);
             // The tempo fader on the outside edge (its buttons in the header without it).
@@ -972,6 +995,9 @@ pub struct DeckLayout {
     /// The tempo fader on its outer edge (off while the mixer's controls are hidden:
     /// a controller has its own); without it SYNC, Q and KEY go in the header.
     pub tempo_fader: bool,
+    /// A deck's size when four are showing ([`four_deck_size`]): every deck is drawn
+    /// at that size, whether one, two or four show.
+    pub four: egui::Vec2,
 }
 
 #[cfg(test)]
@@ -1125,11 +1151,13 @@ mod tests {
         let mut deck = DeckUi::new(DeckId::new(0).unwrap());
         deck.start_load(pending(7, "Glide"));
         let info = info("Old track", TrackCues::default());
+        let size = vec2(680.0, 200.0);
         let layout = DeckLayout {
             side: Side::Left,
             tempo_fader: true,
+            four: size,
         };
-        let mut h = deck_harness(deck, info, vec2(680.0, 200.0), layout);
+        let mut h = deck_harness(deck, info, size, layout);
         h.run_steps(4);
         assert!(h.query_by_label("Glide - Someone").is_some());
         assert!(h.query_by_label("Old track").is_none());
@@ -1151,7 +1179,11 @@ mod tests {
                     assert!((scale_to_fit(size, tempo_fader) - k).abs() < 0.01, "{what}");
                     let deck = DeckUi::new(DeckId::new(0).unwrap());
                     let info = info("A track", TrackCues::default());
-                    let layout = DeckLayout { side, tempo_fader };
+                    let layout = DeckLayout {
+                        side,
+                        tempo_fader,
+                        four: size,
+                    };
                     let mut h = deck_harness(deck, info, size, layout);
                     h.run_steps(6);
                     let window = egui::Rect::from_min_size(egui::Pos2::ZERO, size).expand(0.5);

@@ -8,7 +8,7 @@ use super::{Panels, library};
 use crate::core::view::Region;
 use crate::ui::flex::{self, Flex, Tui, TuiBuilderLogic, col, leaf, row};
 use crate::ui::layout::{DECKS_SHARE, Edge, STACK_GAP, WAVE_GAP};
-use crate::ui::panels::deck::{DeckLayout, Side, WavePanel};
+use crate::ui::panels::deck::{self, DeckLayout, Side, WavePanel};
 use crate::ui::panels::mixer::{self, MixerPanel};
 use crate::ui::panels::{Cx, Panel, drag_to_resize};
 
@@ -49,15 +49,26 @@ pub fn decks_rows(t: &mut Tui, panels: &mut Panels, cx: &mut Cx) {
         return;
     }
     // `| left decks | mixer | right decks |`: the decks share what the mixer leaves,
-    // each as tall as its width makes it (its aspect ratio), and the row is as tall
-    // as they are (never more than its share of the window). The mixer stretches to
-    // the row's height.
+    // and every deck is as big as one of four would be here, however many show (so
+    // two decks look as they do in four), and the row is as tall as they are (never
+    // more than its share of the window). The mixer stretches to the row's height.
     let row_style = row()
         .gap(sp.item.x)
         .pad(sp.row_margin)
         .max_h_pct(DECKS_SHARE)
         .no_shrink();
     let tempo_fader = shell.mixer;
+    let margins = sp.row_margin.sum();
+    let row_room = egui::vec2(
+        shell.size.x - margins.x,
+        shell.size.y * DECKS_SHARE - margins.y,
+    );
+    let mixer4_w = if shell.mixer {
+        mixer::outer_size(4, mixer::SCALE).x
+    } else {
+        0.0
+    };
+    let four = deck::four_deck_size(row_room, mixer4_w, sp.item.x, STACK_GAP, tempo_fader);
     t.style(row_style).add(|t| {
         let side = |d: &DeckId| {
             if mixer::on_left(*d) {
@@ -77,6 +88,7 @@ pub fn decks_rows(t: &mut Tui, panels: &mut Panels, cx: &mut Cx) {
                         DeckLayout {
                             side: s,
                             tempo_fader,
+                            four,
                         },
                         info,
                         cx.out,

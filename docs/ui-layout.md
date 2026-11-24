@@ -29,9 +29,9 @@ window (ui/window.rs: smallest 1024 x 640, kept on the screen, UI size)
 ├─ top bar            panels/status.rs    its effect units wrap to a second line
 ├─ shell              views/mod.rs        one column, everything between the bars:
 │  ├─ waveforms         views/perform.rs    its share of the height, draggable
-│  ├─ decks + mixer     views/perform.rs    | decks | mixer | decks |, the decks keep
-│  │                                        their shape (aspect ratio), the row is as
-│  │                                        tall as they are, at most 45% of the window
+│  ├─ decks + mixer     views/perform.rs    | decks | mixer | decks |, every deck the
+│  │                                        size of one of four, the row as tall as
+│  │                                        they are, at most 45% of the window
 │  ├─ tab bar           views/mod.rs        Prepare's tools, Controller's tabs
 │  └─ body              views/mod.rs        the rest: the library, a tool beside it,
 │                                           the Flow canvas
@@ -78,16 +78,18 @@ Two things to know:
   to settle than something with a size from its style, so prefer styles for anything
   that moves when the layout does.
 - **`aspect` needs a width taffy calls definite.** A stretched width isn't; give the
-  part `.w_pct(1.0)` too (see the deck).
+  part `.w_pct(1.0)` too.
 
 ## The decks
 
-A deck keeps its design shape: `deck::aspect()` is its width over its height at scale
-1, and the decks' row gives each deck `width: 100%` of its column and that aspect
-ratio, so its height follows its width. The row is as tall as the decks (and at
-least as tall as the mixer), and at most 45% of the window. Inside its box, a deck
-draws its controls at the biggest scale that fits (`deck::scale_to_fit`), and the
-overview takes the height to spare.
+Every deck is as big as one of four would be, whether one, two or four show, so the
+decks look the same in every mode. `deck::four_deck_size` works that size out from the
+row: two decks to a side keeping their design shape (`deck::aspect()`, width over
+height at scale 1), as wide as their column, or as tall as the row's share of the
+window (45%) lets two of them be. Each deck starts at that height (`flex-basis`) and
+stretches if its column is taller (beside a taller mixer), and draws its controls at
+the biggest scale that fits both its box and a four-deck deck
+(`deck::scale_to_fit`). The overview takes the height to spare.
 
 The controls row is flexbox too: `| CUE / play | page | tabs |`, mirrored on a left
 deck with `.reverse(true)`. The page takes the width to spare and stretches its
@@ -132,7 +134,6 @@ flexbox layout does the normal case; these haven't come back yet:
 - Hiding the waveforms when the body would be too short.
 - Dropping the mixer when the decks would be too small to read beside it.
 - Hiding a library side pane when there's no room for it at its least width.
-- Drawing one or two decks no bigger than four would be.
 
 ## Checking a change
 

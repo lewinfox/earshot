@@ -2709,6 +2709,48 @@ fn a_new_layout_lands_in_one_frame() {
     }
 }
 
+/// Every deck is drawn as big as one of four would be, so two decks look as they do
+/// in four: the same controls at the same size, with and without the mixer.
+#[test]
+fn two_decks_are_as_big_as_four() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = start("as-big-as-four");
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Perform).into());
+    // The decks' CUE buttons: the biggest called CUE (the mixer's are smaller).
+    let cue = |h: &H| {
+        let sizes: Vec<egui::Vec2> = h
+            .query_all_by_label("CUE")
+            .map(|n| n.rect().size())
+            .collect();
+        let big = sizes.iter().map(|s| s.x).fold(0.0, f32::max);
+        sizes
+            .into_iter()
+            .filter(|s| s.x > big - 0.5)
+            .collect::<Vec<_>>()
+    };
+    for size in [vec2(1280.0, 720.0), vec2(1920.0, 1080.0)] {
+        h.set_size(size);
+        for mixer in [true, false] {
+            h.state_mut().dispatch(ViewCmd::ShowMixer(mixer).into());
+            h.state_mut().dispatch(ViewCmd::DeckCount(4).into());
+            steps(&mut h, 6);
+            let four = cue(&h);
+            h.state_mut().dispatch(ViewCmd::DeckCount(2).into());
+            steps(&mut h, 6);
+            let two = cue(&h);
+            let what = format!("{size:?}, mixer {mixer}");
+            assert_eq!((four.len(), two.len()), (4, 2), "{what}");
+            assert!(
+                (two[0].x - four[0].x).abs() < 0.5,
+                "{what}: CUE is {:?} with two decks, {:?} with four",
+                two[0],
+                four[0]
+            );
+        }
+    }
+}
+
 /// The windows over the app (settings, the keymap, the sampler) fit inside the
 /// smallest app window: what's too long for them scrolls.
 #[test]
