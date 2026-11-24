@@ -144,9 +144,15 @@ impl EarshotApp {
                     .collect();
                 self.buckets.set_sources(&list);
                 self.sources = list;
+                self.panels
+                    .library
+                    .buckets
+                    .set_unreachable(self.buckets.unreachable());
+                self.refresh_downloads();
             }
             StoreEvent::Library(tracks) => {
                 self.index.replace(tracks);
+                self.refresh_downloads();
                 self.sync_offline();
                 self.refresh_previews(None);
                 // Tracks came or went: the duplicates may have changed.

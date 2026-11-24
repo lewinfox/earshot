@@ -242,9 +242,18 @@ as you like, each under its own name.
   it into the cache folder first (the status line shows how far it's got); from there
   it's a file like any other. Nothing ever plays off the network. Right-click tracks
   for *Download* and *Remove the download*.
+- **What's downloaded**: a bucket's own list has a column for it: a tick for a track
+  that's downloaded (it plays without a connection), a cloud for one that's only in
+  its bucket. Any other list can show it too: *Downloaded (bucket tracks)* in its
+  columns menu.
 - **Offline**: right-click a crate, playlist or folder of them → *Keep available
   offline* downloads its bucket tracks, now and as more are added to it, so a set
   never depends on the connection.
+- **No connection**: while a bucket can't be reached, its tracks that aren't
+  downloaded are left out of every list and of the suggestions, since they couldn't
+  be loaded; the list's header says how many, and the Sources pane which bucket.
+  earshot asks again every 30 seconds, and they're back when it answers. Tracks
+  already on a deck or in a Flow stay where they are.
 - **The cache** (`s3/` in the cache folder) is kept under a size limit: *Settings →
   Analysis → Bucket downloads limit*, 20 GB until it's set. Over it, the downloads
   used least recently are removed; ones kept available offline never are. Anything

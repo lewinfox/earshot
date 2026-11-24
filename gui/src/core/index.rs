@@ -19,6 +19,12 @@ pub struct LibraryIndex {
     /// so lists, decks and menus can show them, but not part of [`LibraryIndex::tracks`]
     /// (the library).
     outside: HashMap<TrackId, Track>,
+    /// Tracks whose audio is in a bucket: whether each has been downloaded (it plays
+    /// without a connection). Local tracks aren't here.
+    downloaded: HashMap<TrackId, bool>,
+    /// Bucket tracks that can't be played now: not downloaded, and their bucket
+    /// can't be reached. Lists and suggestions leave them out.
+    hidden: std::collections::HashSet<TrackId>,
     /// Bumped whenever track data changes, so views built from it know to refresh.
     rev: u64,
 }
@@ -80,6 +86,36 @@ impl LibraryIndex {
         self.rev
     }
 
+    /// Which bucket tracks are downloaded, and which can't be played now (see the
+    /// fields), whenever either changes.
+    pub fn set_downloads(
+        &mut self,
+        downloaded: HashMap<TrackId, bool>,
+        hidden: std::collections::HashSet<TrackId>,
+    ) {
+        if downloaded != self.downloaded || hidden != self.hidden {
+            self.downloaded = downloaded;
+            self.hidden = hidden;
+            self.rev += 1;
+        }
+    }
+
+    /// For a track in a bucket: whether it has been downloaded. `None`: a local file.
+    pub fn downloaded(&self, id: TrackId) -> Option<bool> {
+        self.downloaded.get(&id).copied()
+    }
+
+    /// The track can't be played now (its bucket can't be reached, and it isn't
+    /// downloaded): lists leave it out until it can.
+    pub fn is_hidden(&self, id: TrackId) -> bool {
+        self.hidden.contains(&id)
+    }
+
+    /// How many tracks are left out of the lists for that.
+    pub fn hidden_count(&self) -> usize {
+        self.hidden.len()
+    }
+
     pub fn get(&self, id: TrackId) -> Option<&Track> {
         match self.by_id.get(&id) {
             Some(&i) => Some(&self.tracks[i]),
@@ -124,6 +160,8 @@ impl LibraryIndex {
         self.tracks
             .iter()
             .chain(more)
+            // Not what can't be played now.
+            .filter(|t| !self.is_hidden(t.id))
             .map(|t| Candidate {
                 id: t.id,
                 bpm: t.bpm,
@@ -152,7 +190,7 @@ impl LibraryIndex {
         within: Option<&[TrackId]>,
     ) -> Vec<TrackId> {
         let cx = self.context(cx);
-        let keep = |t: &&Track| query::eval(&q.expr, t, &cx);
+        let keep = |t: &&Track| !self.is_hidden(t.id) && query::eval(&q.expr, t, &cx);
         let mut out: Vec<&Track> = match within {
             Some(ids) => ids
                 .iter()
@@ -271,6 +309,41 @@ mod tests {
         assert_eq!(ix.analysis(2), None);
         ix.set_analysis(1, None);
         assert_eq!(ix.analysis(1), None);
+    }
+
+    #[test]
+    fn bucket_tracks_that_cant_be_played_now_are_left_out() {
+        let mut ix = LibraryIndex::default();
+        ix.replace(vec![
+            lib(1, "local", None),
+            lib(2, "here", None),
+            lib(3, "away", None),
+        ]);
+        let all = query::parse("").unwrap();
+        // 2 and 3 are a bucket's; 2 is downloaded.
+        let state = HashMap::from([(2, true), (3, false)]);
+        let rev = ix.rev();
+        ix.set_downloads(state.clone(), Default::default());
+        assert!(ix.rev() > rev);
+        assert_eq!(
+            [ix.downloaded(1), ix.downloaded(2), ix.downloaded(3)],
+            [None, Some(true), Some(false)]
+        );
+        assert_eq!(ix.query(&all, &(), None), vec![1, 2, 3]);
+        // The bucket can't be reached: what isn't downloaded leaves every list and
+        // the suggestions, and comes back when it can be.
+        ix.set_downloads(state.clone(), [3].into());
+        assert_eq!(ix.query(&all, &(), None), vec![1, 2]);
+        assert_eq!(ix.query(&all, &(), Some(&[3, 2, 3])), vec![2]);
+        let ids: Vec<i64> = ix.candidates(false).iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![1, 2]);
+        assert_eq!(ix.hidden_count(), 1);
+        assert!(ix.get(3).is_some(), "still a track: on a deck, in a Flow");
+        let rev = ix.rev();
+        ix.set_downloads(state.clone(), [3].into());
+        assert_eq!(ix.rev(), rev, "nothing changed");
+        ix.set_downloads(state, Default::default());
+        assert_eq!(ix.query(&all, &(), None), vec![1, 2, 3]);
     }
 
     #[test]

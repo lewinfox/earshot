@@ -347,7 +347,12 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 /// A connection to one bucket. Reads only: nothing here writes to a bucket.
 pub struct Client {
     store: AmazonS3,
+    /// Told after each request whether the service answered ([`Client::watched`]).
+    watch: Option<Watch>,
 }
+
+/// Hears whether a bucket's service could be reached, request by request.
+type Watch = Arc<dyn Fn(bool) + Send + Sync>;
 
 impl Client {
     pub fn new(at: &BucketAt, config: &S3Config, keys: &Keys) -> Result<Client, String> {
@@ -375,7 +380,31 @@ impl Client {
                 .with_allow_http(endpoint.starts_with("http://"));
         }
         let store = b.build().map_err(|e| explain(&e))?;
-        Ok(Client { store })
+        Ok(Client { store, watch: None })
+    }
+
+    /// Tell `watch` after every request whether the service answered: `false` when
+    /// it couldn't be reached at all (no connection), `true` when it replied, even
+    /// with an error of its own.
+    fn watched(mut self, watch: Watch) -> Client {
+        self.watch = Some(watch);
+        self
+    }
+
+    /// A request failed: say why in a line, and tell the watcher whether that was
+    /// the service not being reached.
+    fn fail(&self, e: &object_store::Error) -> String {
+        if let Some(w) = &self.watch {
+            w(!unreachable(e));
+        }
+        explain(e)
+    }
+
+    /// A request was answered.
+    fn answered(&self) {
+        if let Some(w) = &self.watch {
+            w(true);
+        }
     }
 
     fn key(key: &str) -> Result<Key, String> {
@@ -394,7 +423,7 @@ impl Client {
             let mut objects = vec![];
             let mut stream = self.store.list(prefix.as_ref());
             while let Some(o) = stream.next().await {
-                let o = o.map_err(|e| explain(&e))?;
+                let o = o.map_err(|e| self.fail(&e))?;
                 objects.push(Object {
                     key: o.location.to_string(),
                     size: o.size,
@@ -402,6 +431,7 @@ impl Client {
                     modified_ns: o.last_modified.timestamp_nanos_opt().unwrap_or(0),
                 });
             }
+            self.answered();
             Ok(objects)
         })
     }
@@ -414,8 +444,11 @@ impl Client {
         };
         runtime().block_on(async {
             match self.store.list(prefix.as_ref()).next().await {
-                Some(Err(e)) => Err(explain(&e)),
-                _ => Ok(()),
+                Some(Err(e)) => Err(self.fail(&e)),
+                _ => {
+                    self.answered();
+                    Ok(())
+                }
             }
         })
     }
@@ -432,9 +465,10 @@ impl Client {
                 .store
                 .get_opts(&key, options)
                 .await
-                .map_err(|e| explain(&e))?;
+                .map_err(|e| self.fail(&e))?;
             let size = got.meta.size;
-            let bytes = got.bytes().await.map_err(|e| explain(&e))?;
+            let bytes = got.bytes().await.map_err(|e| self.fail(&e))?;
+            self.answered();
             Ok((bytes, size))
         })
     }
@@ -450,12 +484,12 @@ impl Client {
         let key = Client::key(key)?;
         let mut file = std::fs::File::create(to).map_err(|e| format!("{}: {e}", to.display()))?;
         runtime().block_on(async {
-            let got = self.store.get(&key).await.map_err(|e| explain(&e))?;
+            let got = self.store.get(&key).await.map_err(|e| self.fail(&e))?;
             let size = got.meta.size;
             let mut stream = got.into_stream();
             let mut done = 0;
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|e| explain(&e))?;
+                let chunk = chunk.map_err(|e| self.fail(&e))?;
                 file.write_all(&chunk)
                     .map_err(|e| format!("{}: {e}", to.display()))?;
                 done += chunk.len() as u64;
@@ -465,9 +499,33 @@ impl Client {
                 return Err(format!("the download stopped at {done} of {size} bytes"));
             }
             file.flush().map_err(|e| format!("{}: {e}", to.display()))?;
+            self.answered();
             Ok(size)
         })
     }
+}
+
+/// Whether a request failed because the service couldn't be reached at all (no
+/// network, no such host, nothing listening, no reply), rather than it answering
+/// with an error.
+fn unreachable(e: &object_store::Error) -> bool {
+    use object_store::client::{HttpError, HttpErrorKind};
+    // Going by what kind of HTTP failure is at the bottom of the error, not by its
+    // words: a service's own error may well say "timeout".
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(c) = cause {
+        if let Some(http) = c.downcast_ref::<HttpError>() {
+            return matches!(
+                http.kind(),
+                HttpErrorKind::Connect
+                    | HttpErrorKind::Request
+                    | HttpErrorKind::Timeout
+                    | HttpErrorKind::Interrupted
+            );
+        }
+        cause = c.source();
+    }
+    false
 }
 
 /// An S3 client error in a line: object_store's own run to several sentences, with the
@@ -484,8 +542,10 @@ fn explain(e: &object_store::Error) -> String {
         "there's no bucket of that name there".into()
     } else if matches!(e, object_store::Error::NotFound { .. }) {
         "it isn't there (any more)".into()
-    } else if has("error sending request") || has("dns error") || has("tcp connect error") {
-        format!("couldn't reach the service ({})", last_line(&text))
+    } else if unreachable(e) {
+        // (The client's own account of it, with its retries, is for the log.)
+        eprintln!("s3: {}", last_line(&text));
+        "couldn't reach the service: there's no connection, or it isn't answering".into()
     } else {
         last_line(&text)
     }
@@ -763,6 +823,17 @@ impl Cache {
         }
     }
 
+    /// The path of every download in the cache: an object is downloaded if its
+    /// [`Cache::path`] is among them. (One look at the folder, for asking about a
+    /// whole library's tracks at once.)
+    pub fn present(&self) -> HashSet<PathBuf> {
+        self.files()
+            .into_iter()
+            .map(|f| f.0)
+            .filter(|p| p.extension().is_none_or(|e| e != PART))
+            .collect()
+    }
+
     /// Every file in the cache: (path, size, last used).
     fn files(&self) -> Vec<(PathBuf, u64, SystemTime)> {
         let mut out = vec![];
@@ -879,6 +950,10 @@ pub enum BucketEvent {
     Downloaded { url: String },
     /// Tracks asked to be downloaded ([`Buckets::download`]) have been, or couldn't be.
     Fetched { done: usize, failed: Vec<String> },
+    /// A bucket's service stopped being reachable (no connection), or is again.
+    Reachable { source: SourceId, reachable: bool },
+    /// Downloads were removed from the cache (its limit changed).
+    CacheChanged,
 }
 
 /// What a scan of a bucket found.
@@ -909,6 +984,8 @@ struct Entry {
     tell: Tell,
     /// Made when first needed (it reads the keychain), then kept.
     client: Mutex<Option<Arc<Client>>>,
+    /// Whether its service answered, the last time it was asked anything.
+    reachable: Arc<AtomicBool>,
 }
 
 impl Entry {
@@ -927,7 +1004,17 @@ impl Entry {
                     self.name
                 )
             })?;
-        let c = Arc::new(Client::new(&self.at, &self.config, &keys)?);
+        // Says when the service stops being reachable, and when it is again.
+        let (reachable, tell, source) = (self.reachable.clone(), self.tell.clone(), self.source);
+        let watch: Watch = Arc::new(move |now| {
+            if reachable.swap(now, Ordering::Relaxed) != now {
+                tell(BucketEvent::Reachable {
+                    source,
+                    reachable: now,
+                });
+            }
+        });
+        let c = Arc::new(Client::new(&self.at, &self.config, &keys)?.watched(watch));
         *client = Some(c.clone());
         Ok(c)
     }
@@ -1110,6 +1197,8 @@ impl Buckets {
                     jobs: self.jobs.clone(),
                     tell: self.tell.clone(),
                     client: Mutex::new(same.and_then(|e| e.client.lock().unwrap().clone())),
+                    reachable: same
+                        .map_or_else(|| Arc::new(AtomicBool::new(true)), |e| e.reachable.clone()),
                 }),
             });
         }
@@ -1133,6 +1222,35 @@ impl Buckets {
             .find(|e| e.owner == self.owner && e.source == source)
             .cloned()
             .ok_or_else(|| "that bucket isn't one of the sources (any more)".to_string())
+    }
+
+    /// The bucket sources whose service couldn't be reached when last asked: their
+    /// tracks that aren't downloaded can't be played now.
+    pub fn unreachable(&self) -> Vec<SourceId> {
+        entries()
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|e| e.owner == self.owner && !e.reachable.load(Ordering::Relaxed))
+            .map(|e| e.source)
+            .collect()
+    }
+
+    /// Ask an unreachable bucket's service whether it's there again, in the
+    /// background: if it is, that's a [`BucketEvent::Reachable`].
+    pub fn probe(&self, source: SourceId) {
+        let Ok(e) = self.entry(source) else { return };
+        super::background::spawn("earshot-s3-probe", move || {
+            if let Ok(client) = e.client() {
+                let _ = client.check(&e.at.prefix);
+            }
+        });
+    }
+
+    /// The bucket source an object's URL belongs to, if it's one of this app's.
+    pub fn source_of(&self, url: &str) -> Option<SourceId> {
+        let (e, _) = entry_for(url).ok()?;
+        (e.owner == self.owner).then_some(e.source)
     }
 
     /// These tracks' copies (by URL), and no others, stay in the cache whatever room

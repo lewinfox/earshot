@@ -38,6 +38,8 @@ pub struct BucketsUi {
     scanning: HashSet<SourceId>,
     /// How each one's last read went: what it found, or why it failed.
     last: HashMap<SourceId, Result<Scan, String>>,
+    /// The ones whose service can't be reached now (no connection).
+    unreachable: HashSet<SourceId>,
 }
 
 impl BucketsUi {
@@ -55,6 +57,11 @@ impl BucketsUi {
     /// Whether there are any (the collections' menus then offer to keep them offline).
     pub fn any(&self) -> bool {
         !self.sources.is_empty()
+    }
+
+    /// The buckets whose service can't be reached now, whenever that changes.
+    pub fn set_unreachable(&mut self, sources: Vec<SourceId>) {
+        self.unreachable = sources.into_iter().collect();
     }
 
     /// A bucket is being read through.
@@ -146,7 +153,15 @@ impl BucketsUi {
                     ui.close();
                 }
             });
-            if self.scanning.contains(&s.id) {
+            if self.unreachable.contains(&s.id) {
+                ui.add(
+                    Note::warning(
+                        "Can't be reached: only its downloaded tracks are listed. \
+                         Trying again every so often.",
+                    )
+                    .small(),
+                );
+            } else if self.scanning.contains(&s.id) {
                 busy_line(ui, "", "Reading…");
             } else {
                 match self.last.get(&s.id) {

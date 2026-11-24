@@ -129,6 +129,9 @@ pub struct EarshotApp {
     /// Buckets being read through that the user didn't ask to be (at startup): a
     /// failure is logged, not shown (there may just be no connection).
     bucket_quiet: std::collections::HashSet<crate::core::sources::SourceId>,
+    /// When the buckets that can't be reached are next asked whether they're there
+    /// again (`None`: they all can be).
+    bucket_probe_at: Option<Instant>,
 
     // ---- core state the UI holds ---------------------------------------------------------
     /// The library, collections and play history: the domain state the panes read.
@@ -457,6 +460,7 @@ impl EarshotApp {
             offline: settings.s3_offline.iter().copied().collect(),
             offline_asked: Default::default(),
             bucket_quiet: Default::default(),
+            bucket_probe_at: None,
             index: LibraryIndex::default(),
             collections: Collections::default(),
             history: History::default(),
@@ -1636,6 +1640,7 @@ impl eframe::App for EarshotApp {
             self.dispatch(ViewCmd::UiScale(z).into());
         }
         self.tick_hud(ctx);
+        self.probe_buckets();
         self.track_plays();
         self.refresh_suggestions();
         self.save_tempo_ranges();

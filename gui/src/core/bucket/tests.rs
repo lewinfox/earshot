@@ -35,8 +35,10 @@ pub(crate) mod fake {
         /// Key → (bytes, ETag).
         objects: BTreeMap<String, (Vec<u8>, String)>,
         asked: Vec<Asked>,
-        /// Refuse everything (the network's down).
+        /// Answer every request with an error.
         down: bool,
+        /// Hang up on every connection without answering: there's no network.
+        unplugged: bool,
     }
 
     /// The access key it accepts.
@@ -87,9 +89,15 @@ pub(crate) mod fake {
             self.state.lock().unwrap().objects.remove(key);
         }
 
-        /// Refuse every request from now on (or answer again).
+        /// Answer every request with an error from now on (or properly again).
         pub fn set_down(&self, down: bool) {
             self.state.lock().unwrap().down = down;
+        }
+
+        /// Hang up on every connection from now on, as if there were no network (or
+        /// answer again).
+        pub fn unplug(&self, unplugged: bool) {
+            self.state.lock().unwrap().unplugged = unplugged;
         }
 
         /// What it's been asked since the last call.
@@ -101,6 +109,9 @@ pub(crate) mod fake {
             let mut reader = BufReader::new(stream.try_clone()?);
             let mut stream = stream;
             loop {
+                if self.state.lock().unwrap().unplugged {
+                    return Ok(());
+                }
                 let mut line = String::new();
                 if reader.read_line(&mut line)? == 0 {
                     return Ok(());
@@ -136,6 +147,10 @@ pub(crate) mod fake {
                 }
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body)?;
+                // (Also a connection that was open already, waiting for this request.)
+                if self.state.lock().unwrap().unplugged {
+                    return Ok(());
+                }
                 let (status, headers, body) = self.answer(&method, &target, range, &auth);
                 let mut out = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\n", body.len());
                 for (k, v) in headers {
@@ -778,4 +793,49 @@ fn objects_the_network_failed_on_are_left_for_the_next_scan() {
     assert!(rig.library().is_empty());
     assert_eq!(rig.scan(source).read, 1);
     assert_eq!(rig.library().len(), 1);
+}
+
+#[test]
+fn a_service_that_cant_be_reached_is_told_from_one_that_answers_with_an_error() {
+    let rig = Rig::new("reach");
+    let s = &rig.service;
+    s.put("a.mp3", &mp3("v23_plain.mp3"));
+    let source = rig.add("", "");
+    let reach = |rig: &Rig| -> Vec<bool> {
+        std::mem::take(&mut *rig.events.lock().unwrap())
+            .into_iter()
+            .filter_map(|e| match e {
+                BucketEvent::Reachable { reachable, .. } => Some(reachable),
+                _ => None,
+            })
+            .collect()
+    };
+    rig.scan(source);
+    assert!(rig.buckets.unreachable().is_empty());
+    assert!(
+        reach(&rig).is_empty(),
+        "reachable from the start: nothing to say"
+    );
+
+    // It answers, with an error: that's the service's doing, not the connection's.
+    s.set_down(true);
+    assert!(scan(&rig.store, &rig.buckets, source).is_err());
+    assert!(rig.buckets.unreachable().is_empty());
+    s.set_down(false);
+
+    // It hangs up without answering: no connection.
+    s.unplug(true);
+    let e = scan(&rig.store, &rig.buckets, source).unwrap_err();
+    assert!(e.contains("couldn't reach"), "{e}");
+    assert_eq!(rig.buckets.unreachable(), [source]);
+    assert_eq!(reach(&rig), [false]);
+    // Said once, however often it fails; and once when it's back.
+    assert!(scan(&rig.store, &rig.buckets, source).is_err());
+    assert!(reach(&rig).is_empty());
+    s.unplug(false);
+    rig.buckets.probe(source);
+    // (Asked in the background, which this thread steps.)
+    crate::core::background::run_pending();
+    assert!(rig.buckets.unreachable().is_empty());
+    assert_eq!(reach(&rig), [true]);
 }

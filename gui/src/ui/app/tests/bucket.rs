@@ -115,7 +115,6 @@ fn a_bucket_is_added_browsed_and_downloaded_from_when_a_track_is_loaded() {
     h.get_by_label("Cancel").click();
     steps(&mut h, 2);
     assert!(!h.state().panels.library.buckets.dialog_open());
-    render(&mut h, "bucket");
 
     // Loaded: downloaded first, then on the deck like any file.
     let (one, two, three) = (cloud[0].clone(), cloud[1].clone(), cloud[2].clone());
@@ -126,6 +125,54 @@ fn a_bucket_is_added_browsed_and_downloaded_from_when_a_track_is_loaded() {
     assert!(downloaded(&one.1));
     assert!(!downloaded(&two.1) && !downloaded(&three.1));
     assert!(h.state().buckets.cache.usage() >= audio.len() as u64);
+
+    // The list's download column knows which is which; a local track has no mark.
+    let marks = |a: &EarshotApp| [one.0, two.0, three.0].map(|id| a.index.downloaded(id));
+    assert_eq!(marks(h.state()), [Some(true), Some(false), Some(false)]);
+    let local = ids(&h)
+        .into_iter()
+        .find(|id| ![one.0, two.0, three.0].contains(id))
+        .unwrap();
+    assert_eq!(h.state().index.downloaded(local), None);
+
+    // No connection: the bucket's tracks that aren't downloaded leave the lists (they
+    // couldn't be loaded), the downloaded one and the folder's stay.
+    let bucket = h
+        .state()
+        .sources
+        .iter()
+        .find(|s| s.kind.is_bucket())
+        .unwrap()
+        .id;
+    let listed = |a: &EarshotApp| {
+        let all = crate::core::query::parse("").unwrap();
+        a.index.query(&all, &a.collections, None)
+    };
+    assert_eq!(listed(h.state()).len(), TRACKS.len() + 3);
+    service.unplug(true);
+    h.state_mut().dispatch(BucketCmd::Scan(bucket).into());
+    settle_until(&mut h, |a| {
+        a.index.is_hidden(two.0) && a.index.is_hidden(three.0) && !a.index.is_hidden(one.0)
+    });
+    let now = listed(h.state());
+    assert_eq!(now.len(), TRACKS.len() + 1);
+    // The list says how many it leaves out; the Sources pane, why.
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Perform).into());
+    h.state_mut()
+        .dispatch(ViewCmd::Source(Some(crate::core::view::Source::Manage)).into());
+    steps(&mut h, 2);
+    h.get_by_label("☁ 2 hidden");
+    h.get_by_label_contains("Can't be reached");
+    render(&mut h, "bucket-offline");
+    assert!(now.contains(&one.0) && now.contains(&local));
+    assert_eq!(h.state().buckets.unreachable(), [bucket]);
+    // Connected again, and asked (as it is every so often): they're back.
+    service.unplug(false);
+    h.state().buckets.probe(bucket);
+    settle_until(&mut h, |a| a.index.hidden_count() == 0);
+    assert_eq!(listed(h.state()).len(), TRACKS.len() + 3);
+    assert!(h.state().buckets.unreachable().is_empty());
 
     // A crate kept offline: its bucket tracks are downloaded now, and one added to it
     // later is too.
@@ -163,6 +210,11 @@ fn a_bucket_is_added_browsed_and_downloaded_from_when_a_track_is_loaded() {
         .into(),
     );
     settle_until(&mut h, |_| downloaded(&three.1));
+    assert_eq!(marks(h.state()), [Some(true); 3]);
+    // (All three downloaded, in the bucket's own list with its download column.)
+    h.get_by_label("Gig box").click();
+    steps(&mut h, 2);
+    render(&mut h, "bucket");
 
     // With the cache's limit below what it holds, what's kept offline stays and the
     // rest goes. (Limits are whole GB in the settings; the cache takes bytes.)
@@ -170,6 +222,8 @@ fn a_bucket_is_added_browsed_and_downloaded_from_when_a_track_is_loaded() {
     cache.set_limit(1);
     assert!(!downloaded(&one.1));
     assert!(downloaded(&two.1) && downloaded(&three.1));
+    h.state_mut().refresh_downloads();
+    assert_eq!(marks(h.state()), [Some(false), Some(true), Some(true)]);
 
     // Removed: its tracks leave the library, and its downloads go.
     let id = h
