@@ -101,6 +101,16 @@ fn a_bucket_is_added_browsed_and_downloaded_from_when_a_track_is_loaded() {
     assert!(h.state().panels.library.buckets.dialog_open());
     h.get_by_label("Gig box");
     h.get_by_label("Add a bucket…");
+    // Picked, its tracks are what's listed, under its name (not "sets", its prefix).
+    h.get_by_label("Gig box").click();
+    steps(&mut h, 2);
+    assert_eq!(
+        h.query_all_by_label("Gig box").count(),
+        2,
+        "the pane's row and the heading"
+    );
+    assert!(h.query_by_label("sets").is_none());
+    assert_eq!(h.state().panels.library.browser.shown().len(), 3);
     render(&mut h, "bucket-window");
     h.get_by_label("Cancel").click();
     steps(&mut h, 2);

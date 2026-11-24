@@ -69,6 +69,9 @@ pub struct LibraryUi {
     want_top: bool,
     /// The library folders (Explorer roots).
     pub folders: Vec<String>,
+    /// The bucket sources: each one's URL (`s3://bucket/prefix`, the scope that
+    /// lists its tracks) and the name the user gave it, for the list's heading.
+    pub buckets: Vec<(String, String)>,
     scope: Scope,
     subdirs: HashMap<String, Vec<Subdir>>,
     pub search: String,
@@ -553,7 +556,11 @@ impl LibraryUi {
                 Some(s) => format!("Played {}", s.label),
                 None => "History".into(),
             },
-            Scope::Folder(f) => f.rsplit('/').next().unwrap_or(f).into(),
+            // A bucket goes by the name the user gave it, not its bucket's or prefix's.
+            Scope::Folder(f) => match self.buckets.iter().find(|(url, _)| url == f) {
+                Some((_, name)) => name.clone(),
+                None => f.rsplit('/').next().unwrap_or(f).into(),
+            },
             Scope::Collection(id) => v
                 .collections
                 .get(*id)

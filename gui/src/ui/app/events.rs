@@ -137,6 +137,11 @@ impl EarshotApp {
                     .collect();
                 self.panels.library.external.set_sources(list.clone());
                 self.panels.library.buckets.set_sources(&list);
+                self.panels.library.browser.buckets = list
+                    .iter()
+                    .filter(|s| s.enabled)
+                    .filter_map(|s| Some((s.bucket_url()?, s.name.clone())))
+                    .collect();
                 self.buckets.set_sources(&list);
                 self.sources = list;
             }
