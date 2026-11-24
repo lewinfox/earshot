@@ -55,7 +55,7 @@ impl DeckUi {
             self.mode_buttons(ui, out, 18.0);
             self.key_shift_buttons(ui, out, TEMPO_W, 18.0);
             // The fader gets exactly what's left, so it never stretches the deck.
-            let h = height - ui.min_rect().height() - ui.spacing().item_spacing.y;
+            let h = (height - ui.min_rect().height() - ui.spacing().item_spacing.y).max(0.0);
             ui.horizontal_top(|ui| {
                 ui.add_space(16.0); // the fader's range markings
                 let (fader, marks) = tempo_fader(s.range);

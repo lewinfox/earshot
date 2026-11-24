@@ -15,6 +15,7 @@ earshot-engine = { version = "0.1.2", path = "../engine" }
 eframe = { version = "0.33.3", features = ["persistence"] }
 egui = "0.33.3"
 egui_extras = "0.33.3"
+egui_taffy = "0.10.0"
 # Debug mode: its zip export and spectrogram.
 crc32fast = "1.5.2"
 realfft = "3.5.1"

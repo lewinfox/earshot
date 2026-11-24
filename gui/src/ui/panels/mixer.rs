@@ -53,8 +53,11 @@ const HEIGHT: f32 = MASTER_H + MIN_FADER_BOTTOM + XF_GAP + XF_H;
 /// Its frame's margins and border round all that, across and down.
 const FRAME: egui::Vec2 = vec2(16.0, 12.0);
 
-/// The mixer's sizes at a scale: the design sizes above, times it. The layout picks
-/// the scale (`ui::layout::shell`), so the mixer is as tall as the decks beside it.
+/// The scale the mixer is drawn at between the decks: its width is this times its
+/// design width, and it stretches to the decks' height (its faders take the height).
+pub const SCALE: f32 = 0.8;
+
+/// The mixer's sizes at a scale: the design sizes above, times it.
 struct Dims {
     s: f32,
     knob_col: f32,
@@ -446,7 +449,7 @@ pub fn show(
 }
 
 /// The mixer for `decks`, in its frame, drawn at `scale` and `height` tall with the
-/// frame (as tall as the decks beside it): both from `ui::layout::DeckRow`.
+/// frame (as tall as the decks beside it).
 pub struct MixerPanel<'a> {
     pub decks: &'a [DeckId],
     pub scale: f32,

@@ -60,7 +60,7 @@ pub struct EarshotApp {
     ctx: egui::Context,
     /// The window kept to the screen, and the UI size applied.
     window: super::window::WindowFit,
-    /// How the window was divided last frame (`layout::shell`).
+    /// What the window showed last frame (`views::shell`).
     shell: super::layout::Shell,
     /// The part of the window that was divided: between the bars.
     shell_rect: egui::Rect,

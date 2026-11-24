@@ -6,6 +6,7 @@
 
 use super::perform::decks_rows;
 use super::{Panels, body, library, pane_frame, tab_bar};
+use crate::ui::flex::Tui;
 use crate::ui::panels::controller::{ControllerTab, HistoryPanel, MappingPanel, SendPanel};
 use crate::ui::panels::{Cx, Panel};
 use crate::ui::widgets::{Tab, tool_tabs};
@@ -33,25 +34,25 @@ const TABS: [Tab<ControllerTab>; 4] = [
     },
 ];
 
-pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
-    decks_rows(ctx, panels, cx, "controller");
+pub fn show(t: &mut Tui, panels: &mut Panels, cx: &mut Cx) {
+    decks_rows(t, panels, cx);
     let current = panels.controller.tab;
     let mut picked = None;
-    tab_bar(ctx, "tabs-controller", cx.theme, |ui| {
+    tab_bar(t, cx.theme, |ui| {
         picked = tool_tabs(ui, &TABS, current);
     });
-    if let Some(t) = picked {
-        panels.controller.tab = t;
+    if let Some(tab) = picked {
+        panels.controller.tab = tab;
     }
     match current {
-        ControllerTab::Library => library(ctx, panels, cx),
+        ControllerTab::Library => library(t, panels, cx),
         tab => {
-            body(ctx, pane_frame(cx.theme), |ui| {
-                let t = &mut panels.controller;
+            body(t, pane_frame(cx.theme), |ui| {
+                let c = &mut panels.controller;
                 match tab {
-                    ControllerTab::History => HistoryPanel { tab: t }.ui(ui, cx),
-                    ControllerTab::Send => SendPanel { tab: t }.ui(ui, cx),
-                    _ => MappingPanel { tab: t }.ui(ui, cx),
+                    ControllerTab::History => HistoryPanel { tab: c }.ui(ui, cx),
+                    ControllerTab::Send => SendPanel { tab: c }.ui(ui, cx),
+                    _ => MappingPanel { tab: c }.ui(ui, cx),
                 }
             });
         }

@@ -51,8 +51,11 @@ use crate::core::outside::is_outside;
 use crate::core::sources::STREAMING;
 use crate::core::sources::SourceId;
 use crate::core::track::TrackId;
-use crate::core::view::{Aside, Mode, Pane, Region, Source};
-use crate::ui::layout::{self, Edge};
+use crate::core::view::{Aside, Pane, Region, Source};
+use crate::ui::flex::{self, Flex, Tui, leaf, row};
+use crate::ui::layout::{
+    ASIDE_MIN_W, BESIDE_MIN_W, Edge, PANE_MAX_SHARE, SOURCE_MIN_W, TABLE_MIN_W,
+};
 use crate::ui::widgets::{Opens, StackItem, icon_stack, icon_stack_with_menu};
 
 /// The left icon stack's views of earshot's own library (the other sources follow).
@@ -669,116 +672,103 @@ impl LibraryPane {
     }
 
     /// Draw it on the left of a Prepare tool (Flow, Tempo lock), without its own side
-    /// panes. One width for every tool, so the library stays put when switching.
-    pub fn show_beside(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        let row = ui.available_width();
-        let width = layout::beside_row(row, cx.prefs.prepare.sizes.flow_library);
-        egui::SidePanel::left("tool-library")
-            .resizable(false)
-            .exact_width(width)
-            .frame(egui::Frame::new().fill(cx.theme.bg))
-            .show_inside(ui, |ui| {
-                self.show(ui, cx, false);
-                drag_to_resize(ui, Edge::Right, Region::FlowLibrary, row, cx);
-            });
+    /// panes: a part of the tool's row, at its share of the row as last dragged. One
+    /// share for every tool, so the library stays put when switching.
+    pub fn show_beside(&mut self, t: &mut Tui, cx: &mut Cx) {
+        // The row its share is of (as laid out last frame).
+        let row = t.taffy_container().full_container().width();
+        let share = cx.prefs.prepare.sizes.flow_library.min(PANE_MAX_SHARE);
+        let style = leaf().basis_pct(share).min_w(BESIDE_MIN_W);
+        flex::pane(t, style, |ui| {
+            let frame = egui::Frame::new().fill(cx.theme.bg);
+            flex::boxed(ui, frame, |ui| self.show(ui, cx, false));
+            drag_to_resize(ui, Edge::Right, Region::FlowLibrary, row, cx);
+        });
     }
 
     /// Draw it, with or without the right icon stack and its panes (`asides`; the
-    /// Flow editor has its own). Its panes' widths are the layout's
-    /// (`layout::library_row`), shared out of the width it's given.
+    /// Flow editor has its own): `| stack | source | track list | aside | stack |`.
+    /// The source and the aside start at their shares of the row as last dragged; the
+    /// track list takes the rest.
     pub fn show(&mut self, ui: &mut Ui, cx: &mut Cx, asides: bool) {
         let layout = cx.prefs.layout().clone();
         self.source = layout.source;
         // The import and add-to-stick windows, wherever their drop was.
         self.external.set_music(&self.browser.folders);
         self.external.windows(ui.ctx(), &cx.core, cx.out);
-        // Panel ids per mode, so each mode keeps its own.
-        let id = |name: &str| match cx.prefs.mode {
-            Mode::Perform => format!("{name}-perform"),
-            Mode::Prepare => format!("{name}-prepare"),
-            Mode::Controller => format!("{name}-controller"),
-            Mode::Debug => format!("{name}-debug"),
-        };
         let mut items: Vec<StackItem<Source>> = VIEWS.into_iter().collect();
         items.extend(self.external.stack_items(&cx.core));
         self.navigate(&items, cx);
         let width = ui.available_width();
-        let row = layout::library_row(
-            width,
-            layout.source.map(|_| layout.sizes.source),
-            layout.aside.map(|_| layout.sizes.aside),
-            asides,
-        );
+        let stack_w = cx.theme.spacing.stack_w;
         let stack_frame = egui::Frame::new()
             .fill(cx.theme.bg)
             .inner_margin(egui::Margin::symmetric(3, 6));
-        egui::SidePanel::left(id("source-stack"))
-            .resizable(false)
-            .exact_width(row.stack)
-            .frame(stack_frame)
-            .show_inside(ui, |ui| {
-                let (external, core, out) = (&mut self.external, &cx.core, &mut *cx.out);
-                let cursor = self.level == Level::Sources;
-                let picked = icon_stack_with_menu(
-                    ui,
-                    &items,
-                    layout.source,
-                    Opens::Right,
-                    cursor,
-                    |ui, s| {
-                        if let Source::Stick(id) = s {
-                            external.stick_menu(ui, id, core, out);
-                        }
-                    },
-                );
-                if let Some(s) = picked {
-                    cx.send(ViewCmd::Source(s));
-                }
-            });
-        if let Some(source) = layout.source.filter(|_| row.source > 0.0) {
-            egui::SidePanel::left(id("source"))
-                .resizable(false)
-                .exact_width(row.source)
-                .show_inside(ui, |ui| {
-                    self.source(ui, source, cx);
-                    drag_to_resize(ui, Edge::Right, Region::Source, width, cx);
-                });
-        }
-        egui::SidePanel::right(id("aside-stack"))
-            .resizable(false)
-            .exact_width(cx.theme.spacing.stack_w)
-            .frame(stack_frame)
-            .show_animated_inside(ui, asides, |ui| {
-                if let Some(a) = icon_stack(ui, &ASIDES, layout.aside, Opens::Left) {
-                    cx.send(ViewCmd::Aside(a));
-                }
-            });
-        if let Some(aside) = layout.aside.filter(|_| row.aside > 0.0 || !asides) {
-            egui::SidePanel::right(id("aside"))
-                .resizable(false)
-                .exact_width(row.aside.max(1.0))
-                .show_animated_inside(ui, asides, |ui| {
-                    self.aside(ui, aside, cx);
-                    drag_to_resize(ui, Edge::Left, Region::Aside, width, cx);
-                });
-        }
+        let side_frame = egui::Frame::side_top_panel(ui.style());
         // Room on the right: right against a pane's drag handle, the list's scroll
         // bar and the handle would take the hover in turns.
-        let frame = egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin {
+        let middle_frame = egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin {
             left: 8,
             right: 8 + HANDLE_GAP,
             top: 8,
             bottom: 8,
         });
-        // Cut off at its own edges: a top row wider than a narrow list never paints
-        // over the pane beside it.
-        let place = ui.available_rect_before_wrap();
-        egui::CentralPanel::default()
-            .frame(frame)
-            .show_inside(ui, |ui| {
-                ui.set_clip_rect(place.intersect(ui.clip_rect()));
-                self.middle(ui, cx)
+        let share = |s: f32| s.min(PANE_MAX_SHARE);
+        let id = ("library", cx.prefs.mode, asides);
+        flex::root(ui, egui::Id::new(id), row(), |t| {
+            flex::pane(t, leaf().w(stack_w), |ui| {
+                flex::boxed(ui, stack_frame, |ui| {
+                    let (external, core, out) = (&mut self.external, &cx.core, &mut *cx.out);
+                    let cursor = self.level == Level::Sources;
+                    let picked = icon_stack_with_menu(
+                        ui,
+                        &items,
+                        layout.source,
+                        Opens::Right,
+                        cursor,
+                        |ui, s| {
+                            if let Source::Stick(id) = s {
+                                external.stick_menu(ui, id, core, out);
+                            }
+                        },
+                    );
+                    if let Some(s) = picked {
+                        cx.send(ViewCmd::Source(s));
+                    }
+                });
             });
+            if let Some(source) = layout.source {
+                let style = leaf()
+                    .basis_pct(share(layout.sizes.source))
+                    .min_w(SOURCE_MIN_W);
+                flex::pane(t, style, |ui| {
+                    flex::boxed(ui, side_frame, |ui| self.source(ui, source, cx));
+                    drag_to_resize(ui, Edge::Right, Region::Source, width, cx);
+                });
+            }
+            flex::pane(t, leaf().grow().min_w(TABLE_MIN_W), |ui| {
+                flex::boxed(ui, middle_frame, |ui| self.middle(ui, cx));
+            });
+            if !asides {
+                return;
+            }
+            if let Some(aside) = layout.aside {
+                let style = leaf()
+                    .basis_pct(share(layout.sizes.aside))
+                    .min_w(ASIDE_MIN_W);
+                flex::pane(t, style, |ui| {
+                    flex::boxed(ui, side_frame, |ui| self.aside(ui, aside, cx));
+                    drag_to_resize(ui, Edge::Left, Region::Aside, width, cx);
+                });
+            }
+            flex::pane(t, leaf().w(stack_w), |ui| {
+                flex::boxed(ui, stack_frame, |ui| {
+                    if let Some(a) = icon_stack(ui, &ASIDES, layout.aside, Opens::Left) {
+                        cx.send(ViewCmd::Aside(a));
+                    }
+                });
+            });
+        });
     }
 }
 

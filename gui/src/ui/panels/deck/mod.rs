@@ -43,8 +43,8 @@ use crate::core::pads::DeckPads;
 use crate::core::store::TrackCues;
 use crate::core::track::Track;
 use crate::core::view::PadMode;
+use crate::ui::flex::{self, Flex, Tui, TuiBuilderLogic, col, leaf, row};
 use crate::ui::panels::library::drag;
-use crate::ui::panels::{Cx, Panel};
 use crate::ui::theme::THEME;
 use crate::ui::util::{self, Camelot};
 use crate::ui::widgets::key_chip_sized;
@@ -151,13 +151,15 @@ impl PendingLoad {
 
 // Layout.
 const TEMPO_W: f32 = 76.0;
+/// Between the tempo fader and the rest of the deck.
+const FADER_GAP: f32 = 8.0;
 /// SYNC, ★, Q and KEYLOCK over the key shift, in the header (without a tempo fader):
 /// two lines, no taller than the title and details beside them.
 const BUTTONS_W: f32 = 2.0 * TEMPO_W + 4.0 + 6.0;
 
 /// The controls row's scale: every size in it is [`design`]'s times `k`, so the row
-/// grows and shrinks as one piece. The layout picks it (`ui::layout::shell`), from
-/// [`width`] and [`height`] below: the biggest at which the deck fits its place.
+/// grows and shrinks as one piece. The deck picks it from the box the layout gave it
+/// ([`scale_to_fit`]): the biggest at which its controls fit.
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct Dims {
     k: f32,
@@ -200,16 +202,26 @@ impl Dims {
 // ---- the deck's size, for the layout ----
 //
 // A deck is a frame round a header, the overview and the controls row, with the tempo
-// fader beside them. Only the controls row scales; the rest is fixed, so the deck's
-// size at a scale is simple arithmetic, and the layout can ask for it before drawing.
+// fader beside them. Only the controls row scales; the rest is fixed. The layout gives
+// a deck its design shape ([`aspect`]) at whatever width its row has, and the deck
+// draws its controls at the biggest scale that fits that box ([`scale_to_fit`]).
 
 /// The controls row's height at its design size: the jog ring's, which two rows of
 /// buttons match.
 const ROW_H: f32 = design::JOG_D * design::JOG_SCALE;
-/// The controls row's width at its design size, without the tabs: CUE / play, the jog
-/// ring and the widest page (`the_controls_are_as_wide_as_the_layout_expects` checks
-/// it against what's drawn: change it when the row gains or loses a button).
-const CONTROLS_W: f32 = 574.0;
+/// The on-screen player page's width (hot cues, loops and beat jumps) at its design
+/// size: drawn wider, it's stretched to fill its box. Change it when the page gains
+/// or loses a button (`a_deck_fits_the_box_it_is_given` fails if it's too small).
+const PLAYER_PAGE_W: f32 = 351.0;
+/// The other pages' (the grid editor's, a controller's pads) at their design size.
+const PAGE_W: f32 = 361.0;
+/// CUE / play and the jog ring beside them, at the design size.
+const TRANSPORT_W: f32 = CUE_D + TRANSPORT_GAP + (JOG_D + JOG_LEFT) * JOG_SCALE;
+/// The controls row's width at its design size: CUE / play, the widest page and the
+/// tabs, with the gaps between them.
+const CONTROLS_W: f32 = TRANSPORT_W + GROUP_GAP + PAGE_W + GROUP_GAP + TABS_W;
+/// The most a page is stretched across its box, times its own width.
+const PAGE_STRETCH_MAX: f32 = 1.3;
 /// The frame's margins and border, and the gap kept inside it, across.
 const FRAME_W: f32 = 18.0 + 6.0;
 /// The frame's margins and border, the header and the gaps between the three, down.
@@ -241,14 +253,18 @@ fn overview_h(k: f32) -> f32 {
 
 /// A deck's width at scale `k`, with or without its tempo fader.
 pub fn width(k: f32, tempo_fader: bool) -> f32 {
-    let fader = if tempo_fader { TEMPO_W + 8.0 } else { 0.0 };
-    FRAME_W + fader + k * (CONTROLS_W + TABS_W + GAP_X)
+    let fader = if tempo_fader {
+        TEMPO_W + FADER_GAP
+    } else {
+        0.0
+    };
+    FRAME_W + fader + k * CONTROLS_W
 }
 
 /// The biggest scale at which a deck is no wider than `w`.
 pub fn scale_for_width(w: f32, tempo_fader: bool) -> f32 {
     // A hair under, so rounding never pushes the row a pixel past its place.
-    (w - width(0.0, tempo_fader)) / (CONTROLS_W + TABS_W + GAP_X) * 0.995
+    (w - width(0.0, tempo_fader)) / CONTROLS_W * 0.995
 }
 
 /// A deck's height at scale `k`.
@@ -256,23 +272,19 @@ pub fn height(k: f32) -> f32 {
     (FIXED_H + overview_h(k) + ROW_H * k).max(MIN_H)
 }
 
-/// The biggest scale (up to [`SCALE_MAX`]) at which a deck is no taller than `h`; under
-/// [`SCALE_MIN`] if even that is too tall.
-pub fn scale_for_height(h: f32) -> f32 {
-    if height(SCALE_MIN) > h {
-        return SCALE_MIN * h / height(SCALE_MIN);
-    }
-    // `height` only grows with the scale: close in on the one that gives `h`.
-    let (mut lo, mut hi) = (SCALE_MIN, SCALE_MAX);
-    for _ in 0..24 {
-        let mid = (lo + hi) / 2.0;
-        if height(mid) <= h {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    lo
+/// The shape a deck keeps as its row gives it more or less room: its width over its
+/// height at its design size.
+pub fn aspect(tempo_fader: bool) -> f32 {
+    width(1.0, tempo_fader) / height(1.0)
+}
+
+/// The biggest scale at which a deck's controls fit a deck `size` big (its frame
+/// included): as wide as it is, under the header and the overview at its least.
+pub fn scale_to_fit(size: egui::Vec2, tempo_fader: bool) -> f32 {
+    let by_height = (size.y - FIXED_H - OVERVIEW_MIN_H) / ROW_H;
+    scale_for_width(size.x, tempo_fader)
+        .min(by_height)
+        .clamp(scale_min(tempo_fader), SCALE_MAX)
 }
 
 /// The pages of a player's controls, picked with the tabs on their outer edge (as in
@@ -373,36 +385,19 @@ pub struct DeckUi {
     pub controller: bool,
     /// What the controls between the tabs and CUE / play show.
     page: Page,
-    /// Each page's width (player, grid) at `page_dims`, measured once, so the box is
-    /// as wide as the wider page and switching doesn't move anything.
-    page_widths: [Option<f32>; 3],
-    page_dims: Dims,
-    /// `controller` when they were measured (the player page differs with one).
-    page_controller: bool,
-    /// Room to spare beside the page box this frame, which it takes (like a flexbox
-    /// item that grows).
-    page_spare: f32,
-    /// The page box's width while the page shown is drawn (`None` while a hidden page
-    /// is measured): what a page that fills it fills.
+    /// The page box's width while the page shown is drawn: what a page that fills it
+    /// fills.
     page_box: Option<f32>,
-    /// How much wider than its own width the page shown is drawn, to fill the box
-    /// (1 while a page is measured): its widths and the gaps across are times this
-    /// (see [`DeckUi::wx`]); heights aren't.
+    /// The page box's width as last drawn.
+    page_drawn: Option<f32>,
+    /// How much wider than its own width the player page is drawn, to fill the box:
+    /// its widths and the gaps across are times this (see [`DeckUi::wx`]); heights
+    /// aren't.
     page_sx: f32,
-    /// Width of the page and CUE / play last frame, to keep a left deck's against
-    /// the mixer.
-    controls_w: f32,
     /// Where it was drawn last (see [`DeckUi::show`]).
     side: Side,
     /// Its buttons' size, as last drawn.
     dims: Dims,
-    /// The largest scale that fits the deck's width (the width it was found for, and
-    /// the scale), once its controls turned out too wide for it.
-    fit: Option<(f32, f32)>,
-    /// Frames in a row the controls have been too wide for their place.
-    too_wide: u8,
-    /// The panel's size as last drawn (its frame included).
-    drawn: egui::Vec2,
     bpm_text: String,
     /// The engine's state for this frame.
     state: DeckSnap,
@@ -440,18 +435,11 @@ impl DeckUi {
             active: false,
             controller: false,
             page: Page::Player,
-            page_widths: [None; 3],
-            page_dims: Dims::FULL,
-            page_controller: false,
-            page_spare: 0.0,
             page_box: None,
+            page_drawn: None,
             page_sx: 1.0,
-            controls_w: 0.0,
             side: Side::Left,
             dims: Dims::FULL,
-            fit: None,
-            too_wide: 0,
-            drawn: egui::Vec2::ZERO,
             bpm_text: String::new(),
             state: DeckSnap::default(),
             pending: None,
@@ -619,133 +607,61 @@ impl DeckUi {
 
     // ---- the deck panel -----------------------------------------------------------------
 
-    /// Draw the deck as `layout` says.
+    /// Draw the deck in its side's column of the decks' row: as tall as its width
+    /// makes it (it keeps its design shape), or taller if the row is. Its controls'
+    /// scale is the biggest at which they fit the box the layout gave it.
     pub fn show(
         &mut self,
-        ui: &mut Ui,
+        t: &mut Tui,
         layout: DeckLayout,
         info: &DeckInfo,
         out: &mut Vec<Command>,
     ) {
-        let DeckLayout {
-            width,
-            height,
-            side,
-            scale,
-            tempo_fader,
-        } = layout;
+        let DeckLayout { side, tempo_fader } = layout;
         self.side = side;
-        let before = (self.controls_w, self.page_spare, self.page_widths);
-        // The scale is the layout's, which fits the deck to its place from `width` and
-        // `height` above. Should the controls turn out wider than those say (a new
-        // button, `CONTROLS_W` not kept up), they're still fitted here, a frame late.
-        let fader_w = if tempo_fader { TEMPO_W + 8.0 } else { 0.0 };
-        let mut k = scale.clamp(SCALE_MIN, SCALE_MAX);
-        if self.fit.is_some_and(|(w, _)| w != width) {
-            self.fit = None;
-        }
-        let floor = SCALE_MIN;
-        if let Some((_, cap)) = self.fit {
-            k = k.min(cap).max(floor);
-        }
-        self.dims = Dims { k };
-        self.panel(
-            ui,
-            width,
-            height,
-            info,
-            out,
-            |deck, ui, info, out, inner_h| {
-                let left = if tempo_fader {
-                    ui.available_width() - TEMPO_W - 8.0
-                } else {
-                    ui.available_width()
-                };
-                // The tempo fader on the outside edge (its buttons in the header without it).
-                ui.horizontal_top(|ui| {
-                    if tempo_fader && side == Side::Left {
-                        deck.tempo(ui, info, out, inner_h);
-                        ui.add_space(4.0);
-                    }
-                    ui.vertical(|ui| {
-                        ui.set_width(left);
-                        let top = ui.cursor().min.y;
-                        deck.header(ui, info, out, !tempo_fader);
-                        // The overview takes what the header and controls leave, so the
-                        // controls sit on the bottom edge.
-                        let used = ui.cursor().min.y - top;
-                        let overview_h =
-                            (inner_h - used - deck.dims.controls_h() - ui.spacing().item_spacing.y)
-                                .max(OVERVIEW_MIN_H);
-                        deck.overview(ui, info, out, overview_h);
-                        deck.controls(ui, info, out);
-                    });
-                    if tempo_fader && side == Side::Right {
-                        ui.add_space(4.0);
-                        deck.tempo(ui, info, out, inner_h);
-                    }
-                });
-            },
-        );
-        // The safety net: controls that stay wider than `CONTROLS_W` says (not for a
-        // frame or two while a page settles) are drawn at the scale that does fit from
-        // then on, so nothing is pushed off the edge.
-        let asked = scale.clamp(SCALE_MIN, SCALE_MAX);
-        let tabs = TABS_W + GAP_X;
-        let cap = (width - FRAME_W - fader_w) / (self.controls_w / k + tabs) * 0.995;
-        let too_wide = self.fit.is_none() && self.controls_w > 0.0 && cap < asked * 0.99;
-        self.too_wide = if too_wide { self.too_wide + 1 } else { 0 };
-        if self.too_wide >= 3 {
-            self.too_wide = 0;
-            self.fit = Some((width, cap.max(floor)));
-            ui.ctx().request_discard("a deck's controls didn't fit");
-        }
-        // The row places its parts by their widths as last drawn. When those change (a
-        // new scale, two decks to four, the mixer shown or hidden), this frame isn't
-        // shown: it's drawn again until they hold, so the change lands all at once.
-        let moved = |a: f32, b: f32| (a - b).abs() > 0.05;
-        let pages = before
-            .2
-            .iter()
-            .zip(&self.page_widths)
-            .any(|(a, b)| match (a, b) {
-                (Some(a), Some(b)) => moved(*a, *b),
-                (a, b) => a.is_some() != b.is_some(),
-            });
-        if moved(before.0, self.controls_w) || moved(before.1, self.page_spare) || pages {
-            ui.ctx().request_discard("a deck's controls are settling");
-        }
-    }
-
-    /// The deck's panel, `width` × `height`, around a layout (`body`, given the
-    /// track's details, or the one loading's, and the height inside). A track
-    /// dropped anywhere on it loads, in every layout.
-    fn panel(
-        &mut self,
-        ui: &mut Ui,
-        width: f32,
-        height: f32,
-        info: &DeckInfo,
-        out: &mut Vec<Command>,
-        body: impl FnOnce(&mut DeckUi, &mut Ui, &DeckInfo, &mut Vec<Command>, f32),
-    ) {
         let loading = self.pending.as_ref().map(PendingLoad::info);
         let info = loading.as_ref().unwrap_or(info);
-        let resp = THEME
-            .panel_frame()
-            .show(ui, |ui| {
-                ui.set_width(width - 18.0);
-                // (The frame's margins and its border.)
-                let inner_h = height - 14.0;
-                ui.set_min_height(inner_h);
-                ui.spacing_mut().item_spacing = vec2(4.0, 5.0);
-                body(self, ui, info, out, inner_h);
-            })
-            .response;
-        self.drawn = resp.rect.size();
+        // `width: 100%; flex: 1 1 auto` with its aspect ratio: its height follows its
+        // width, and it stretches if the column is taller.
+        let mut style = leaf().w_pct(1.0).aspect(aspect(tempo_fader));
+        style.flex_grow = 1.0;
+        let rect = flex::framed(t, style, THEME.panel_frame(), |t, rect| {
+            self.dims = Dims {
+                k: scale_to_fit(rect.size(), tempo_fader),
+            };
+            t.egui_style_mut().spacing.item_spacing = vec2(4.0, 5.0);
+            // The tempo fader on the outside edge (its buttons in the header without it).
+            t.style(row().grow().gap(FADER_GAP).reverse(side == Side::Right))
+                .add(|t| {
+                    if tempo_fader {
+                        flex::pane(t, leaf().w(TEMPO_W), |ui| {
+                            let h = ui.max_rect().height();
+                            self.tempo(ui, info, out, h)
+                        });
+                    }
+                    // The header, the overview taking what's spare, and the controls on
+                    // the bottom edge.
+                    t.style(col().grow().gap(5.0)).add(|t| {
+                        flex::fit(t, leaf(), |ui| self.header(ui, info, out, !tempo_fader));
+                        flex::pane(t, leaf().grow().min_h(OVERVIEW_MIN_H), |ui| {
+                            let h = ui.max_rect().height();
+                            self.overview(ui, info, out, h)
+                        });
+                        self.controls(t, info, out);
+                    });
+                });
+            rect
+        });
+        // On top of what's in it: a track dropped anywhere on the deck loads.
+        let ui = t.egui_ui_mut();
+        let resp = ui.interact(
+            rect,
+            egui::Id::new(("deck-drop", self.id.index())),
+            Sense::hover(),
+        );
         if self.active {
             ui.painter().rect_stroke(
-                resp.rect,
+                rect,
                 8.0,
                 Stroke::new(1.5_f32, self.colour()),
                 StrokeKind::Inside,
@@ -753,7 +669,7 @@ impl DeckUi {
         }
         if drag::hovering_tracks(&resp) {
             ui.painter().rect_stroke(
-                resp.rect,
+                rect,
                 8.0,
                 Stroke::new(2.0_f32, THEME.accent),
                 StrokeKind::Inside,
@@ -858,106 +774,64 @@ impl DeckUi {
     }
 
     /// CUE / play and the BPM ring nearest the mixer (like Rekordbox), then the page
-    /// (hot cue pads, loops and beat jumps, or the grid editor) and its tabs on the
-    /// outer edge. A left deck's row is right-aligned and mirrored.
-    fn controls(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>) {
+    /// (hot cue pads, loops and beat jumps, or the grid editor), taking the room to
+    /// spare, and its tabs on the outer edge. A left deck's row is mirrored.
+    fn controls(&mut self, t: &mut Tui, info: &DeckInfo, out: &mut Vec<Command>) {
         let mirrored = self.side == Side::Left;
         let d = self.dims;
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing = vec2(d.px(GAP_X), d.px(GAP_Y));
-            // The tabs at the deck's outer edge (by the tempo fader); the page and CUE /
-            // play against the mixer. The space between takes what's left (the group's
-            // width is from last frame).
-            let gap = |ui: &mut Ui, group: f32| {
-                let tabs = d.px(TABS_W) + ui.spacing().item_spacing.x;
-                ui.add_space((ui.available_width() - group - tabs).max(d.px(GROUP_GAP)));
-            };
-            // The page box takes the room to spare too, and the page shown stretches
-            // across it (`controls_w` stays the controls' own width, which the deck's
-            // fit goes by).
-            self.page_spare = {
-                let tabs = d.px(TABS_W) + ui.spacing().item_spacing.x;
-                (ui.available_width() - tabs - self.controls_w - d.px(GROUP_GAP))
-                    .max(0.0)
-                    .floor()
-            };
-            let spare = self.page_spare;
-            if mirrored {
-                self.page_tabs(ui);
-                gap(ui, self.controls_w + spare);
-                let start = ui.cursor().min.x;
-                self.page(ui, info, out, true);
-                ui.add_space(d.px(GROUP_GAP));
-                self.transport(ui, out);
-                self.controls_w = ui.cursor().min.x - start - spare;
-            } else {
-                let start = ui.cursor().min.x;
-                self.transport(ui, out);
-                ui.add_space(d.px(GROUP_GAP));
-                self.page(ui, info, out, false);
-                self.controls_w = ui.cursor().min.x - start - spare;
-                gap(ui, 0.0);
-                self.page_tabs(ui);
-            }
+        let style = row()
+            .h(d.controls_h())
+            .gap(d.px(GROUP_GAP))
+            .reverse(mirrored);
+        t.style(style).add(|t| {
+            flex::pane(t, leaf().w(d.px(TRANSPORT_W)), |ui| {
+                ui.spacing_mut().item_spacing = vec2(d.px(GAP_X), d.px(GAP_Y));
+                ui.horizontal_top(|ui| self.transport(ui, out));
+            });
+            flex::pane(t, leaf().grow(), |ui| self.page(ui, info, out, mirrored));
+            flex::pane(t, leaf().w(d.px(TABS_W)), |ui| self.page_tabs(ui));
         });
     }
 
-    /// The page the tabs picked, in a fixed box (as wide as the widest page, as tall
-    /// as the controls) so switching doesn't move or resize anything. `mirrored`: the
-    /// player page's groups run the other way (a left deck).
+    /// The page the tabs picked, filling the box between CUE / play and the tabs (the
+    /// same box whichever page shows, so switching doesn't move anything). `mirrored`:
+    /// the player page's groups run the other way (a left deck).
     fn page(&mut self, ui: &mut Ui, info: &DeckInfo, out: &mut Vec<Command>, mirrored: bool) {
-        if self.page_dims != self.dims || self.page_controller != self.controller {
-            self.page_dims = self.dims;
-            self.page_controller = self.controller;
-            self.page_widths = [None; 3];
-        }
-        let h = self.dims.double();
-        // The other pages, each measured once without being shown (nothing on them can
-        // be clicked).
-        for other in Page::ALL {
-            if other == self.page || self.page_widths[other as usize].is_some() {
-                continue;
-            }
-            // Room to spare, so nothing in it wraps or squeezes.
-            let rect = Rect::from_min_size(ui.cursor().min, vec2(4000.0, h));
-            let mut hidden = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(rect)
-                    .layout(Layout::left_to_right(Align::Min))
-                    .invisible(),
-            );
-            let mut ignored = vec![];
-            let w = self.page_contents(&mut hidden, info, &mut ignored, mirrored, other);
-            self.page_widths[other as usize] = Some(w);
-        }
-        let width = self
-            .page_widths
-            .iter()
-            .flatten()
-            .fold(0.0, |a: f32, b| a.max(*b));
-        let size = vec2(width + self.page_spare, h);
         let page = self.page;
+        let on_screen_player = page == Page::Player && !self.controller;
+        // Its own width, and the most it's stretched to: past that, the room to spare
+        // is left beside it, on the outer side.
+        let own = self.dims.px(if on_screen_player {
+            PLAYER_PAGE_W
+        } else {
+            PAGE_W
+        });
+        let room = ui.max_rect().width();
+        let size = vec2(room.min(own * PAGE_STRETCH_MAX), self.dims.double());
+        // The pads are an egui grid, which sizes its columns from the last pass: when
+        // the box changes size, draw it again before it's shown.
+        if self.page_drawn != Some(size.x) {
+            self.page_drawn = Some(size.x);
+            ui.ctx().request_discard("a deck's page changed size");
+        }
         self.page_box = Some(size.x);
-        // Stretched from its own width to the box's (once that's known).
-        self.page_sx = self.page_widths[page as usize]
-            .filter(|&w| w > 0.0)
-            .map_or(1.0, |w| (size.x / w).max(1.0));
-        let sx = self.page_sx;
-        let used = ui
-            .allocate_ui_with_layout(size, Layout::left_to_right(Align::Min), |ui| {
-                ui.set_min_size(size);
-                ui.set_max_size(size);
-                self.page_contents(ui, info, out, mirrored, page)
-            })
-            .inner;
+        // The on-screen player page is stretched from its own width to the box's; the
+        // other pages fill the box themselves.
+        self.page_sx = if on_screen_player {
+            (size.x / own).max(1.0)
+        } else {
+            1.0
+        };
+        let x = if mirrored { room - size.x } else { 0.0 };
+        let rect = Rect::from_min_size(ui.max_rect().min + vec2(x, 0.0), size);
+        let builder = egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Min));
+        ui.scope_builder(builder, |ui| {
+            self.page_contents(ui, info, out, mirrored, page)
+        });
         self.page_box = None;
         self.page_sx = 1.0;
-        // Its own width, unstretched. Never narrower than measured before (a hidden
-        // measure can come out a little wider than the page drawn): the box mustn't
-        // shrink under the tabs.
-        let used = (used / sx).min(width);
-        let known = self.page_widths[page as usize].unwrap_or(0.0);
-        self.page_widths[page as usize] = Some(known.max(used));
     }
 
     /// A width on the page shown: a design size, scaled, and stretched to fill the
@@ -1093,30 +967,11 @@ fn page_icon(p: &egui::Painter, c: egui::Pos2, page: Page, ink: Color32) {
 /// How a Perform deck is drawn.
 #[derive(Clone, Copy, Debug)]
 pub struct DeckLayout {
-    /// Its width, and at least its height.
-    pub width: f32,
-    pub height: f32,
     /// Which side of the mixer it's on.
     pub side: Side,
-    /// The scale its controls are drawn at (`ui::layout::DeckRow::scale`).
-    pub scale: f32,
     /// The tempo fader on its outer edge (off while the mixer's controls are hidden:
     /// a controller has its own); without it SYNC, Q and KEY go in the header.
     pub tempo_fader: bool,
-}
-
-/// A Perform deck.
-
-pub struct DeckPanel<'a> {
-    pub deck: &'a mut DeckUi,
-    pub layout: DeckLayout,
-}
-
-impl Panel for DeckPanel<'_> {
-    fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        let info = cx.engine.deck(self.deck.id);
-        self.deck.show(ui, self.layout, info, cx.out);
-    }
 }
 
 #[cfg(test)]
@@ -1243,79 +1098,77 @@ mod tests {
         assert!(d.pending().is_none());
     }
 
+    /// A harness drawing `deck` as the layout would, filling a window `size` big.
+    fn deck_harness(
+        deck: DeckUi,
+        info: DeckInfo,
+        size: egui::Vec2,
+        layout: DeckLayout,
+    ) -> egui_kittest::Harness<'static, DeckUi> {
+        let h = egui_kittest::Harness::builder()
+            .with_size(size)
+            .build_ui_state(
+                move |ui, deck: &mut DeckUi| {
+                    flex::root(ui, "deck-test", col(), |t| {
+                        deck.show(t, layout, &info, &mut vec![])
+                    });
+                },
+                deck,
+            );
+        THEME.install(&h.ctx);
+        h
+    }
+
     #[test]
     fn loading_deck_shows_the_new_track_at_once() {
         use egui_kittest::kittest::Queryable;
         let mut deck = DeckUi::new(DeckId::new(0).unwrap());
         deck.start_load(pending(7, "Glide"));
         let info = info("Old track", TrackCues::default());
-        let mut h = egui_kittest::Harness::builder()
-            .with_size(vec2(700.0, 260.0))
-            .build_ui_state(
-                move |ui, deck: &mut DeckUi| {
-                    let mut out = vec![];
-                    let layout = DeckLayout {
-                        width: 680.0,
-                        height: 200.0,
-                        side: Side::Left,
-                        scale: 0.9,
-                        tempo_fader: true,
-                    };
-                    deck.show(ui, layout, &info, &mut out);
-                },
-                deck,
-            );
-        h.run_steps(2);
+        let layout = DeckLayout {
+            side: Side::Left,
+            tempo_fader: true,
+        };
+        let mut h = deck_harness(deck, info, vec2(680.0, 200.0), layout);
+        h.run_steps(4);
         assert!(h.query_by_label("Glide - Someone").is_some());
         assert!(h.query_by_label("Old track").is_none());
         h.state_mut().finish_load(7);
-        h.run_steps(2);
+        h.run_steps(4);
         assert!(h.query_by_label("Old track").is_some());
     }
 
-    /// The layout sizes a deck from `width` and `height` without drawing it: what's
-    /// drawn must agree, at every scale, on both sides, with and without the fader.
+    /// A deck given its size at a scale is drawn at that scale, and everything in it
+    /// is inside it: on both sides, with and without the fader.
     #[test]
-    fn the_controls_are_as_wide_as_the_layout_expects() {
-        for k in [SCALE_MIN, 0.55, 0.6, 0.75, 1.0, SCALE_MAX] {
+    fn a_deck_fits_the_box_it_is_given() {
+        use egui_kittest::kittest::{NodeT, Queryable, by};
+        for k in [0.6, 0.75, 1.0, SCALE_MAX] {
             for side in [Side::Left, Side::Right] {
                 for tempo_fader in [false, true] {
-                    if k < scale_min(tempo_fader) {
-                        continue;
-                    }
+                    let size = vec2(width(k, tempo_fader), height(k)).ceil();
+                    let what = format!("scale {k}, {side:?}, fader {tempo_fader}");
+                    assert!((scale_to_fit(size, tempo_fader) - k).abs() < 0.01, "{what}");
                     let deck = DeckUi::new(DeckId::new(0).unwrap());
                     let info = info("A track", TrackCues::default());
-                    let size = vec2(width(k, tempo_fader), height(k));
-                    let mut h = egui_kittest::Harness::builder()
-                        .with_size(size + vec2(20.0, 20.0))
-                        .build_ui_state(
-                            move |ui, deck: &mut DeckUi| {
-                                let layout = DeckLayout {
-                                    width: size.x,
-                                    height: size.y,
-                                    side,
-                                    scale: k,
-                                    tempo_fader,
-                                };
-                                deck.show(ui, layout, &info, &mut vec![]);
-                            },
-                            deck,
-                        );
-                    THEME.install(&h.ctx);
+                    let layout = DeckLayout { side, tempo_fader };
+                    let mut h = deck_harness(deck, info, size, layout);
                     h.run_steps(6);
-                    let d = h.state();
-                    let what = format!("scale {k}, {side:?}, fader {tempo_fader}");
-                    assert!(
-                        (d.drawn.x - size.x).abs() < 0.5 && (d.drawn.y - size.y).abs() < 0.6,
-                        "{what}: drawn {:?}, but the layout expects {size:?}",
-                        d.drawn
-                    );
-                    assert!(d.fit.is_none(), "{what}: refitted to {:?}", d.fit);
-                    let drawn = d.controls_w / k;
-                    assert!(
-                        (CONTROLS_W - 4.0..=CONTROLS_W + 0.5).contains(&drawn),
-                        "{what}: the controls are {drawn} wide at scale 1, not {CONTROLS_W}"
-                    );
+                    let window = egui::Rect::from_min_size(egui::Pos2::ZERO, size).expand(0.5);
+                    for n in h.query_all(by()) {
+                        let node = n.accesskit_node();
+                        if node.role() == egui::accesskit::Role::TextRun {
+                            continue;
+                        }
+                        let Some(b) = node.bounding_box() else {
+                            continue;
+                        };
+                        let r = egui::Rect::from_min_max(
+                            egui::pos2(b.x0 as f32, b.y0 as f32),
+                            egui::pos2(b.x1 as f32, b.y1 as f32),
+                        );
+                        assert!(window.contains_rect(r), "{what}: {n:?} at {r:?}");
+                    }
                 }
             }
         }

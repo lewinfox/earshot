@@ -4,18 +4,23 @@
 
 use super::perform::decks_rows;
 use super::{Panels, body, pane_frame, tab_bar};
+use crate::ui::flex::{self, Flex, Tui, leaf, row};
 use crate::ui::panels::Cx;
 
-pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
-    decks_rows(ctx, panels, cx, "debug");
-    tab_bar(ctx, "debug-bar", cx.theme, |ui| panels.debug.bar(ui, cx));
+pub fn show(t: &mut Tui, panels: &mut Panels, cx: &mut Cx) {
+    decks_rows(t, panels, cx);
+    tab_bar(t, cx.theme, |ui| panels.debug.bar(ui, cx));
     // The log and the spectrogram, half the window each.
-    egui::SidePanel::left("debug-log")
-        .resizable(false)
-        .exact_width(cx.shell.size.x * 0.5)
-        .frame(pane_frame(cx.theme))
-        .show(ctx, |ui| panels.debug.log(ui));
-    body(ctx, pane_frame(cx.theme), |ui| {
-        panels.debug.spectrogram(ui, cx)
+    body(t, egui::Frame::new().fill(cx.theme.bg), |ui| {
+        flex::root(ui, "debug-body", row(), |t| {
+            flex::pane(t, leaf().grow(), |ui| {
+                flex::boxed(ui, pane_frame(cx.theme), |ui| panels.debug.log(ui))
+            });
+            flex::pane(t, leaf().grow(), |ui| {
+                flex::boxed(ui, pane_frame(cx.theme), |ui| {
+                    panels.debug.spectrogram(ui, cx)
+                })
+            });
+        })
     });
 }

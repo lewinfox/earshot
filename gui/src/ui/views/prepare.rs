@@ -11,6 +11,8 @@ use super::perform::decks_rows;
 use super::{Panels, body, pane_frame, tab_bar};
 use crate::core::command::ViewCmd;
 use crate::core::view::Tool;
+use crate::ui::flex::{self, Flex, Tui, leaf, row};
+use crate::ui::layout::TOOL_MIN_W;
 use crate::ui::panels::deck::CuePane;
 use crate::ui::panels::export::ExportPanel;
 use crate::ui::panels::flow::FlowTab;
@@ -54,16 +56,16 @@ const TOOLS: [Tab<Tool>; 6] = [
     },
 ];
 
-pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
+pub fn show(t: &mut Tui, panels: &mut Panels, cx: &mut Cx) {
     let current = cx.prefs.prepare.tool;
-    decks_rows(ctx, panels, cx, "prepare");
-    tab_bar(ctx, "tools-prepare", cx.theme, |ui| {
-        if let Some(t) = tool_tabs(ui, &TOOLS, current) {
-            cx.send(ViewCmd::Tool(t));
+    decks_rows(t, panels, cx);
+    tab_bar(t, cx.theme, |ui| {
+        if let Some(tl) = tool_tabs(ui, &TOOLS, current) {
+            cx.send(ViewCmd::Tool(tl));
         }
     });
     body(
-        ctx,
+        t,
         egui::Frame::new().fill(cx.theme.bg),
         |ui| match current {
             Tool::Flow => FlowTab {
@@ -71,12 +73,14 @@ pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
                 library: &mut panels.library,
             }
             .ui(ui, cx),
-            _ => {
-                panels.library.show_beside(ui, cx);
-                egui::CentralPanel::default()
-                    .frame(pane_frame(cx.theme))
-                    .show_inside(ui, |ui| tool(ui, current, panels, cx));
-            }
+            // `| library | tool |`
+            _ => flex::root(ui, "prepare-body", row(), |t| {
+                panels.library.show_beside(t, cx);
+                let style = leaf().grow().min_w(TOOL_MIN_W);
+                flex::pane(t, style, |ui| {
+                    flex::boxed(ui, pane_frame(cx.theme), |ui| tool(ui, current, panels, cx))
+                });
+            }),
         },
     );
 }

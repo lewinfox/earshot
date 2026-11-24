@@ -12,7 +12,7 @@ use egui::{Color32, Sense, Ui, vec2};
 
 use super::design::*;
 use super::wave::{self, DeckWave, Grid, Marks};
-use super::{DeckInfo, DeckUi, Page};
+use super::{DeckInfo, DeckUi};
 use crate::core::bus::{Range, VOLUME};
 use crate::core::command::Command;
 use crate::core::stems::StemsCmd;
@@ -92,17 +92,12 @@ impl DeckUi {
         let on: [bool; COUNT] = std::array::from_fn(|i| !s.stem_mute[i]);
         let level = s.stem_level;
         let (pos, colour) = (self.shown, self.colour());
-        // As wide as the page box, or measured: the widest other page, or the least
-        // that fits. The waveforms take the room.
+        // As wide as the page box (or the least that fits). The waveforms take the room.
         let (gap, group) = (d.px(GAP_X), d.px(GROUP_GAP));
         let knob = d.px(STEM_KNOB_D);
         let fixed = knob + 4.0 + w + 2.0 * gap;
         let least = 2.0 * (d.px(STEM_WAVE_MIN) + fixed) + group;
-        let others = [Page::Player, Page::Grid]
-            .iter()
-            .filter_map(|p| self.page_widths[*p as usize])
-            .fold(0.0_f32, f32::max);
-        let across = self.page_box.unwrap_or(others).max(least);
+        let across = self.page_box.unwrap_or(least).max(least);
         let wave_w = ((across - group) / 2.0 - fixed).floor();
         let h = d.px(BTN_H);
         if let Some(sw) = &info.stem_waves

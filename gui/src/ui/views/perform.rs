@@ -3,49 +3,62 @@
 //! bar): then each side of the mixer holds two smaller decks, one above the other.
 
 use earshot_engine::DeckId;
-use egui::Ui;
-use egui_extras::{Size, StripBuilder};
 
-use super::{Panels, library, row_frame};
+use super::{Panels, library};
 use crate::core::view::Region;
-use crate::ui::layout::{Edge, STACK_GAP, WAVE_GAP};
-use crate::ui::panels::deck::{DeckLayout, DeckPanel, Side, WavePanel};
+use crate::ui::flex::{self, Flex, Tui, TuiBuilderLogic, col, leaf, row};
+use crate::ui::layout::{DECKS_SHARE, Edge, STACK_GAP, WAVE_GAP};
+use crate::ui::panels::deck::{DeckLayout, Side, WavePanel};
 use crate::ui::panels::mixer::{self, MixerPanel};
 use crate::ui::panels::{Cx, Panel, drag_to_resize};
 
-pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
-    decks_rows(ctx, panels, cx, "perform");
-    library(ctx, panels, cx);
+pub fn show(t: &mut Tui, panels: &mut Panels, cx: &mut Cx) {
+    decks_rows(t, panels, cx);
+    library(t, panels, cx);
 }
 
 /// The waveforms' row and the decks' row (with the mixer): the same in every mode.
-/// `mode` keeps each mode's panel ids apart. Their heights, the decks' scale and
-/// whether there's a mixer are the layout's (`cx.shell`); nothing is sized here.
-pub fn decks_rows(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx, mode: &str) {
+pub fn decks_rows(t: &mut Tui, panels: &mut Panels, cx: &mut Cx) {
     let decks = cx.prefs.decks();
     let shell = cx.shell;
     let sp = &cx.theme.spacing;
-    let waves_row = egui::TopBottomPanel::top(format!("waves-{mode}"))
-        .exact_height(shell.waves_h)
-        .frame(row_frame(cx, sp.waves_margin));
-    show_row(ctx, waves_row, shell.waves_h > 0.0, |ui| {
-        ui.spacing_mut().item_spacing.y = WAVE_GAP;
-        for &d in &decks {
-            let deck = &mut panels.decks[d.index()];
-            WavePanel {
-                deck,
-                height: shell.wave_h,
-            }
-            .ui(ui, cx);
-        }
-        drag_to_resize(ui, Edge::Bottom, Region::Waves, shell.size.y, cx);
-    });
-    let row = shell.decks;
-    let decks_row = egui::TopBottomPanel::top(format!("decks-{mode}"))
-        .exact_height(shell.decks_h)
-        .frame(row_frame(cx, sp.row_margin));
-    show_row(ctx, decks_row, shell.decks_h > 0.0, |ui| {
-        // Decks on the crossfader's left, the mixer, then the rest.
+    if shell.waves {
+        // As tall as dragged; the waveforms share it.
+        let style = leaf().h_pct(shell.waves_pct()).no_shrink();
+        let frame = egui::Frame::new()
+            .fill(cx.theme.bg)
+            .inner_margin(sp.waves_margin);
+        flex::pane(t, style, |ui| {
+            flex::boxed(ui, frame, |ui| {
+                let n = decks.len().max(1) as f32;
+                let wave_h = ((ui.available_height() - (n - 1.0) * WAVE_GAP) / n).max(0.0);
+                ui.spacing_mut().item_spacing.y = WAVE_GAP;
+                for &d in &decks {
+                    let deck = &mut panels.decks[d.index()];
+                    WavePanel {
+                        deck,
+                        height: wave_h,
+                    }
+                    .ui(ui, cx);
+                }
+            });
+            drag_to_resize(ui, Edge::Bottom, Region::Waves, shell.size.y, cx);
+        });
+    }
+    if !shell.decks_row {
+        return;
+    }
+    // `| left decks | mixer | right decks |`: the decks share what the mixer leaves,
+    // each as tall as its width makes it (its aspect ratio), and the row is as tall
+    // as they are (never more than its share of the window). The mixer stretches to
+    // the row's height.
+    let row_style = row()
+        .gap(sp.item.x)
+        .pad(sp.row_margin)
+        .max_h_pct(DECKS_SHARE)
+        .no_shrink();
+    let tempo_fader = shell.mixer;
+    t.style(row_style).add(|t| {
         let side = |d: &DeckId| {
             if mixer::on_left(*d) {
                 Side::Left
@@ -53,57 +66,36 @@ pub fn decks_rows(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx, mode: &
                 Side::Right
             }
         };
-        let column = |ui: &mut Ui, s: Side, panels: &mut Panels, cx: &mut Cx| {
-            let width = ui.available_width();
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = STACK_GAP;
+        let column = |t: &mut Tui, s: Side, panels: &mut Panels, cx: &mut Cx| {
+            t.style(col().grow().gap(STACK_GAP)).add(|t| {
                 for d in decks.iter().filter(|d| side(d) == s) {
                     let deck = &mut panels.decks[d.index()];
-                    DeckPanel {
-                        deck,
-                        layout: DeckLayout {
-                            width,
-                            height: row.deck_h,
+                    let engine = cx.engine;
+                    let info = engine.deck(deck.id);
+                    deck.show(
+                        t,
+                        DeckLayout {
                             side: s,
-                            scale: row.scale,
-                            tempo_fader: row.mixer.is_some(),
+                            tempo_fader,
                         },
-                    }
-                    .ui(ui, cx);
+                        info,
+                        cx.out,
+                    );
                 }
             });
         };
-        // The mixer at its own width; the decks share the rest.
-        let mut strip = StripBuilder::new(ui).size(Size::remainder());
-        if let Some((_, width)) = row.mixer {
-            strip = strip.size(Size::exact(width));
+        column(t, Side::Left, panels, cx);
+        if shell.mixer {
+            let size = mixer::outer_size(decks.len(), mixer::SCALE);
+            flex::pane(t, leaf().w(size.x).min_h(size.y), |ui| {
+                MixerPanel {
+                    decks: &decks,
+                    scale: mixer::SCALE,
+                    height: ui.max_rect().height(),
+                }
+                .ui(ui, cx)
+            });
         }
-        strip.size(Size::remainder()).horizontal(|mut strip| {
-            strip.cell(|ui| column(ui, Side::Left, panels, cx));
-            if let Some((scale, _)) = row.mixer {
-                strip.cell(|ui| {
-                    MixerPanel {
-                        decks: &decks,
-                        scale,
-                        height: row.height,
-                    }
-                    .ui(ui, cx)
-                });
-            }
-            strip.cell(|ui| column(ui, Side::Right, panels, cx));
-        });
+        column(t, Side::Right, panels, cx);
     });
-}
-
-/// A row of the shell, there or not at once (not slid in or out): a change of layout
-/// lands whole, in one frame.
-fn show_row(
-    ctx: &egui::Context,
-    row: egui::TopBottomPanel,
-    shown: bool,
-    add: impl FnOnce(&mut Ui),
-) {
-    if shown {
-        row.show(ctx, add);
-    }
 }

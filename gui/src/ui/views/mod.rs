@@ -6,8 +6,7 @@ pub mod debug;
 pub mod perform;
 pub mod prepare;
 
-use egui::Margin;
-
+use super::flex::{self, Flex, Tui, col, leaf};
 use super::layout;
 use super::panels::Cx;
 use super::panels::controller::ControllerUi;
@@ -59,52 +58,45 @@ impl Panels {
     }
 }
 
-/// Divide the window (what the bars have left of it) for the mode's view: every row's
-/// height and the decks' scale, before any of it is drawn.
+/// What the window under the bars shows this frame, from the preferences.
 pub fn shell(ctx: &egui::Context, panels: &Panels, cx: &Cx) -> layout::Shell {
     let prefs = cx.prefs;
     // The Flow editor's full screen hides the decks and their waveforms.
     let planning = prefs.flow_tab() && panels.flow.full;
     // What the bars left, and never wider than the window itself.
     let room = ctx.available_rect().intersect(ctx.content_rect());
-    layout::shell(
-        room.size(),
-        layout::ShellInput {
-            decks: prefs.deck_total(),
-            mixer: prefs.mixer_shown(),
-            // The waveforms make way for a bigger library (the decks stay).
-            waves: !planning && !prefs.library_maximized,
-            decks_row: !planning,
-            tab_bar: !matches!(prefs.mode, Mode::Perform)
-                && (cfg!(debug_assertions) || prefs.mode != Mode::Debug),
-            waves_share: prefs.layout().sizes.waves,
-        },
-    )
+    layout::Shell {
+        size: room.size(),
+        decks: prefs.deck_total(),
+        mixer: prefs.mixer_shown(),
+        // The waveforms make way for a bigger library (the decks stay).
+        waves: !planning && !prefs.library_maximized,
+        decks_row: !planning,
+        tab_bar: !matches!(prefs.mode, Mode::Perform)
+            && (cfg!(debug_assertions) || prefs.mode != Mode::Debug),
+        waves_share: prefs.layout().sizes.waves,
+    }
 }
 
-/// A bar of tabs over the body, at the height the layout kept for it.
-fn tab_bar(ctx: &egui::Context, id: &str, theme: &Theme, body: impl FnOnce(&mut egui::Ui)) {
+/// A bar of tabs over the body.
+fn tab_bar(t: &mut Tui, theme: &Theme, body: impl FnOnce(&mut egui::Ui)) {
     let sp = &theme.spacing;
-    egui::TopBottomPanel::top(id.to_owned())
-        .exact_height(sp.tab_bar_h)
-        .frame(
-            egui::Frame::new()
-                .fill(theme.bg)
-                .inner_margin(sp.row_margin),
-        )
-        .show(ctx, |ui| {
+    flex::pane(t, leaf().h(sp.tab_bar_h), |ui| {
+        let frame = egui::Frame::new()
+            .fill(theme.bg)
+            .inner_margin(sp.row_margin);
+        flex::boxed(ui, frame, |ui| {
             ui.allocate_ui(egui::vec2(ui.available_width(), sp.tab_h), body);
         });
+    });
 }
 
-/// The body: what's left of the window under the rows above, in `frame`. Whatever is
-/// drawn in it is cut off at its edges, so a pane with more than fits (it should
-/// scroll) can never paint over the status bar. Every view's body goes through here.
-fn body(ctx: &egui::Context, frame: egui::Frame, add: impl FnOnce(&mut egui::Ui)) {
-    let room = ctx.available_rect();
-    egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
-        ui.set_clip_rect(room.intersect(ui.clip_rect()));
-        add(ui);
+/// The body: what the rows above leave of the window, in `frame`. Whatever is drawn
+/// in it is cut off at its edges, so a pane with more than fits (it should scroll)
+/// can never paint over the status bar. Every view's body goes through here.
+fn body(t: &mut Tui, frame: egui::Frame, add: impl FnOnce(&mut egui::Ui)) {
+    flex::pane(t, leaf().grow().min_h(layout::BODY_MIN_H), |ui| {
+        flex::boxed(ui, frame, add)
     });
 }
 
@@ -115,27 +107,29 @@ fn pane_frame(theme: &Theme) -> egui::Frame {
         .inner_margin(theme.spacing.pane_margin)
 }
 
-/// Draw the mode's view.
+/// Draw the mode's view: one column, top to bottom, in what the bars leave.
 pub fn show(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
-    match cx.prefs.mode {
-        Mode::Perform => perform::show(ctx, panels, cx),
-        Mode::Prepare => prepare::show(ctx, panels, cx),
-        Mode::Controller => controller::show(ctx, panels, cx),
+    let mode = match cx.prefs.mode {
         // Only reachable in a debug build; a release build left in it shows Perform.
-        Mode::Debug if cfg!(debug_assertions) => debug::show(ctx, panels, cx),
-        Mode::Debug => perform::show(ctx, panels, cx),
-    }
-}
-
-/// The frame of the waveforms' row and the decks' row.
-fn row_frame(cx: &Cx, margin: Margin) -> egui::Frame {
-    egui::Frame::new().fill(cx.theme.bg).inner_margin(margin)
+        Mode::Debug if !cfg!(debug_assertions) => Mode::Perform,
+        m => m,
+    };
+    egui::CentralPanel::default()
+        .frame(egui::Frame::new().fill(cx.theme.bg))
+        .show(ctx, |ui| {
+            flex::root(ui, egui::Id::new(("shell", mode)), col(), |t| match mode {
+                Mode::Perform => perform::show(t, panels, cx),
+                Mode::Prepare => prepare::show(t, panels, cx),
+                Mode::Controller => controller::show(t, panels, cx),
+                Mode::Debug => debug::show(t, panels, cx),
+            });
+        });
 }
 
 /// The library fills what's left, drawing its own panes' frames.
-fn library(ctx: &egui::Context, panels: &mut Panels, cx: &mut Cx) {
+fn library(t: &mut Tui, panels: &mut Panels, cx: &mut Cx) {
     use super::panels::Panel;
-    body(ctx, egui::Frame::new().fill(cx.theme.bg), |ui| {
+    body(t, egui::Frame::new().fill(cx.theme.bg), |ui| {
         panels.library.ui(ui, cx)
     });
 }
