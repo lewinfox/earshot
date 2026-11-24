@@ -27,6 +27,7 @@
 //! item in [`ASIDES`] and an arm in [`LibraryPane::aside`].
 
 pub mod browser;
+pub mod buckets;
 pub mod collections;
 pub mod drag;
 pub mod external;
@@ -48,7 +49,6 @@ use crate::core::collections::{CollectionCmd, CollectionId, CollectionKind, Coll
 use crate::core::command::{Command, ViewCmd};
 use crate::core::external::NodePath;
 use crate::core::outside::is_outside;
-use crate::core::sources::STREAMING;
 use crate::core::sources::SourceId;
 use crate::core::track::TrackId;
 use crate::core::view::{Aside, Mode, Pane, Region, Source};
@@ -163,6 +163,8 @@ pub struct LibraryPane {
     pub collections: CollectionsUi,
     /// Other DJ programs' libraries.
     pub external: ExternalUi,
+    /// Bucket sources (`core::bucket`).
+    pub buckets: buckets::BucketsUi,
     pub suggest: SuggestUi,
     /// Waveform thumbnails and cover art for every list.
     pub media: Media,
@@ -188,6 +190,7 @@ impl LibraryPane {
             browser: LibraryUi::default(),
             collections: CollectionsUi::default(),
             external: ExternalUi::default(),
+            buckets: buckets::BucketsUi::default(),
             suggest: SuggestUi::default(),
             media: Media::default(),
             tables,
@@ -543,6 +546,7 @@ impl LibraryPane {
                 search: &search,
                 sticks: cx.core.drives,
                 sends: &sends,
+                offline: self.buckets.any().then_some(cx.core.offline),
             };
             let mut cmds: Vec<CollectionCmd> = vec![];
             self.collections.show(ui, section, &tree, &mut cmds);
@@ -574,6 +578,17 @@ impl LibraryPane {
                 }
             }
             Source::Manage => self.manage(ui, cx),
+            Source::Bucket(id) => {
+                if self.buckets.pane_gone(id) {
+                    cx.send(ViewCmd::Source(None));
+                    return;
+                }
+                let scope = self.browser.scope().clone();
+                if let Some(picked) = self.buckets.pane(ui, id, &cx.core, &scope, cx.out) {
+                    self.browser.set_scope(picked);
+                    self.external.close();
+                }
+            }
             Source::Program(_) | Source::Library(_) | Source::Stick(_) => {
                 if self.external.pane_gone(source) {
                     cx.send(ViewCmd::Source(None));
@@ -599,7 +614,7 @@ impl LibraryPane {
     }
 
     /// Managing sources: the music folders (picking one lists its files in the
-    /// middle), adding libraries, and streaming services to come.
+    /// middle), buckets, and adding libraries.
     fn manage(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let before = self.browser.scope().clone();
         egui::ScrollArea::vertical()
@@ -608,13 +623,11 @@ impl LibraryPane {
                 heading(ui, cx, "Music folders");
                 self.browser.folder_tree(ui, &cx.core, cx.out);
                 ui.add_space(10.0);
+                heading(ui, cx, "Buckets");
+                self.buckets.manage(ui);
+                ui.add_space(10.0);
                 heading(ui, cx, "Other libraries");
                 self.external.manage(ui, cx.out);
-                ui.add_space(10.0);
-                heading(ui, cx, "Streaming");
-                for name in STREAMING {
-                    ui.label(RichText::new(format!("{name}  ·  coming")).color(cx.theme.muted));
-                }
             });
         // A folder was picked: it's what the middle lists now.
         if *self.browser.scope() != before && matches!(self.browser.scope(), Scope::Folder(_)) {
@@ -692,6 +705,7 @@ impl LibraryPane {
         // The import and add-to-stick windows, wherever their drop was.
         self.external.set_music(&self.browser.folders);
         self.external.windows(ui.ctx(), &cx.core, cx.out);
+        self.buckets.window(ui.ctx(), cx.out);
         // Panel ids per mode, so each mode keeps its own.
         let id = |name: &str| match cx.prefs.mode {
             Mode::Perform => format!("{name}-perform"),
@@ -701,6 +715,9 @@ impl LibraryPane {
         };
         let mut items: Vec<StackItem<Source>> = VIEWS.into_iter().collect();
         items.extend(self.external.stack_items(&cx.core));
+        // The buckets, before Manage (the last, which adds sources).
+        let manage = items.len() - 1;
+        items.splice(manage..manage, self.buckets.stack_items());
         self.navigate(&items, cx);
         let width = ui.available_width();
         let row = layout::library_row(
@@ -718,6 +735,7 @@ impl LibraryPane {
             .frame(stack_frame)
             .show_inside(ui, |ui| {
                 let (external, core, out) = (&mut self.external, &cx.core, &mut *cx.out);
+                let buckets = &mut self.buckets;
                 let cursor = self.level == Level::Sources;
                 let picked = icon_stack_with_menu(
                     ui,
@@ -725,10 +743,10 @@ impl LibraryPane {
                     layout.source,
                     Opens::Right,
                     cursor,
-                    |ui, s| {
-                        if let Source::Stick(id) = s {
-                            external.stick_menu(ui, id, core, out);
-                        }
+                    |ui, s| match s {
+                        Source::Stick(id) => external.stick_menu(ui, id, core, out),
+                        Source::Bucket(id) => buckets.menu(ui, id, out),
+                        _ => {}
                     },
                 );
                 if let Some(s) = picked {

@@ -91,6 +91,7 @@ fn the_setting_turns_quick_analysis_of_new_tracks_off() {
         null_audio: true,
         worker: stand_in,
         midi: false,
+        secrets: std::sync::Arc::new(crate::core::bucket::MemorySecrets::default()),
     };
     let mut h = build("quick-off", services);
     assert!(h.state().settings.quick_analyse_new, "on by default");

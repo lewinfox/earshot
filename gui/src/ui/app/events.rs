@@ -18,6 +18,8 @@ impl EarshotApp {
                 Event::Scanned(Ok(())) => self.panels.library.browser.scanning = false,
                 Event::Store(e) => self.store_event(e),
                 Event::External(e) => self.external_event(e),
+                Event::Bucket(e) => self.bucket_event(e),
+                Event::Online(online) => self.set_online(online),
                 Event::Export(e) => self.export_event(e),
                 Event::Drives(d) => self.drives_changed(d),
                 Event::Duplicates(Ok(groups)) => self.panels.library.browser.set_duplicates(groups),
@@ -130,15 +132,25 @@ impl EarshotApp {
                 // The music folders, for the Explorer tree and where new files go.
                 self.panels.library.browser.folders = list
                     .iter()
-                    .filter(|s| s.enabled && !s.kind.is_library())
+                    .filter(|s| s.enabled && s.kind.is_folder())
                     .filter_map(|s| s.location.as_ref())
                     .map(|p| p.to_string_lossy().into_owned())
                     .collect();
                 self.panels.library.external.set_sources(list.clone());
+                self.panels.library.buckets.set_sources(&list);
+                self.panels.library.browser.buckets = list
+                    .iter()
+                    .filter(|s| s.enabled)
+                    .filter_map(|s| Some((s.bucket_url()?, s.name.clone())))
+                    .collect();
+                self.buckets.set_sources(&list);
                 self.sources = list;
+                self.refresh_downloads();
             }
             StoreEvent::Library(tracks) => {
                 self.index.replace(tracks);
+                self.refresh_downloads();
+                self.sync_offline();
                 self.refresh_previews(None);
                 // Tracks came or went: the duplicates may have changed.
                 if *self.panels.library.browser.scope() == Scope::Duplicates {
@@ -158,6 +170,7 @@ impl EarshotApp {
             }
             StoreEvent::Collections(list) => {
                 self.collections.set(list);
+                self.sync_offline();
                 let collections = &self.collections;
                 if let Some(id) = self
                     .pending_rename

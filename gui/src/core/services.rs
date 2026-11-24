@@ -21,6 +21,8 @@ pub struct Services {
     pub worker: fn(Role, usize) -> WorkerConfig,
     /// Open every MIDI input at startup.
     pub midi: bool,
+    /// Where bucket sources' access keys are kept (`core::bucket`): the OS keychain.
+    pub secrets: std::sync::Arc<dyn super::bucket::Secrets>,
 }
 
 impl Services {
@@ -30,6 +32,7 @@ impl Services {
             null_audio: false,
             worker: WorkerConfig::python,
             midi: true,
+            secrets: std::sync::Arc::new(super::bucket::Keychain),
         }
     }
 

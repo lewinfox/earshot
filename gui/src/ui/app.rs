@@ -119,6 +119,19 @@ pub struct EarshotApp {
     listener: tempo_lock::Listener,
     /// The stems tool (its own background worker).
     stems: crate::core::stems::Stems,
+    /// Bucket sources: their keys, their downloads' cache (`core::bucket`).
+    buckets: crate::core::bucket::Buckets,
+    /// The crates, playlists and folders whose bucket tracks are kept downloaded.
+    offline: std::collections::HashSet<CollectionId>,
+    /// Bucket tracks already asked to be downloaded for those, so one that fails
+    /// isn't asked for again with every change to the library.
+    offline_asked: std::collections::HashSet<String>,
+    /// Buckets being read through that the user didn't ask to be (at startup): a
+    /// failure is logged, not shown (there may just be no connection).
+    bucket_quiet: std::collections::HashSet<crate::core::sources::SourceId>,
+    /// The computer is online (`core::online`). While it isn't, bucket tracks that
+    /// aren't downloaded are left out of the lists.
+    online: bool,
 
     // ---- core state the UI holds ---------------------------------------------------------
     /// The library, collections and play history: the domain state the panes read.
@@ -342,6 +355,12 @@ impl EarshotApp {
             let sink = sink.clone();
             crate::core::drives::watch(drives_stop.0.clone(), move |d| sink(Event::Drives(d)));
         }
+        // Whether the computer is online (a test says: it's taken to be until then).
+        let online = !watching || crate::core::online::online();
+        if watching {
+            let sink = sink.clone();
+            crate::core::online::watch(drives_stop.0.clone(), move |on| sink(Event::Online(on)));
+        }
         let analyser =
             Analyser::start(sink.clone(), player.clone(), store.clone(), services.worker);
         let hasher = library::start_hasher(store.clone());
@@ -379,6 +398,17 @@ impl EarshotApp {
                 Arc::new(move |e| sink(Event::Stems(e))),
             )
         };
+        let buckets = {
+            let sink = sink.clone();
+            crate::core::bucket::Buckets::new(
+                &folders.cache,
+                (settings.s3_cache_gb.max(0.0) * 1e9) as u64,
+                services.secrets.clone(),
+                jobs.clone(),
+                Arc::new(move |e| sink(Event::Bucket(e))),
+            )
+        };
+        buckets.tidy_at_start();
         let art_loader = library::start_art_loader(store.reader.clone(), sink.clone());
         let lib = Arc::new(Library { store, analyser });
         let mut prefs: UiPrefs = cc
@@ -432,6 +462,11 @@ impl EarshotApp {
             tempo_lock,
             listener: Default::default(),
             stems,
+            buckets,
+            offline: settings.s3_offline.iter().copied().collect(),
+            offline_asked: Default::default(),
+            bucket_quiet: Default::default(),
+            online,
             index: LibraryIndex::default(),
             collections: Collections::default(),
             history: History::default(),
@@ -514,6 +549,10 @@ impl EarshotApp {
         }
         app.restore_flow();
         app.rescan();
+        // The buckets are listed again too: quietly, as there may be no connection.
+        app.sources = app.lib.store.reader.sources().unwrap_or_default();
+        app.buckets.set_sources(&app.sources);
+        app.scan_buckets(true);
         // Sources' path rules whose folders have gone are dropped: the next read
         // looks for those files again.
         for mut s in app.lib.store.reader.sources().unwrap_or_default() {
@@ -1066,6 +1105,7 @@ impl EarshotApp {
             }
             Command::Library(c) => self.library_cmd(c),
             Command::External(c) => self.external_cmd(c),
+            Command::Bucket(c) => self.bucket_cmd(c),
             Command::Export(c) => self.export_cmd(c),
             Command::TempoLock(TempoLockCmd::Listen { version, at }) => self.listen(version, at),
             Command::TempoLock(c) => self.tempo_lock.run(c),
@@ -1266,6 +1306,18 @@ impl EarshotApp {
             ViewCmd::Source(s) => {
                 self.prefs.layout_mut().source = s;
                 self.panels.library.level = Level::Sources;
+                // A bucket's icon: its tracks are what the list shows.
+                if let Some(crate::core::view::Source::Bucket(id)) = s
+                    && let Some(url) = self
+                        .sources
+                        .iter()
+                        .find(|b| b.id == id)
+                        .and_then(|b| b.bucket_url())
+                {
+                    let lib = &mut self.panels.library;
+                    lib.browser.set_scope(Scope::Folder(url));
+                    lib.external.close();
+                }
             }
             ViewCmd::Aside(a) => self.prefs.layout_mut().aside = a,
             ViewCmd::Tool(t) => self.prefs.layout_mut().tool = t,
@@ -1378,6 +1430,7 @@ impl EarshotApp {
             drives: &self.drives,
             uses: &self.uses,
             loaded: &[],
+            offline: &self.offline,
         };
         lib.suggest.refresh(&view, &decks, selected);
     }
@@ -1418,6 +1471,7 @@ impl EarshotApp {
                 drives: &self.drives,
                 uses: &self.uses,
                 loaded: &loaded,
+                offline: &self.offline,
             },
             engine: &self.frame,
             theme: &THEME,
@@ -1497,6 +1551,9 @@ impl EarshotApp {
                 stale: &self.stale,
                 stems_cache_gb: self.settings.stems_cache_gb,
                 stems_used: crate::core::stems::usage(),
+                s3_cache_gb: self.settings.s3_cache_gb,
+                s3_used: self.buckets.cache.usage(),
+                buckets: self.sources.iter().any(|s| s.kind.is_bucket()),
             },
             keymap_file: KeymapEnv {
                 path: &self.keymap_path,
@@ -1653,6 +1710,7 @@ fn store_sink(sink: &Sink) -> EventSink {
     Arc::new(move |e| sink(Event::Store(e)))
 }
 
+mod bucket_ops;
 mod edits;
 mod events;
 mod export_ops;

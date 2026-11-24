@@ -11,9 +11,9 @@
 //!
 //! The schema is made by the migrations in `gui/migrations/` ([`MIGRATIONS`]), run in
 //! order when the database opens: a new one gets them all, an older one the ones it
-//! hasn't had (after a backup copy). For now there's one, `000_init.sql`, edited in
-//! place while nothing is released; a database made before an edit to it is refused
-//! (its fingerprint, [`INIT_FINGERPRINT`], doesn't match).
+//! hasn't had (after a backup copy). `000_init.sql` is the baseline; a database made
+//! before an edit to it is refused (its fingerprint, [`init_fingerprint`], doesn't
+//! match), so changes to the schema go in a migration after it (`001_s3.sql` …).
 
 mod read;
 mod write;
@@ -30,7 +30,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 pub use read::{
     CueRow, JobRow, LibTrack, Memory, PlaySession, Preview, ResultState, Sources, TrackCues,
 };
-pub use write::{AnalysisSave, GridSave, ScannedFile, Writer, grid_bpm};
+pub use write::{AnalysisSave, GridSave, ScannedFile, ScannedObject, Writer, grid_bpm};
 
 use super::background;
 use super::collections::{Collection, CollectionKind, FlowGraph, NodeId, Section};
@@ -50,13 +50,16 @@ pub const FILE_NAME: &str = "library.db";
 /// The migrations, in order: a database's `user_version` is how many it has had.
 /// Add one at the end to change the schema (once `000_init.sql` stops being edited
 /// in place).
-pub const MIGRATIONS: &[&str] = &[include_str!("../../../migrations/000_init.sql")];
+pub const MIGRATIONS: &[&str] = &[
+    include_str!("../../../migrations/000_init.sql"),
+    include_str!("../../../migrations/001_s3.sql"),
+];
 
 /// `application_id` of a database made by [`MIGRATIONS`] (ASCII "ears"). Development
 /// databases from before there were migrations don't have it, and are refused.
 const APPLICATION_ID: i64 = 0x6561_7273;
 
-/// The setting holding [`INIT_FINGERPRINT`] as it was when the database was made.
+/// The setting holding [`init_fingerprint`] as it was when the database was made.
 const INIT_SETTING: &str = "schema.init";
 
 /// A fingerprint of `000_init.sql`'s statements (comments and spacing left out), so
@@ -729,16 +732,55 @@ fn migrate_with(conn: &mut Connection, path: &Path, migrations: &[&str]) -> Resu
     if found > 0 {
         backup(conn, path, found)?;
     }
+    // Foreign keys off while migrating (it can't be changed inside the transaction):
+    // a migration that makes a table again drops the old one, which would otherwise
+    // take the rows that refer to it along (ON DELETE CASCADE). What it leaves is
+    // checked before it's committed.
+    let enforced: bool = conn.pragma_query_value(None, "foreign_keys", |r| r.get(0))?;
+    conn.pragma_update(None, "foreign_keys", false)?;
+    let done = run_migrations(
+        conn,
+        &migrations[found as usize..],
+        found,
+        known,
+        &fingerprint,
+    );
+    conn.pragma_update(None, "foreign_keys", enforced)?;
+    done
+}
+
+/// Run `migrations` (the ones a database at version `found` hasn't had) in one
+/// transaction, leaving it at version `known`.
+fn run_migrations(
+    conn: &mut Connection,
+    migrations: &[&str],
+    found: i64,
+    known: i64,
+    fingerprint: &str,
+) -> Result<()> {
     let tx = conn.transaction().map_err(StoreError::Create)?;
-    for sql in &migrations[found as usize..] {
+    for sql in migrations {
         tx.execute_batch(sql).map_err(StoreError::Create)?;
+    }
+    let broken: Option<String> = tx
+        .query_row(
+            "SELECT \"table\" FROM pragma_foreign_key_check LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(StoreError::Create)?;
+    if broken.is_some() {
+        return Err(StoreError::Refused(
+            "a migration left rows that refer to rows that aren't there",
+        ));
     }
     if found == 0 {
         tx.pragma_update(None, "application_id", APPLICATION_ID)
             .map_err(StoreError::Create)?;
         tx.execute(
             "INSERT INTO settings(key, value) VALUES (?1, ?2)",
-            [INIT_SETTING, &fingerprint],
+            [INIT_SETTING, fingerprint],
         )
         .map_err(StoreError::Create)?;
     }
@@ -805,6 +847,12 @@ impl Reader {
                 .pop()
                 .ok_or(StoreError::NoTrack(id))
         })
+    }
+
+    /// Every track in the library, as `StoreEvent::Library` lists them.
+    #[cfg(test)]
+    pub fn library(&self) -> Result<Vec<LibTrack>> {
+        self.with(|c| read::tracks(c, None))
     }
 
     /// Where a track's audio is now.
@@ -916,9 +964,17 @@ impl Reader {
         self.with(read::plays)
     }
 
-    /// Files whose audio hash hasn't been worked out: (file id, path).
-    pub fn files_without_hash(&self) -> Result<Vec<(i64, PathBuf)>> {
+    /// Files whose audio hash hasn't been worked out: (file id, where it is).
+    pub fn files_without_hash(&self) -> Result<Vec<(i64, Location)>> {
         self.with(read::files_without_hash)
+    }
+
+    /// The objects known under a bucket source's URL: URL → (size, ETag).
+    pub fn objects(
+        &self,
+        root: &str,
+    ) -> Result<std::collections::HashMap<String, (i64, Option<String>)>> {
+        self.with(|c| read::objects(c, root))
     }
 
     /// Every file the library knows: path bytes → (size, mtime in ns).

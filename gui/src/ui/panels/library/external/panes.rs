@@ -39,6 +39,7 @@ fn icon(kind: SourceKind) -> &'static str {
         SourceKind::Serato | SourceKind::SeratoUsb => "S",
         SourceKind::Mixxx => "MX",
         SourceKind::Folder => "📁",
+        SourceKind::S3 => "☁",
     }
 }
 

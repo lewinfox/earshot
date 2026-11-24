@@ -40,6 +40,23 @@ pub struct ScannedFile {
     pub tag_hash: Option<Hash>,
 }
 
+/// An object a bucket scan found that is new, or whose ETag or size changed
+/// (`core::bucket`).
+#[derive(Debug, Clone)]
+pub struct ScannedObject {
+    /// `s3://bucket/key`: its `files.path`.
+    pub url: String,
+    /// Its key: its `track_sources.external_id`.
+    pub key: String,
+    pub size: i64,
+    /// When it was last written, ns since the epoch.
+    pub modified_ns: i64,
+    pub etag: Option<String>,
+    pub tags: TrackTags,
+    /// From the object's `TXXX:AUDIO_SHA256`, when it has one.
+    pub tag_hash: Option<Hash>,
+}
+
 /// Everything one analysis job found, written in one transaction.
 #[derive(Debug)]
 pub struct AnalysisSave {
@@ -1400,7 +1417,11 @@ pub(super) fn new_tracks(c: &Connection, before: i64) -> Result<Vec<i64>> {
 /// Record one new or changed file and its tags (see [`Writer::apply_scan`]); returns
 /// its track.
 fn record_file(tx: &Connection, f: &ScannedFile, t: i64) -> Result<i64> {
-    let bytes = path_bytes(&f.path);
+    record_at(tx, &path_bytes(&f.path), f, t)
+}
+
+/// [`record_file`] at `bytes`: the file's path, or a remote object's URL.
+pub(super) fn record_at(tx: &Connection, bytes: &[u8], f: &ScannedFile, t: i64) -> Result<i64> {
     let existing: Option<i64> = tx
         .query_row(
             "SELECT track_id FROM files WHERE path = ?1",

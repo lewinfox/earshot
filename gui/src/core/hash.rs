@@ -236,8 +236,13 @@ pub fn tag_hash(at: &Location) -> Option<Hash> {
     if ext != "mp3" && ext != "aac" {
         return None;
     }
-    let mut f = at.open().ok()?;
+    let mut f = at.peek().ok()?;
     read_txxx(f.as_mut(), AUDIO_HASH).and_then(|v| from_hex(&v))
+}
+
+/// [`tag_hash`] of an MP3 (or AAC) that's already open.
+pub fn tag_hash_from(f: &mut dyn Media) -> Option<Hash> {
+    read_txxx(f, AUDIO_HASH).and_then(|v| from_hex(&v))
 }
 
 /// The value of the first ID3v2 `TXXX` frame with this description.

@@ -69,6 +69,9 @@ pub struct LibraryUi {
     want_top: bool,
     /// The library folders (Explorer roots).
     pub folders: Vec<String>,
+    /// The bucket sources: each one's URL (`s3://bucket/prefix`, the scope that
+    /// lists its tracks) and the name the user gave it, for the list's heading.
+    pub buckets: Vec<(String, String)>,
     scope: Scope,
     subdirs: HashMap<String, Vec<Subdir>>,
     pub search: String,
@@ -250,6 +253,8 @@ impl LibraryUi {
             Scope::All => TableView::Library,
             Scope::Duplicates => TableView::Duplicates,
             Scope::History(_) => TableView::History,
+            // A bucket, or a folder in one.
+            Scope::Folder(f) if f.starts_with("s3://") => TableView::Bucket,
             Scope::Folder(_) => TableView::Explorer,
             Scope::Collection(id) => match v.collections.get(*id).map(|c| c.kind) {
                 Some(CollectionKind::Playlist) => TableView::Playlist,
@@ -347,7 +352,10 @@ impl LibraryUi {
     fn reorderable(&self, v: &CoreView, table: &TableState) -> bool {
         self.collection()
             .and_then(|id| v.collections.get(id))
-            .is_some_and(|c| c.kind == CollectionKind::Playlist)
+            // (Not while some of its tracks are left out: rows aren't its entries then.)
+            .is_some_and(|c| {
+                c.kind == CollectionKind::Playlist && !c.tracks.iter().any(|t| v.lib.is_hidden(*t))
+            })
             && self.query == Query::default()
             && table.sort.is_none()
             && !table.has_filters()
@@ -553,7 +561,11 @@ impl LibraryUi {
                 Some(s) => format!("Played {}", s.label),
                 None => "History".into(),
             },
-            Scope::Folder(f) => f.rsplit('/').next().unwrap_or(f).into(),
+            // A bucket goes by the name the user gave it, not its bucket's or prefix's.
+            Scope::Folder(f) => match self.buckets.iter().find(|(url, _)| url == f) {
+                Some((_, name)) => name.clone(),
+                None => f.rsplit('/').next().unwrap_or(f).into(),
+            },
             Scope::Collection(id) => v
                 .collections
                 .get(*id)
@@ -601,6 +613,21 @@ impl LibraryUi {
                     format!("{} tracks", self.shown.len())
                 };
                 ui.label(RichText::new(count).color(THEME.muted));
+                // Why the lists are shorter than they were.
+                if let n @ 1.. = v.lib.hidden_count() {
+                    // (In a few words where the list is narrow, beside a tool.)
+                    let text = match ui.available_width() > 420.0 {
+                        true => format!("☁ {n} hidden"),
+                        false => format!("☁ {n}"),
+                    };
+                    ui.label(RichText::new(text).color(THEME.warn))
+                        .on_hover_text(format!(
+                            "{n} track{} in a bucket and not downloaded, so {} couldn't \
+                             be loaded while this computer is offline. Back when it's online.",
+                            if n == 1 { " is" } else { "s are" },
+                            if n == 1 { "it" } else { "they" },
+                        ));
+                }
                 let mut edit = egui::TextEdit::singleline(&mut self.search)
                     .hint_text("Search   bpm:120-126  key:8A  -tag:x  sort:-bpm   ( / )")
                     .desired_width(f32::INFINITY);

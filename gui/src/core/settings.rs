@@ -32,6 +32,12 @@ pub const LOAD_WHILE_PLAYING: &str = "decks.load_while_playing";
 pub const STEMS_CACHE_GB: &str = "stems.cache_gb";
 /// [`STEMS_CACHE_GB`] until it's set.
 pub const STEMS_CACHE_GB_DEFAULT: f64 = 20.0;
+/// The most the cache of tracks downloaded from buckets may take, GB
+/// (`bucket::Cache`): over it, the ones used least recently go.
+pub const S3_CACHE_GB: &str = "s3.cache_gb";
+/// The crates, playlists and folders whose bucket tracks are kept downloaded
+/// ("available offline"): collection ids.
+pub const S3_OFFLINE: &str = "s3.offline";
 /// The sampler's 16 slots ([`Bank`]): each one's sound file, volume and loop switch.
 pub const SAMPLER: &str = "sampler.slots";
 /// Add another library's tracks to earshot without asking, when they're put in a
@@ -55,6 +61,8 @@ pub struct Settings {
     pub flow_open: Option<CollectionId>,
     pub import_without_asking: bool,
     pub stems_cache_gb: f64,
+    pub s3_cache_gb: f64,
+    pub s3_offline: Vec<CollectionId>,
     pub quick_analyse_new: bool,
     pub sampler: Bank,
 }
@@ -92,6 +100,8 @@ impl Settings {
             flow_open: read(reader, FLOW_OPEN).unwrap_or_default(),
             import_without_asking: read(reader, IMPORT_WITHOUT_ASKING).unwrap_or_default(),
             stems_cache_gb: read(reader, STEMS_CACHE_GB).unwrap_or(STEMS_CACHE_GB_DEFAULT),
+            s3_cache_gb: read(reader, S3_CACHE_GB).unwrap_or(super::bucket::CACHE_GB_DEFAULT),
+            s3_offline: read(reader, S3_OFFLINE).unwrap_or_default(),
             quick_analyse_new: read(reader, QUICK_ANALYSE_NEW).unwrap_or(true),
             sampler: read(reader, SAMPLER).unwrap_or_default(),
         }

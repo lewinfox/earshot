@@ -196,6 +196,7 @@ fn the_open_flow_and_its_view_come_back_from_the_database() {
         null_audio: true,
         worker: stand_in,
         midi: false,
+        secrets: std::sync::Arc::new(crate::core::bucket::MemorySecrets::default()),
     };
     let mut h = super::tests::build(test, services);
     settle_until(&mut h, |a| a.panels.flow.flow == Some(id));

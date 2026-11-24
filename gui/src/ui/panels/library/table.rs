@@ -35,6 +35,8 @@ pub enum ColumnId {
     /// The row's place in the list (a playlist's order).
     Index,
     Status,
+    /// For a track in a bucket: whether it has been downloaded.
+    Download,
     Wave,
     Title,
     Artist,
@@ -128,7 +130,7 @@ const fn col(
 }
 
 /// Every column, in the columns menu's order.
-pub const COLUMNS: [ColumnDef; 21] = [
+pub const COLUMNS: [ColumnDef; 22] = [
     col(
         ColumnId::Index,
         "#",
@@ -146,6 +148,15 @@ pub const COLUMNS: [ColumnDef; 21] = [
         34.0,
         true,
         |ui, c| status_mark(ui, c.t, c.v.lib.analysis(c.t.id)),
+    ),
+    col(
+        ColumnId::Download,
+        "",
+        "Downloaded (bucket tracks)",
+        None,
+        22.0,
+        true,
+        download_cell,
     ),
     col(ColumnId::Wave, "", "Waveform", None, 100.0, true, wave_cell),
     col(
@@ -328,6 +339,23 @@ pub const COLUMNS: [ColumnDef; 21] = [
     ),
 ];
 
+/// A bucket track's download mark: a tick once it's downloaded (it plays without a
+/// connection), a cloud while it's only in its bucket. Nothing for a local file.
+fn download_cell(ui: &mut Ui, c: &mut Cell<'_>) {
+    let (mark, colour, tip) = match c.v.lib.downloaded(c.t.id) {
+        None => return,
+        Some(true) => ("✔", THEME.ok, "Downloaded: plays without a connection"),
+        Some(false) => (
+            "☁",
+            THEME.muted,
+            "In its bucket: downloaded when it's loaded or analysed \
+             (right-click > Download to fetch it now)",
+        ),
+    };
+    ui.label(RichText::new(mark).color(colour))
+        .on_hover_text(tip);
+}
+
 pub fn def(id: ColumnId) -> &'static ColumnDef {
     COLUMNS
         .iter()
@@ -336,9 +364,10 @@ pub fn def(id: ColumnId) -> &'static ColumnDef {
 }
 
 /// The columns any library list can show.
-pub const LIBRARY_COLUMNS: [ColumnId; 18] = [
+pub const LIBRARY_COLUMNS: [ColumnId; 19] = [
     ColumnId::Index,
     ColumnId::Status,
+    ColumnId::Download,
     ColumnId::Wave,
     ColumnId::Colour,
     ColumnId::Title,
@@ -358,8 +387,9 @@ pub const LIBRARY_COLUMNS: [ColumnId; 18] = [
 ];
 
 /// The suggestions' columns: the library's and the score's.
-pub const SUGGEST_COLUMNS: [ColumnId; 20] = [
+pub const SUGGEST_COLUMNS: [ColumnId; 21] = [
     ColumnId::Status,
+    ColumnId::Download,
     ColumnId::Wave,
     ColumnId::Colour,
     ColumnId::Title,
@@ -390,6 +420,8 @@ pub enum TableView {
     Library,
     /// A folder on disk.
     Explorer,
+    /// A bucket source's tracks.
+    Bucket,
     Playlist,
     Smart,
     Crate,
@@ -423,6 +455,7 @@ impl TableView {
                 &[Index, Status, Wave, Title, Artist, Bpm, Key, Time]
             }
             TableView::Duplicates => &[Status, Title, Artist, Bpm, Time, File],
+            TableView::Bucket => &[Status, Download, Wave, Title, Artist, Bpm, Key, Time],
             _ => &[Status, Wave, Title, Artist, Bpm, Key, Time],
         };
         TableState {

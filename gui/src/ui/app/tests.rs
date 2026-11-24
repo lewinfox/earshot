@@ -177,6 +177,7 @@ pub(super) fn start_with(test: &str, worker: fn(Role, usize) -> WorkerConfig) ->
         null_audio: true,
         worker,
         midi: false,
+        secrets: std::sync::Arc::new(crate::core::bucket::MemorySecrets::default()),
     };
     let mut h = build(test, services);
     h.state_mut()
@@ -1885,6 +1886,7 @@ fn master_in_prepare_is_the_playing_deck() {
 }
 
 mod audio_watch;
+mod bucket;
 mod cpu_strain;
 mod external;
 mod history;
@@ -1968,6 +1970,7 @@ fn deck_options_survive_a_restart() {
         null_audio: true,
         worker: stand_in,
         midi: false,
+        secrets: std::sync::Arc::new(crate::core::bucket::MemorySecrets::default()),
     };
     let mut h = build("deck-options", services);
     settle_until(&mut h, |a| {

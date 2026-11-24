@@ -143,6 +143,7 @@ fn slots_are_assigned_played_from_the_pads_and_kept() {
         null_audio: true,
         worker: stand_in,
         midi: false,
+        secrets: std::sync::Arc::new(crate::core::bucket::MemorySecrets::default()),
     };
     let mut h = build("sampler", services);
     settle_until(&mut h, |a| {

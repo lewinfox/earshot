@@ -51,6 +51,9 @@ pub enum Command {
     External(ExternalCmd),
     /// Writing to other DJ programs' libraries and sticks. Run by the UI, like `Library`.
     Export(ExportCmd),
+    /// Bucket sources (`core::bucket`): add, read again, download. Run by the UI, like
+    /// `Library`.
+    Bucket(super::bucket::BucketCmd),
     /// The tempo lock tool (`TempoLock::run`). Run by the UI, like `Library`.
     TempoLock(TempoLockCmd),
     /// The stems tool (`Stems::run`). Run by the UI, like `Library`.
@@ -565,6 +568,12 @@ impl Command {
 impl From<ExportCmd> for Command {
     fn from(c: ExportCmd) -> Command {
         Command::Export(c)
+    }
+}
+
+impl From<super::bucket::BucketCmd> for Command {
+    fn from(c: super::bucket::BucketCmd) -> Command {
+        Command::Bucket(c)
     }
 }
 

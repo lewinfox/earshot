@@ -17,7 +17,6 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use earshot_engine::beatgrid::GridModel;
-use earshot_engine::media::Location;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -420,10 +419,11 @@ fn resolve(store: &Reader, picked: &[Picked]) -> Result<(Vec<OutNode>, Vec<Track
     Ok((nodes, order))
 }
 
-/// A track as the worker takes it; `None` if its audio isn't a file here.
+/// A track as the worker takes it; `None` if its audio isn't a file here (a
+/// bucket's track that hasn't been downloaded: its downloaded copy is what's sent).
 fn out_track(store: &Reader, id: TrackId) -> Result<Option<OutTrack>, String> {
     let e = |e: super::store::StoreError| e.to_string();
-    let Location::File(file) = store.track_location(id).map_err(e)? else {
+    let Some(file) = store.track_location(id).map_err(e)?.here() else {
         return Ok(None);
     };
     let t = store.track(id).map_err(e)?;

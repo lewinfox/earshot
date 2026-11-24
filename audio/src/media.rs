@@ -1,15 +1,23 @@
 //! Where a track's audio is, and getting its bytes: everything that reads audio
-//! (decoding, tags, cover art, the audio hash) goes through [`Location::open`], so a
-//! new kind of place (a remote object, a streaming service) is one more variant here
-//! and nothing else changes.
+//! (decoding, tags, cover art, the audio hash) goes through [`Location::open`] or
+//! [`Location::peek`], so a new kind of place (a remote object, a streaming service)
+//! is one more [`Remote`] and nothing else changes.
 //!
 //! Stored in the database as bytes ([`Location::to_bytes`]): a local path's raw bytes,
 //! or a URL (`scheme://…`).
+//!
+//! A URL is read through the [`Remote`] registered for its scheme ([`register`]): the
+//! app registers one for `s3://` (its bucket sources). Audio is never decoded off the
+//! network: [`Location::open`] has the remote fetch a local copy first, and only
+//! [`Location::peek`] (tags, cover art) reads a remote object in place, a few ranges
+//! of it.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock, RwLock};
 
 /// Bytes to read a track from: seekable, so formats with their index at the end
 /// (MP4) and the audio hash's ranges work.
@@ -24,13 +32,50 @@ impl Media for File {
     }
 }
 
+/// What reads one scheme's URLs (`s3://…`): registered by the app ([`register`]).
+pub trait Remote: Send + Sync {
+    /// The local copy of the whole object, if there's one already. Never waits on
+    /// the network.
+    fn cached(&self, url: &str) -> Option<PathBuf>;
+    /// A local copy of the whole object, fetched first if there's none. Blocking.
+    fn fetch(&self, url: &str) -> Result<PathBuf, String>;
+    /// The object where it is, read a range at a time: for tags and cover art, which
+    /// are a small part of it.
+    fn peek(&self, url: &str) -> Result<Box<dyn Media>, String>;
+}
+
+fn remotes() -> &'static RwLock<HashMap<String, Arc<dyn Remote>>> {
+    static REMOTES: OnceLock<RwLock<HashMap<String, Arc<dyn Remote>>>> = OnceLock::new();
+    REMOTES.get_or_init(Default::default)
+}
+
+/// Read `scheme://…` URLs through `remote` from now on (replacing the scheme's
+/// earlier one).
+pub fn register(scheme: &str, remote: Arc<dyn Remote>) {
+    remotes()
+        .write()
+        .unwrap()
+        .insert(scheme.to_ascii_lowercase(), remote);
+}
+
+/// The remote registered for a URL's scheme.
+fn remote_for(url: &str) -> Result<Arc<dyn Remote>, String> {
+    let scheme = url.split("://").next().unwrap_or("").to_ascii_lowercase();
+    remotes()
+        .read()
+        .unwrap()
+        .get(&scheme)
+        .cloned()
+        .ok_or_else(|| format!("{url}: reading audio from {scheme}:// isn't supported"))
+}
+
 /// Where a track's audio is.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Location {
     /// A file on this computer.
     File(PathBuf),
-    /// Anywhere else, by URL: `s3://bucket/key`, `https://…`, a streaming service's
-    /// own scheme. Not readable yet: [`Location::open`] says so.
+    /// Anywhere else, by URL: `s3://bucket/key`, a streaming service's own scheme.
+    /// Read through its scheme's [`Remote`].
     Url(String),
 }
 
@@ -73,7 +118,14 @@ impl Location {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             Location::Url(u) => {
-                let path = u.split(['?', '#']).next().unwrap_or(u);
+                // A web address ends at its query or fragment. An object's key
+                // (`s3://bucket/key`) is taken as it is: `?` and `#` are part of
+                // plenty of file names.
+                let web = u.starts_with("http://") || u.starts_with("https://");
+                let path = match web {
+                    true => u.split(['?', '#']).next().unwrap_or(u),
+                    false => u.as_str(),
+                };
                 path.rsplit('/').next().unwrap_or(path).to_string()
             }
         }
@@ -86,15 +138,50 @@ impl Location {
         (!stem.is_empty() && !ext.is_empty()).then(|| ext.to_lowercase())
     }
 
-    /// Open it for reading.
+    /// Open the whole of it for reading: a remote object is fetched to a local copy
+    /// first ([`Location::local`]), so this can take as long as the download.
     pub fn open(&self) -> Result<Box<dyn Media>, String> {
+        open_file(&self.local()?)
+    }
+
+    /// Open it to read a little of it (tags, cover art): a remote object that has no
+    /// local copy is read where it is, only the ranges asked for.
+    pub fn peek(&self) -> Result<Box<dyn Media>, String> {
         match self {
-            Location::File(p) => File::open(p)
-                .map(|f| Box::new(f) as Box<dyn Media>)
-                .map_err(|e| format!("{}: {e}", p.display())),
-            Location::Url(u) => Err(format!("{u}: reading audio from a URL isn't supported yet")),
+            Location::File(p) => open_file(p),
+            Location::Url(u) => {
+                let remote = remote_for(u)?;
+                match remote.cached(u) {
+                    Some(p) => open_file(&p),
+                    None => remote.peek(u),
+                }
+            }
         }
     }
+
+    /// A file on this computer holding it: the file itself, or a remote object's
+    /// local copy, fetched first if there's none. Blocking.
+    pub fn local(&self) -> Result<PathBuf, String> {
+        match self {
+            Location::File(p) => Ok(p.clone()),
+            Location::Url(u) => remote_for(u)?.fetch(u),
+        }
+    }
+
+    /// The file on this computer holding it, if there's one now: [`Location::local`]
+    /// without fetching anything.
+    pub fn here(&self) -> Option<PathBuf> {
+        match self {
+            Location::File(p) => Some(p.clone()),
+            Location::Url(u) => remote_for(u).ok()?.cached(u),
+        }
+    }
+}
+
+fn open_file(p: &Path) -> Result<Box<dyn Media>, String> {
+    File::open(p)
+        .map(|f| Box::new(f) as Box<dyn Media>)
+        .map_err(|e| format!("{}: {e}", p.display()))
 }
 
 impl fmt::Display for Location {
@@ -164,10 +251,15 @@ mod tests {
             ("y.M4A", Some("m4a".into()))
         );
         assert_eq!(Location::File("/m/.hidden".into()).extension(), None);
+        let o = Location::Url("s3://bucket/a/Track #3 (why?).FLAC".into());
+        assert_eq!(
+            (o.file_name().as_str(), o.extension()),
+            ("Track #3 (why?).FLAC", Some("flac".into()))
+        );
     }
 
     #[test]
-    fn files_open_and_urls_say_they_cant_yet() {
+    fn files_open_and_unknown_schemes_say_they_cant() {
         let p = std::env::temp_dir().join(format!("earshot-media-{}.bin", std::process::id()));
         std::fs::write(&p, b"12345").unwrap();
         let mut m = Location::File(p.clone()).open().unwrap();
@@ -176,7 +268,58 @@ mod tests {
         m.read_to_string(&mut s).unwrap();
         assert_eq!(s, "12345");
         std::fs::remove_file(&p).unwrap();
-        let e = Location::Url("s3://b/k.mp3".into()).open().err().unwrap();
-        assert!(e.contains("isn't supported yet"), "{e}");
+        let at = Location::Url("nosuch://b/k.mp3".into());
+        for e in [at.open().err().unwrap(), at.peek().err().unwrap()] {
+            assert!(e.contains("isn't supported"), "{e}");
+        }
+        assert_eq!(at.here(), None);
+    }
+
+    /// A remote whose objects are files in a folder: `fetch` copies one to `<name>.copy`.
+    struct Folder(PathBuf);
+
+    impl Folder {
+        fn object(&self, url: &str) -> PathBuf {
+            self.0.join(url.rsplit('/').next().unwrap())
+        }
+    }
+
+    impl Remote for Folder {
+        fn cached(&self, url: &str) -> Option<PathBuf> {
+            let copy = self.object(url).with_extension("copy");
+            copy.is_file().then_some(copy)
+        }
+
+        fn fetch(&self, url: &str) -> Result<PathBuf, String> {
+            let copy = self.object(url).with_extension("copy");
+            std::fs::copy(self.object(url), &copy).map_err(|e| e.to_string())?;
+            Ok(copy)
+        }
+
+        fn peek(&self, url: &str) -> Result<Box<dyn Media>, String> {
+            open_file(&self.object(url))
+        }
+    }
+
+    #[test]
+    fn a_url_is_read_through_its_schemes_remote() {
+        let dir = std::env::temp_dir().join(format!("earshot-remote-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("k.mp3"), b"abc").unwrap();
+        register("testremote", Arc::new(Folder(dir.clone())));
+        let at = Location::Url("testremote://b/k.mp3".into());
+        let read = |m: Result<Box<dyn Media>, String>| {
+            let mut s = String::new();
+            m.unwrap().read_to_string(&mut s).unwrap();
+            s
+        };
+        // Peeking reads it where it is; nothing is copied.
+        assert_eq!(read(at.peek()), "abc");
+        assert_eq!(at.here(), None);
+        // Opening fetches the local copy, which is then what's read.
+        assert_eq!(read(at.open()), "abc");
+        assert_eq!(at.here(), Some(dir.join("k.copy")));
+        assert_eq!(at.local().unwrap(), dir.join("k.copy"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
