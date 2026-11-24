@@ -2,6 +2,7 @@
 //! added, each under the name the user gave it, and the window that adds one (or
 //! changes one's name, service or key).
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use egui::{RichText, TextEdit, Ui};
@@ -11,7 +12,11 @@ use crate::core::bucket::{BucketCmd, BucketForm, Scan};
 use crate::core::command::Command;
 use crate::core::index::LibraryCmd;
 use crate::core::sources::{Source, SourceId};
+use crate::core::view::Source as Pane;
 use crate::ui::modals::show_fitted;
+use crate::ui::panels::CoreView;
+use crate::ui::theme::THEME;
+use crate::ui::widgets::StackItem;
 use crate::ui::widgets::{Button, Note, busy_line, muted};
 
 /// The window's title: adding a bucket, or changing one.
@@ -40,6 +45,9 @@ pub struct BucketsUi {
     last: HashMap<SourceId, Result<Scan, String>>,
     /// The computer is offline: only downloaded tracks are listed.
     offline: bool,
+    /// The folders of the bucket whose pane is open, as of a library revision
+    /// ([`BucketsUi::folders`]).
+    tree: Option<(SourceId, u64, std::rc::Rc<Vec<String>>)>,
 }
 
 impl BucketsUi {
@@ -103,84 +111,63 @@ impl BucketsUi {
         self.dialog.is_some()
     }
 
-    /// The Sources pane's Buckets section: each bucket (picking one lists its tracks
-    /// in the middle), and the button that adds one.
-    /// Returns the bucket picked, as the scope that lists its tracks.
-    pub fn manage(&mut self, ui: &mut Ui, scope: &Scope, out: &mut Vec<Command>) -> Option<Scope> {
-        let mut picked = None;
-        if self.sources.is_empty() {
-            muted(ui, "No buckets yet.");
-        } else if self.offline {
-            ui.add(
-                Note::warning(
-                    "This computer is offline: only the tracks already downloaded are \
-                     listed. The rest are back when it's online.",
-                )
-                .small(),
-            );
+    /// The bucket sources' icons for the left icon stack: one each, by the first
+    /// letters of the name the user gave it (as the DJ programs have "RB", "MX").
+    pub fn stack_items(&self) -> Vec<StackItem<Pane>> {
+        self.sources
+            .iter()
+            .enumerate()
+            .map(|(i, s)| StackItem {
+                id: Pane::Bucket(s.id),
+                icon: Cow::Owned(initials(&s.name)),
+                tip: Cow::Owned(format!("{}: a bucket", s.name)),
+                enabled: true,
+                // Reading it through now.
+                light: self.scanning.contains(&s.id).then_some(THEME.warn),
+                gap: i == 0,
+                menu: true,
+            })
+            .collect()
+    }
+
+    /// The bucket a pane shows is gone (removed).
+    pub fn pane_gone(&self, id: SourceId) -> bool {
+        !self.sources.iter().any(|s| s.id == id)
+    }
+
+    /// What can be done to a bucket: its icon's right-click menu.
+    pub fn menu(&mut self, ui: &mut Ui, id: SourceId, out: &mut Vec<Command>) {
+        let Some(s) = self.sources.iter().find(|s| s.id == id).cloned() else {
+            return;
+        };
+        if ui.button("Read again").clicked() {
+            out.push(BucketCmd::Scan(s.id).into());
+            ui.close();
         }
-        for s in self.sources.clone() {
-            let Some(url) = s.bucket_url() else { continue };
-            let selected = matches!(scope, Scope::Folder(f) if *f == url);
-            let endpoint = s
-                .config
-                .s3
-                .as_ref()
-                .and_then(|c| c.endpoint.clone())
-                .unwrap_or_else(|| "Amazon S3".into());
-            let r = ui
-                .selectable_label(selected, RichText::new(&s.name).strong())
-                .on_hover_text(format!("{url}\n{endpoint}"));
-            if r.clicked() {
-                picked = Some(Scope::Folder(url.clone()));
-            }
-            r.context_menu(|ui| {
-                if ui.button("Read again").clicked() {
-                    out.push(BucketCmd::Scan(s.id).into());
-                    ui.close();
-                }
-                if ui.button("Edit…").clicked() {
-                    self.dialog = Some(Dialog {
-                        source: Some(s.id),
-                        form: BucketForm::of(&s),
-                        checking: false,
-                        error: None,
-                    });
-                    ui.close();
-                }
-                ui.separator();
-                if ui
-                    .button("Remove")
-                    .on_hover_text(
-                        "Its tracks leave the library, its downloads are deleted and its \
-                         access key is forgotten. Nothing in the bucket is touched.",
-                    )
-                    .clicked()
-                {
-                    out.push(LibraryCmd::RemoveSource(s.id).into());
-                    ui.close();
-                }
-            });
-            if self.scanning.contains(&s.id) {
-                busy_line(ui, "", "Reading…");
-            } else {
-                match self.last.get(&s.id) {
-                    Some(Err(e)) => {
-                        ui.add(Note::danger(e).small());
-                    }
-                    Some(Ok(scan)) if scan.failed > 0 => {
-                        ui.add(
-                            Note::warning(format!(
-                                "{} couldn't be read; Read again to try them",
-                                tracks(scan.failed)
-                            ))
-                            .small(),
-                        );
-                    }
-                    _ => {}
-                }
-            }
+        if ui.button("Edit…").clicked() {
+            self.edit(&s);
+            ui.close();
         }
+        ui.separator();
+        if ui.button("Remove").on_hover_text(REMOVE_TIP).clicked() {
+            out.push(LibraryCmd::RemoveSource(s.id).into());
+            ui.close();
+        }
+    }
+
+    /// Open the window to change a bucket's name, service or key.
+    fn edit(&mut self, s: &Source) {
+        self.dialog = Some(Dialog {
+            source: Some(s.id),
+            form: BucketForm::of(s),
+            checking: false,
+            error: None,
+        });
+    }
+
+    /// The Manage pane's Buckets section: just the button that adds one. Each bucket
+    /// added has an icon of its own in the stack.
+    pub fn manage(&mut self, ui: &mut Ui) {
         if ui
             .button("Add a bucket…")
             .on_hover_text("Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO")
@@ -188,7 +175,177 @@ impl BucketsUi {
         {
             self.add();
         }
+        muted(ui, "Each bucket gets an icon of its own on the left.");
+    }
+
+    /// A bucket's own pane: what it is, how much of it is downloaded, what can be
+    /// done to it, and its folders (picking one narrows the list to it). Returns
+    /// the scope picked, if one was.
+    pub fn pane(
+        &mut self,
+        ui: &mut Ui,
+        id: SourceId,
+        v: &CoreView,
+        scope: &Scope,
+        out: &mut Vec<Command>,
+    ) -> Option<Scope> {
+        let s = self.sources.iter().find(|s| s.id == id).cloned()?;
+        let root = s.bucket_url()?;
+        let mut picked = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                ui.label(RichText::new(&s.name).strong().size(14.0));
+                let endpoint = s
+                    .config
+                    .s3
+                    .as_ref()
+                    .and_then(|c| c.endpoint.clone())
+                    .unwrap_or_else(|| "Amazon S3".into());
+                muted(ui, &root).on_hover_text(endpoint);
+                // Its tracks, and how many of them are downloaded.
+                let inside = format!("{root}/");
+                let (mut all, mut here) = (0, 0);
+                for t in v
+                    .lib
+                    .tracks()
+                    .iter()
+                    .filter(|t| t.path.starts_with(&inside))
+                {
+                    all += 1;
+                    here += usize::from(v.lib.downloaded(t.id) == Some(true));
+                }
+                muted(ui, format!("{}, {here} downloaded", tracks(all)));
+                ui.add_space(4.0);
+                if self.offline {
+                    ui.add(
+                        Note::warning(
+                            "This computer is offline: only the tracks already downloaded \
+                             are listed. The rest are back when it's online.",
+                        )
+                        .small(),
+                    );
+                }
+                if self.scanning.contains(&s.id) {
+                    busy_line(ui, "", "Reading…");
+                } else {
+                    match self.last.get(&s.id) {
+                        Some(Err(e)) => {
+                            ui.add(Note::danger(e).small());
+                        }
+                        Some(Ok(scan)) if scan.failed > 0 => {
+                            ui.add(
+                                Note::warning(format!(
+                                    "{} couldn't be read; Read again to try them",
+                                    tracks(scan.failed)
+                                ))
+                                .small(),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .button("Read again")
+                        .on_hover_text("List the bucket, and read what's new or changed")
+                        .clicked()
+                    {
+                        out.push(BucketCmd::Scan(s.id).into());
+                    }
+                    if ui.button("Edit…").clicked() {
+                        self.edit(&s);
+                    }
+                    if ui.button("Remove").on_hover_text(REMOVE_TIP).clicked() {
+                        out.push(LibraryCmd::RemoveSource(s.id).into());
+                    }
+                });
+                ui.add_space(8.0);
+                // Everything in it, then its folders.
+                let whole = matches!(scope, Scope::Folder(f) if *f == root);
+                if ui
+                    .selectable_label(whole, format!("All of it  ({all})"))
+                    .clicked()
+                {
+                    picked = Some(Scope::Folder(root.clone()));
+                }
+                let folders = self.folders(&s, &root, v);
+                self.folder_rows(ui, &root, "", &folders, scope, &mut picked);
+            });
         picked
+    }
+
+    /// The folders in a bucket (each key's, and their parents'), relative to its
+    /// root and sorted: worked out again only when the library changes.
+    fn folders(&mut self, s: &Source, root: &str, v: &CoreView) -> std::rc::Rc<Vec<String>> {
+        let rev = v.lib.rev();
+        if let Some((id, at, folders)) = &self.tree
+            && (*id, *at) == (s.id, rev)
+        {
+            return folders.clone();
+        }
+        let inside = format!("{root}/");
+        let mut set = std::collections::BTreeSet::new();
+        for t in v.lib.tracks() {
+            let Some(key) = t.path.strip_prefix(&inside) else {
+                continue;
+            };
+            // Every folder above the file.
+            let mut dir = key;
+            while let Some((parent, _)) = dir.rsplit_once('/') {
+                if !set.insert(parent.to_string()) {
+                    break;
+                }
+                dir = parent;
+            }
+        }
+        let folders = std::rc::Rc::new(set.into_iter().collect::<Vec<_>>());
+        self.tree = Some((s.id, rev, folders.clone()));
+        folders
+    }
+
+    /// The folders directly in `parent` ("" for the bucket's root), each with its own
+    /// inside it.
+    fn folder_rows(
+        &self,
+        ui: &mut Ui,
+        root: &str,
+        parent: &str,
+        folders: &[String],
+        scope: &Scope,
+        picked: &mut Option<Scope>,
+    ) {
+        let children = folders.iter().filter(|f| match f.rsplit_once('/') {
+            Some((p, _)) => p == parent,
+            None => parent.is_empty(),
+        });
+        for f in children {
+            let name = f.rsplit('/').next().unwrap_or(f);
+            let url = format!("{root}/{f}");
+            let selected = matches!(scope, Scope::Folder(s) if *s == url);
+            let prefix = format!("{f}/");
+            let has_children = folders.iter().any(|o| o.starts_with(&prefix));
+            let mut label = |ui: &mut Ui| {
+                if ui
+                    .selectable_label(selected, name)
+                    .on_hover_text(&url)
+                    .clicked()
+                {
+                    *picked = Some(Scope::Folder(url.clone()));
+                }
+            };
+            if !has_children {
+                ui.horizontal(|ui| {
+                    ui.add_space(ui.spacing().indent);
+                    label(ui);
+                });
+                continue;
+            }
+            let id = ui.make_persistent_id(("bucket-folder", &url));
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+                .show_header(ui, label)
+                .body(|ui| self.folder_rows(ui, root, f, folders, scope, picked));
+        }
     }
 
     /// The window that adds or changes a bucket, while it's open.
@@ -252,6 +409,24 @@ impl BucketsUi {
             self.dialog = None;
         }
     }
+}
+
+/// What removing a bucket does, for its buttons' hover text.
+const REMOVE_TIP: &str = "Its tracks leave the library, its downloads are deleted and its \
+                          access key is forgotten. Nothing in the bucket is touched.";
+
+/// A bucket's icon: the first letters of the first two words of its name ("Gig box":
+/// "GB"), or of its one word ("Archive": "AR").
+fn initials(name: &str) -> String {
+    let mut words = name
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty());
+    let letters: String = match (words.next(), words.next()) {
+        (Some(a), Some(b)) => a.chars().take(1).chain(b.chars().take(1)).collect(),
+        (Some(a), None) => a.chars().take(2).collect(),
+        _ => "S3".into(),
+    };
+    letters.to_uppercase()
 }
 
 /// "1 track", "3 tracks".

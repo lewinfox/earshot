@@ -227,12 +227,16 @@ A bucket on Amazon S3, Cloudflare R2, Backblaze B2, Wasabi or MinIO (anything th
 speaks the S3 API) can be a source beside the music folders, and there can be as many
 as you like, each under its own name.
 
-- **Add one**: the Sources pane (the `+` at the bottom of the library's left icons) →
-  *Buckets* → *Add a bucket…*. Give it a name, the service's endpoint (blank for
-  Amazon S3; `https://<account id>.r2.cloudflarestorage.com` for R2), the region
-  (`auto` for R2), the bucket, optionally a prefix (a folder in it), and an access
-  key. earshot checks it can list the bucket before saving anything. Right-click a
-  bucket to read it again, change its name, service or key, or remove it.
+- **Add one**: the `+` at the bottom of the library's left icons → *Add a bucket…*.
+  Give it a name, the service's endpoint (blank for Amazon S3;
+  `https://<account id>.r2.cloudflarestorage.com` for R2), the region (`auto` for
+  R2), the bucket, optionally a prefix (a folder in it), and an access key. earshot
+  checks it can list the bucket before saving anything.
+- **Each bucket has an icon of its own** among the library's left icons, lettered
+  from its name ("Gig box": GB), like the DJ programs' and USB sticks'. Its pane
+  lists its tracks, says how many are downloaded, and has its folders to narrow the
+  list by, with *Read again*, *Edit…* (its name, service or key) and *Remove*; the
+  icon's right-click menu has the same three.
 - **Browsing downloads nothing.** The bucket's audio files are listed and their tags
   read where they are, a few KB each, so its tracks appear in the library with artist,
   title and length. BPM, key and grid stay unknown until a track is analysed, which

@@ -93,24 +93,49 @@ fn a_bucket_is_added_browsed_and_downloaded_from_when_a_track_is_loaded() {
         "only listed, and read by ranges"
     );
 
-    // The Sources pane lists it under its name; the window that adds another opens.
-    h.state_mut()
-        .dispatch(ViewCmd::Source(Some(crate::core::view::Source::Manage)).into());
-    h.state_mut().panels.library.buckets.add();
+    // It has an icon of its own in the left stack ("GB"), and its pane is open: its
+    // name heads the pane and the list (not "sets", its prefix), which lists its
+    // tracks.
+    use crate::core::view::Source as Pane;
+    let pane = Pane::Bucket(source.id);
+    assert_eq!(h.state().prefs.layout().source, Some(pane));
     steps(&mut h, 3);
-    assert!(h.state().panels.library.buckets.dialog_open());
-    h.get_by_label("Gig box");
-    h.get_by_label("Add a bucket…");
-    // Picked, its tracks are what's listed, under its name (not "sets", its prefix).
-    h.get_by_label("Gig box").click();
-    steps(&mut h, 2);
+    let icons = |a: &EarshotApp| -> Vec<(Pane, String)> {
+        let items = a.panels.library.buckets.stack_items();
+        items.iter().map(|i| (i.id, i.icon.to_string())).collect()
+    };
+    assert_eq!(icons(h.state()), [(pane, "GB".to_string())]);
     assert_eq!(
         h.query_all_by_label("Gig box").count(),
         2,
-        "the pane's row and the heading"
+        "the pane and the list"
     );
     assert!(h.query_by_label("sets").is_none());
     assert_eq!(h.state().panels.library.browser.shown().len(), 3);
+    h.get_by_label("All of it  (3)");
+    // Another view, then its icon again: back on its tracks.
+    h.state_mut()
+        .dispatch(ViewCmd::Source(Some(Pane::AllTracks)).into());
+    steps(&mut h, 2);
+    h.get_by_label_contains("All tracks  (").click();
+    steps(&mut h, 2);
+    assert_eq!(
+        h.state().panels.library.browser.shown().len(),
+        TRACKS.len() + 3
+    );
+    h.state_mut().dispatch(ViewCmd::Source(Some(pane)).into());
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.layout().source, Some(pane));
+    assert_eq!(h.state().panels.library.browser.shown().len(), 3);
+
+    // The + pane only adds sources: the bucket isn't listed there; its button opens
+    // the window that adds another.
+    h.state_mut()
+        .dispatch(ViewCmd::Source(Some(Pane::Manage)).into());
+    steps(&mut h, 3);
+    h.get_by_label("Add a bucket…").click();
+    steps(&mut h, 3);
+    assert!(h.state().panels.library.buckets.dialog_open());
     render(&mut h, "bucket-window");
     h.get_by_label("Cancel").click();
     steps(&mut h, 2);
@@ -152,8 +177,7 @@ fn a_bucket_is_added_browsed_and_downloaded_from_when_a_track_is_loaded() {
     // The list says how many it leaves out; the Sources pane, why.
     h.state_mut()
         .dispatch(ViewCmd::SetMode(Mode::Perform).into());
-    h.state_mut()
-        .dispatch(ViewCmd::Source(Some(crate::core::view::Source::Manage)).into());
+    h.state_mut().dispatch(ViewCmd::Source(Some(pane)).into());
     steps(&mut h, 2);
     h.get_by_label("☁ 2 hidden");
     h.get_by_label_contains("This computer is offline");
@@ -205,7 +229,7 @@ fn a_bucket_is_added_browsed_and_downloaded_from_when_a_track_is_loaded() {
     settle_until(&mut h, |_| downloaded(&three.1));
     assert_eq!(marks(h.state()), [Some(true); 3]);
     // (All three downloaded, in the bucket's own list with its download column.)
-    h.get_by_label("Gig box").click();
+    h.state_mut().dispatch(ViewCmd::Source(Some(pane)).into());
     steps(&mut h, 2);
     render(&mut h, "bucket");
 
@@ -230,5 +254,9 @@ fn a_bucket_is_added_browsed_and_downloaded_from_when_a_track_is_loaded() {
     settle_until(&mut h, |a| {
         in_buckets(a).is_empty() && a.index.tracks().len() == TRACKS.len()
     });
+    // Its icon and pane go with it.
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.layout().source, None);
+    assert!(icons(h.state()).is_empty());
     assert!(!cache.path(&two.1).exists());
 }

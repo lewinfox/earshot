@@ -578,6 +578,17 @@ impl LibraryPane {
                 }
             }
             Source::Manage => self.manage(ui, cx),
+            Source::Bucket(id) => {
+                if self.buckets.pane_gone(id) {
+                    cx.send(ViewCmd::Source(None));
+                    return;
+                }
+                let scope = self.browser.scope().clone();
+                if let Some(picked) = self.buckets.pane(ui, id, &cx.core, &scope, cx.out) {
+                    self.browser.set_scope(picked);
+                    self.external.close();
+                }
+            }
             Source::Program(_) | Source::Library(_) | Source::Stick(_) => {
                 if self.external.pane_gone(source) {
                     cx.send(ViewCmd::Source(None));
@@ -613,10 +624,7 @@ impl LibraryPane {
                 self.browser.folder_tree(ui, &cx.core, cx.out);
                 ui.add_space(10.0);
                 heading(ui, cx, "Buckets");
-                let scope = self.browser.scope().clone();
-                if let Some(bucket) = self.buckets.manage(ui, &scope, cx.out) {
-                    self.browser.set_scope(bucket);
-                }
+                self.buckets.manage(ui);
                 ui.add_space(10.0);
                 heading(ui, cx, "Other libraries");
                 self.external.manage(ui, cx.out);
@@ -707,6 +715,9 @@ impl LibraryPane {
         };
         let mut items: Vec<StackItem<Source>> = VIEWS.into_iter().collect();
         items.extend(self.external.stack_items(&cx.core));
+        // The buckets, before Manage (the last, which adds sources).
+        let manage = items.len() - 1;
+        items.splice(manage..manage, self.buckets.stack_items());
         self.navigate(&items, cx);
         let width = ui.available_width();
         let row = layout::library_row(
@@ -724,6 +735,7 @@ impl LibraryPane {
             .frame(stack_frame)
             .show_inside(ui, |ui| {
                 let (external, core, out) = (&mut self.external, &cx.core, &mut *cx.out);
+                let buckets = &mut self.buckets;
                 let cursor = self.level == Level::Sources;
                 let picked = icon_stack_with_menu(
                     ui,
@@ -731,10 +743,10 @@ impl LibraryPane {
                     layout.source,
                     Opens::Right,
                     cursor,
-                    |ui, s| {
-                        if let Source::Stick(id) = s {
-                            external.stick_menu(ui, id, core, out);
-                        }
+                    |ui, s| match s {
+                        Source::Stick(id) => external.stick_menu(ui, id, core, out),
+                        Source::Bucket(id) => buckets.menu(ui, id, out),
+                        _ => {}
                     },
                 );
                 if let Some(s) = picked {

@@ -93,6 +93,10 @@ impl EarshotApp {
                 // (Its `StoreEvent::Sources` came first: the bucket is known by now.)
                 if let Ok(source) = saved {
                     self.scan_bucket(source, false);
+                    // Its own pane, where reading it shows.
+                    self.dispatch(
+                        ViewCmd::Source(Some(crate::core::view::Source::Bucket(source))).into(),
+                    );
                 }
             }
             BucketEvent::Scanned { source, result } => {

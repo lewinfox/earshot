@@ -1306,6 +1306,18 @@ impl EarshotApp {
             ViewCmd::Source(s) => {
                 self.prefs.layout_mut().source = s;
                 self.panels.library.level = Level::Sources;
+                // A bucket's icon: its tracks are what the list shows.
+                if let Some(crate::core::view::Source::Bucket(id)) = s
+                    && let Some(url) = self
+                        .sources
+                        .iter()
+                        .find(|b| b.id == id)
+                        .and_then(|b| b.bucket_url())
+                {
+                    let lib = &mut self.panels.library;
+                    lib.browser.set_scope(Scope::Folder(url));
+                    lib.external.close();
+                }
             }
             ViewCmd::Aside(a) => self.prefs.layout_mut().aside = a,
             ViewCmd::Tool(t) => self.prefs.layout_mut().tool = t,

@@ -253,7 +253,8 @@ impl LibraryUi {
             Scope::All => TableView::Library,
             Scope::Duplicates => TableView::Duplicates,
             Scope::History(_) => TableView::History,
-            Scope::Folder(f) if self.buckets.iter().any(|(url, _)| url == f) => TableView::Bucket,
+            // A bucket, or a folder in one.
+            Scope::Folder(f) if f.starts_with("s3://") => TableView::Bucket,
             Scope::Folder(_) => TableView::Explorer,
             Scope::Collection(id) => match v.collections.get(*id).map(|c| c.kind) {
                 Some(CollectionKind::Playlist) => TableView::Playlist,
