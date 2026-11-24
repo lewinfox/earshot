@@ -42,6 +42,28 @@ pub struct TreeCtx<'a> {
     /// The USB sticks plugged in, for "Send to", and what was sent where.
     pub sticks: &'a [Drive],
     pub sends: &'a RefCell<Vec<(CollectionId, PathBuf, TargetKind)>>,
+    /// With bucket sources: the collections whose bucket tracks are kept downloaded
+    /// (the menus offer it). `None` with no buckets.
+    pub offline: Option<&'a std::collections::HashSet<CollectionId>>,
+}
+
+/// The menu item that keeps a collection's bucket tracks downloaded, where there are
+/// buckets.
+fn offline_item(ui: &mut Ui, id: CollectionId, cx: &TreeCtx, out: &mut Vec<CollectionCmd>) {
+    let Some(offline) = cx.offline else { return };
+    let mut on = offline.contains(&id);
+    if ui
+        .checkbox(&mut on, "Keep available offline")
+        .on_hover_text(
+            "Download its tracks that are in buckets now, and keep them downloaded \
+             whatever room the cache needs: for a set that mustn't depend on the \
+             connection.",
+        )
+        .clicked()
+    {
+        out.push(CollectionCmd::KeepOffline { id, on });
+        ui.close();
+    }
 }
 
 impl CollectionsUi {
@@ -203,6 +225,7 @@ impl CollectionsUi {
             }
             move_menu(ui, f, cx.collections, out);
             send_to(ui, f.id, cx);
+            offline_item(ui, f.id, cx, out);
             let inside = cx.collections.count_inside(f.id);
             ui.menu_button("Delete", |ui| {
                 let label = match inside {
@@ -271,6 +294,7 @@ impl CollectionsUi {
                 out.push(CollectionCmd::Duplicate(c.id));
                 ui.close();
             }
+            offline_item(ui, c.id, cx, out);
             if c.kind == CollectionKind::Smart
                 && ui
                     .add_enabled(

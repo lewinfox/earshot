@@ -110,7 +110,7 @@ base directories; `$XDG_DATA_HOME` and the rest move them):
 |---|---|---|---|---|
 | data | `~/.local/share/earshot` | `~/Library/Application Support/io.github.lewinfox.earshot` | `%APPDATA%\lewinfox\earshot\data` | `library.db`: your library and settings |
 | config | `~/.config/earshot` | as data | `%APPDATA%\lewinfox\earshot\config` | `keymap.txt`, `controllers/` (your own mappings) |
-| cache | `~/.cache/earshot` | `~/Library/Caches/io.github.lewinfox.earshot` | `%LOCALAPPDATA%\lewinfox\earshot\cache` | stems, tempo lock's working files: made again when needed |
+| cache | `~/.cache/earshot` | `~/Library/Caches/io.github.lewinfox.earshot` | `%LOCALAPPDATA%\lewinfox\earshot\cache` | stems, tracks downloaded from buckets (`s3/`), tempo lock's working files: made or downloaded again when needed |
 | state | `~/.local/state/earshot` | as data | `%LOCALAPPDATA%\lewinfox\earshot\data` | logs, debug exports, the window's size and place |
 
 To remove every trace of earshot on Linux, delete those four (after uninstalling):
@@ -133,6 +133,7 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   library and suggestions, `Shift+←`/`Shift+→` load to deck A/B, and `/` jumps to search.
   Deck keys are live unless a text field has focus; `Esc` gives them back.
 - **Add music**: *Menu → Import → Folder…*. Folders are remembered in `library.db`.
+  Music in an S3-compatible bucket can be a source too: see [Buckets](#buckets).
   The left-hand tree shows *All tracks* and each folder; pick a folder to list the
   tracks in it and its subfolders. Right-click a top-level folder to remove it.
 - **Load** a track: double-click it (goes to a deck that isn't playing), right-click →
@@ -220,6 +221,74 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   red-over-white bar puts the 1 at the playhead, plus *BPM*, nudge, ÷2 and ×2. A tempo-lock
   `<file>.beats.json` sidecar next to a file is still used if there's no analysed grid.
 
+## Buckets
+
+A bucket on Amazon S3, Cloudflare R2, Backblaze B2, Wasabi or MinIO (anything that
+speaks the S3 API) can be a source beside the music folders, and there can be as many
+as you like, each under its own name.
+
+- **Add one**: the Sources pane (the `+` at the bottom of the library's left icons) →
+  *Buckets* → *Add a bucket…*. Give it a name, the service's endpoint (blank for
+  Amazon S3; `https://<account id>.r2.cloudflarestorage.com` for R2), the region
+  (`auto` for R2), the bucket, optionally a prefix (a folder in it), and an access
+  key. earshot checks it can list the bucket before saving anything. Right-click a
+  bucket to read it again, change its name, service or key, or remove it.
+- **Browsing downloads nothing.** The bucket's audio files are listed and their tags
+  read where they are, a few KB each, so its tracks appear in the library with artist,
+  title and length. BPM, key and grid stay unknown until a track is analysed, which
+  needs the whole file. A later read only looks at objects that are new or whose ETag
+  or size changed; objects deleted from the bucket leave the library.
+- **Loading downloads the track.** Loading, previewing or analysing a track fetches
+  it into the cache folder first (the status line shows how far it's got); from there
+  it's a file like any other. Nothing ever plays off the network. Right-click tracks
+  for *Download* and *Remove the download*.
+- **Offline**: right-click a crate, playlist or folder of them → *Keep available
+  offline* downloads its bucket tracks, now and as more are added to it, so a set
+  never depends on the connection.
+- **The cache** (`s3/` in the cache folder) is kept under a size limit: *Settings →
+  Analysis → Bucket downloads limit*, 20 GB until it's set. Over it, the downloads
+  used least recently are removed; ones kept available offline never are. Anything
+  removed is just downloaded again when it's next wanted. Removing a bucket deletes
+  its downloads.
+- **Keys** are kept in the system keychain (the Secret Service on Linux, i.e. GNOME
+  Keyring or KWallet; the Keychain on macOS; the Credential Manager on Windows),
+  never in `library.db`. On Linux, adding a bucket needs one of those running.
+- **Cost**: analysing a whole bucket downloads all of it once, about 20 GB for 2,000
+  tracks: on AWS roughly US$1.80 in transfer fees (R2 has none). Unchanged objects are
+  never downloaded twice while they're in the cache.
+
+earshot only ever lists and reads, so give it a **read-only key**:
+
+- **AWS**: an IAM user with this policy (drop the `Condition` and use `my-bucket/*`
+  for the whole bucket):
+
+  ```json
+  {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Action": "s3:ListBucket",
+        "Resource": "arn:aws:s3:::my-bucket",
+        "Condition": { "StringLike": { "s3:prefix": ["music/*"] } }
+      },
+      {
+        "Effect": "Allow",
+        "Action": "s3:GetObject",
+        "Resource": "arn:aws:s3:::my-bucket/music/*"
+      }
+    ]
+  }
+  ```
+
+- **Cloudflare R2**: an R2 API token with **Object Read only**, applied to the one
+  bucket. Its *Access Key ID* and *Secret Access Key* are the key; the endpoint is the
+  token page's S3 endpoint.
+- **Backblaze B2**: an application key limited to the bucket with *Read Only* access;
+  the endpoint is `https://s3.<region>.backblazeb2.com`.
+- **MinIO**: the endpoint is your server's URL (`http://…` is accepted, for one on
+  your own network).
+
 ## Tests
 
 `make test` runs the Rust tests, `make test-worker` the worker's. Or one at a time:
@@ -271,6 +340,10 @@ make packages    # the .deb and .rpm of it: target/packages
   section isn't mapped yet. Its PAD FX 1 / 2 pads play a fixed bank of 16 effects
   each (`gui/src/core/pads.rs`): not rekordbox's own defaults, and not editable yet.
 - Hot cues are not saved.
+- Buckets: nothing is written back to one (no uploads or tag edits), and nothing
+  streams from one. A bucket track and a local file with the same audio are two
+  tracks (the Duplicates view finds them). A key with an empty part (`a//b.mp3`)
+  can't be listed.
 - The worker has no timeout: if it hangs, the analysis queue stops until restart.
 
 ## Licence

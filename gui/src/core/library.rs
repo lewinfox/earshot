@@ -21,6 +21,11 @@ const AUDIO_EXTENSIONS: &[&str] = &[
     "mp3", "flac", "wav", "aif", "aiff", "m4a", "mp4", "aac", "ogg",
 ];
 
+/// Whether files with this extension (lower case, no dot) are audio earshot reads.
+pub fn is_audio_extension(ext: &str) -> bool {
+    AUDIO_EXTENSIONS.contains(&ext)
+}
+
 pub fn is_audio(p: &Path) -> bool {
     p.extension()
         .and_then(|x| x.to_str())
@@ -244,10 +249,15 @@ pub fn start_hasher(store: Store) -> Hasher {
             Ok(f) => f,
             Err(e) => return eprintln!("hashing: {e}"),
         };
-        for (file, path) in files {
-            match hash::content_hash(&path.as_path().into()) {
+        for (file, at) in files {
+            // A bucket's object is hashed once it has been downloaded (its local
+            // copy), never fetched for it.
+            let Some(here) = at.here() else {
+                continue;
+            };
+            match hash::content_hash(&here.as_path().into()) {
                 Ok(hash) => store.send(StoreCmd::SetContentHash { file, hash }),
-                Err(e) => eprintln!("hashing {}: {e}", path.display()),
+                Err(e) => eprintln!("hashing {at}: {e}"),
             }
         }
     })
@@ -285,6 +295,11 @@ pub fn quick_analyse(store: &Store, id: i64) -> Result<bool, String> {
         return Ok(false);
     }
     let at = reader.track_location(id).map_err(|e| e.to_string())?;
+    // A bucket's track that hasn't been downloaded stays unanalysed: finding it in
+    // the bucket doesn't download it.
+    if at.here().is_none() {
+        return Ok(false);
+    }
     let (audio, tags) = decode::decode(&at)?;
     let Some((grid, first_beat)) = super::player::quick_grid(&tags, &audio) else {
         return Ok(false);

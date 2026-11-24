@@ -37,6 +37,11 @@ pub struct AnalysisEnv<'a> {
     /// The stems cache's limit, GB, and what it takes now, bytes.
     pub stems_cache_gb: f64,
     pub stems_used: u64,
+    /// The cache of tracks downloaded from buckets: its limit, GB, and what it takes
+    /// now, bytes; and whether there are any buckets (else it isn't shown).
+    pub s3_cache_gb: f64,
+    pub s3_used: u64,
+    pub buckets: bool,
 }
 
 /// What's known of the tracks with stale analysis (an older analyser, other audio,
@@ -318,6 +323,29 @@ fn analysis(ui: &mut Ui, env: &AnalysisEnv) -> Vec<Command> {
     muted(ui, "Least recently used stems are removed at startup.");
     if gb != env.stems_cache_gb {
         out.push(Command::App(AppCmd::StemsCacheGb(gb)));
+    }
+    if env.buckets {
+        ui.separator();
+        let mut gb = env.s3_cache_gb;
+        ui.horizontal(|ui| {
+            ui.label("Bucket downloads limit");
+            ui.add(
+                egui::DragValue::new(&mut gb)
+                    .range(1.0..=2000.0)
+                    .speed(1.0)
+                    .suffix(" GB"),
+            );
+            muted(ui, format!("{:.1} GB used", env.s3_used as f64 / 1e9));
+        });
+        muted(
+            ui,
+            "Tracks from buckets are downloaded when they're loaded or analysed. Over the \
+             limit, the ones used least recently are removed; ones kept available \
+             offline never are.",
+        );
+        if gb != env.s3_cache_gb {
+            out.push(crate::core::bucket::BucketCmd::CacheGb(gb).into());
+        }
     }
     out
 }

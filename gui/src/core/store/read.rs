@@ -561,14 +561,33 @@ pub fn cues(c: &Connection, track: i64) -> Result<TrackCues> {
     })
 }
 
-pub fn files_without_hash(c: &Connection) -> Result<Vec<(i64, PathBuf)>> {
+pub fn files_without_hash(c: &Connection) -> Result<Vec<(i64, Location)>> {
     let mut st = c.prepare(
         "SELECT id, path FROM files WHERE content_hash IS NULL AND missing_since IS NULL
          ORDER BY id",
     )?;
     Ok(st
-        .query_map([], |r| Ok((r.get(0)?, bytes_path(r.get(1)?))))?
+        .query_map([], |r| Ok((r.get(0)?, Location::from_bytes(r.get(1)?))))?
         .collect::<rusqlite::Result<_>>()?)
+}
+
+/// The objects known under a bucket source's URL (`s3://bucket/prefix`): each one's
+/// URL → (size, ETag), as its bucket listed it last. Ones marked missing aren't
+/// known: found again, they're read again.
+pub fn objects(c: &Connection, root: &str) -> Result<HashMap<String, (i64, Option<String>)>> {
+    let prefix = format!("{}/", root.trim_end_matches('/')).into_bytes();
+    let mut st = c.prepare(
+        "SELECT path, size, etag FROM files
+         WHERE substr(path, 1, ?1) = ?2 AND missing_since IS NULL",
+    )?;
+    Ok(st
+        .query_map(params![prefix.len() as i64, prefix], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, (r.get(1)?, r.get(2)?)))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .map(|(path, stamp)| (String::from_utf8_lossy(&path).into_owned(), stamp))
+        .collect())
 }
 
 /// A file of earshot's with this audio (`core::hash`), that's still there.

@@ -736,6 +736,12 @@ impl FlowGraph {
 /// User actions on collections.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CollectionCmd {
+    /// Keep its bucket tracks downloaded, or stop (`BucketCmd::KeepOffline`, which
+    /// the UI runs it as).
+    KeepOffline {
+        id: CollectionId,
+        on: bool,
+    },
     /// Show it: a Flow on the canvas, anything else as the track list.
     Open(CollectionId),
     /// Show its tracks in the track list (a Flow's too, as a list).

@@ -164,12 +164,14 @@ fn migrations_bring_a_database_up_to_date_after_a_backup() {
     drop(w);
     let path = dir.join(FILE_NAME);
     let next = "CREATE TABLE added_later (x INTEGER) STRICT;";
+    let now = MIGRATIONS.len() as i64;
+    let with_next: Vec<&str> = MIGRATIONS.iter().copied().chain([next]).collect();
     let mut conn = Connection::open(&path).unwrap();
-    super::migrate_with(&mut conn, &path, &[MIGRATIONS[0], next]).unwrap();
+    super::migrate_with(&mut conn, &path, &with_next).unwrap();
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, now + 1);
     conn.execute("INSERT INTO added_later VALUES (1)", [])
         .unwrap();
     let kept: String = conn
@@ -179,13 +181,13 @@ fn migrations_bring_a_database_up_to_date_after_a_backup() {
         .unwrap();
     assert_eq!(kept, "yes");
     // The backup is the database as it was, before the new migration.
-    let bak = Connection::open(dir.join(format!("{FILE_NAME}.v1.bak"))).unwrap();
+    let bak = Connection::open(dir.join(format!("{FILE_NAME}.v{now}.bak"))).unwrap();
     let v: i64 = bak
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 1);
+    assert_eq!(v, now);
     // Up to date: nothing more to do, and no new backup.
-    super::migrate_with(&mut conn, &path, &[MIGRATIONS[0], next]).unwrap();
+    super::migrate_with(&mut conn, &path, &with_next).unwrap();
 }
 
 #[test]
@@ -2518,4 +2520,73 @@ fn an_imported_playlist_deleted_and_undone_is_still_updated_by_importing_again()
     let deleted = w.edit(EditCmd::Delete(1)).unwrap().unwrap();
     w.apply_edit(&deleted.inverse()).unwrap();
     assert_eq!(external(&mut w, 1).as_deref(), Some("x"));
+}
+
+/// `001_s3.sql` makes `sources` again (for its CHECK): what was in it, and the rows
+/// that refer to it, come through, and foreign keys are enforced again afterwards.
+#[test]
+fn the_s3_migration_keeps_the_sources_and_their_tracks() {
+    let dir = std::env::temp_dir().join(format!("earshot-store-s3-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(FILE_NAME);
+    let mut conn = Connection::open(&path).unwrap();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    // As a database made before buckets was.
+    super::migrate_with(&mut conn, &path, &MIGRATIONS[..1]).unwrap();
+    conn.execute_batch(
+        "INSERT INTO sources(id, kind, name, location, added_at)
+           VALUES (7, 'folder', 'Music', x'2f6d', 1);
+         INSERT INTO tracks(id, added_at) VALUES (3, 1);
+         INSERT INTO files(track_id, path, size, mtime_ns) VALUES (3, x'2f6d2f61', 10, 1);
+         INSERT INTO track_sources(source_id, external_id, track_id, synced_at)
+           VALUES (7, '/m/a', 3, 1);",
+    )
+    .unwrap();
+    assert!(
+        conn.execute(
+            "INSERT INTO sources(kind, name, added_at) VALUES ('s3', 'B', 1)",
+            []
+        )
+        .is_err(),
+        "no buckets before the migration"
+    );
+
+    super::migrate_with(&mut conn, &path, MIGRATIONS).unwrap();
+    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(
+        count("SELECT count(*) FROM sources WHERE id = 7 AND name = 'Music'"),
+        1
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM track_sources WHERE source_id = 7"),
+        1
+    );
+    assert_eq!(count("SELECT count(*) FROM files WHERE etag IS NULL"), 1);
+    // A bucket is a source now; other kinds are still refused.
+    conn.execute(
+        "INSERT INTO sources(kind, name, location, added_at) VALUES ('s3', 'B', x'73', 1)",
+        [],
+    )
+    .unwrap();
+    assert!(
+        conn.execute(
+            "INSERT INTO sources(kind, name, added_at) VALUES ('ftp', 'B', 1)",
+            []
+        )
+        .is_err()
+    );
+    // Foreign keys are on again, and still point at the table made again.
+    assert_eq!(count("PRAGMA foreign_keys"), 1);
+    conn.execute("DELETE FROM sources WHERE id = 7", [])
+        .unwrap();
+    assert_eq!(count("SELECT count(*) FROM track_sources"), 0);
+    assert!(
+        conn.execute(
+            "INSERT INTO track_sources(source_id, external_id, track_id, synced_at)
+             VALUES (99, 'x', 3, 1)",
+            []
+        )
+        .is_err()
+    );
 }

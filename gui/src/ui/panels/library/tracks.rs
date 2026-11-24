@@ -207,6 +207,7 @@ pub fn track_menu(ui: &mut Ui, sel: &[TrackId], v: &CoreView, at: MenuAt, out: &
         }
         return;
     }
+    bucket_items(ui, sel, v, out);
     if let Some(c) = at.viewing.and_then(|id| v.collections.get(id))
         && c.kind.takes_tracks()
         && v.open_flow != Some(c.id)
@@ -339,6 +340,50 @@ fn load_items(ui: &mut Ui, id: TrackId, decks: usize, out: &mut Vec<Command>) {
 /// "Add to Playlist ▸", "Add to Crate ▸", "Add to Flow ▸": each lists that tree, its
 /// folders as submenus, with "New …" at the top. Added to a Flow, tracks are new
 /// cards not linked to any other.
+/// For tracks that are in a bucket: download them now, or remove their downloads.
+fn bucket_items(ui: &mut Ui, sel: &[TrackId], v: &CoreView, out: &mut Vec<Command>) {
+    use crate::core::bucket::BucketCmd;
+    use earshot_engine::media::Location;
+    let urls: Vec<(TrackId, Location)> = sel
+        .iter()
+        .filter_map(|&id| Some((id, v.lib.get(id)?.path.clone())))
+        .filter(|(_, p)| p.starts_with("s3://"))
+        .map(|(id, p)| (id, Location::Url(p)))
+        .collect();
+    if urls.is_empty() {
+        return;
+    }
+    let (here, away): (Vec<_>, Vec<_>) = urls.iter().partition(|(_, at)| at.here().is_some());
+    let ids = |of: &[&(TrackId, Location)]| of.iter().map(|t| t.0).collect::<Vec<_>>();
+    if !away.is_empty()
+        && ui
+            .button(count("Download", away.len()))
+            .on_hover_text("From its bucket, to play or analyse without waiting")
+            .clicked()
+    {
+        out.push(BucketCmd::Download(ids(&away)).into());
+        ui.close();
+    }
+    if !here.is_empty()
+        && ui
+            .button(format!("Remove {}", downloads(here.len())))
+            .on_hover_text("The track stays in the library, and in its bucket")
+            .clicked()
+    {
+        out.push(BucketCmd::RemoveDownloads(ids(&here)).into());
+        ui.close();
+    }
+    ui.separator();
+}
+
+/// "the download", "3 downloads".
+fn downloads(n: usize) -> String {
+    match n {
+        1 => "the download".into(),
+        n => format!("{n} downloads"),
+    }
+}
+
 pub fn add_to_menus(ui: &mut Ui, sel: &[TrackId], v: &CoreView, out: &mut Vec<Command>) {
     let n = sel.len();
     for (section, kind) in [

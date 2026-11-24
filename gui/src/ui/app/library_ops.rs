@@ -42,19 +42,31 @@ impl EarshotApp {
             }
             LibraryCmd::RemoveRoot(path) => {
                 let folder = self.sources.iter().find(|s| {
-                    !s.kind.is_library()
-                        && s.location.as_deref() == Some(std::path::Path::new(&path))
+                    s.kind.is_folder() && s.location.as_deref() == Some(std::path::Path::new(&path))
                 });
                 if let Some(s) = folder {
                     self.lib.store.send(StoreCmd::RemoveSource(s.id));
                 }
             }
-            LibraryCmd::RemoveSource(id) => self.lib.store.send(StoreCmd::RemoveSource(id)),
-            LibraryCmd::Rescan => self.rescan(),
+            LibraryCmd::RemoveSource(id) => {
+                self.lib.store.send(StoreCmd::RemoveSource(id));
+                self.bucket_removed(id);
+            }
+            LibraryCmd::Rescan => {
+                self.rescan();
+                self.scan_buckets(false);
+            }
             LibraryCmd::Reveal(track) => {
-                if let Some(t) = self.index.get(track)
-                    && let Err(e) = library::reveal(std::path::Path::new(&t.path))
-                {
+                let Some(t) = self.index.get(track) else {
+                    return;
+                };
+                // A bucket's track: its downloaded copy, if it has one.
+                let at = earshot_engine::media::Location::from_bytes(t.path.clone().into_bytes());
+                let shown = match at.here() {
+                    Some(file) => library::reveal(&file),
+                    None => Err("it's in a bucket, and hasn't been downloaded".into()),
+                };
+                if let Err(e) = shown {
                     let text = format!("Couldn't show the file: {e}");
                     self.notify(crate::core::notice::Level::Warning, text);
                 }
@@ -85,10 +97,15 @@ impl EarshotApp {
                 then: Box::new(c.into()),
             });
         }
+        if let CollectionCmd::KeepOffline { id, on } = c {
+            return self
+                .bucket_cmd(crate::core::bucket::BucketCmd::KeepOffline { collection: id, on });
+        }
         let store = self.lib.store.clone();
         let lib = &mut self.panels.library;
         let flow = &mut self.panels.flow;
         match c {
+            CollectionCmd::KeepOffline { .. } => unreachable!("run above"),
             CollectionCmd::Open(id) => match self.collections.get(id).map(|c| c.kind) {
                 Some(kind) => {
                     // A Flow goes on the canvas. Beside it (the Flow tab), the track

@@ -27,6 +27,7 @@
 //! item in [`ASIDES`] and an arm in [`LibraryPane::aside`].
 
 pub mod browser;
+pub mod buckets;
 pub mod collections;
 pub mod drag;
 pub mod external;
@@ -163,6 +164,8 @@ pub struct LibraryPane {
     pub collections: CollectionsUi,
     /// Other DJ programs' libraries.
     pub external: ExternalUi,
+    /// Bucket sources (`core::bucket`).
+    pub buckets: buckets::BucketsUi,
     pub suggest: SuggestUi,
     /// Waveform thumbnails and cover art for every list.
     pub media: Media,
@@ -188,6 +191,7 @@ impl LibraryPane {
             browser: LibraryUi::default(),
             collections: CollectionsUi::default(),
             external: ExternalUi::default(),
+            buckets: buckets::BucketsUi::default(),
             suggest: SuggestUi::default(),
             media: Media::default(),
             tables,
@@ -543,6 +547,7 @@ impl LibraryPane {
                 search: &search,
                 sticks: cx.core.drives,
                 sends: &sends,
+                offline: self.buckets.any().then_some(cx.core.offline),
             };
             let mut cmds: Vec<CollectionCmd> = vec![];
             self.collections.show(ui, section, &tree, &mut cmds);
@@ -607,6 +612,12 @@ impl LibraryPane {
             .show(ui, |ui| {
                 heading(ui, cx, "Music folders");
                 self.browser.folder_tree(ui, &cx.core, cx.out);
+                ui.add_space(10.0);
+                heading(ui, cx, "Buckets");
+                let scope = self.browser.scope().clone();
+                if let Some(bucket) = self.buckets.manage(ui, &scope, cx.out) {
+                    self.browser.set_scope(bucket);
+                }
                 ui.add_space(10.0);
                 heading(ui, cx, "Other libraries");
                 self.external.manage(ui, cx.out);
@@ -692,6 +703,7 @@ impl LibraryPane {
         // The import and add-to-stick windows, wherever their drop was.
         self.external.set_music(&self.browser.folders);
         self.external.windows(ui.ctx(), &cx.core, cx.out);
+        self.buckets.window(ui.ctx(), cx.out);
         // Panel ids per mode, so each mode keeps its own.
         let id = |name: &str| match cx.prefs.mode {
             Mode::Perform => format!("{name}-perform"),

@@ -27,7 +27,8 @@ after that is a plan, not a promise.
   the keyboard or the on-screen controls, with the library and suggestions
   on screen the whole time.
 
-Non-goals for now: Windows, streaming services, effects beyond the basics,
+Non-goals for now: Windows, streaming services (S3-compatible buckets are sources,
+though: their tracks are downloaded to play, never streamed), effects beyond the basics,
 more than two decks.
 
 ## Shape

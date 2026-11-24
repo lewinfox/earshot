@@ -608,5 +608,6 @@ pub fn short_kind(k: SourceKind) -> &'static str {
         SourceKind::Serato | SourceKind::SeratoUsb => "Serato",
         SourceKind::Mixxx => "Mixxx",
         SourceKind::Folder => "folder",
+        SourceKind::S3 => "bucket",
     }
 }

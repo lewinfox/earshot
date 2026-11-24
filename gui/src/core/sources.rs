@@ -1,9 +1,10 @@
-//! Where tracks come from: earshot's music folders, other DJ programs' libraries
-//! and, later, streaming services. Each is a [`Source`], a row of the Store's
+//! Where tracks come from: earshot's music folders, S3-compatible buckets, other DJ
+//! programs' libraries and, later, streaming services. Each is a [`Source`], a row of the Store's
 //! `sources` table; the library pane's Sources lists them, and a track is in the
 //! library while an enabled source has it (`track_sources`). What reads each kind is
-//! elsewhere: folders are scanned by `core::library`, other programs' libraries are
-//! read and imported through cratelib (`core::external`).
+//! elsewhere: folders are scanned by `core::library`, buckets are listed and read by
+//! `core::bucket`, other programs' libraries are read and imported through cratelib
+//! (`core::external`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -30,12 +31,16 @@ pub enum SourceKind {
     Mixxx,
     /// A USB stick's `_Serato_` folder (not a program's library: there can be many).
     SeratoUsb,
+    /// An S3-compatible bucket (AWS S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO),
+    /// or a prefix of one: listed and read by `core::bucket`. There can be many.
+    S3,
 }
 
 impl SourceKind {
     /// Every kind, in the order the pane lists them.
-    pub const ALL: [SourceKind; 7] = [
+    pub const ALL: [SourceKind; 8] = [
         SourceKind::Folder,
+        SourceKind::S3,
         SourceKind::RekordboxDb,
         SourceKind::Serato,
         SourceKind::Mixxx,
@@ -61,6 +66,7 @@ impl SourceKind {
             SourceKind::Serato => "serato",
             SourceKind::Mixxx => "mixxx",
             SourceKind::SeratoUsb => "serato_usb",
+            SourceKind::S3 => "s3",
         }
     }
 
@@ -91,12 +97,24 @@ impl SourceKind {
             SourceKind::Serato => "Serato",
             SourceKind::Mixxx => "Mixxx",
             SourceKind::SeratoUsb => "Serato USB",
+            SourceKind::S3 => "Bucket",
         }
     }
 
-    /// Another DJ program's library, read through cratelib (not a folder).
+    /// Another DJ program's library, read through cratelib (not a folder or a
+    /// bucket, whose audio files earshot indexes itself).
     pub const fn is_library(self) -> bool {
-        !matches!(self, SourceKind::Folder)
+        !matches!(self, SourceKind::Folder | SourceKind::S3)
+    }
+
+    /// A music folder on this computer.
+    pub const fn is_folder(self) -> bool {
+        matches!(self, SourceKind::Folder)
+    }
+
+    /// An S3-compatible bucket.
+    pub const fn is_bucket(self) -> bool {
+        matches!(self, SourceKind::S3)
     }
 
     /// One of [`SourceKind::PROGRAMS`]: always listed, its location set by the user
@@ -136,6 +154,22 @@ pub struct SourceConfig {
     /// last, checked at startup ([`SourceConfig::revalidate`]).
     #[serde(skip_serializing_if = "PathRules::is_empty")]
     pub paths: PathRules,
+    /// A bucket: where its service is. (Which bucket and prefix is the source's
+    /// location; its access key is in the OS keychain, never here.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub s3: Option<S3Config>,
+}
+
+/// Where a bucket's service is (`SourceConfig::s3`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct S3Config {
+    /// The service's URL: `https://<account>.r2.cloudflarestorage.com` for R2,
+    /// `http://localhost:9000` for a MinIO here. `None`: AWS, by its region.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// `eu-west-2`, or `auto` for R2.
+    pub region: String,
 }
 
 impl SourceConfig {
@@ -153,9 +187,11 @@ impl SourceConfig {
 pub struct Source {
     pub id: SourceId,
     pub kind: SourceKind,
-    /// For showing: a folder's name, "Rekordbox", "Rekordbox USB (STICK)" …
+    /// For showing: a folder's name, "Rekordbox", "Rekordbox USB (STICK)", what the
+    /// user called a bucket …
     pub name: String,
-    /// Its folder or library file; `None`: not set yet.
+    /// Its folder or library file, or a bucket's URL (`s3://bucket/prefix`); `None`:
+    /// not set yet.
     pub location: Option<PathBuf>,
     pub config: SourceConfig,
     /// Its tracks are listed.
@@ -187,6 +223,16 @@ impl NewSource {
     }
 }
 
+impl Source {
+    /// A bucket source's URL, `s3://bucket/prefix`: its tracks' paths start with it.
+    pub fn bucket_url(&self) -> Option<String> {
+        self.location
+            .as_ref()
+            .filter(|_| self.kind.is_bucket())
+            .map(|l| l.to_string_lossy().into_owned())
+    }
+}
+
 /// Streaming services the pane lists as coming (not sources yet).
 pub const STREAMING: [&str; 3] = ["SoundCloud", "Beatport", "Spotify"];
 
@@ -204,12 +250,17 @@ mod tests {
         assert!(!SourceKind::RekordboxXml.found_by_itself());
         assert!(SourceKind::RekordboxUsb.has_memory_cues());
         assert!(!SourceKind::Serato.has_memory_cues());
+        // A bucket is neither a folder nor another program's library.
+        assert!(SourceKind::S3.is_bucket());
+        assert!(!SourceKind::S3.is_library() && !SourceKind::S3.is_folder());
+        assert!(!SourceKind::S3.is_program() && !SourceKind::S3.on_stick());
     }
 
     #[test]
     fn revalidating_drops_rules_whose_folder_has_gone() {
         let here = std::env::temp_dir().to_string_lossy().into_owned();
         let mut c = SourceConfig {
+            s3: None,
             volume_root: None,
             paths: PathRules::from([
                 (here.clone(), "C:/M".into()),

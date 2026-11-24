@@ -65,18 +65,26 @@ impl MediaSource for Source {
     }
 }
 
-fn open(at: &Location) -> Result<Box<dyn FormatReader>, String> {
-    let media = at.open()?;
+/// Open a track for symphonia: the `whole` of it to decode (a remote object's local
+/// copy, fetched first), or just to look at its tags and pictures (a remote object is
+/// then read where it is, a range at a time).
+fn open(at: &Location, whole: bool) -> Result<Box<dyn FormatReader>, String> {
+    let media = if whole { at.open()? } else { at.peek()? };
+    probe(media, at.extension().as_deref()).map_err(|e| format!("{at}: {e}"))
+}
+
+/// Work out what format `media` is (`extension` is a hint) and open it as that.
+fn probe(media: Box<dyn Media>, extension: Option<&str>) -> Result<Box<dyn FormatReader>, String> {
     let mss = MediaSourceStream::new(Box::new(Source(media)), Default::default());
     let mut hint = Hint::new();
-    if let Some(ext) = at.extension() {
-        hint.with_extension(&ext);
+    if let Some(ext) = extension {
+        hint.with_extension(ext);
     }
     // Gapless trimming (encoder delay and padding) is on by default in the decoder options.
     let fmt_opts = FormatOptions::default();
     symphonia::default::get_probe()
         .probe(&hint, mss, fmt_opts, MetadataOptions::default())
-        .map_err(|e| format!("{at}: {e}"))
+        .map_err(|e| e.to_string())
 }
 
 fn tags_of(format: &mut Box<dyn FormatReader>) -> TrackTags {
@@ -109,7 +117,7 @@ fn tags_of(format: &mut Box<dyn FormatReader>) -> TrackTags {
 /// Whether the track's audio is stored losslessly (PCM, FLAC, ALAC, WavPack…), by its
 /// codec, not its file name: an `.m4a` can be either.
 pub fn is_lossless(at: &Location) -> Result<bool, String> {
-    let format = open(at)?;
+    let format = open(at, false)?;
     let track = format
         .default_track(TrackType::Audio)
         .ok_or("no audio track")?;
@@ -134,7 +142,15 @@ pub fn is_lossless(at: &Location) -> Result<bool, String> {
 
 /// Read tags without decoding audio.
 pub fn read_tags(at: &Location) -> Result<TrackTags, String> {
-    let mut format = open(at)?;
+    let mut format = open(at, false)?;
+    Ok(tags_of(&mut format))
+}
+
+/// [`read_tags`] of audio that's already open (`extension`: what kind it is, as a
+/// hint): for a caller that reads it its own way (a bucket's object, a range at a
+/// time).
+pub fn read_tags_from(media: Box<dyn Media>, extension: Option<&str>) -> Result<TrackTags, String> {
+    let mut format = probe(media, extension)?;
     Ok(tags_of(&mut format))
 }
 
@@ -142,7 +158,7 @@ pub fn read_tags(at: &Location) -> Result<TrackTags, String> {
 /// encoded (usually JPEG or PNG). Doesn't decode audio.
 pub fn read_cover(at: &Location) -> Result<Option<Vec<u8>>, String> {
     use symphonia::core::meta::StandardVisualKey;
-    let mut format = open(at)?;
+    let mut format = open(at, false)?;
     let mut meta = format.metadata();
     let Some(rev) = meta.skip_to_latest() else {
         return Ok(None);
@@ -157,7 +173,7 @@ pub fn read_cover(at: &Location) -> Result<Option<Vec<u8>>, String> {
 
 /// Decode a whole track to stereo f32. Mono is duplicated, extra channels are dropped.
 pub fn decode(at: &Location) -> Result<(TrackAudio, TrackTags), String> {
-    let mut format = open(at)?;
+    let mut format = open(at, true)?;
     let mut tags = tags_of(&mut format);
     let track = format
         .default_track(TrackType::Audio)

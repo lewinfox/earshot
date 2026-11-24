@@ -7,6 +7,7 @@
 pub mod analysis;
 pub mod audio_watch;
 pub mod background;
+pub mod bucket;
 pub mod bus;
 pub mod collections;
 pub mod command;
@@ -97,6 +98,8 @@ pub enum Event {
     Drives(Vec<drives::Drive>),
     /// Writing to other DJ software's libraries and sticks.
     Export(export::ExportEvent),
+    /// Bucket sources: one saved, read through, a track downloaded.
+    Bucket(bucket::BucketEvent),
     /// News from the tempo lock tool.
     #[allow(dead_code)] // read by the tempo lock tab (step 7, B4)
     TempoLock(tempo_lock::TempoLockEvent),

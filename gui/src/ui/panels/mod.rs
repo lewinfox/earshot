@@ -91,6 +91,9 @@ pub struct CoreView<'a> {
     /// The tracks on a player now, and which (the library outlines their rows in the
     /// player's colour).
     pub loaded: &'a [(TrackId, DeckId)],
+    /// The crates, playlists and folders whose bucket tracks are kept downloaded
+    /// (`BucketCmd::KeepOffline`).
+    pub offline: &'a std::collections::HashSet<CollectionId>,
 }
 
 /// The engine as it is this frame, read once by the shell before anything is drawn.

@@ -94,6 +94,7 @@ fn short_of_resources_analysis_is_quick_only_and_the_full_one_runs_once_there_is
         null_audio: true,
         worker: stand_in,
         midi: false,
+        secrets: std::sync::Arc::new(crate::core::bucket::MemorySecrets::default()),
     };
     let mut h = build("cpu-strain-analysis", services);
     // No quick grids for new tracks: the tracks start with none.
