@@ -62,14 +62,13 @@ Styles start from `leaf()`, `row()` or `col()` and read like their CSS:
 | `.min_w(240.0)` | `min-width: 240px` |
 | `.max_h_pct(0.45)` | `max-height: 45%` |
 | `.no_shrink()` | `flex-shrink: 0` |
-| `.aspect(3.0)` | `aspect-ratio: 3` |
 | `.gap(4.0)` / `.pad(margin)` | `gap` / `padding` |
 | `.reverse(true)` | `row-reverse` / `column-reverse` |
 
 Every part starts at `min-width: 0; min-height: 0`: unlike CSS, a part is never
 widened to fit its content unless it asks with `min_w` / `min_h`.
 
-Two things to know:
+One thing to know:
 
 - **Layout lands a pass late, but a frame on time.** egui draws in one pass, so a part
   is drawn where the last pass's layout put it. When the layout changes, egui_taffy
@@ -77,8 +76,6 @@ Two things to know:
   shown whole. Something measured from what's drawn (`flex::fit`) takes one more pass
   to settle than something with a size from its style, so prefer styles for anything
   that moves when the layout does.
-- **`aspect` needs a width taffy calls definite.** A stretched width isn't; give the
-  part `.w_pct(1.0)` too.
 
 ## The decks
 

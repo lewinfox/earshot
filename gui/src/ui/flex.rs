@@ -21,8 +21,6 @@
 //! | `.grow()` | `flex: 1 1 0` |
 //! | `.basis_pct(0.3)` | `flex: 0 1 30%` |
 //! | `.min_w(240.0)` | `min-width: 240px` |
-//! | `.aspect(2.0)` | `aspect-ratio: 2` |
-//! | `.w_pct(1.0)` | `width: 100%` |
 //! | `.max_h_pct(0.45)` | `max-height: 45%` |
 //! | `.gap(4.0)` | `gap: 4px` |
 //! | `.pad(m)` | `padding: m` |
@@ -101,11 +99,6 @@ pub trait Flex: Sized {
         s.flex_shrink = 0.0;
         self
     }
-    /// This share of the container's width.
-    fn w_pct(mut self, p: f32) -> Self {
-        self.style().size.width = percent(p);
-        self
-    }
     /// This share of the container's height.
     fn h_pct(mut self, p: f32) -> Self {
         self.style().size.height = percent(p);
@@ -144,13 +137,6 @@ pub trait Flex: Sized {
         let s = self.style();
         s.flex_basis = percent(p);
         s.flex_shrink = 1.0;
-        self
-    }
-    /// Width over height, used for whichever of the two isn't otherwise set. (Taffy
-    /// only uses it from a width it calls definite: a stretched width isn't, but
-    /// `w_pct(1.0)` is.)
-    fn aspect(mut self, ratio: f32) -> Self {
-        self.style().aspect_ratio = Some(ratio);
         self
     }
     /// Between the parts.
