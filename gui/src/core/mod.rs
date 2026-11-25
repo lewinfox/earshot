@@ -111,6 +111,8 @@ pub enum Event {
     Stems(stems::StemsEvent),
     /// The Trim tool saved a cut, or couldn't.
     Trim(trim::TrimEvent),
+    /// The MIDI devices plugged in changed (`midi::watch`).
+    MidiDevices(Vec<midi::Found>),
     /// A MIDI message came in (it has already gone to the engine, if it does anything).
     Midi(midi::MidiMsg),
 }

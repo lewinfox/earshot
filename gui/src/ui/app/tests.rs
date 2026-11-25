@@ -1887,6 +1887,7 @@ fn master_in_prepare_is_the_playing_deck() {
 
 mod audio_watch;
 mod bucket;
+mod controller_hotplug;
 mod cpu_strain;
 mod external;
 mod history;
