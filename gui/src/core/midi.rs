@@ -639,9 +639,11 @@ pub fn pick<'a>(
 
 /// Watch for MIDI devices being plugged in and pulled out, on a thread of its own:
 /// `changed` hears the devices there are each time they differ (not at the start).
-/// On Linux the thread sleeps until ALSA's sequencer announces a port coming or
-/// going; elsewhere it looks every 2 s. The thread ends within a second of `stop`
-/// being set.
+/// The thread sleeps until the system says something was plugged in or pulled out:
+/// on Linux, ALSA's sequencer announcing a port; on Windows, its device-change
+/// message; on macOS, IOKit's USB notifications. (Where that can't be had it looks
+/// every 2 s.) It looks then, and once more a second later: a device's MIDI ports
+/// can trail the news of it. The thread ends within a second of `stop` being set.
 pub fn watch(
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     changed: impl Fn(Vec<Found>) + Send + 'static,
@@ -651,8 +653,11 @@ pub fn watch(
     std::thread::Builder::new()
         .name("earshot-midi-watch".into())
         .spawn(move || {
+            // (Made here: Windows' and macOS's belong to the thread that makes them.)
             let news = announce::News::new();
             let mut last = found();
+            // Something was just plugged in or out: look once more in a second.
+            let mut again = false;
             loop {
                 match &news {
                     // A second at a time, to notice `stop`.
@@ -661,6 +666,10 @@ pub fn watch(
                             return;
                         }
                         if news.wait(Duration::from_secs(1)) {
+                            again = true;
+                            break;
+                        }
+                        if std::mem::take(&mut again) {
                             break;
                         }
                     },
@@ -748,8 +757,20 @@ mod announce {
     }
 }
 
-/// Elsewhere nothing announces them yet: [`watch`] looks every so often.
-#[cfg(not(target_os = "linux"))]
+/// Windows' device-change message, and macOS's USB notifications: a device plugged
+/// in or pulled out, which [`watch`] takes as the cue to look at the ports.
+#[cfg(windows)]
+mod announce {
+    pub use crate::core::drives::DeviceNews as News;
+}
+
+#[cfg(target_os = "macos")]
+mod announce {
+    pub use crate::core::usb::News;
+}
+
+/// Elsewhere nothing announces them: [`watch`] looks every so often.
+#[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
 mod announce {
     pub struct News;
 

@@ -202,7 +202,8 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   filter do nothing on the new deck until moved to that deck's value (soft takeover);
   a mark on the on-screen control shows where the controller's is until then. A
   controller with a spare button can map `deck_1_layer_toggle` / `deck_2_layer_toggle`.
-- **Plugging a controller in or out** while earshot runs is noticed: it's connected
+- **Plugging a controller in or out** while earshot runs is noticed (the system says
+  so; earshot doesn't keep looking): it's connected
   (and the audio moved to its sound card) at once, or, if a deck is playing, when the
   decks stop. One controller is used at a time. With two plugged in, the top bar's
   MIDI pill picks which; that's refused while a deck plays, as it moves the audio.
