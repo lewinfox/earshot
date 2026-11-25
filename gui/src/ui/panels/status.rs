@@ -63,6 +63,8 @@ pub struct TopBar<'a> {
     pub controller_busy: Option<(&'a str, &'a str)>,
     /// The open MIDI inputs, with the mapping each got.
     pub midi_devices: &'a [crate::core::midi::Port],
+    /// Every MIDI device plugged in, opened or not.
+    pub midi_found: &'a [crate::core::midi::Found],
     /// Every mapping there is (its key and name), to pick one from.
     pub mappings: &'a [(String, String)],
     pub analysis: &'a AnalysisSummary,
@@ -339,14 +341,26 @@ impl TopBar<'_> {
     fn midi_pill(&self, ui: &mut Ui, cx: &mut Cx) {
         use crate::core::controllers::device_key;
         let devices = self.midi_devices;
+        let found = self.midi_found;
+        // The devices plugged in that aren't the controller in use.
+        let others = found
+            .iter()
+            .filter(|f| !devices.iter().any(|d| d.name == f.name))
+            .count();
         let midi = if devices.is_empty() {
-            "MIDI: none".to_string()
+            match others {
+                0 => "MIDI: none".to_string(),
+                n => format!("MIDI: none (+{n})"),
+            }
         } else {
             let names: Vec<&str> = devices
                 .iter()
                 .map(|d| d.name.split(':').next().unwrap_or(&d.name))
                 .collect();
-            format!("MIDI: {}", names.join(", "))
+            match others {
+                0 => format!("MIDI: {}", names.join(", ")),
+                n => format!("MIDI: {} (+{n})", names.join(", ")),
+            }
         };
         let intent = if devices.is_empty() {
             Intent::Neutral
@@ -355,13 +369,31 @@ impl TopBar<'_> {
         };
         let pill = ui
             .add(Pill::new(&midi, intent))
-            .on_hover_text("Click to pick each controller's mapping, or reconnect MIDI");
+            .on_hover_text("Click to pick the controller and its mapping, or reconnect MIDI");
         egui::Popup::menu(&pill)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
                 ui.set_min_width(260.0);
-                if devices.is_empty() {
+                if found.is_empty() && devices.is_empty() {
                     ui.label("No MIDI device is connected.");
+                }
+                // More than one plugged in: which is the controller. (One at a time:
+                // it's the one read, lit, and played through.)
+                if found.len() > 1 {
+                    ui.label(egui::RichText::new("Controller").strong());
+                    for f in found {
+                        let using = devices.iter().any(|d| d.name == f.name);
+                        if ui.radio(using, f.label()).clicked() && !using {
+                            cx.send(AppCmd::UseController(f.key.clone()));
+                            ui.close();
+                        }
+                    }
+                    ui.label(
+                        egui::RichText::new("Stop the decks to change it.")
+                            .size(11.0)
+                            .color(cx.theme.muted),
+                    );
+                    ui.separator();
                 }
                 for d in devices {
                     ui.label(egui::RichText::new(&d.name).strong());

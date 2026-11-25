@@ -157,6 +157,10 @@ pub use super::view::ViewCmd;
 pub enum AppCmd {
     /// Close and reopen every MIDI input, e.g. after plugging the controller in.
     ReconnectMidi,
+    /// Use the MIDI device `0` (a `controllers::device_key`) as the controller from
+    /// now on, of those plugged in, and remember it. Refused while a deck plays:
+    /// changing controller moves the audio to its sound card.
+    UseController(String),
     /// Use mapping `mapping` (a `controllers::MappingId::key`) for the MIDI device
     /// `device` (a `controllers::device_key`) from now on, and remember it.
     UseMapping { device: String, mapping: String },

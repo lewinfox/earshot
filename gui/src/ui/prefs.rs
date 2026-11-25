@@ -72,6 +72,9 @@ pub struct UiPrefs {
     /// The mapping chosen for each MIDI device (the MIDI pill): a
     /// `controllers::device_key` to a `controllers::MappingId::key`.
     pub controller_mappings: std::collections::BTreeMap<String, String>,
+    /// The MIDI device chosen as the controller (the MIDI pill), of those plugged in:
+    /// a `controllers::device_key`. `None`: the first with a mapping.
+    pub controller_chosen: Option<String>,
 }
 
 /// The UI size's range (Settings > Display, Ctrl +/-): everything is drawn this many
@@ -114,6 +117,7 @@ impl Default for UiPrefs {
             layers: [false; 2],
             mixer_with_controller: false,
             controller_mappings: Default::default(),
+            controller_chosen: None,
         }
     }
 }

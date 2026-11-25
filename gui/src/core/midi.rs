@@ -569,6 +569,12 @@ pub struct Midi {
     _lights: Option<super::lights::Lights>,
 }
 
+/// Whether a MIDI port could be a controller's: not ALSA's Midi Through, and not one
+/// of earshot's own (its ports for a controller's lights are listed too).
+fn is_device(port: &str) -> bool {
+    !port.contains("Midi Through") && !port.starts_with("earshot")
+}
+
 /// The MIDI input ports there are (not ALSA's Midi Through), without opening them.
 pub fn port_names() -> Vec<String> {
     let Ok(probe) = MidiInput::new("earshot-probe") else {
@@ -578,13 +584,190 @@ pub fn port_names() -> Vec<String> {
         .ports()
         .iter()
         .filter_map(|p| probe.port_name(p).ok())
-        .filter(|n| !n.contains("Midi Through"))
+        .filter(|n| is_device(n))
         .collect()
 }
 
-/// Connect to every MIDI input port, sending to the engine on `lane`, and to the
-/// output ports of the same names, for the controller's lights. Returns the
-/// connections and the input port names.
+/// A MIDI device that's plugged in, opened or not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    /// Its input port's name.
+    pub name: String,
+    /// What it's remembered by (`controllers::device_key`): the same when it's
+    /// plugged in again, which its port's name needn't be.
+    pub key: String,
+}
+
+impl Found {
+    /// A port of this name.
+    pub fn new(name: &str) -> Found {
+        let usb = super::controller_audio::usb_id(name);
+        Found {
+            key: super::controllers::device_key(name, usb.as_deref()),
+            name: name.to_string(),
+        }
+    }
+
+    /// For showing: the device's name, without its port's (`DDJ-400:DDJ-400 MIDI 1
+    /// 20:0`: `DDJ-400`).
+    pub fn label(&self) -> &str {
+        self.name.split(':').next().unwrap_or(&self.name)
+    }
+}
+
+/// The MIDI devices plugged in now, without opening them.
+pub fn found() -> Vec<Found> {
+    port_names().iter().map(|n| Found::new(n)).collect()
+}
+
+/// Which of the devices plugged in is the controller to use (its key): the one the
+/// user chose (`chosen`), if it's there; else the first that has a mapping
+/// (`mapped`); else the first. Only that one is opened: two controllers at once
+/// would both be read through one's mapping.
+pub fn pick<'a>(
+    chosen: Option<&str>,
+    found: &'a [Found],
+    mapped: impl Fn(&Found) -> bool,
+) -> Option<&'a str> {
+    found
+        .iter()
+        .find(|f| Some(f.key.as_str()) == chosen)
+        .or_else(|| found.iter().find(|f| mapped(f)))
+        .or(found.first())
+        .map(|f| f.key.as_str())
+}
+
+/// Watch for MIDI devices being plugged in and pulled out, on a thread of its own:
+/// `changed` hears the devices there are each time they differ (not at the start).
+/// On Linux the thread sleeps until ALSA's sequencer announces a port coming or
+/// going; elsewhere it looks every 2 s. The thread ends within a second of `stop`
+/// being set.
+pub fn watch(
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    changed: impl Fn(Vec<Found>) + Send + 'static,
+) {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    std::thread::Builder::new()
+        .name("earshot-midi-watch".into())
+        .spawn(move || {
+            let news = announce::News::new();
+            let mut last = found();
+            loop {
+                match &news {
+                    // A second at a time, to notice `stop`.
+                    Some(news) => loop {
+                        if stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        if news.wait(Duration::from_secs(1)) {
+                            break;
+                        }
+                    },
+                    None => {
+                        for _ in 0..2 {
+                            std::thread::sleep(Duration::from_secs(1));
+                            if stop.load(Ordering::Relaxed) {
+                                return;
+                            }
+                        }
+                    }
+                }
+                // A device brings its ports up one after another: let it finish.
+                std::thread::sleep(Duration::from_millis(300));
+                let now = found();
+                if now != last {
+                    last = now.clone();
+                    changed(now);
+                }
+            }
+        })
+        .expect("start the MIDI watcher");
+}
+
+/// ALSA's sequencer announcing ports as they come and go: what [`watch`] waits on.
+#[cfg(target_os = "linux")]
+mod announce {
+    use std::time::Duration;
+
+    use alsa::poll::Descriptors;
+    use alsa::seq::{Addr, EventType, PortCap, PortSubscribe, PortType, Seq};
+
+    /// A sequencer client subscribed to the system's announcements.
+    pub struct News(Seq);
+
+    impl News {
+        /// `None` without a sequencer (no ALSA MIDI on this machine): look every so
+        /// often instead.
+        pub fn new() -> Option<News> {
+            let seq = Seq::open(None, Some(alsa::Direction::Capture), true).ok()?;
+            seq.set_client_name(c"earshot-watch").ok()?;
+            let port = seq
+                .create_simple_port(
+                    c"announcements",
+                    PortCap::WRITE | PortCap::NO_EXPORT,
+                    PortType::APPLICATION,
+                )
+                .ok()?;
+            let sub = PortSubscribe::empty().ok()?;
+            sub.set_sender(Addr::system_announce());
+            sub.set_dest(Addr {
+                client: seq.client_id().ok()?,
+                port,
+            });
+            seq.subscribe_port(&sub).ok()?;
+            Some(News(seq))
+        }
+
+        /// Wait up to `up_to` for a port to come or go. True if one did.
+        pub fn wait(&self, up_to: Duration) -> bool {
+            let mut input = self.0.input();
+            let Ok(mut fds) = (&self.0, Some(alsa::Direction::Capture)).get() else {
+                std::thread::sleep(up_to);
+                return false;
+            };
+            if alsa::poll::poll(&mut fds, up_to.as_millis() as i32).unwrap_or(0) == 0 {
+                return false;
+            }
+            // Everything that's arrived: a port among it is news. (Clients alone
+            // aren't: earshot's own look at the ports makes one.)
+            let mut ports = false;
+            while input.event_input_pending(true).unwrap_or(0) > 0 {
+                match input.event_input() {
+                    Ok(e) => {
+                        ports |= matches!(
+                            e.get_type(),
+                            EventType::PortStart | EventType::PortExit | EventType::PortChange
+                        )
+                    }
+                    Err(_) => break,
+                }
+            }
+            ports
+        }
+    }
+}
+
+/// Elsewhere nothing announces them yet: [`watch`] looks every so often.
+#[cfg(not(target_os = "linux"))]
+mod announce {
+    pub struct News;
+
+    impl News {
+        pub fn new() -> Option<News> {
+            None
+        }
+
+        pub fn wait(&self, _: std::time::Duration) -> bool {
+            false
+        }
+    }
+}
+
+/// Connect to the MIDI input ports of the device `only` (a `controllers::device_key`;
+/// `None`: every port), sending to the engine on `lane`, and to the output ports of
+/// the same names, for the controller's lights. Returns the connections and the
+/// input ports opened.
 pub fn connect_all(
     sink: &Sink,
     lane: &Lane,
@@ -592,6 +775,7 @@ pub fn connect_all(
     monitor: &super::lights::MonitorSlot,
     route: &Route,
     choose: &dyn Fn(&str, Option<&str>) -> Option<super::controllers::Profile>,
+    only: Option<&str>,
 ) -> Result<(Midi, Vec<Port>), String> {
     let t0 = std::time::Instant::now();
     let probe = MidiInput::new("earshot-probe").map_err(|e| e.to_string())?;
@@ -609,13 +793,17 @@ pub fn connect_all(
     let mut connections = Vec::new();
     for port in &ports {
         let name = probe.port_name(port).unwrap_or_else(|_| "unknown".into());
-        if name.contains("Midi Through") {
+        if !is_device(&name) {
+            continue;
+        }
+        let usb = super::controller_audio::usb_id(&name);
+        // Another device than the controller in use: left closed.
+        if only.is_some_and(|k| k != super::controllers::device_key(&name, usb.as_deref())) {
             continue;
         }
         let input = MidiInput::new("earshot").map_err(|e| e.to_string())?;
         // Which mapping this controller gets (`core::controllers`). The first port
         // with one sets the session's mapping.
-        let usb = super::controller_audio::usb_id(&name);
         let profile = choose(&name, usb.as_deref());
         eprintln!(
             "[init] MIDI: {name:?} (USB id {}): mapping {}",
@@ -1068,6 +1256,38 @@ fn on_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_device_is_the_controller_the_chosen_one_if_its_there() {
+        let found: Vec<Found> = ["Keys:Keys MIDI 1 24:0", "DDJ-400:DDJ-400 MIDI 1 20:0"]
+            .iter()
+            .map(|n| Found {
+                name: n.to_string(),
+                key: crate::core::controllers::device_key(n, None),
+            })
+            .collect();
+        let (keys, ddj) = (found[0].key.as_str(), found[1].key.as_str());
+        assert_eq!(found[1].label(), "DDJ-400");
+        assert_eq!(
+            ddj, "port:DDJ-400:DDJ-400 MIDI 1",
+            "the same when plugged in again"
+        );
+        // None chosen: the first with a mapping; with none mapped, the first.
+        assert_eq!(pick(None, &found, |f| f.key == ddj), Some(ddj));
+        assert_eq!(pick(None, &found, |_| false), Some(keys));
+        // The chosen one, mapped or not, while it's plugged in.
+        assert_eq!(pick(Some(keys), &found, |f| f.key == ddj), Some(keys));
+        assert_eq!(
+            pick(Some("usb:dead:beef"), &found, |f| f.key == ddj),
+            Some(ddj)
+        );
+        assert_eq!(pick(Some(keys), &[], |_| true), None);
+        // earshot's own ports (a controller's lights) and ALSA's through port aren't
+        // devices.
+        assert!(is_device("DDJ-400:DDJ-400 MIDI 1 20:0"));
+        assert!(!is_device("earshot:earshot-lights 129:0"));
+        assert!(!is_device("Midi Through:Midi Through Port-0 14:0"));
+    }
     use crate::core::command::{DeckCmd, ViewCmd};
     use earshot_engine::{
         ChannelParam, DeckCmd as EngineCmd, DeckId, MasterParam, ParamId, Press, Set,

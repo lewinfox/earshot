@@ -22,6 +22,7 @@ impl EarshotApp {
                 Event::Online(online) => self.set_online(online),
                 Event::Export(e) => self.export_event(e),
                 Event::Drives(d) => self.drives_changed(d),
+                Event::MidiDevices(found) => self.midi_devices_changed(found),
                 Event::Duplicates(Ok(groups)) => self.panels.library.browser.set_duplicates(groups),
                 Event::Duplicates(Err(e)) => eprintln!("finding duplicates: {e}"),
                 Event::Stale { queued, result } => {
