@@ -693,6 +693,7 @@ impl EarshotApp {
     /// or none: its ports opened (any others closed), its mapping and lights set up,
     /// and the audio moved to its sound card (or back to the computer's own).
     fn connect_controller(&mut self, device: Option<String>) {
+        let was = self.midi_ports.clone();
         // Close the old ports first so they can be reopened.
         self.midi = Midi::default();
         let lane = self.player.lock().unwrap().midi.clone();
@@ -732,11 +733,17 @@ impl EarshotApp {
         self.panels
             .controller
             .set_active(self.midi_devices.iter().find_map(|p| p.mapping.clone()));
-        // A controller with a sound card came or went: play to it, or stop.
-        if self
+        // The controller came, went or changed: open the audio again, so it plays to
+        // the output chosen for it (the controller's own sound card, when that's
+        // back), or off one that has gone. On Linux the controller's card is found
+        // from its MIDI port; elsewhere the output is the one picked in the Audio
+        // settings, which is only looked for when the audio opens. (Not at startup,
+        // before there's audio: it opens once the controller is ready.)
+        let card_changed = self
             .controller
-            .set(controller_audio::find(&self.midi_ports))
-        {
+            .set(controller_audio::find(&self.midi_ports));
+        let running = self.player.lock().unwrap().engine.is_some();
+        if card_changed || (running && was != self.midi_ports) {
             self.reopen_audio();
         }
     }
