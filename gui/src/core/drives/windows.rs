@@ -95,9 +95,9 @@ mod sys {
 
     use super::{Volume, device, fs_kind, letter, root};
 
-    /// A drive came or went since [`News::wait`] last said so (set by the window's
-    /// procedure, which Windows calls on the watcher's thread).
-    static CHANGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    /// How many device changes Windows has told of (counted by the windows'
+    /// procedure, which Windows calls on each watcher's own thread).
+    static CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     /// The hidden window's procedure: notes Windows' device-change message, which it
     /// sends every top-level window when a volume arrives or has gone (a stick
@@ -114,7 +114,7 @@ mod sys {
                 DBT_DEVICEARRIVAL | DBT_DEVICEREMOVECOMPLETE | DBT_DEVNODES_CHANGED
             )
         {
-            CHANGED.store(true, std::sync::atomic::Ordering::Relaxed);
+            CHANGES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         // SAFETY: passing on exactly what Windows gave this procedure.
         unsafe { DefWindowProcW(window, message, wparam, lparam) }
@@ -124,7 +124,12 @@ mod sys {
     /// window that's never shown, on the thread that makes it, which must also be
     /// the one that [`News::wait`]s (Windows delivers a window's messages to its
     /// own thread).
-    pub struct News(HWND);
+    pub struct News {
+        window: HWND,
+        /// How many device changes there had been when this last said so: there can
+        /// be more than one of these (the drives' watcher, the controllers').
+        seen: std::cell::Cell<u64>,
+    }
 
     impl News {
         /// `None` if Windows won't make the window: look every so often instead.
@@ -165,7 +170,10 @@ mod sys {
                     std::ptr::null(),
                 )
             };
-            (!window.is_null()).then_some(News(window))
+            (!window.is_null()).then(|| News {
+                window,
+                seen: std::cell::Cell::new(CHANGES.load(std::sync::atomic::Ordering::Relaxed)),
+            })
         }
 
         /// Wait up to `up_to` for a drive to come or go. True if one did.
@@ -176,12 +184,13 @@ mod sys {
                 // SAFETY: `msg` is plain data Windows fills in; the window is ours.
                 unsafe {
                     let mut msg: MSG = std::mem::zeroed();
-                    while PeekMessageW(&mut msg, self.0, 0, 0, PM_REMOVE) != 0 {
+                    while PeekMessageW(&mut msg, self.window, 0, 0, PM_REMOVE) != 0 {
                         TranslateMessage(&msg);
                         DispatchMessageW(&msg);
                     }
                 }
-                if CHANGED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                let now = CHANGES.load(std::sync::atomic::Ordering::Relaxed);
+                if self.seen.replace(now) != now {
                     return true;
                 }
                 let left = until.saturating_duration_since(std::time::Instant::now());
@@ -206,7 +215,7 @@ mod sys {
     impl Drop for News {
         fn drop(&mut self) {
             // SAFETY: the window this made, destroyed once, on its own thread.
-            unsafe { DestroyWindow(self.0) };
+            unsafe { DestroyWindow(self.window) };
         }
     }
 

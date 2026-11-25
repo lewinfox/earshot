@@ -36,6 +36,10 @@ mod macos;
 #[cfg(any(windows, test))]
 mod windows;
 pub use format::{fat_label, format};
+/// Windows' news of devices coming and going (not only drives): the MIDI watcher
+/// waits on one of its own (`midi::watch`).
+#[cfg(windows)]
+pub use windows::News as DeviceNews;
 
 /// How long [`watch`] waits without news before looking anyway: a library written
 /// onto a stick by another program doesn't change the mount table. (earshot looks

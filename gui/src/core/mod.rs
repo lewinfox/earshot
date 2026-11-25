@@ -56,6 +56,8 @@ pub mod tap;
 pub mod tempo_lock;
 pub mod track;
 pub mod trim;
+#[cfg(target_os = "macos")]
+pub mod usb;
 pub mod view;
 pub mod worker_client;
 pub mod worker_env;
