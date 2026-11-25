@@ -109,9 +109,6 @@ pub struct EarshotApp {
     /// Every MIDI device plugged in, opened or not (`midi::watch` keeps it current):
     /// the MIDI pill offers them, when there's more than one.
     midi_found: Vec<midi::Found>,
-    /// A controller was plugged in while a deck was playing: it's connected (and the
-    /// audio moved to its sound card) once nothing plays.
-    controller_waiting: bool,
     /// Every mapping there is (its key and name), for the MIDI pill's list.
     mappings: Vec<(String, String)>,
     /// Send track ids here to load their cover art.
@@ -467,7 +464,6 @@ impl EarshotApp {
             midi_ports: vec![],
             midi_devices: vec![],
             midi_found: vec![],
-            controller_waiting: false,
             mappings: vec![],
             art_loader,
             hasher,
@@ -679,14 +675,25 @@ impl EarshotApp {
         ));
     }
 
-    /// (Re)open every MIDI input, e.g. after plugging the controller in.
+    /// (Re)open the controller's MIDI ports: the one chosen (the MIDI pill) if it's
+    /// plugged in, else the first with a mapping. At startup, and when the user asks
+    /// (Reconnect MIDI, a mapping picked).
     #[track_caller]
     fn connect_midi(&mut self) {
         eprintln!(
             "[init] MIDI: connecting (asked from {})",
             std::panic::Location::caller()
         );
-        self.controller_waiting = false;
+        self.midi_found = midi::found();
+        let device = self.controller_to_use().map(str::to_owned);
+        self.connect_controller(device);
+    }
+
+    /// Use the MIDI device `device` (a `controllers::device_key`) as the controller,
+    /// or none: its ports opened (any others closed), its mapping and lights set up,
+    /// and the audio moved to its sound card (or back to the computer's own).
+    fn connect_controller(&mut self, device: Option<String>) {
+        let was = self.midi_ports.clone();
         // Close the old ports first so they can be reopened.
         self.midi = Midi::default();
         let lane = self.player.lock().unwrap().midi.clone();
@@ -699,10 +706,8 @@ impl EarshotApp {
             let key = crate::core::controllers::device_key(port, usb);
             store.find(port, usb, chosen.get(&key).map(String::as_str))
         };
-        // One controller is used, of the devices plugged in: the one chosen (the
-        // MIDI pill), else the first with a mapping.
-        self.midi_found = midi::found();
-        let only = self.controller_to_use().map(str::to_owned);
+        // (No device: a key no port has, so none is opened.)
+        let only = Some(device.unwrap_or_default());
         (self.midi, self.midi_devices) = midi::connect_all(
             &self.sink,
             &lane,
@@ -728,11 +733,17 @@ impl EarshotApp {
         self.panels
             .controller
             .set_active(self.midi_devices.iter().find_map(|p| p.mapping.clone()));
-        // A controller with a sound card came or went: play to it, or stop.
-        if self
+        // The controller came, went or changed: open the audio again, so it plays to
+        // the output chosen for it (the controller's own sound card, when that's
+        // back), or off one that has gone. On Linux the controller's card is found
+        // from its MIDI port; elsewhere the output is the one picked in the Audio
+        // settings, which is only looked for when the audio opens. (Not at startup,
+        // before there's audio: it opens once the controller is ready.)
+        let card_changed = self
             .controller
-            .set(controller_audio::find(&self.midi_ports))
-        {
+            .set(controller_audio::find(&self.midi_ports));
+        let running = self.player.lock().unwrap().engine.is_some();
+        if card_changed || (running && was != self.midi_ports) {
             self.reopen_audio();
         }
     }
@@ -761,14 +772,16 @@ impl EarshotApp {
             .is_some_and(|sh| sh.live().iter().any(|d| d.playing))
     }
 
-    /// A MIDI device was plugged in or pulled out (`midi::watch`).
+    /// A MIDI device was plugged in or pulled out (`midi::watch`). Nothing is
+    /// switched by itself, with one exception:
     ///
-    /// - The controller in use has gone: what's left is connected at once (there's
-    ///   nothing to keep: its ports and its sound card went with it).
-    /// - A device that would now be the controller came (none was connected, or the
-    ///   chosen one is back): it's connected, and the audio moved to its sound
-    ///   card, at once if nothing is playing, else when the decks stop.
-    /// - Any other device: only listed (the MIDI pill offers it).
+    /// - The controller in use has gone: earshot goes to having no controller (its
+    ///   ports closed, the audio back on the computer's own output). Its ports and
+    ///   sound card went with it, so there's nothing to keep. Another device that's
+    ///   plugged in isn't taken up in its place.
+    /// - Anything else (a device plugged in, one that isn't in use pulled out): the
+    ///   MIDI pill's list is brought up to date, and that's all. The user picks a
+    ///   controller there (`AppCmd::UseController`).
     fn midi_devices_changed(&mut self, found: Vec<midi::Found>) {
         if found == self.midi_found {
             return;
@@ -777,43 +790,30 @@ impl EarshotApp {
             "MIDI: devices now {:?}",
             found.iter().map(|f| f.label()).collect::<Vec<_>>()
         );
+        // The ones that weren't there before, to say so.
+        let new: Vec<String> = found
+            .iter()
+            .filter(|f| !self.midi_found.iter().any(|was| was.key == f.key))
+            .map(|f| f.label().to_owned())
+            .collect();
         self.midi_found = found;
-        // (Its port's name too: plugged in again it's another port, to open afresh.)
+        // (By its port's name: plugged in again it's another port.)
         let gone = self
             .midi_devices
             .iter()
             .any(|open| !self.midi_found.iter().any(|f| f.name == open.name));
-        let using = self
-            .midi_devices
-            .first()
-            .map(|p| crate::core::controllers::device_key(&p.name, p.usb.as_deref()));
-        let to_use = self.controller_to_use().map(str::to_owned);
         if gone {
-            return self.connect_midi();
+            self.notify(
+                notice::Level::Warning,
+                "The controller was unplugged: earshot is on the computer's own output.",
+            );
+            return self.connect_controller(None);
         }
-        if to_use == using {
-            return;
-        }
-        if self.any_playing() {
-            self.controller_waiting = true;
-            let name = to_use
-                .and_then(|k| self.midi_found.iter().find(|f| f.key == k))
-                .map_or("The controller", |f| f.label())
-                .to_owned();
+        if let Some(name) = new.first() {
             self.notify(
                 notice::Level::Info,
-                format!("{name} is plugged in: it's used once the decks stop."),
+                format!("{name} is plugged in: pick it in the MIDI pill to use it."),
             );
-        } else {
-            self.connect_midi();
-        }
-    }
-
-    /// Each frame: the controller that was plugged in while a deck played is
-    /// connected once none does.
-    fn connect_waiting_controller(&mut self) {
-        if self.controller_waiting && !self.any_playing() {
-            self.connect_midi();
         }
     }
 
@@ -1060,8 +1060,9 @@ impl EarshotApp {
                     );
                 } else {
                     eprintln!("MIDI: {device} is the controller from now on");
-                    self.prefs.controller_chosen = Some(device);
-                    self.connect_midi();
+                    self.prefs.controller_chosen = Some(device.clone());
+                    self.midi_found = midi::found();
+                    self.connect_controller(Some(device));
                 }
             }
             Command::App(AppCmd::UseMapping { device, mapping }) => {
@@ -1760,7 +1761,6 @@ impl eframe::App for EarshotApp {
             .as_ref()
             .is_some_and(|sh| sh.live().iter().any(|d| d.playing));
         self.lib.analyser.set_playing(playing);
-        self.connect_waiting_controller();
         self.confirm_quit(ctx);
         self.keyboard(ctx);
         input::full_screen_key(ctx);

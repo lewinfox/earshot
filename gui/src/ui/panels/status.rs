@@ -377,9 +377,10 @@ impl TopBar<'_> {
                 if found.is_empty() && devices.is_empty() {
                     ui.label("No MIDI device is connected.");
                 }
-                // More than one plugged in: which is the controller. (One at a time:
-                // it's the one read, lit, and played through.)
-                if found.len() > 1 {
+                // A device plugged in that isn't the controller: which is. (One at a
+                // time: it's the one read, lit, and played through. earshot never
+                // changes it by itself.)
+                if others > 0 {
                     ui.label(egui::RichText::new("Controller").strong());
                     for f in found {
                         let using = devices.iter().any(|d| d.name == f.name);

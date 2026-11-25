@@ -203,11 +203,11 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   a mark on the on-screen control shows where the controller's is until then. A
   controller with a spare button can map `deck_1_layer_toggle` / `deck_2_layer_toggle`.
 - **Plugging a controller in or out** while earshot runs is noticed (the system says
-  so; earshot doesn't keep looking): it's connected
-  (and the audio moved to its sound card) at once, or, if a deck is playing, when the
-  decks stop. One controller is used at a time. With two plugged in, the top bar's
-  MIDI pill picks which; that's refused while a deck plays, as it moves the audio.
-  A device that isn't the controller is only listed there.
+  so; earshot doesn't keep looking), and listed in the top bar's MIDI pill. earshot
+  never switches controller by itself: pick it in the pill to use it, which moves
+  the audio to its sound card and so is refused while a deck plays. The one
+  exception is the controller in use being pulled out: earshot then has none, and
+  plays through the computer's own output. One controller is used at a time.
 - **Sampler** (*Menu → Sampler…*): 16 slots, each a short sound (a file, or the
   track selected in the library; its first two minutes, kept in memory) with its own
   volume and a *Loop* switch. With the DDJ-400's pads in SAMPLER mode a pad plays its
