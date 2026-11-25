@@ -302,18 +302,27 @@ impl BucketsUi {
                     .unwrap_or_else(|| "Amazon S3".into());
                 muted(ui, &root).on_hover_text(endpoint);
                 // Its tracks, and how many of them are downloaded.
-                let inside = format!("{root}/");
-                let (mut all, mut here) = (0, 0);
-                for t in v
-                    .lib
-                    .tracks()
-                    .iter()
-                    .filter(|t| t.path.starts_with(&inside))
-                {
+                // (One that's also a file on this computer is played from there, and
+                // needs no download.)
+                let (mut all, mut here, mut local) = (0, 0, 0);
+                for t in v.lib.tracks().iter().filter(|t| t.in_folder(&root)) {
                     all += 1;
-                    here += usize::from(v.lib.downloaded(t.id) == Some(true));
+                    match v.lib.downloaded(t.id) {
+                        Some(true) => here += 1,
+                        Some(false) => {}
+                        None => local += 1,
+                    }
                 }
-                muted(ui, format!("{}, {here} downloaded", tracks(all)));
+                muted(
+                    ui,
+                    match local {
+                        0 => format!("{}, {here} downloaded", tracks(all)),
+                        n => format!(
+                            "{}, {here} downloaded, {n} on this computer too",
+                            tracks(all)
+                        ),
+                    },
+                );
                 ui.add_space(4.0);
                 if self.offline {
                     ui.add(
@@ -447,13 +456,7 @@ impl BucketsUi {
         {
             return f.clone();
         }
-        let inside = format!("{root}/");
-        let f = Rc::new(facets(
-            v.lib
-                .tracks()
-                .iter()
-                .filter(|t| t.path.starts_with(&inside)),
-        ));
+        let f = Rc::new(facets(v.lib.tracks().iter().filter(|t| t.in_folder(root))));
         self.facets = Some((s.id, rev, f.clone()));
         f
     }
@@ -467,10 +470,9 @@ impl BucketsUi {
         {
             return folders.clone();
         }
-        let inside = format!("{root}/");
         let mut set = std::collections::BTreeSet::new();
         for t in v.lib.tracks() {
-            let Some(key) = t.path.strip_prefix(&inside) else {
+            let Some(key) = t.path_in(root) else {
                 continue;
             };
             // Every folder above the file.

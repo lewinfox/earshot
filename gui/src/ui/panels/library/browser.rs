@@ -306,17 +306,16 @@ impl LibraryUi {
             ),
             // In play order (unless sorted), repeats and all.
             Scope::History(_) => Some(self.session().map(|s| s.tracks.clone()).unwrap_or_default()),
-            Scope::Folder(f) => {
-                let dir = format!("{f}/");
-                Some(
-                    v.lib
-                        .tracks()
-                        .iter()
-                        .filter(|t| t.path.starts_with(&dir))
-                        .map(|t| t.id)
-                        .collect(),
-                )
-            }
+            // (A bucket's too: a track is in it by its object there, even when it's
+            // played from a file on this computer.)
+            Scope::Folder(f) => Some(
+                v.lib
+                    .tracks()
+                    .iter()
+                    .filter(|t| t.in_folder(f))
+                    .map(|t| t.id)
+                    .collect(),
+            ),
             Scope::Collection(id) => match v.collections.get(*id) {
                 None => Some(vec![]),
                 Some(c) if c.kind == CollectionKind::Smart => {
@@ -805,12 +804,11 @@ fn drop_into(
 
 /// Right-click on an Explorer folder: analyse what's in it, or stop scanning it.
 fn folder_menu(ui: &mut Ui, path: &str, root: bool, v: &CoreView, out: &mut Vec<Command>) {
-    let prefix = format!("{path}/");
     let inside: Vec<_> = v
         .lib
         .tracks()
         .iter()
-        .filter(|t| t.path.starts_with(&prefix))
+        .filter(|t| t.in_folder(path))
         .collect();
     let fresh: Vec<TrackId> = inside
         .iter()

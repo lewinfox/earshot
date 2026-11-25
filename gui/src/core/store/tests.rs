@@ -2697,3 +2697,191 @@ fn an_analysed_key_shows_unless_the_metadata_has_one() {
     .unwrap();
     assert_eq!(key(&mut w, "B").1.as_deref(), Some("8A"));
 }
+
+/// A bucket object's file row, as a scan records it: `url`, with these tags.
+fn object(url: &str, title: &str) -> ScannedObject {
+    ScannedObject {
+        url: url.into(),
+        key: url.rsplit_once('/').unwrap().1.into(),
+        size: 1000,
+        modified_ns: 1,
+        etag: Some("\"e1\"".into()),
+        tags: tags(title, "Cloud"),
+        tag_hash: None,
+    }
+}
+
+fn file_id(w: &Writer, path: &[u8]) -> i64 {
+    w.conn()
+        .query_row("SELECT id FROM files WHERE path = ?1", [path], |r| r.get(0))
+        .unwrap()
+}
+
+/// The same audio in a bucket and on this computer is one track, played from the
+/// local file. Found when the bucket's copy is hashed (it was downloaded): the
+/// bucket's track is the one kept (it's the one in use), with the local one's cues,
+/// grid, rating, crates and what the user typed.
+#[test]
+fn a_bucket_track_with_the_audio_of_a_local_one_becomes_it() {
+    let (dir, mut w) = setup("twin");
+    add_folder(&mut w, &dir.join("music"));
+    let local_path = dir.join("music/a.mp3");
+    scan(&mut w, &dir, &[file(&local_path, "Local title", None)]);
+    let local = library(&mut w)[0].id;
+    // The local track is the one with history.
+    w.set_meta(local, "comment", "user", Some("mine")).unwrap();
+    w.save_user_grid(local, &grid(124.0)).unwrap();
+    w.save_hotcues(
+        local,
+        &[Some(1.5), None, None, None, None, None, None, None],
+    )
+    .unwrap();
+    w.conn()
+        .execute("UPDATE tracks SET rating = 4 WHERE id = ?1", [local])
+        .unwrap();
+    w.create_collection(50, None, Crate, "Box", None).unwrap();
+    w.add_tracks(50, &[local]).unwrap();
+    w.set_content_hash(file_id(&w, &path_bytes(&local_path)), &[7; 32])
+        .unwrap();
+
+    // The bucket has it too: two tracks, until the bucket's is hashed.
+    let source = w
+        .add_source(&NewSource {
+            kind: SourceKind::S3,
+            name: "Gig box".into(),
+            location: Some("s3://tunes".into()),
+            config: Default::default(),
+        })
+        .unwrap();
+    let url = "s3://tunes/a.mp3";
+    w.record_objects(source, &[object(url, "Cloud title")])
+        .unwrap();
+    assert_eq!(library(&mut w).len(), 2);
+    let cloud = library(&mut w)
+        .into_iter()
+        .find(|t| t.path == url)
+        .unwrap()
+        .id;
+    // (On a deck it got a hot cue of its own in another slot, and the same slot.)
+    w.save_hotcues(
+        cloud,
+        &[Some(9.0), Some(3.0), None, None, None, None, None, None],
+    )
+    .unwrap();
+    w.take_events();
+
+    let merged = w
+        .set_content_hash(file_id(&w, url.as_bytes()), &[7; 32])
+        .unwrap();
+    assert_eq!(merged, Some((local, cloud)), "the one being hashed is kept");
+    let events = w.take_events();
+    assert!(events.iter().any(
+        |e| matches!(e, StoreEvent::Merged { from, into } if (*from, *into) == (local, cloud))
+    ));
+    // Its downloaded copy isn't needed any more.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, StoreEvent::Redundant(urls) if urls == &[url.to_string()]))
+    );
+
+    // One track: at the local file, in the bucket too, with the local one's own.
+    let lib = library(&mut w);
+    assert_eq!(lib.len(), 1);
+    let t = &lib[0];
+    assert_eq!(t.id, cloud);
+    assert_eq!(t.path, local_path.to_string_lossy());
+    assert_eq!(t.remote.as_deref(), Some(url));
+    assert_eq!(
+        (t.title.as_str(), t.artist.as_str()),
+        ("Local title", "Someone")
+    );
+    assert_eq!(
+        (t.comment.as_str(), t.rating, t.bpm),
+        ("mine", Some(4), Some(124.0))
+    );
+    assert_eq!(
+        read::track_location(w.conn(), cloud).unwrap(),
+        Location::File(local_path.clone())
+    );
+    // The local track's cue where both had one; the bucket track's in its own slot.
+    let cues = read::hotcues(w.conn(), cloud).unwrap();
+    assert_eq!((cues[0], cues[1]), (Some(1.5), Some(3.0)));
+    assert_eq!(read::collection_tracks(w.conn(), 50).unwrap(), [cloud]);
+
+    // The bucket's object changing doesn't change the track's tags: the local file's
+    // are the track's.
+    let mut changed = object(url, "Renamed in the bucket");
+    changed.etag = Some("\"e2\"".into());
+    w.record_objects(source, &[changed]).unwrap();
+    assert_eq!(library(&mut w)[0].title, "Local title");
+
+    // The local file gone (a drive unplugged): it's the bucket's track again.
+    w.apply_scan(&[dir.join("music")], &[], &[]).unwrap();
+    let lib = library(&mut w);
+    assert_eq!((lib.len(), lib[0].path.as_str()), (1, url));
+    assert_eq!(
+        read::track_location(w.conn(), cloud).unwrap(),
+        Location::Url(url.into())
+    );
+}
+
+/// The other way round: the bucket's copy was hashed first (it carries its hash in
+/// its tags, or was downloaded before the file was here), and the local file's hash
+/// comes later. The local file's track is kept, and keeps its own.
+#[test]
+fn a_local_file_with_the_audio_of_a_bucket_track_takes_it_in() {
+    let (dir, mut w) = setup("twin-local");
+    let source = w
+        .add_source(&NewSource {
+            kind: SourceKind::S3,
+            name: "Gig box".into(),
+            location: Some("s3://tunes".into()),
+            config: Default::default(),
+        })
+        .unwrap();
+    let url = "s3://tunes/a.mp3";
+    let mut stamped = object(url, "Cloud title");
+    stamped.tag_hash = Some([7; 32]);
+    w.record_objects(source, &[stamped]).unwrap();
+    let cloud = library(&mut w)[0].id;
+    w.save_user_grid(cloud, &grid(126.0)).unwrap();
+
+    add_folder(&mut w, &dir.join("music"));
+    let local_path = dir.join("music/a.mp3");
+    scan(&mut w, &dir, &[file(&local_path, "Local title", None)]);
+    assert_eq!(library(&mut w).len(), 2);
+    let local = library(&mut w)
+        .into_iter()
+        .find(|t| t.path != url)
+        .unwrap()
+        .id;
+    let merged = w
+        .set_content_hash(file_id(&w, &path_bytes(&local_path)), &[7; 32])
+        .unwrap();
+    assert_eq!(merged, Some((cloud, local)));
+    let lib = library(&mut w);
+    assert_eq!(lib.len(), 1);
+    // Its own title; the grid it didn't have, from the bucket's track.
+    assert_eq!((lib[0].id, lib[0].title.as_str()), (local, "Local title"));
+    assert_eq!(lib[0].bpm, Some(126.0));
+    assert_eq!(lib[0].remote.as_deref(), Some(url));
+    assert_eq!(lib[0].path, local_path.to_string_lossy());
+
+    // Two local files with the same audio stay two tracks (the Duplicates view's).
+    let other = dir.join("music/b.mp3");
+    scan(
+        &mut w,
+        &dir,
+        &[
+            file(&local_path, "Local title", None),
+            file(&other, "Copy", None),
+        ],
+    );
+    assert_eq!(
+        w.set_content_hash(file_id(&w, &path_bytes(&other)), &[7; 32])
+            .unwrap(),
+        None
+    );
+    assert_eq!(library(&mut w).len(), 2);
+}

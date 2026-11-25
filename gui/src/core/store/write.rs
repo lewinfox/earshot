@@ -389,10 +389,19 @@ impl Writer {
         Ok(())
     }
 
-    /// Record a file's audio hash, worked out in the background. If another track has
-    /// the same audio and none of its files are present any more, this file is that
-    /// track moved: the two are merged, keeping the older track (its analysis, cues
-    /// and Flow places). Returns (merged away, kept) when that happens.
+    /// Record a file's audio hash, worked out in the background. Returns (merged
+    /// away, kept) when that makes two tracks one:
+    ///
+    /// - Another track has the same audio and none of its files are present any more:
+    ///   this file is that track moved. The older track is kept (its analysis, cues
+    ///   and Flow places).
+    /// - This is a bucket's object and another track has the same audio in a file on
+    ///   this computer, or the other way round: they're one track, in two places
+    ///   ([`twin_with_hash`]). This file's track is the one kept (it's the one in use
+    ///   just now: a bucket's track is hashed because it was loaded), with the local
+    ///   file's track's grid, cues, metadata and analysis where both have them. The
+    ///   local file is what's played from then on, so the bucket's downloaded copy
+    ///   isn't needed any more ([`StoreEvent::Redundant`]).
     pub fn set_content_hash(&mut self, file: i64, hash: &Hash) -> Result<Option<(i64, i64)>> {
         let tx = self.conn.transaction()?;
         let track: Option<i64> = tx
@@ -407,12 +416,33 @@ impl Writer {
             "UPDATE files SET content_hash = ?2 WHERE id = ?1",
             params![file, hash.to_vec()],
         )?;
+        let remote: bool = tx.query_row(
+            &format!("SELECT {REMOTE} FROM files WHERE id = ?1"),
+            [file],
+            |r| r.get(0),
+        )?;
         let merged = match orphan_with_hash(&tx, hash, Some(track))? {
             Some(keep) => {
-                merge(&tx, track, keep)?;
+                merge(&tx, track, keep, Tags::Theirs)?;
                 Some((track, keep))
             }
-            None => None,
+            None => match twin_with_hash(&tx, hash, !remote, track)? {
+                Some(twin) => {
+                    if remote {
+                        // The twin has the local file: what it has is the track's.
+                        give_way(&tx, twin, track)?;
+                        merge(&tx, twin, track, Tags::Theirs)?;
+                    } else {
+                        merge(&tx, twin, track, Tags::Ours)?;
+                    }
+                    Some((twin, track))
+                }
+                None => None,
+            },
+        };
+        let redundant = match merged {
+            Some((_, kept)) => redundant_objects(&tx, kept)?,
+            None => vec![],
         };
         // Results made before the hash was known were made from this audio.
         tx.execute(
@@ -425,6 +455,10 @@ impl Writer {
             self.refresh_embeddings(&[from, into])?;
             self.emit_library()?;
             self.emit_collections()?;
+            self.emit(StoreEvent::Merged { from, into });
+        }
+        if !redundant.is_empty() {
+            self.emit(StoreEvent::Redundant(redundant));
         }
         Ok(merged)
     }
@@ -1480,6 +1514,20 @@ pub(super) fn record_at(tx: &Connection, bytes: &[u8], f: &ScannedFile, t: i64) 
             track
         }
     };
+    // A bucket's object of a track that's also on this computer: the local file's
+    // tags are the track's, as it's the one played.
+    let shadowed: bool = tx.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM files WHERE path = ?1 AND {REMOTE})
+               AND EXISTS (SELECT 1 FROM files WHERE track_id = ?2
+                           AND missing_since IS NULL AND NOT ({REMOTE}))"
+        ),
+        params![bytes, track],
+        |r| r.get(0),
+    )?;
+    if shadowed {
+        return Ok(track);
+    }
     if let Some(d) = f.tags.duration {
         tx.execute(
             "UPDATE tracks SET duration_s = ?2 WHERE id = ?1",
@@ -1555,11 +1603,122 @@ fn orphan_with_hash(c: &Connection, hash: &Hash, except: Option<i64>) -> Result<
     .optional()?)
 }
 
+/// Whose file's tags a merged track has ([`merge`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tags {
+    /// The track merged away's: its file is the one that's present (a moved file).
+    Theirs,
+    /// The kept track's own: its file is the one that's played (the local file of a
+    /// track that's also in a bucket). Fields it has none for come from the other.
+    Ours,
+}
+
+/// A file is a bucket's object (its path a `s3://` URL), as SQL on `files`.
+const REMOTE: &str = "path BETWEEN x'73333a2f2f' AND x'73333a2f30'";
+
+/// A track other than `except` with this audio in a file that's present and is a
+/// bucket's object (`remote`) or on this computer (not), and in none of the other
+/// kind: the same track in the other kind of place. (One that's in both already has
+/// its twin: a second local copy of it is a duplicate, as two local copies are.)
+fn twin_with_hash(c: &Connection, hash: &Hash, remote: bool, except: i64) -> Result<Option<i64>> {
+    Ok(c.query_row(
+        &format!(
+            "SELECT f.track_id FROM files f JOIN tracks t ON t.id = f.track_id
+             WHERE f.content_hash = ?1 AND t.deleted_at IS NULL AND f.track_id != ?2
+               AND f.missing_since IS NULL AND (f.{REMOTE}) = ?3
+               AND NOT EXISTS (SELECT 1 FROM files g
+                               WHERE g.track_id = f.track_id AND g.missing_since IS NULL
+                                 AND (g.{REMOTE}) != ?3)
+             ORDER BY f.track_id LIMIT 1"
+        ),
+        params![hash.to_vec(), except, remote],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
+/// The bucket objects (their URLs) a track has that it also has on this computer:
+/// their downloaded copies aren't needed while the local file is there.
+fn redundant_objects(c: &Connection, track: i64) -> Result<Vec<String>> {
+    let local: bool = c.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM files WHERE track_id = ?1
+                            AND missing_since IS NULL AND NOT ({REMOTE}))"
+        ),
+        [track],
+        |r| r.get(0),
+    )?;
+    if !local {
+        return Ok(vec![]);
+    }
+    let mut st = c.prepare(&format!(
+        "SELECT path FROM files WHERE track_id = ?1 AND missing_since IS NULL AND {REMOTE}"
+    ))?;
+    let urls = st
+        .query_map([track], |r| r.get::<_, Vec<u8>>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(urls
+        .into_iter()
+        .map(|u| String::from_utf8_lossy(&u).into_owned())
+        .collect())
+}
+
+/// Before [`merge`]ing `from` into `into`, where `from`'s is what the track should
+/// have (it has the local file): `into` gives up what `from` has too, so the merge
+/// brings `from`'s over. Its hot cues in the same slots, its metadata from the same
+/// sources, its measurements and waveform, its grid if `from` has one, and its
+/// rating, colour and mark if `from` has them.
+fn give_way(c: &Connection, from: i64, into: i64) -> Result<()> {
+    let p = params![from, into];
+    c.execute(
+        "DELETE FROM cues WHERE track_id = ?2 AND EXISTS
+           (SELECT 1 FROM cues f WHERE f.track_id = ?1 AND f.kind = cues.kind AND f.slot = cues.slot)",
+        p,
+    )?;
+    c.execute(
+        "DELETE FROM track_meta WHERE track_id = ?2 AND EXISTS
+           (SELECT 1 FROM track_meta f WHERE f.track_id = ?1 AND f.field = track_meta.field
+              AND f.source = track_meta.source)",
+        p,
+    )?;
+    for (table, key) in [
+        ("track_features", "name"),
+        ("analysis_results", "analyser"),
+        ("blobs", "kind"),
+        ("embeddings", "model"),
+    ] {
+        c.execute(
+            &format!(
+                "DELETE FROM {table} WHERE track_id = ?2 AND EXISTS
+                   (SELECT 1 FROM {table} f WHERE f.track_id = ?1 AND f.{key} = {table}.{key})"
+            ),
+            p,
+        )?;
+    }
+    // (Its own grids stay, as older rows; `merge` makes `from`'s the one in use.)
+    c.execute(
+        "UPDATE tracks SET active_grid_id = NULL, bpm = NULL
+         WHERE id = ?2 AND (SELECT active_grid_id FROM tracks WHERE id = ?1) IS NOT NULL",
+        p,
+    )?;
+    c.execute(
+        "UPDATE tracks SET
+           rating = coalesce((SELECT rating FROM tracks WHERE id = ?1), rating),
+           color = coalesce((SELECT color FROM tracks WHERE id = ?1), color),
+           needs_attention = coalesce((SELECT needs_attention FROM tracks WHERE id = ?1),
+                                      needs_attention),
+           added_at = min(added_at, (SELECT added_at FROM tracks WHERE id = ?1))
+         WHERE id = ?2",
+        p,
+    )?;
+    Ok(())
+}
+
 /// Fold track `from` into `into`: its files, and wherever it's used, move over, then
 /// it's deleted. `into` keeps its own analysis, user metadata and cues; it takes
-/// `from`'s tags (they're the present file's) and, if it had no grid, `from`'s
+/// `from`'s tags or keeps its own (`tags`) and, if it had no grid, `from`'s
 /// analysis.
-fn merge(c: &Connection, from: i64, into: i64) -> Result<()> {
+fn merge(c: &Connection, from: i64, into: i64, tags: Tags) -> Result<()> {
     let p = params![from, into];
     c.execute("UPDATE files SET track_id = ?2 WHERE track_id = ?1", p)?;
     c.execute("UPDATE flow_nodes SET track_id = ?2 WHERE track_id = ?1", p)?;
@@ -1584,10 +1743,12 @@ fn merge(c: &Connection, from: i64, into: i64) -> Result<()> {
         "UPDATE OR IGNORE track_sources SET track_id = ?2 WHERE track_id = ?1",
         p,
     )?;
-    c.execute(
-        "DELETE FROM track_meta WHERE track_id = ?2 AND source = 'tag'",
-        p,
-    )?;
+    if tags == Tags::Theirs {
+        c.execute(
+            "DELETE FROM track_meta WHERE track_id = ?2 AND source = 'tag'",
+            p,
+        )?;
+    }
     c.execute(
         "UPDATE OR IGNORE track_meta SET track_id = ?2 WHERE track_id = ?1",
         p,

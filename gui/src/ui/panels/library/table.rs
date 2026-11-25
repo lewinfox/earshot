@@ -342,12 +342,24 @@ pub const COLUMNS: [ColumnDef; 22] = [
 /// A bucket track's download mark: a tick once it's downloaded (it plays without a
 /// connection), a cloud while it's only in its bucket. Nothing for a local file.
 fn download_cell(ui: &mut Ui, c: &mut Cell<'_>) {
-    let Some(downloaded) = c.v.lib.downloaded(c.t.id) else {
-        return;
+    // In a bucket, and a file on this computer too (the same audio): it's played
+    // from here, and needs no download.
+    let local_too = c.t.remote.is_some() && c.t.remote.as_deref() != Some(c.t.path.as_str());
+    let downloaded = match c.v.lib.downloaded(c.t.id) {
+        Some(d) => d,
+        None if local_too => true,
+        None => return,
     };
     let (rect, r) = ui.allocate_exact_size(egui::vec2(16.0, 12.0), egui::Sense::hover());
     let p = ui.painter();
-    if downloaded {
+    if local_too {
+        // A dot: here already.
+        p.circle_filled(rect.center(), 3.0, THEME.ok);
+        r.on_hover_text(
+            "On this computer too: it's played from there, so the bucket's copy \
+             is never downloaded",
+        );
+    } else if downloaded {
         // A tick.
         let (a, b, d) = (
             rect.left_center() + egui::vec2(3.0, 0.5),

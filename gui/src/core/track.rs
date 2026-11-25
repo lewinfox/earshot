@@ -46,6 +46,10 @@ pub struct Track {
     pub plays: u32,
     /// When it last started a counted play (unix seconds).
     pub last_played: Option<i64>,
+    /// Its object in a bucket (`s3://bucket/key`), if it has one. Its `path` is that
+    /// too, unless it's also a file on this computer (then that's its path, and what's
+    /// played).
+    pub remote: Option<String>,
     /// Title, artist, album, genre, comment, file name, tags: lowercase, one per
     /// line (see [`TextField`]).
     pub search_text: Box<str>,
@@ -64,6 +68,25 @@ pub enum TextField {
 }
 
 impl Track {
+    /// It's in `folder`: a folder on this computer its file is in, or a bucket (or a
+    /// folder in one) its object is in.
+    pub fn in_folder(&self, folder: &str) -> bool {
+        let inside = |path: &str| {
+            path.strip_prefix(folder)
+                .is_some_and(|rest| rest.starts_with('/'))
+        };
+        inside(&self.path) || self.remote.as_deref().is_some_and(inside)
+    }
+
+    /// Where it is under `folder` ([`Track::in_folder`]): its path there, after the
+    /// folder's own.
+    pub fn path_in(&self, folder: &str) -> Option<&str> {
+        [Some(self.path.as_str()), self.remote.as_deref()]
+            .into_iter()
+            .flatten()
+            .find_map(|p| p.strip_prefix(folder)?.strip_prefix('/'))
+    }
+
     pub fn new(l: LibTrack) -> Track {
         let file = l.path.rsplit('/').next().unwrap_or(&l.path);
         let search_text = [
@@ -100,6 +123,7 @@ impl Track {
             tags: l.tags,
             plays: l.plays,
             last_played: l.last_played,
+            remote: l.remote,
             path: l.path,
         }
     }
@@ -263,6 +287,7 @@ pub(crate) fn lib_track(id: TrackId, title: &str, artist: &str) -> LibTrack {
         tags: vec![],
         plays: 0,
         last_played: None,
+        remote: None,
     }
 }
 

@@ -482,6 +482,17 @@ pub enum StoreEvent {
     FlowLoaded(Option<(i64, String, FlowGraph)>, Option<FlowCamera>),
     /// Collections that no longer exist.
     Deleted(Vec<i64>),
+    /// Two tracks turned out to be one (the same audio): `from` is gone, and
+    /// everything of it is `into`'s. Sent after the [`StoreEvent::Library`] and
+    /// [`StoreEvent::Collections`] that show it.
+    Merged {
+        from: i64,
+        into: i64,
+    },
+    /// Bucket objects (their URLs) whose track turned out to be on this computer
+    /// too: their downloaded copies aren't needed, as the local file is what's
+    /// played.
+    Redundant(Vec<String>),
     /// An edit was made (from [`StoreCmd::Edit`], or a hand-fixed grid): one step
     /// for the undo history.
     Edited(Edit),
