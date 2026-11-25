@@ -8,11 +8,16 @@
 //! it, an import reading from it. When the last hold goes, the drive's filesystem is
 //! flushed (`syncfs`), so everything earshot wrote is on the stick before the light
 //! goes green.
+//!
+//! On Windows a stick is a drive letter (`windows`): its removable volumes, and
+//! disks on the USB, SD or MMC bus. They're looked for every two seconds; flushing
+//! and ejecting go to the volume itself. Formatting isn't done there yet.
 
 use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -25,6 +30,8 @@ use super::sources::SourceKind;
 use super::store::Reader;
 
 mod format;
+#[cfg(any(windows, test))]
+mod windows;
 pub use format::{fat_label, format};
 
 /// How long [`watch`] waits without news before looking anyway: a library written
@@ -36,6 +43,7 @@ const IDLE: Duration = Duration::from_secs(30);
 const ROOTS: [&str; 4] = ["/media", "/run/media", "/mnt", "/Volumes"];
 
 /// Filesystems that are never drives.
+#[cfg_attr(windows, allow(dead_code))] // the mount table's: Windows has none
 const VIRTUAL: [&str; 14] = [
     "proc",
     "sysfs",
@@ -56,11 +64,11 @@ const VIRTUAL: [&str; 14] = [
 /// A removable drive, mounted.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Drive {
-    /// Where it's mounted.
+    /// Where it's mounted (on Windows, its drive letter's root: `E:\`).
     pub path: PathBuf,
-    /// Its name (the mount point's last part, which is the volume label).
+    /// Its name: the volume label (on Linux and macOS, the mount point's last part).
     pub label: String,
-    /// The block device (`/dev/sdb1`), for ejecting.
+    /// The block device (`/dev/sdb1`; on Windows the volume, `\\.\E:`), for ejecting.
     pub device: String,
     pub fstype: String,
     pub total_bytes: u64,
@@ -214,6 +222,7 @@ fn parse_all_mounts(text: &str) -> Vec<(String, PathBuf, String)> {
 
 /// The removable drives in a mount table: mounts below one of [`ROOTS`] (not a
 /// root's own mount), as (device, mount point, fstype).
+#[cfg_attr(windows, allow(dead_code))] // Windows has no mount table
 fn parse_mounts(text: &str) -> Vec<(String, PathBuf, String)> {
     parse_all_mounts(text)
         .into_iter()
@@ -248,8 +257,13 @@ fn space(at: &Path) -> (u64, u64, bool) {
     )
 }
 
-/// Windows: [`list`] finds no drives there yet, so this is never asked.
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn space(at: &Path) -> (u64, u64, bool) {
+    windows::space(at)
+}
+
+/// Neither: nothing is known.
+#[cfg(not(any(unix, windows)))]
 fn space(_: &Path) -> (u64, u64, bool) {
     (0, 0, false)
 }
@@ -275,10 +289,18 @@ fn mounts_changed(_: &fs::File) -> bool {
     false
 }
 
-/// The removable drives mounted now.
-pub fn list() -> Vec<Drive> {
-    let mounts = match fs::read_to_string("/proc/self/mounts") {
-        Ok(text) => parse_mounts(&text),
+/// A drive as the system lists it: (device, where it's mounted, filesystem, and its
+/// label where that isn't the mount point's name).
+type Mounted = (String, PathBuf, String, Option<String>);
+
+/// The removable drives mounted now, as the system lists them.
+#[cfg(not(windows))]
+fn mounted() -> Vec<Mounted> {
+    match fs::read_to_string("/proc/self/mounts") {
+        Ok(text) => parse_mounts(&text)
+            .into_iter()
+            .map(|(device, at, fstype)| (device, at, fstype, None))
+            .collect(),
         // macOS: everything under /Volumes but the system disk's link.
         Err(_) => fs::read_dir("/Volumes")
             .into_iter()
@@ -286,18 +308,33 @@ pub fn list() -> Vec<Drive> {
             .flatten()
             .map(|e| e.path())
             .filter(|p| !p.is_symlink() && p.is_dir())
-            .map(|p| (String::new(), p, String::new()))
+            .map(|p| (String::new(), p, String::new(), None))
             .collect(),
-    };
-    mounts
+    }
+}
+
+/// The sticks with a drive letter now (`windows::volumes`).
+#[cfg(windows)]
+fn mounted() -> Vec<Mounted> {
+    windows::volumes()
         .into_iter()
-        .map(|(device, path, fstype)| {
+        .map(|v| (v.device, v.path, v.fstype, Some(v.label)))
+        .collect()
+}
+
+/// The removable drives mounted now.
+pub fn list() -> Vec<Drive> {
+    mounted()
+        .into_iter()
+        .map(|(device, path, fstype, label)| {
             let (total_bytes, free_bytes, writable) = space(&path);
             Drive {
-                label: path.file_name().map_or_else(
-                    || path.display().to_string(),
-                    |n| n.to_string_lossy().into(),
-                ),
+                label: label.unwrap_or_else(|| {
+                    path.file_name().map_or_else(
+                        || path.display().to_string(),
+                        |n| n.to_string_lossy().into(),
+                    )
+                }),
                 libraries: libraries_at(&path),
                 empty: is_empty(&path),
                 device,
@@ -376,6 +413,13 @@ impl Drop for StopOnDrop {
 }
 
 /// Write everything cached for the filesystem at `at` to the drive.
+#[cfg(windows)]
+pub fn flush(at: &Path) {
+    windows::flush(at);
+}
+
+/// Write everything cached for the filesystem at `at` to the drive.
+#[cfg(not(windows))]
 pub fn flush(at: &Path) {
     let Ok(f) = fs::File::open(at) else { return };
     #[cfg(target_os = "linux")]
@@ -392,7 +436,6 @@ pub fn flush(at: &Path) {
         // SAFETY: sync takes no arguments and can't fail.
         unsafe { libc::sync() };
     }
-    // Windows: opening a folder fails above, so there's nothing to flush.
     #[cfg(not(unix))]
     let _ = f;
 }
@@ -437,7 +480,15 @@ impl Drop for Hold {
     }
 }
 
+/// Take a drive out of use and eject it, so Windows shows it as safe to remove.
+/// Blocking. Fails while anything has a file on it open.
+#[cfg(windows)]
+pub fn eject(d: &Drive) -> Result<(), String> {
+    windows::eject(&d.device)
+}
+
 /// Unmount a drive and power it off, so it can be pulled out. Blocking.
+#[cfg(not(windows))]
 pub fn eject(d: &Drive) -> Result<(), String> {
     flush(&d.path);
     let run = |cmd: &str, args: &[&str]| -> Result<(), String> {

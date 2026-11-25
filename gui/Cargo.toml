@@ -46,6 +46,18 @@ bytes = "1.12.2"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.190"
 
+# USB sticks on Windows (core/drives/windows.rs): which volumes are removable, their
+# size and free space, flushing and ejecting them.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # A controller's own sound card: which ALSA card its MIDI port is on, and asking
 # PipeWire to let go of it (the ReserveDevice1 D-Bus name).
