@@ -260,3 +260,123 @@ fn a_bucket_is_added_browsed_and_downloaded_from_when_a_track_is_loaded() {
     assert!(icons(h.state()).is_empty());
     assert!(!cache.path(&two.1).exists());
 }
+
+/// A silent AIFF with an ID3 chunk of text `frames` (id, text), as taggers write one:
+/// a WAV's tags aren't read (symphonia drops its INFO list).
+fn tagged_aiff(frames: &[(&[u8; 4], &str)]) -> Vec<u8> {
+    let mut id3 = Vec::new();
+    for (id, text) in frames {
+        id3.extend(*id);
+        id3.extend((1 + text.len() as u32).to_be_bytes());
+        id3.extend([0, 0, 3]); // no flags; UTF-8
+        id3.extend(text.as_bytes());
+    }
+    let n = id3.len() as u32;
+    let mut tag = b"ID3\x03\x00\x00".to_vec();
+    tag.extend([21, 14, 7, 0].map(|s| (n >> s) as u8 & 0x7f));
+    tag.extend(id3);
+    if tag.len() % 2 == 1 {
+        tag.push(0);
+    }
+    let frames = 4410u32;
+    let data = vec![0u8; frames as usize * 4];
+    let mut b = b"FORM\0\0\0\0AIFFCOMM".to_vec();
+    b.extend(18u32.to_be_bytes());
+    b.extend(2u16.to_be_bytes());
+    b.extend(frames.to_be_bytes());
+    b.extend(16u16.to_be_bytes());
+    b.extend([0x40, 0x0E, 0xAC, 0x44, 0, 0, 0, 0, 0, 0]); // 44100
+    b.extend(b"SSND");
+    b.extend((8 + data.len() as u32).to_be_bytes());
+    b.extend([0; 8]);
+    b.extend(data);
+    b.extend(b"ID3 ");
+    b.extend((tag.len() as u32).to_be_bytes());
+    b.extend(tag);
+    let form = (b.len() - 8) as u32;
+    b[4..8].copy_from_slice(&form.to_be_bytes());
+    b
+}
+
+/// A bucket pane's Artist or Genre list, by what it shows; each is named by its label.
+fn picker<'a>(h: &'a H, shows: &'a str) -> egui_kittest::Node<'a> {
+    use egui::accesskit::Role;
+    use egui_kittest::kittest::{NodeT, by};
+    let list = h.get(by().role(Role::ComboBox).value(shows));
+    let name = list.accesskit_node().label().unwrap_or_default();
+    assert!(
+        ["Artist", "Genre"].contains(&name.as_str()),
+        "named {name:?}"
+    );
+    list
+}
+
+#[test]
+fn a_buckets_pane_filters_its_tracks_by_artist_and_genre() {
+    let mut h = start("bucket-filters");
+    let service = fake::Service::start("test-app-bucket-filters");
+    for (key, artist, genre) in [
+        ("One.aiff", "Daft", "House; Techno"),
+        ("Two.aiff", "Daft", "House"),
+        ("Three.aiff", "Someone", "Ambient"),
+    ] {
+        let title = key.trim_end_matches(".aiff");
+        let file = tagged_aiff(&[(b"TIT2", title), (b"TPE1", artist), (b"TCON", genre)]);
+        service.put(key, &file);
+    }
+    let form = BucketForm {
+        name: "Crate box".into(),
+        endpoint: service.endpoint.clone(),
+        bucket: service.bucket.clone(),
+        access_key_id: fake::KEY_ID.into(),
+        secret_access_key: fake::SECRET.into(),
+        ..Default::default()
+    };
+    h.state_mut()
+        .dispatch(BucketCmd::Save { form, source: None }.into());
+    settle_until(&mut h, |a| in_buckets(a).len() == 3);
+    steps(&mut h, 3);
+    let shown = |h: &H| -> Vec<String> {
+        let a = h.state();
+        let mut v: Vec<String> = (a.panels.library.browser.shown().iter())
+            .map(|id| a.index.get(*id).unwrap().title.clone())
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(shown(&h), ["One", "Three", "Two"]);
+    // Genre is a column of a bucket's list, read from the tags.
+    h.get_by_label("House; Techno");
+
+    // A genre: its tracks, including one with it among others; "House" isn't
+    // "Deep House". Each genre with how many tracks have it.
+    picker(&h, "Any genre").click();
+    steps(&mut h, 2);
+    h.get_by_label("Techno  (1)");
+    h.get_by_label("Ambient  (1)");
+    render(&mut h, "bucket-genre-list");
+    h.get_by_label("House  (2)").click();
+    steps(&mut h, 3);
+    assert_eq!(shown(&h), ["One", "Two"]);
+
+    // The artists then are only those with tracks in it.
+    picker(&h, "Any artist").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Someone  (1)").is_none());
+    h.get_by_label("Daft  (2)").click();
+    steps(&mut h, 3);
+    assert_eq!(shown(&h), ["One", "Two"]);
+
+    // Any genre again: the artist's tracks.
+    picker(&h, "House").click();
+    steps(&mut h, 2);
+    h.get_by_label("Any genre").click();
+    steps(&mut h, 3);
+    assert_eq!(shown(&h), ["One", "Two"]);
+    // And another artist: theirs.
+    picker(&h, "Daft").click();
+    steps(&mut h, 2);
+    h.get_by_label("Someone  (1)").click();
+    steps(&mut h, 3);
+    assert_eq!(shown(&h), ["Three"]);
+}

@@ -584,7 +584,8 @@ impl LibraryPane {
                     return;
                 }
                 let scope = self.browser.scope().clone();
-                if let Some(picked) = self.buckets.pane(ui, id, &cx.core, &scope, cx.out) {
+                let table = self.tables.get_mut(TableView::Bucket);
+                if let Some(picked) = self.buckets.pane(ui, id, &cx.core, &scope, table, cx.out) {
                     self.browser.set_scope(picked);
                     self.external.close();
                 }

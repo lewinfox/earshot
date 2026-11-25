@@ -1299,14 +1299,15 @@ fn smart_playlists_run_their_query_in_sql_like_in_memory() {
     let (dir, mut w) = setup("smart");
     add_folder(&mut w, &dir.join("music"));
     let mut files = vec![];
-    for (name, artist, bpm, key) in [
-        ("Deep Space", "Daft", 124.0, "Am"),
-        ("Shallow", "Daft", 128.0, "8A"),
-        ("Other", "Someone", 140.0, "C"),
-        ("Warm Up", "Someone", 122.0, "9A"),
+    for (name, artist, genre, bpm, key) in [
+        ("Deep Space", "Daft", "Deep House; Techno", 124.0, "Am"),
+        ("Shallow", "Daft", "House", 128.0, "8A"),
+        ("Other", "Someone", "Techno;Deep House", 140.0, "C"),
+        ("Warm Up", "Someone", "", 122.0, "9A"),
     ] {
         let mut f = file(&dir.join(format!("music/{name}.mp3")), name, None);
         f.tags.artist = Some(artist.into());
+        f.tags.genre = Some(genre.into());
         f.tags.bpm = Some(bpm);
         f.tags.key = Some(key.into());
         files.push(f);
@@ -1363,6 +1364,11 @@ fn smart_playlists_run_their_query_in_sql_like_in_memory() {
         "\"deep space\"",
         "artist:someone",
         "title=shallow",
+        "genre=house",
+        "genre=techno",
+        "genre=\"deep house\"",
+        "genre:house",
+        "-genre=techno",
         "bpm:120-126",
         "bpm>=128",
         "bpm:141",
@@ -1416,6 +1422,18 @@ fn smart_playlists_run_their_query_in_sql_like_in_memory() {
         } else {
             assert_eq!(sql, mem, "{q}");
         }
+    }
+    // An exact genre is one of a track's several, whole: "house" isn't "deep house".
+    for (q, want) in [
+        ("genre=house", vec!["Shallow"]),
+        ("genre=\"deep house\"", vec!["Deep Space", "Other"]),
+    ] {
+        w.set_query(1, q).unwrap();
+        let mut got: Vec<i64> = read::collection_tracks(w.conn(), 1).unwrap();
+        got.sort();
+        let mut want: Vec<i64> = want.into_iter().map(id).collect();
+        want.sort();
+        assert_eq!(got, want, "{q}");
     }
     assert!(matches!(
         w.set_query(1, "bpm:"),
