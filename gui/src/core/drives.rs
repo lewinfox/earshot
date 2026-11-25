@@ -31,6 +31,8 @@ use super::sources::SourceKind;
 use super::store::Reader;
 
 mod format;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(any(windows, test))]
 mod windows;
 pub use format::{fat_label, format};
@@ -352,20 +354,23 @@ pub fn list() -> Vec<Drive> {
 /// Watch the drives on a thread of its own; `changed` hears the whole list each
 /// time it differs (and once at the start). On Linux the thread sleeps until the
 /// kernel says the mount table changed (`/proc/self/mounts` is readable as
-/// "priority" data then), or for [`IDLE`]; on Windows until Windows says a drive
-/// came or went (`windows::News`), or for [`IDLE`]; on macOS it looks every 2 s. The
-/// thread ends within a second of `stop` being set.
+/// "priority" data then), or for [`IDLE`]; on Windows and macOS until the system says
+/// a drive came or went (`windows::News`, `macos::News`), or for [`IDLE`]. Where none
+/// of those can be had it looks every 2 s. The thread ends within a second of `stop`
+/// being set.
 pub fn watch(stop: Arc<AtomicBool>, changed: impl Fn(Vec<Drive>) + Send + 'static) {
     std::thread::Builder::new()
         .name("earshot-drives".into())
         .spawn(move || {
             let mounts = fs::File::open("/proc/self/mounts").ok();
-            // (Made here: the window is this thread's.)
+            // (Made here: Windows' is a window, which is this thread's.)
             #[cfg(windows)]
             let news = windows::News::new();
+            #[cfg(target_os = "macos")]
+            let news = macos::News::new();
             // A drive just came or went: look once more in a second, as its drive
-            // letter can trail the news of it.
-            #[cfg(windows)]
+            // letter (or its mount, on macOS) can trail the news of it.
+            #[cfg(any(windows, target_os = "macos"))]
             let mut again = false;
             let mut last: Option<Vec<Drive>> = None;
             loop {
@@ -398,7 +403,7 @@ pub fn watch(stop: Arc<AtomicBool>, changed: impl Fn(Vec<Drive>) + Send + 'stati
                         let _ = f.read_to_end(&mut vec![]);
                     }
                     None => {
-                        #[cfg(windows)]
+                        #[cfg(any(windows, target_os = "macos"))]
                         if let Some(news) = &news {
                             let wait = if again { Duration::from_secs(1) } else { IDLE };
                             let until = std::time::Instant::now() + wait;
