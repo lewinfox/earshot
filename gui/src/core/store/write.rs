@@ -1480,6 +1480,8 @@ fn write_tag_meta(c: &Connection, track: i64, tags: &TrackTags, t: i64) -> Resul
     for (field, value) in [
         ("title", tags.title.as_deref()),
         ("artist", tags.artist.as_deref()),
+        ("album", tags.album.as_deref()),
+        ("genre", tags.genre.as_deref()),
         ("bpm", bpm.as_deref()),
         ("key", tags.key.as_deref()),
     ] {

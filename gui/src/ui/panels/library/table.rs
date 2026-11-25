@@ -455,7 +455,7 @@ impl TableView {
                 &[Index, Status, Wave, Title, Artist, Bpm, Key, Time]
             }
             TableView::Duplicates => &[Status, Title, Artist, Bpm, Time, File],
-            TableView::Bucket => &[Status, Download, Wave, Title, Artist, Bpm, Key, Time],
+            TableView::Bucket => &[Status, Download, Wave, Title, Artist, Genre, Bpm, Key, Time],
             _ => &[Status, Wave, Title, Artist, Bpm, Key, Time],
         };
         TableState {

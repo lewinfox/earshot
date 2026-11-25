@@ -23,6 +23,8 @@ fn tags(title: &str, artist: &str) -> TrackTags {
     TrackTags {
         title: Some(title.into()),
         artist: Some(artist.into()),
+        album: None,
+        genre: None,
         bpm: Some(124.0),
         key: Some("8A".into()),
         duration: Some(300.0),
@@ -251,6 +253,21 @@ fn a_track_with_no_title_shows_its_file_name() {
     f.tags.title = None;
     scan(&mut w, &dir, &[f]);
     assert_eq!(library(&mut w)[0].title, "Some Song");
+}
+
+#[test]
+fn a_tagged_album_and_genre_are_listed_and_searchable() {
+    let (dir, mut w) = setup("genre");
+    add_folder(&mut w, &dir.join("music"));
+    let mut f = file(&dir.join("music/a.mp3"), "A", None);
+    f.tags.album = Some("Night Record".into());
+    f.tags.genre = Some("Deep House".into());
+    scan(&mut w, &dir, &[f]);
+    let t = &library(&mut w)[0];
+    assert_eq!(t.album, "Night Record");
+    assert_eq!(t.genre, "Deep House");
+    assert_eq!(read::search(w.conn(), "deep").unwrap(), vec![t.id]);
+    assert_eq!(read::search(w.conn(), "night").unwrap(), vec![t.id]);
 }
 
 #[test]
