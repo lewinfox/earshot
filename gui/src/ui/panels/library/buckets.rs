@@ -3,7 +3,7 @@
 //! changes one's name, service or key).
 
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use egui::{RichText, TextEdit, Ui};
@@ -52,15 +52,12 @@ pub struct BucketsUi {
     /// ([`BucketsUi::folders`]).
     tree: Option<(SourceId, u64, std::rc::Rc<Vec<String>>)>,
     /// The artists and genres of the bucket whose pane is open, as of a library
-    /// revision and the artists and genres picked ([`BucketsUi::facets`]).
-    facets: Option<(FacetsKey, Rc<Facets>)>,
+    /// revision ([`BucketsUi::facets`]).
+    facets: Option<(SourceId, u64, Rc<Facets>)>,
 }
 
-type FacetsKey = (SourceId, u64, BTreeSet<String>, BTreeSet<String>);
-
-/// A bucket's artists and genres, each with how many of its tracks have it, for its
-/// pane's Artist and Genre lists. Each list counts only the tracks the other list's
-/// pick leaves, so picking a genre lists only the artists with tracks in it.
+/// A bucket's artists and genres, each with how many of its tracks have it: its
+/// pane's Artists and Genres branches.
 #[derive(Debug, Default, PartialEq)]
 struct Facets {
     artists: Vec<(String, usize)>,
@@ -72,20 +69,9 @@ fn genres_of(t: &Track) -> impl Iterator<Item = &str> {
     t.genre.split(';').map(str::trim).filter(|g| !g.is_empty())
 }
 
-/// [`Facets`] of `tracks`, with these artists and genres picked (none: any). Values
-/// that differ only in case are one, under the spelling seen first.
-fn facets<'a>(
-    tracks: impl Iterator<Item = &'a Track>,
-    artists: &BTreeSet<String>,
-    genres: &BTreeSet<String>,
-) -> Facets {
-    let lower = |set: &BTreeSet<String>| -> HashSet<String> {
-        set.iter().map(|s| s.to_lowercase()).collect()
-    };
-    let (artists, genres) = (lower(artists), lower(genres));
-    let artist_ok = |t: &Track| artists.is_empty() || artists.contains(&t.artist.to_lowercase());
-    let genre_ok =
-        |t: &Track| genres.is_empty() || genres_of(t).any(|g| genres.contains(&g.to_lowercase()));
+/// [`Facets`] of `tracks`. Values that differ only in case are one, under the
+/// spelling seen first.
+fn facets<'a>(tracks: impl Iterator<Item = &'a Track>) -> Facets {
     let mut a: HashMap<String, (String, usize)> = HashMap::new();
     let mut g: HashMap<String, (String, usize)> = HashMap::new();
     let count = |map: &mut HashMap<String, (String, usize)>, value: &str| {
@@ -94,16 +80,14 @@ fn facets<'a>(
             .1 += 1;
     };
     for t in tracks {
-        if genre_ok(t) && !t.artist.trim().is_empty() {
+        if !t.artist.trim().is_empty() {
             count(&mut a, &t.artist);
         }
-        if artist_ok(t) {
-            // A track tagged with a genre twice counts once.
-            let mut seen = HashSet::new();
-            for genre in genres_of(t) {
-                if seen.insert(genre.to_lowercase()) {
-                    count(&mut g, genre);
-                }
+        // A track tagged with a genre twice counts once.
+        let mut seen = HashSet::new();
+        for genre in genres_of(t) {
+            if seen.insert(genre.to_lowercase()) {
+                count(&mut g, genre);
             }
         }
     }
@@ -118,48 +102,46 @@ fn facets<'a>(
     }
 }
 
-/// One of the pane's lists, named by the `label` beside it: "Any" or one of
-/// `values` (with its count). Returns what was picked, if anything was: `Some(None)`
-/// for "Any".
-fn value_picker(
-    ui: &mut Ui,
-    id: impl std::hash::Hash,
-    label: egui::Id,
-    any: &str,
-    none: &str,
-    values: &[(String, usize)],
-    picked: &BTreeSet<String>,
-) -> Option<Option<String>> {
-    let mut out = None;
-    let shown = if picked.is_empty() {
-        any.to_string()
-    } else {
-        picked.iter().cloned().collect::<Vec<_>>().join(", ")
-    };
-    let enabled = !values.is_empty() || !picked.is_empty();
-    ui.add_enabled_ui(enabled, |ui| {
-        let combo = egui::ComboBox::from_id_salt(id)
-            .selected_text(shown)
-            .width(ui.available_width())
-            .height(360.0)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(picked.is_empty(), any).clicked() {
-                    out = Some(None);
-                }
-                let picked_lower: HashSet<String> =
-                    picked.iter().map(|s| s.to_lowercase()).collect();
-                for (value, n) in values {
-                    let on = picked_lower.contains(&value.to_lowercase());
-                    if ui.selectable_label(on, format!("{value}  ({n})")).clicked() {
-                        out = Some(Some(value.clone()));
-                    }
-                }
-            });
-        combo
-            .response
-            .labelled_by(label)
-            .on_disabled_hover_text(none);
+/// A row picked in a bucket's tree: one at a time.
+enum Pick {
+    /// Everything in a folder (the bucket's root: all its tracks).
+    Folder(String),
+    Artist(String),
+    Genre(String),
+}
+
+/// A branch of the tree, closed to start with: its `title` opens and closes it.
+fn branch(ui: &mut Ui, id: egui::Id, title: &str, body: impl FnOnce(&mut Ui)) {
+    let state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    let mut clicked = false;
+    let mut header = state.show_header(ui, |ui| {
+        clicked = ui.selectable_label(false, title).clicked();
     });
+    if clicked {
+        header.toggle();
+    }
+    header.body(body);
+}
+
+/// A branch's rows: each of `values` with its count, `picked` (lowercased) shown
+/// picked. Returns the one clicked.
+fn value_rows(
+    ui: &mut Ui,
+    values: &[(String, usize)],
+    picked: &HashSet<String>,
+    none: &str,
+) -> Option<String> {
+    if values.is_empty() {
+        muted(ui, none);
+    }
+    let mut out = None;
+    for (value, n) in values {
+        let on = picked.contains(&value.to_lowercase());
+        if ui.selectable_label(on, format!("{value}  ({n})")).clicked() {
+            out = Some(value.clone());
+        }
+    }
     out
 }
 
@@ -375,71 +357,91 @@ impl BucketsUi {
                     }
                 });
                 ui.add_space(8.0);
-                // Show only an artist's tracks, or a genre's.
-                let (artists, genres) = (
-                    table.values(ColumnId::Artist),
-                    table.values(ColumnId::Genre),
-                );
-                let facets = self.facets(&s, &root, v, &artists, &genres);
-                egui::Grid::new(("bucket-filters", s.id))
-                    .num_columns(2)
-                    .spacing([8.0, 4.0])
-                    .show(ui, |ui| {
-                        let label = ui.label("Artist").id;
-                        if let Some(p) = value_picker(
-                            ui,
-                            ("bucket-artist", s.id),
-                            label,
-                            "Any artist",
-                            "None of its tracks are tagged with an artist",
-                            &facets.artists,
-                            &artists,
-                        ) {
-                            table.pick_value(ColumnId::Artist, p);
-                        }
-                        ui.end_row();
-                        let label = ui.label("Genre").id;
-                        if let Some(p) = value_picker(
-                            ui,
-                            ("bucket-genre", s.id),
-                            label,
-                            "Any genre",
-                            "None of its tracks are tagged with a genre",
-                            &facets.genres,
-                            &genres,
-                        ) {
-                            table.pick_value(ColumnId::Genre, p);
-                        }
-                        ui.end_row();
-                    });
-                ui.add_space(8.0);
-                // Everything in it, then its folders.
+                // One tree, one row picked at a time: all its tracks, an artist's, a
+                // genre's, or a folder's.
+                let lower = |c| -> HashSet<String> {
+                    table.values(c).iter().map(|v| v.to_lowercase()).collect()
+                };
+                let (artists, genres) = (lower(ColumnId::Artist), lower(ColumnId::Genre));
+                let by_value = !artists.is_empty() || !genres.is_empty();
                 let whole = matches!(scope, Scope::Folder(f) if *f == root);
+                // Picked by artist or genre, the folders show nothing picked.
+                let (none, folder_scope) = (HashSet::new(), Scope::All);
+                let (artists, genres, scope) = if by_value && whole {
+                    (&artists, &genres, &folder_scope)
+                } else {
+                    (&none, &none, scope)
+                };
+                let facets = self.facets(&s, &root, v);
+                let mut pick = None;
                 if ui
-                    .selectable_label(whole, format!("All of it  ({all})"))
+                    .selectable_label(whole && !by_value, format!("All tracks  ({all})"))
                     .clicked()
                 {
-                    picked = Some(Scope::Folder(root.clone()));
+                    pick = Some(Pick::Folder(root.clone()));
                 }
+                branch(
+                    ui,
+                    ui.make_persistent_id(("bucket-artists", s.id)),
+                    &format!("Artists  ({})", facets.artists.len()),
+                    |ui| {
+                        let none = "None of its tracks are tagged with an artist.";
+                        if let Some(a) = value_rows(ui, &facets.artists, artists, none) {
+                            pick = Some(Pick::Artist(a));
+                        }
+                    },
+                );
+                branch(
+                    ui,
+                    ui.make_persistent_id(("bucket-genres", s.id)),
+                    &format!("Genres  ({})", facets.genres.len()),
+                    |ui| {
+                        let none = "None of its tracks are tagged with a genre.";
+                        if let Some(g) = value_rows(ui, &facets.genres, genres, none) {
+                            pick = Some(Pick::Genre(g));
+                        }
+                    },
+                );
                 let folders = self.folders(&s, &root, v);
-                self.folder_rows(ui, &root, "", &folders, scope, &mut picked);
+                if !folders.is_empty() {
+                    let mut folder = None;
+                    branch(
+                        ui,
+                        ui.make_persistent_id(("bucket-folders", s.id)),
+                        "Folders",
+                        |ui| self.folder_rows(ui, &root, "", &folders, scope, &mut folder),
+                    );
+                    if let Some(Scope::Folder(f)) = folder {
+                        pick = Some(Pick::Folder(f));
+                    }
+                }
+                // What a row picked shows: the column filters say which artist or
+                // genre (and show above the list, to be cleared there too).
+                if let Some(p) = pick {
+                    table.pick_value(ColumnId::Artist, None);
+                    table.pick_value(ColumnId::Genre, None);
+                    let folder = match p {
+                        Pick::Folder(f) => f,
+                        Pick::Artist(a) => {
+                            table.pick_value(ColumnId::Artist, Some(a));
+                            root.clone()
+                        }
+                        Pick::Genre(g) => {
+                            table.pick_value(ColumnId::Genre, Some(g));
+                            root.clone()
+                        }
+                    };
+                    picked = Some(Scope::Folder(folder));
+                }
             });
         picked
     }
 
-    /// The bucket's [`Facets`] with these picked: worked out again only when the
-    /// library or a pick changes.
-    fn facets(
-        &mut self,
-        s: &Source,
-        root: &str,
-        v: &CoreView,
-        artists: &BTreeSet<String>,
-        genres: &BTreeSet<String>,
-    ) -> Rc<Facets> {
-        let key = (s.id, v.lib.rev(), artists.clone(), genres.clone());
-        if let Some((at, f)) = &self.facets
-            && *at == key
+    /// The bucket's [`Facets`]: worked out again only when the library changes.
+    fn facets(&mut self, s: &Source, root: &str, v: &CoreView) -> Rc<Facets> {
+        let rev = v.lib.rev();
+        if let Some((id, at, f)) = &self.facets
+            && (*id, *at) == (s.id, rev)
         {
             return f.clone();
         }
@@ -449,10 +451,8 @@ impl BucketsUi {
                 .tracks()
                 .iter()
                 .filter(|t| t.path.starts_with(&inside)),
-            artists,
-            genres,
         ));
-        self.facets = Some((key, f.clone()));
+        self.facets = Some((s.id, rev, f.clone()));
         f
     }
 
@@ -685,15 +685,13 @@ mod tests {
     }
 
     #[test]
-    fn facets_count_artists_and_genres_and_narrow_each_other() {
+    fn facets_count_artists_and_genres() {
         let tracks = [
             track(1, "Daft", "House; Techno"),
             track(2, "daft", "house"),
             track(3, "Someone", "Techno;Ambient; Techno"),
             track(4, "", ""),
         ];
-        let none = BTreeSet::new();
-        let pick = |s: &str| BTreeSet::from([s.to_string()]);
         let owned = |v: &[(&str, usize)]| {
             v.iter()
                 .map(|(s, n)| (s.to_string(), *n))
@@ -701,20 +699,11 @@ mod tests {
         };
         // Case folded, under the first spelling; untagged left out; a genre tagged
         // twice on one track counts once.
-        let f = facets(tracks.iter(), &none, &none);
+        let f = facets(tracks.iter());
         assert_eq!(f.artists, owned(&[("Daft", 2), ("Someone", 1)]));
         assert_eq!(
             f.genres,
             owned(&[("Ambient", 1), ("House", 2), ("Techno", 2)])
         );
-        // A genre picked: only its artists. An artist picked: only their genres.
-        let f = facets(tracks.iter(), &none, &pick("techno"));
-        assert_eq!(f.artists, owned(&[("Daft", 1), ("Someone", 1)]));
-        let f = facets(tracks.iter(), &pick("Someone"), &none);
-        assert_eq!(f.genres, owned(&[("Ambient", 1), ("Techno", 1)]));
-        // Each list isn't narrowed by its own pick.
-        let f = facets(tracks.iter(), &pick("Someone"), &pick("ambient"));
-        assert_eq!(f.artists, owned(&[("Someone", 1)]));
-        assert_eq!(f.genres, owned(&[("Ambient", 1), ("Techno", 1)]));
     }
 }

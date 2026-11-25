@@ -10,6 +10,7 @@ use crate::core::bucket::tests::fake;
 use crate::core::bucket::{BucketCmd, BucketForm};
 use crate::core::collections::CollectionKind;
 use crate::core::sources::SourceKind;
+use std::collections::BTreeSet;
 
 /// The tracks that are a bucket's: (id, URL), in path order.
 fn in_buckets(a: &EarshotApp) -> Vec<(i64, String)> {
@@ -112,7 +113,7 @@ fn a_bucket_is_added_browsed_and_downloaded_from_when_a_track_is_loaded() {
     );
     assert!(h.query_by_label("sets").is_none());
     assert_eq!(h.state().panels.library.browser.shown().len(), 3);
-    h.get_by_label("All of it  (3)");
+    h.get_by_label("All tracks  (3)");
     // Another view, then its icon again: back on its tracks.
     h.state_mut()
         .dispatch(ViewCmd::Source(Some(Pane::AllTracks)).into());
@@ -298,19 +299,6 @@ fn tagged_aiff(frames: &[(&[u8; 4], &str)]) -> Vec<u8> {
     b
 }
 
-/// A bucket pane's Artist or Genre list, by what it shows; each is named by its label.
-fn picker<'a>(h: &'a H, shows: &'a str) -> egui_kittest::Node<'a> {
-    use egui::accesskit::Role;
-    use egui_kittest::kittest::{NodeT, by};
-    let list = h.get(by().role(Role::ComboBox).value(shows));
-    let name = list.accesskit_node().label().unwrap_or_default();
-    assert!(
-        ["Artist", "Genre"].contains(&name.as_str()),
-        "named {name:?}"
-    );
-    list
-}
-
 #[test]
 fn a_buckets_pane_filters_its_tracks_by_artist_and_genre() {
     let mut h = start("bucket-filters");
@@ -318,9 +306,9 @@ fn a_buckets_pane_filters_its_tracks_by_artist_and_genre() {
     for (key, artist, genre) in [
         ("One.aiff", "Daft", "House; Techno"),
         ("Two.aiff", "Daft", "House"),
-        ("Three.aiff", "Someone", "Ambient"),
+        ("deep/Three.aiff", "Someone", "Ambient"),
     ] {
-        let title = key.trim_end_matches(".aiff");
+        let title = key.rsplit('/').next().unwrap().trim_end_matches(".aiff");
         let file = tagged_aiff(&[(b"TIT2", title), (b"TPE1", artist), (b"TCON", genre)]);
         service.put(key, &file);
     }
@@ -348,35 +336,53 @@ fn a_buckets_pane_filters_its_tracks_by_artist_and_genre() {
     // Genre is a column of a bucket's list, read from the tags.
     h.get_by_label("House; Techno");
 
-    // A genre: its tracks, including one with it among others; "House" isn't
-    // "Deep House". Each genre with how many tracks have it.
-    picker(&h, "Any genre").click();
+    let filters = |h: &H| {
+        use crate::ui::panels::library::table::{ColumnId, TableView};
+        let t = &h.state().panels.library.tables.0[&TableView::Bucket];
+        (t.values(ColumnId::Artist), t.values(ColumnId::Genre))
+    };
+    let none = || -> (BTreeSet<String>, BTreeSet<String>) { Default::default() };
+
+    // The tree: all its tracks, then its artists, genres and folders, closed.
+    h.get_by_label("All tracks  (3)");
+    assert!(h.query_by_label("House  (2)").is_none());
+
+    // A genre: its tracks, including one with it among others. Each genre with how
+    // many tracks have it.
+    h.get_by_label("Genres  (3)").click();
     steps(&mut h, 2);
     h.get_by_label("Techno  (1)");
     h.get_by_label("Ambient  (1)");
-    render(&mut h, "bucket-genre-list");
     h.get_by_label("House  (2)").click();
     steps(&mut h, 3);
     assert_eq!(shown(&h), ["One", "Two"]);
+    render(&mut h, "bucket-tree");
 
-    // The artists then are only those with tracks in it.
-    picker(&h, "Any artist").click();
-    steps(&mut h, 2);
-    assert!(h.query_by_label("Someone  (1)").is_none());
-    h.get_by_label("Daft  (2)").click();
-    steps(&mut h, 3);
-    assert_eq!(shown(&h), ["One", "Two"]);
-
-    // Any genre again: the artist's tracks.
-    picker(&h, "House").click();
-    steps(&mut h, 2);
-    h.get_by_label("Any genre").click();
-    steps(&mut h, 3);
-    assert_eq!(shown(&h), ["One", "Two"]);
-    // And another artist: theirs.
-    picker(&h, "Daft").click();
+    // An artist instead: one row picked at a time, so the genre goes.
+    h.get_by_label("Artists  (2)").click();
     steps(&mut h, 2);
     h.get_by_label("Someone  (1)").click();
     steps(&mut h, 3);
     assert_eq!(shown(&h), ["Three"]);
+    assert_eq!(
+        filters(&h),
+        (["Someone".to_string()].into(), Default::default())
+    );
+
+    // A folder: its tracks, by no artist or genre.
+    h.get_by_label("Folders").click();
+    steps(&mut h, 2);
+    h.get_by_label("deep").click();
+    steps(&mut h, 3);
+    assert_eq!(shown(&h), ["Three"]);
+    assert_eq!(filters(&h), none());
+    h.get_by_label("Daft  (2)").click();
+    steps(&mut h, 3);
+    assert_eq!(shown(&h), ["One", "Two"]);
+
+    // All its tracks again.
+    h.get_by_label("All tracks  (3)").click();
+    steps(&mut h, 3);
+    assert_eq!(shown(&h), ["One", "Three", "Two"]);
+    assert_eq!(filters(&h), none());
 }
