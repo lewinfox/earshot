@@ -190,6 +190,15 @@ impl EarshotApp {
                 }
             }
             StoreEvent::FlowLoaded(flow, camera) => self.load_flow(flow, camera),
+            // Tracks in a bucket turned out to be on this computer too: they're
+            // played from there, so the bucket's downloaded copies go at once.
+            StoreEvent::Redundant(urls) => {
+                for url in &urls {
+                    self.buckets.cache.forget(url);
+                }
+                self.refresh_downloads();
+            }
+            StoreEvent::Merged { from, into } => self.tracks_merged(from, into),
             StoreEvent::Deleted(ids) => {
                 if self.flow().flow.is_some_and(|id| ids.contains(&id)) {
                     self.flow().load(None, None);

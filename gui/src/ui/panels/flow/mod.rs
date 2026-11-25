@@ -238,6 +238,11 @@ impl FlowUi {
         }
     }
 
+    /// The Flow on the canvas has a card of this track.
+    pub fn has_track(&self, track: TrackId) -> bool {
+        self.graph.nodes.iter().any(|n| n.track == track)
+    }
+
     /// Add tracks as new starting cards, below the existing ones.
     pub fn add_tracks(&mut self, tracks: &[TrackId]) {
         for &t in tracks {

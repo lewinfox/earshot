@@ -260,6 +260,13 @@ as you like, each under its own name.
   have a column for it: a tick for a track that's downloaded (it plays without a
   connection), a cloud for one that's only in its bucket. Any other list can show it
   too: *Downloaded (bucket tracks)* in its columns menu.
+- **The same track in a bucket and on this computer** is one track: it's played
+  from the local file, and the bucket's copy is never downloaded while that's there
+  (if the file goes, with an unplugged drive say, the bucket's is used). earshot knows
+  they're the same by their audio, which for a bucket's copy means after it has been
+  downloaded once (or at once, if the file carries its audio hash in its tags): until
+  then it's listed twice. When they become one, the track has the local one's grid,
+  cues, rating, crates and history, and the download is deleted straight away.
 - **Keeping tracks for offline**: right-click a crate, playlist or folder of them →
   *Keep available offline* downloads its bucket tracks, now and as more are added to it, so a set
   never depends on the connection.
@@ -372,8 +379,7 @@ make packages    # the .deb and .rpm of it: target/packages
   that has been tried on a real machine yet, and earshot can't format a stick there
   (format it as FAT32 in Windows first).
 - Buckets: nothing is written back to one (no uploads or tag edits), and nothing
-  streams from one. A bucket track and a local file with the same audio are two
-  tracks (the Duplicates view finds them). A key with an empty part (`a//b.mp3`)
+  streams from one. A key with an empty part (`a//b.mp3`)
   can't be listed.
 - The worker has no timeout: if it hangs, the analysis queue stops until restart.
 

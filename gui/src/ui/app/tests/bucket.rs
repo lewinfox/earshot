@@ -22,6 +22,18 @@ fn in_buckets(a: &EarshotApp) -> Vec<(i64, String)> {
         .collect()
 }
 
+/// `audio` (a WAV) with a few of its last samples changed by `name`: other audio,
+/// as far as the audio hash goes, that still plays. (The fixture's own would be the
+/// same track as the one in the music folder.)
+fn other_audio(audio: &[u8], name: &str) -> Vec<u8> {
+    let mut out = audio.to_vec();
+    let n = out.len();
+    for (i, b) in name.bytes().enumerate() {
+        out[n - 2000 + 2 * i] ^= b | 1;
+    }
+    out
+}
+
 fn downloaded(url: &str) -> bool {
     Location::Url(url.into()).here().is_some()
 }
@@ -36,7 +48,7 @@ fn a_bucket_is_added_browsed_and_downloaded_from_when_a_track_is_loaded() {
         "sets/Cloud Two.wav",
         "sets/Cloud Three.wav",
     ] {
-        service.put(key, &audio);
+        service.put(key, &other_audio(&audio, key));
     }
     let form = BucketForm {
         name: "Gig box".into(),
@@ -411,4 +423,103 @@ fn a_buckets_pane_filters_its_tracks_by_artist_and_genre() {
     steps(&mut h, 3);
     assert_eq!(shown(&h), ["One", "Three", "Two"]);
     assert_eq!(filters(&h), none());
+}
+
+/// The same audio in the music folder and in a bucket: two rows until the bucket's
+/// copy has been downloaded once (its audio isn't known before), then one track,
+/// played from the local file, with the download dropped from the cache at once.
+#[test]
+fn the_same_track_in_a_folder_and_a_bucket_is_one_track() {
+    let mut h = start("bucket-twin");
+    let service = fake::Service::start("test-app-twin");
+    // The folder's own "Night Bus", byte for byte, and one that's only in the bucket.
+    let audio = std::fs::read(fixture_tracks().join("Night Bus.wav")).unwrap();
+    service.put("sets/Night Bus (cloud).wav", &audio);
+    service.put("sets/Only Here.wav", &other_audio(&audio, "only"));
+    let form = BucketForm {
+        name: "Gig box".into(),
+        endpoint: service.endpoint.clone(),
+        bucket: service.bucket.clone(),
+        prefix: "sets".into(),
+        access_key_id: fake::KEY_ID.into(),
+        secret_access_key: fake::SECRET.into(),
+        ..Default::default()
+    };
+    h.state_mut()
+        .dispatch(BucketCmd::Save { form, source: None }.into());
+    settle_until(&mut h, |a| in_buckets(a).len() == 2);
+    assert_eq!(
+        h.state().index.tracks().len(),
+        TRACKS.len() + 2,
+        "shown twice"
+    );
+    let local = h
+        .state()
+        .index
+        .tracks()
+        .iter()
+        .find(|t| t.title == "Night Bus")
+        .map(|t| (t.id, t.path.clone(), t.bpm))
+        .unwrap();
+    assert!(local.2.is_some(), "the folder's is analysed");
+    let cloud = in_buckets(h.state())
+        .into_iter()
+        .find(|t| t.1.contains("Night Bus"))
+        .unwrap();
+    // The folder's track is in a crate.
+    h.state_mut().dispatch(
+        CollectionCmd::Create {
+            kind: CollectionKind::Crate,
+            parent: None,
+            tracks: vec![local.0],
+            query: None,
+        }
+        .into(),
+    );
+    settle(&mut h);
+
+    // The bucket's copy loaded: downloaded, hashed, and found to be the folder's.
+    h.state_mut()
+        .dispatch(ViewCmd::SetMode(Mode::Prepare).into());
+    h.state_mut().dispatch(LibraryCmd::Load(cloud.0).into());
+    settle_until(&mut h, |a| a.index.tracks().len() == TRACKS.len() + 1);
+    let a = h.state();
+    // One track, the one on the deck: at the folder's file, with its analysis, in its
+    // crate, and still in the bucket's list.
+    assert_eq!(prepared(a), Some(cloud.0));
+    assert!(
+        a.index.get(local.0).is_none(),
+        "the folder's row is this one now"
+    );
+    let t = a.index.get(cloud.0).unwrap();
+    assert_eq!(t.path, local.1);
+    assert_eq!(t.remote.as_deref(), Some(cloud.1.as_str()));
+    assert_eq!(t.bpm, local.2);
+    let krate = a
+        .collections
+        .children(None)
+        .into_iter()
+        .find(|c| c.kind == CollectionKind::Crate)
+        .unwrap();
+    assert_eq!(krate.tracks, [cloud.0]);
+    let root = format!("s3://{}/sets", service.bucket);
+    assert!(t.in_folder(&root));
+    // Played from the folder from now on: the download is gone already, and it has
+    // no download mark (it needs none).
+    assert!(!downloaded(&cloud.1), "the cached copy went at once");
+    assert_eq!(a.index.downloaded(cloud.0), None);
+    assert_eq!(
+        a.lib.store.reader.track_location(cloud.0).unwrap(),
+        Location::File(local.1.clone().into())
+    );
+    // Loaded again, nothing is asked of the bucket.
+    service.asked();
+    h.state_mut().dispatch(LibraryCmd::Load(cloud.0).into());
+    settle(&mut h);
+    assert_eq!(service.asked(), []);
+    assert!(!downloaded(&cloud.1));
+    // Offline, it's still listed (the bucket's other track isn't).
+    h.state_mut().set_online(false);
+    assert!(!h.state().index.is_hidden(cloud.0));
+    assert_eq!(h.state().index.hidden_count(), 1);
 }

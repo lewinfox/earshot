@@ -134,6 +134,34 @@ impl EarshotApp {
         }
     }
 
+    /// Two tracks turned out to be one (the same audio in a bucket and on this
+    /// computer, or a file that moved): what still names the one that's gone is
+    /// pointed at the one kept. The lists have it already (the library and the
+    /// collections were sent first).
+    pub(super) fn tracks_merged(&mut self, from: i64, into: i64) {
+        // A deck it was on. (Rare: the track kept is the one in use.)
+        for deck in &mut self.player.lock().unwrap().decks {
+            if deck.track_id == Some(from) {
+                deck.track_id = Some(into);
+            }
+        }
+        for loaded in self.loaded_from.iter_mut().flatten() {
+            if loaded.0 == from {
+                loaded.0 = into;
+            }
+        }
+        if let Some(cues) = self.cues.remove(&from) {
+            self.cues.entry(into).or_insert(cues);
+        }
+        // The Flow on the canvas, if it has a card of it: read again as saved.
+        let flow = &self.panels.flow;
+        if let Some(id) = flow.flow
+            && flow.has_track(from)
+        {
+            self.lib.store.send(StoreCmd::LoadFlow(id));
+        }
+    }
+
     /// The computer went offline, or is online again (`core::online`). Offline, the
     /// bucket tracks that aren't downloaded are left out of the lists, as they
     /// couldn't be loaded; online again, they're back, and the buckets are read

@@ -51,6 +51,9 @@ pub struct LibTrack {
     pub plays: u32,
     /// When it last started a counted play (unix seconds).
     pub last_played: Option<i64>,
+    /// Its object in a bucket (`s3://bucket/key`), if it has one: its `path` too,
+    /// unless it's also a file on this computer.
+    pub remote: Option<String>,
 }
 
 /// (track id, waveform thumbnail)
@@ -69,14 +72,15 @@ pub(super) fn source_rank(source: &str) -> u8 {
 }
 
 /// Tracks with a file that's present: every one an enabled source has (`None`), or
-/// just these ids (wherever they are).
+/// just these ids (wherever they are). A track's path is its file on this computer,
+/// if it has one, before a bucket's object.
 pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
     let base = "SELECT t.id, f.path, t.duration_s, t.bpm, g.source, t.rating, t.color,
                 t.needs_attention
          FROM tracks t
          JOIN files f ON f.id = (SELECT id FROM files
                                  WHERE track_id = t.id AND missing_since IS NULL
-                                 ORDER BY id LIMIT 1)
+                                 ORDER BY substr(path, 1, 5) = x'73333a2f2f', id LIMIT 1)
          LEFT JOIN beatgrids g ON g.id = t.active_grid_id
          WHERE t.deleted_at IS NULL";
     type Row = (
@@ -107,6 +111,10 @@ pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
     let mut feats: HashMap<(i64, String), f64> = HashMap::new();
     let mut tags: HashMap<i64, Vec<String>> = HashMap::new();
     let tag_sql = "SELECT tt.track_id, g.name FROM track_tags tt JOIN tags g ON g.id = tt.tag_id";
+    // Each track's object in a bucket, if it has one.
+    let mut remote: HashMap<i64, String> = HashMap::new();
+    let remote_sql = "SELECT track_id, path FROM files
+                      WHERE missing_since IS NULL AND substr(path, 1, 5) = x'73333a2f2f'";
     // (count, last start) by track.
     let mut played: HashMap<i64, (u32, i64)> = HashMap::new();
     let play_sql = "SELECT track_id, count(*), max(started_at) FROM plays";
@@ -153,6 +161,12 @@ pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
             while let Some(r) = q.next()? {
                 played.insert(r.get(0)?, (r.get(1)?, r.get(2)?));
             }
+            let mut st = c.prepare(&format!("{remote_sql} ORDER BY id DESC"))?;
+            let mut q = st.query([])?;
+            while let Some(r) = q.next()? {
+                let url: Vec<u8> = r.get(1)?;
+                remote.insert(r.get(0)?, String::from_utf8_lossy(&url).into_owned());
+            }
         }
         Some(ids) => {
             let mut st = c.prepare_cached(&format!("{base} AND t.id = ?1"))?;
@@ -161,6 +175,8 @@ pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
             let mut st_tag = c.prepare_cached(&format!("{tag_sql} WHERE tt.track_id = ?1"))?;
             let mut st_play =
                 c.prepare_cached(&format!("{play_sql} WHERE track_id = ?1 GROUP BY track_id"))?;
+            let mut st_remote =
+                c.prepare_cached(&format!("{remote_sql} AND track_id = ?1 ORDER BY id DESC"))?;
             for &id in ids {
                 rows.extend(st.query_row([id], map).optional()?);
                 let mut q = st_meta.query([id])?;
@@ -178,6 +194,11 @@ pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
                 let mut q = st_play.query([id])?;
                 while let Some(r) = q.next()? {
                     played.insert(r.get(0)?, (r.get(1)?, r.get(2)?));
+                }
+                let mut q = st_remote.query([id])?;
+                while let Some(r) = q.next()? {
+                    let url: Vec<u8> = r.get(1)?;
+                    remote.insert(r.get(0)?, String::from_utf8_lossy(&url).into_owned());
                 }
             }
         }
@@ -226,6 +247,7 @@ pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
                     needs_attention,
                     plays: played.get(&id).map_or(0, |p| p.0),
                     last_played: played.get(&id).map(|p| p.1),
+                    remote: remote.remove(&id),
                     path: path.to_string_lossy().into_owned(),
                 }
             },
@@ -284,11 +306,12 @@ pub fn track_at(c: &Connection, path: &std::path::Path) -> Result<Option<i64>> {
     .optional()?)
 }
 
-/// Where a track's audio is now: its first file that isn't missing.
+/// Where a track's audio is now: its first file that isn't missing, one on this
+/// computer before a bucket's object (a track can be in both).
 pub fn track_location(c: &Connection, id: i64) -> Result<Location> {
     c.query_row(
         "SELECT path FROM files WHERE track_id = ?1 AND missing_since IS NULL
-         ORDER BY id LIMIT 1",
+         ORDER BY substr(path, 1, 5) = x'73333a2f2f', id LIMIT 1",
         [id],
         |r| r.get::<_, Vec<u8>>(0),
     )

@@ -89,6 +89,7 @@ impl OutsideTrack {
             tags: vec![],
             plays: 0,
             last_played: None,
+            remote: None,
         }
     }
 }
