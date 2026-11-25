@@ -455,7 +455,7 @@ impl TableView {
                 &[Index, Status, Wave, Title, Artist, Bpm, Key, Time]
             }
             TableView::Duplicates => &[Status, Title, Artist, Bpm, Time, File],
-            TableView::Bucket => &[Status, Download, Wave, Title, Artist, Bpm, Key, Time],
+            TableView::Bucket => &[Status, Download, Wave, Title, Artist, Genre, Bpm, Key, Time],
             _ => &[Status, Wave, Title, Artist, Bpm, Key, Time],
         };
         TableState {
@@ -477,6 +477,9 @@ pub enum Filter {
     Status(BTreeSet<Status>),
     /// Any of these colours (`None`: no colour).
     Colour(BTreeSet<Option<u32>>),
+    /// Any of these values, whole (as a bucket pane's Artist and Genre lists pick
+    /// them); a genre matches one of a track's several.
+    Values(BTreeSet<String>),
 }
 
 impl Filter {
@@ -485,6 +488,7 @@ impl Filter {
             Filter::Text(s) => s.trim().is_empty(),
             Filter::Status(s) => s.is_empty(),
             Filter::Colour(s) => s.is_empty(),
+            Filter::Values(s) => s.is_empty(),
         }
     }
 
@@ -522,6 +526,11 @@ impl Filter {
                     })
                     .collect(),
             ),
+            Filter::Values(set) => Expr::Or(
+                set.iter()
+                    .map(|s| Expr::Cmp(field, Op::Eq, Value::Text(s.to_lowercase())))
+                    .collect(),
+            ),
         })
     }
 
@@ -539,6 +548,7 @@ impl Filter {
                 .map(|c| colour_name(*c))
                 .collect::<Vec<_>>()
                 .join(" or "),
+            Filter::Values(set) => set.iter().cloned().collect::<Vec<_>>().join(" or "),
         }
     }
 }
@@ -605,8 +615,27 @@ impl TableState {
             .map(|(_, f)| f)
     }
 
+    /// The values a column's [`Filter::Values`] picks (empty: it hasn't one).
+    pub fn values(&self, c: ColumnId) -> BTreeSet<String> {
+        match self.filter_of(c) {
+            Some(Filter::Values(set)) => set.clone(),
+            _ => BTreeSet::new(),
+        }
+    }
+
+    /// Show only the rows whose column is `value`, whole (`None`: stop filtering by it).
+    pub fn pick_value(&mut self, c: ColumnId, value: Option<String>) {
+        self.filters.retain(|(id, _)| *id != c);
+        if let Some(v) = value {
+            self.filters.push((c, Filter::Values([v].into())));
+        }
+    }
+
     /// The column's filter, made (empty, of the right kind) if it hasn't one.
     pub fn filter_mut(&mut self, c: ColumnId) -> &mut Filter {
+        // Values all let go of: the column's own kind again, to type in.
+        self.filters
+            .retain(|(id, f)| !(*id == c && matches!(f, Filter::Values(s) if s.is_empty())));
         if let Some(i) = self.filters.iter().position(|(id, _)| *id == c) {
             return &mut self.filters[i].1;
         }
@@ -1118,6 +1147,15 @@ fn header_menu(ui: &mut Ui, c: ColumnId, s: &mut TableState, available: &[Column
                     });
                 }
             }
+            Filter::Values(set) => {
+                // Picked in the bucket's pane: here they can only be let go of.
+                for value in set.clone() {
+                    let mut on = true;
+                    if ui.checkbox(&mut on, &value).changed() {
+                        set.remove(&value);
+                    }
+                }
+            }
         }
         if s.filter_of(c).is_some() && ui.button("Clear this filter").clicked() {
             s.filters.retain(|(id, _)| *id != c);
@@ -1502,6 +1540,30 @@ mod tests {
         );
         // Nothing to grow: left as it is.
         assert_eq!(fill(&natural, 900.0, |_| false), natural);
+    }
+
+    #[test]
+    fn picked_values_filter_whole_and_can_be_let_go_of() {
+        let mut s = TableView::Bucket.default_state();
+        s.pick_value(ColumnId::Genre, Some("Deep House".into()));
+        s.pick_value(ColumnId::Artist, Some("Daft".into()));
+        assert_eq!(s.values(ColumnId::Genre), ["Deep House".to_string()].into());
+        let is = |f, v: &str| Expr::Or(vec![Expr::Cmp(f, Op::Eq, Value::Text(v.into()))]);
+        let want = Expr::And(vec![
+            is(Field::Genre, "deep house"),
+            is(Field::Artist, "daft"),
+        ]);
+        assert_eq!(s.filter(), Ok(want));
+        // Picking another replaces it; "Any" drops it.
+        s.pick_value(ColumnId::Artist, Some("Someone".into()));
+        assert_eq!(s.values(ColumnId::Artist), ["Someone".to_string()].into());
+        s.pick_value(ColumnId::Artist, None);
+        assert!(s.values(ColumnId::Artist).is_empty());
+        // Unticked in the header: typing a filter there works again.
+        if let Filter::Values(set) = s.filter_mut(ColumnId::Genre) {
+            set.clear();
+        }
+        assert!(matches!(s.filter_mut(ColumnId::Genre), Filter::Text(_)));
     }
 
     #[test]

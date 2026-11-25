@@ -53,6 +53,7 @@ pub const FILE_NAME: &str = "library.db";
 pub const MIGRATIONS: &[&str] = &[
     include_str!("../../../migrations/000_init.sql"),
     include_str!("../../../migrations/001_s3.sql"),
+    include_str!("../../../migrations/002_album_genre.sql"),
 ];
 
 /// `application_id` of a database made by [`MIGRATIONS`] (ASCII "ears"). Development

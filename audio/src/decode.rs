@@ -35,6 +35,9 @@ impl TrackAudio {
 pub struct TrackTags {
     pub title: Option<String>,
     pub artist: Option<String>,
+    pub album: Option<String>,
+    /// Every genre tagged, in order, joined with "; ".
+    pub genre: Option<String>,
     pub bpm: Option<f64>,
     pub key: Option<String>,
     pub duration: Option<f64>,
@@ -89,6 +92,7 @@ fn probe(media: Box<dyn Media>, extension: Option<&str>) -> Result<Box<dyn Forma
 
 fn tags_of(format: &mut Box<dyn FormatReader>) -> TrackTags {
     let mut tags = TrackTags::default();
+    let mut genres: Vec<String> = Vec::new();
     if let Some(track) = format.default_track(TrackType::Audio) {
         let rate = track
             .codec_params
@@ -105,11 +109,21 @@ fn tags_of(format: &mut Box<dyn FormatReader>) -> TrackTags {
             match &tag.std {
                 Some(StandardTag::TrackTitle(s)) => tags.title = Some(s.to_string()),
                 Some(StandardTag::Artist(s)) => tags.artist = Some(s.to_string()),
+                Some(StandardTag::Album(s)) => tags.album = Some(s.to_string()),
+                Some(StandardTag::Genre(s)) => {
+                    let s = s.trim();
+                    if !s.is_empty() && !genres.iter().any(|g| g == s) {
+                        genres.push(s.to_string());
+                    }
+                }
                 Some(StandardTag::Bpm(b)) => tags.bpm = Some(*b as f64),
                 Some(StandardTag::InitialKey(s)) => tags.key = Some(s.to_string()),
                 _ => {}
             }
         }
+    }
+    if !genres.is_empty() {
+        tags.genre = Some(genres.join("; "));
     }
     tags
 }
@@ -301,6 +315,67 @@ mod lossless_tests {
             assert!((audio.samples[6] - expect).abs() < 1e-6);
             assert!((audio.samples[7] + expect).abs() < 1e-6);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// An ID3v2.3 tag of text `frames` (each a four-letter id and its text).
+    fn id3(frames: &[(&[u8; 4], &str)]) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (id, text) in frames {
+            body.extend(*id);
+            body.extend((1 + text.len() as u32).to_be_bytes());
+            body.extend([0, 0, 3]); // no flags; UTF-8
+            body.extend(text.as_bytes());
+        }
+        let n = body.len() as u32;
+        let mut tag = b"ID3\x03\x00\x00".to_vec();
+        // The size, seven bits a byte.
+        tag.extend([
+            (n >> 21) as u8 & 0x7f,
+            (n >> 14) as u8 & 0x7f,
+            (n >> 7) as u8 & 0x7f,
+            n as u8 & 0x7f,
+        ]);
+        tag.extend(body);
+        tag
+    }
+
+    /// [`aiff`] with an `ID3 ` chunk of `frames`, as taggers write one.
+    fn aiff_with_id3(frames: &[(&[u8; 4], &str)]) -> Vec<u8> {
+        let mut b = aiff(100);
+        let mut tag = id3(frames);
+        b.extend(b"ID3 ");
+        b.extend((tag.len() as u32).to_be_bytes());
+        if tag.len() % 2 == 1 {
+            tag.push(0);
+        }
+        b.extend(tag);
+        let form = (b.len() - 8) as u32;
+        b[4..8].copy_from_slice(&form.to_be_bytes());
+        b
+    }
+
+    #[test]
+    fn reads_album_and_genre() {
+        let dir = std::env::temp_dir().join(format!("earshot-genre-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.aiff");
+        std::fs::write(
+            &path,
+            aiff_with_id3(&[
+                (b"TIT2", "Song"),
+                (b"TALB", "Record"),
+                (b"TCON", " Deep House "),
+            ]),
+        )
+        .unwrap();
+        let tags = read_tags(&Location::File(path.clone())).unwrap();
+        assert_eq!(tags.title.as_deref(), Some("Song"));
+        assert_eq!(tags.album.as_deref(), Some("Record"));
+        assert_eq!(tags.genre.as_deref(), Some("Deep House"));
+
+        // Untagged: no genre, rather than an empty one.
+        std::fs::write(&path, aiff_with_id3(&[(b"TIT2", "Song")])).unwrap();
+        assert_eq!(read_tags(&Location::File(path)).unwrap().genre, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

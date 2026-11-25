@@ -754,7 +754,7 @@ impl Cache {
     fn sub_usage(&self, n: u64) {
         let _ = self
             .usage
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |u| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |u| {
                 Some(u.saturating_sub(n))
             });
     }
@@ -1293,8 +1293,10 @@ pub fn removed(buckets: &Buckets, source: &Source, others: &[Source]) {
     }
 }
 
-/// Tags are read from this many objects at once: it's all waiting on the network.
-const SCAN_THREADS: usize = 8;
+/// Tags are read from this many objects at once: it's nearly all waiting on the
+/// network (a few small ranged GETs each), and S3-compatible services take far more
+/// requests at once than this.
+const SCAN_THREADS: usize = 32;
 /// Objects are recorded this many at a time, so a long first scan shows as it goes
 /// (and what it's read survives being cut short).
 const SCAN_BATCH: usize = 200;

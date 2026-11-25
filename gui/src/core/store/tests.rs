@@ -23,6 +23,8 @@ fn tags(title: &str, artist: &str) -> TrackTags {
     TrackTags {
         title: Some(title.into()),
         artist: Some(artist.into()),
+        album: None,
+        genre: None,
         bpm: Some(124.0),
         key: Some("8A".into()),
         duration: Some(300.0),
@@ -251,6 +253,21 @@ fn a_track_with_no_title_shows_its_file_name() {
     f.tags.title = None;
     scan(&mut w, &dir, &[f]);
     assert_eq!(library(&mut w)[0].title, "Some Song");
+}
+
+#[test]
+fn a_tagged_album_and_genre_are_listed_and_searchable() {
+    let (dir, mut w) = setup("genre");
+    add_folder(&mut w, &dir.join("music"));
+    let mut f = file(&dir.join("music/a.mp3"), "A", None);
+    f.tags.album = Some("Night Record".into());
+    f.tags.genre = Some("Deep House".into());
+    scan(&mut w, &dir, &[f]);
+    let t = &library(&mut w)[0];
+    assert_eq!(t.album, "Night Record");
+    assert_eq!(t.genre, "Deep House");
+    assert_eq!(read::search(w.conn(), "deep").unwrap(), vec![t.id]);
+    assert_eq!(read::search(w.conn(), "night").unwrap(), vec![t.id]);
 }
 
 #[test]
@@ -1282,14 +1299,15 @@ fn smart_playlists_run_their_query_in_sql_like_in_memory() {
     let (dir, mut w) = setup("smart");
     add_folder(&mut w, &dir.join("music"));
     let mut files = vec![];
-    for (name, artist, bpm, key) in [
-        ("Deep Space", "Daft", 124.0, "Am"),
-        ("Shallow", "Daft", 128.0, "8A"),
-        ("Other", "Someone", 140.0, "C"),
-        ("Warm Up", "Someone", 122.0, "9A"),
+    for (name, artist, genre, bpm, key) in [
+        ("Deep Space", "Daft", "Deep House; Techno", 124.0, "Am"),
+        ("Shallow", "Daft", "House", 128.0, "8A"),
+        ("Other", "Someone", "Techno;Deep House", 140.0, "C"),
+        ("Warm Up", "Someone", "", 122.0, "9A"),
     ] {
         let mut f = file(&dir.join(format!("music/{name}.mp3")), name, None);
         f.tags.artist = Some(artist.into());
+        f.tags.genre = Some(genre.into());
         f.tags.bpm = Some(bpm);
         f.tags.key = Some(key.into());
         files.push(f);
@@ -1346,6 +1364,11 @@ fn smart_playlists_run_their_query_in_sql_like_in_memory() {
         "\"deep space\"",
         "artist:someone",
         "title=shallow",
+        "genre=house",
+        "genre=techno",
+        "genre=\"deep house\"",
+        "genre:house",
+        "-genre=techno",
         "bpm:120-126",
         "bpm>=128",
         "bpm:141",
@@ -1399,6 +1422,18 @@ fn smart_playlists_run_their_query_in_sql_like_in_memory() {
         } else {
             assert_eq!(sql, mem, "{q}");
         }
+    }
+    // An exact genre is one of a track's several, whole: "house" isn't "deep house".
+    for (q, want) in [
+        ("genre=house", vec!["Shallow"]),
+        ("genre=\"deep house\"", vec!["Deep Space", "Other"]),
+    ] {
+        w.set_query(1, q).unwrap();
+        let mut got: Vec<i64> = read::collection_tracks(w.conn(), 1).unwrap();
+        got.sort();
+        let mut want: Vec<i64> = want.into_iter().map(id).collect();
+        want.sort();
+        assert_eq!(got, want, "{q}");
     }
     assert!(matches!(
         w.set_query(1, "bpm:"),

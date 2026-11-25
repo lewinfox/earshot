@@ -639,6 +639,7 @@ pub fn eval(e: &Expr, t: &Track, cx: &dyn Context) -> bool {
             Value::Text(s) => {
                 let have = text_field(t, *f);
                 match op {
+                    Op::Eq if *f == Field::Genre => has_genre(have, s),
                     Op::Eq => have == s,
                     _ => have.contains(s.as_str()),
                 }
@@ -649,6 +650,12 @@ pub fn eval(e: &Expr, t: &Track, cx: &dyn Context) -> bool {
             Value::Status(s) => cx.status(t) == *s,
         },
     }
+}
+
+/// Whether `genres` (a track's, lowercased: several are joined with "; ") is `genre`
+/// or has it as one of them.
+pub fn has_genre(genres: &str, genre: &str) -> bool {
+    genres == genre || genres.split(';').any(|g| g.trim() == genre)
 }
 
 fn cmp(a: f64, op: Op, b: f64) -> bool {
@@ -908,6 +915,14 @@ fn sql(e: &Expr, args: &mut Vec<SqlValue>) -> String {
             let n = args.len() + 1;
             match v {
                 Value::Text(s) => match op {
+                    // One of several genres, as [`has_genre`].
+                    Op::Eq if *f == Field::Genre => {
+                        args.push(SqlValue::Text(s.clone()));
+                        format!(
+                            "coalesce(instr(';' || replace(replace(lower({col}), '; ', ';'), ' ;', ';') || ';',
+                                            ';' || ?{n} || ';') > 0, 0)"
+                        )
+                    }
                     Op::Eq => {
                         args.push(SqlValue::Text(s.clone()));
                         format!("coalesce(lower({col}) = ?{n}, 0)")
