@@ -354,7 +354,7 @@ make packages    # the .deb and .rpm of it: target/packages
   section isn't mapped yet. Its PAD FX 1 / 2 pads play a fixed bank of 16 effects
   each (`gui/src/core/pads.rs`): not rekordbox's own defaults, and not editable yet.
 - Hot cues are not saved.
-- Windows: USB sticks are found, exported to, imported from and ejected, but none of
+- Windows: USB sticks are found (as they're plugged in), exported to, imported from and ejected, but none of
   that has been tried on a real machine yet, and earshot can't format a stick there
   (format it as FAT32 in Windows first).
 - Buckets: nothing is written back to one (no uploads or tag edits), and nothing
