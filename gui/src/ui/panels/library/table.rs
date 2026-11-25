@@ -933,6 +933,10 @@ impl TrackTable<'_> {
                     let tid = rows[i];
                     let Some(t) = v.lib.get(tid) else { return };
                     row.set_selected(show_selection && sel.contains(tid));
+                    // No highlight for the row under the mouse: it flickers down the
+                    // list as the pointer crosses it, and says nothing (the selection
+                    // and the tracks on the decks have their own marks).
+                    row.set_hovered(false);
                     let loaded_on = v.loaded.iter().find(|l| l.0 == tid).map(|l| l.1);
                     for &(c, _) in &shown {
                         row.col(|ui| {

@@ -589,7 +589,31 @@ impl Deck {
                 // Every press sets the cue, plays or moves the playhead.
                 self.untouched = false;
                 let playing = self.playing();
+                // Put the cue where the playhead is (on the beat, when quantising),
+                // and the playhead on it.
+                let mut set_here = |dk: &mut Self| {
+                    dk.cue_point = dk.snap(dk.pos());
+                    dk.cue_by_hand = true;
+                    dk.jump(dk.cue_point, JumpReason::Cue);
+                    out.send(EngineEvent::CueSet {
+                        deck: dk.id,
+                        generation,
+                        position: dk.cue_point,
+                        by_hand: true,
+                    });
+                };
                 match press {
+                    // A hand on the platter of a playing deck has found a place by
+                    // ear: the cue goes there, as on a stopped deck, and the deck
+                    // waits on it (letting go doesn't play on).
+                    Press::Down
+                        if playing
+                            && self.preview == Preview::None
+                            && self.player.scratch.held() =>
+                    {
+                        self.player.transport.playing = false;
+                        set_here(self);
+                    }
                     Press::Down if playing && self.preview == Preview::None => {
                         self.player.transport.playing = false;
                         self.jump(self.cue_point, JumpReason::Cue);
@@ -599,15 +623,7 @@ impl Deck {
                             self.preview = Preview::Cue;
                             self.player.transport.playing = true;
                         } else {
-                            self.cue_point = self.snap(self.pos());
-                            self.cue_by_hand = true;
-                            self.jump(self.cue_point, JumpReason::Cue);
-                            out.send(EngineEvent::CueSet {
-                                deck: self.id,
-                                generation,
-                                position: self.cue_point,
-                                by_hand: true,
-                            });
+                            set_here(self);
                         }
                     }
                     Press::Up if self.preview == Preview::Cue => {
@@ -3282,6 +3298,51 @@ mod tests {
         rig.run(0.01);
         assert!(!rig.snap().decks[0].playing);
         assert!((rig.pos(0) - 5.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn cue_with_a_hand_on_a_playing_decks_platter_sets_the_cue_there() {
+        let mut rig = Rig::new();
+        rig.load(0, 120.0, 120.0);
+        rig.deck(0, DeckCmd::Seek(2.0));
+        rig.deck(0, DeckCmd::Cue(Press::Down)); // the cue, at 2.0
+        rig.deck(0, DeckCmd::Cue(Press::Up));
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.run(3.2);
+        assert!(rig.snap().decks[0].playing);
+        // A hand on the platter (it holds the track where it is), then Cue: the cue
+        // goes where the hand has it (on the nearest beat: it's quantising), and the
+        // deck waits there.
+        rig.deck(0, DeckCmd::Hand(true));
+        rig.run(0.05);
+        let held = rig.pos(0);
+        assert!(held > 5.0, "{held}");
+        rig.deck(0, DeckCmd::Cue(Press::Down));
+        rig.deck(0, DeckCmd::Cue(Press::Up));
+        rig.run(0.05);
+        let cue = rig.snap().decks[0].cue_point;
+        assert!((cue - held).abs() < 0.26, "cue {cue}, the hand at {held}");
+        assert!((cue - 2.0).abs() > 1.0, "not the old cue");
+        assert!((rig.pos(0) - cue).abs() < 1e-3);
+        // Letting go doesn't play on.
+        rig.deck(0, DeckCmd::Hand(false));
+        rig.run(0.2);
+        assert!(!rig.snap().decks[0].playing);
+        assert!((rig.pos(0) - cue).abs() < 1e-3);
+
+        // Without a hand on it, Cue on a playing deck goes back to the cue and stops,
+        // as ever.
+        rig.deck(0, DeckCmd::Play(Set::On));
+        rig.run(1.0);
+        rig.deck(0, DeckCmd::Cue(Press::Down));
+        rig.deck(0, DeckCmd::Cue(Press::Up));
+        rig.run(0.05);
+        assert!(!rig.snap().decks[0].playing);
+        assert!((rig.pos(0) - cue).abs() < 1e-3);
+        assert!(
+            (rig.snap().decks[0].cue_point - cue).abs() < 1e-9,
+            "the cue stays"
+        );
     }
 
     #[test]
