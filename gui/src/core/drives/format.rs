@@ -2,7 +2,8 @@
 //! partition in an MBR partition table, the layout Rekordbox, Serato and every CDJ
 //! read. On Linux through udisks (over D-Bus, with `gdbus`): a desktop user may
 //! format a removable drive without a password, and udisks itself refuses the
-//! computer's own disks. On macOS, `diskutil eraseDisk`.
+//! computer's own disks. On macOS, `diskutil eraseDisk`. On Windows it isn't done
+//! yet ([`format`] says so).
 //!
 //! Before anything is erased, the drive must be a USB drive or memory card and
 //! everything on it mounted where sticks are (`super::ROOTS`).
@@ -37,6 +38,16 @@ pub fn fat_label(s: &str) -> String {
 /// mounted again. Returns where. Blocking: a few seconds.
 pub fn format(d: &Drive, label: &str) -> Result<PathBuf, String> {
     let label = fat_label(label);
+    if cfg!(windows) {
+        // Not built yet: Windows' own tools won't make FAT32 over 32 GB, which
+        // sticks for players often are, so it needs a formatter of earshot's own.
+        return Err(format!(
+            "earshot can't format drives on Windows yet. Format {} as FAT32 yourself \
+             (right-click it in File Explorer > Format; over 32 GB, with a FAT32 \
+             formatting tool), then try again.",
+            d.path.display()
+        ));
+    }
     if cfg!(target_os = "macos") {
         mac(d, &label)
     } else {
