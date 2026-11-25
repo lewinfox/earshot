@@ -15,6 +15,9 @@ pub enum AnalyserId {
     Loudness,
     /// The placeholder energy (`track_features` energy): suggestions.
     Energy,
+    /// The musical key (`track_features` key_pc, key_minor, key_confidence): what a
+    /// track shows as its key unless its tags, another library or the user says.
+    Key,
     /// The beatgrid (a `beatgrids` row), the tempo range (bpm_min, bpm_max, drifts)
     /// and where the beats start (first_beat: the initial cue).
     Grid,
@@ -87,6 +90,14 @@ pub const REGISTRY: &[AnalyserSpec] = &[
         features: &["energy"],
     },
     AnalyserSpec {
+        id: AnalyserId::Key,
+        version: 1,
+        runs_in: RunsIn::Rust,
+        needs: NATIVE_STEREO,
+        depends_on: &[],
+        features: &["key_pc", "key_minor", "key_confidence"],
+    },
+    AnalyserSpec {
         id: AnalyserId::Grid,
         // As `ANALYSERS["grid"]` in worker/earshot_worker/__main__.py.
         version: 3,
@@ -101,10 +112,11 @@ pub const REGISTRY: &[AnalyserSpec] = &[
 ];
 
 impl AnalyserId {
-    pub const ALL: [AnalyserId; 4] = [
+    pub const ALL: [AnalyserId; 5] = [
         AnalyserId::Waveform,
         AnalyserId::Loudness,
         AnalyserId::Energy,
+        AnalyserId::Key,
         AnalyserId::Grid,
     ];
 
@@ -113,6 +125,7 @@ impl AnalyserId {
             AnalyserId::Waveform => "waveform",
             AnalyserId::Loudness => "loudness",
             AnalyserId::Energy => "energy",
+            AnalyserId::Key => "key",
             AnalyserId::Grid => "grid",
         }
     }

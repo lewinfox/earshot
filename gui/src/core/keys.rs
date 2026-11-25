@@ -66,13 +66,29 @@ pub fn pitch_class(k: Camelot) -> u8 {
 }
 
 /// The key with this tonic (pitch class 0-11) and mode.
-#[cfg(test)]
 pub fn from_pitch_class(pc: u8, minor: bool) -> Camelot {
     let pc = pc % 12 + if minor { 3 } else { 0 };
     Camelot {
         n: MAJOR_BY_PITCH[(pc % 12) as usize],
         minor,
     }
+}
+
+/// What analysis found a track's key to be, as its `track_features` hold it
+/// (`key_pc`, `key_minor`), as a key.
+pub fn analysed(pc: f64, minor: f64) -> Option<Camelot> {
+    (0.0..12.0)
+        .contains(&pc)
+        .then(|| from_pitch_class(pc as u8, minor != 0.0))
+}
+
+/// The features a key found by analysis is saved as (`earshot_audio::key`).
+pub fn features(k: &earshot_engine::key::Key) -> [(&'static str, f64); 3] {
+    [
+        ("key_pc", k.tonic as f64),
+        ("key_minor", k.minor as u8 as f64),
+        ("key_confidence", k.confidence),
+    ]
 }
 
 pub fn key_name(k: Camelot) -> String {

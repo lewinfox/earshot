@@ -491,6 +491,18 @@ pub fn load_track(
             l
         }
     };
+    // Its key too, if analysis hasn't found it: every track that's played has one.
+    if reader
+        .analysed_key(id)
+        .map_err(|e| e.to_string())?
+        .is_none()
+        && let Some(k) = earshot_engine::key::key(&audio)
+    {
+        lib.store.send(StoreCmd::SaveFeatures {
+            track: id,
+            features: crate::core::keys::features(&k).to_vec(),
+        });
+    }
     let first_beat = reader.first_beat(id).map_err(|e| e.to_string())?;
     let audio = Arc::new(audio);
     let mut estimate = false;

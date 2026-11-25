@@ -342,18 +342,44 @@ pub const COLUMNS: [ColumnDef; 22] = [
 /// A bucket track's download mark: a tick once it's downloaded (it plays without a
 /// connection), a cloud while it's only in its bucket. Nothing for a local file.
 fn download_cell(ui: &mut Ui, c: &mut Cell<'_>) {
-    let (mark, colour, tip) = match c.v.lib.downloaded(c.t.id) {
-        None => return,
-        Some(true) => ("✔", THEME.ok, "Downloaded: plays without a connection"),
-        Some(false) => (
-            "☁",
-            THEME.muted,
+    let Some(downloaded) = c.v.lib.downloaded(c.t.id) else {
+        return;
+    };
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(16.0, 12.0), egui::Sense::hover());
+    let p = ui.painter();
+    if downloaded {
+        // A tick.
+        let (a, b, d) = (
+            rect.left_center() + egui::vec2(3.0, 0.5),
+            rect.center_bottom() + egui::vec2(-1.5, -2.5),
+            rect.right_top() + egui::vec2(-2.5, 2.5),
+        );
+        let stroke = egui::Stroke::new(1.6_f32, THEME.ok);
+        p.line_segment([a, b], stroke);
+        p.line_segment([b, d], stroke);
+        r.on_hover_text("Downloaded: plays without a connection");
+    } else {
+        // A cloud, drawn (the fonts' own is a blob at this size): three bumps on a
+        // flat base.
+        let colour = THEME.muted;
+        let base = rect.bottom() - 2.5;
+        let c0 = rect.center();
+        p.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(rect.left() + 3.0, base - 3.0),
+                egui::pos2(rect.right() - 3.0, base),
+            ),
+            1.5,
+            colour,
+        );
+        p.circle_filled(egui::pos2(c0.x - 3.2, base - 2.6), 2.6, colour);
+        p.circle_filled(egui::pos2(c0.x + 0.4, base - 4.4), 3.4, colour);
+        p.circle_filled(egui::pos2(c0.x + 3.6, base - 2.4), 2.4, colour);
+        r.on_hover_text(
             "In its bucket: downloaded when it's loaded or analysed \
              (right-click > Download to fetch it now)",
-        ),
-    };
-    ui.label(RichText::new(mark).color(colour))
-        .on_hover_text(tip);
+        );
+    }
 }
 
 pub fn def(id: ColumnId) -> &'static ColumnDef {
@@ -464,6 +490,7 @@ impl TableView {
             filters: vec![],
             sized: BTreeSet::new(),
             fitted: 0,
+            download_offered: false,
         }
     }
 }
@@ -570,6 +597,9 @@ pub struct TableState {
     /// Bumped by "Fit columns to contents", so egui forgets the dragged widths.
     #[serde(skip)]
     pub fitted: u32,
+    /// The download column was put in once, when the library first had bucket
+    /// tracks ([`TableState::offer_download`]): taken out since, it stays out.
+    pub download_offered: bool,
 }
 
 impl Default for TableState {
@@ -579,6 +609,25 @@ impl Default for TableState {
 }
 
 impl TableState {
+    /// The library has bucket tracks: show which are downloaded, by putting the
+    /// download column in (after the status, or first) if it isn't there. Once: the
+    /// user may take it out again.
+    pub fn offer_download(&mut self) {
+        if std::mem::replace(&mut self.download_offered, true) {
+            return;
+        }
+        if self.columns.iter().any(|c| c.0 == ColumnId::Download) {
+            return;
+        }
+        let at = self
+            .columns
+            .iter()
+            .position(|c| c.0 == ColumnId::Status)
+            .map_or(0, |i| i + 1);
+        self.columns
+            .insert(at, (ColumnId::Download, def(ColumnId::Download).width));
+    }
+
     /// The sort for `core::query` (empty: the list's own order).
     pub fn sort(&self) -> Sort {
         match self.sort {

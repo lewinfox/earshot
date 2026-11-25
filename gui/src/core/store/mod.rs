@@ -897,6 +897,11 @@ impl Reader {
         self.with(|c| read::first_beat(c, id))
     }
 
+    /// The key analysis found for a track, if it has.
+    pub fn analysed_key(&self, id: i64) -> Result<Option<crate::core::keys::Camelot>> {
+        self.with(|c| read::analysed_key(c, id))
+    }
+
     /// A track's saved hot cues, by pad.
     pub fn hotcues(&self, id: i64) -> Result<[Option<f64>; HOTCUES]> {
         self.with(|c| read::hotcues(c, id))

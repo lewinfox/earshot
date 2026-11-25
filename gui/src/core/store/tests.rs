@@ -2625,3 +2625,75 @@ fn the_s3_migration_keeps_the_sources_and_their_tracks() {
         .is_err()
     );
 }
+
+/// A key found by analysis is the track's key where its metadata has none; what its
+/// tags, another library or the user says wins, and comes back when that's cleared.
+#[test]
+fn an_analysed_key_shows_unless_the_metadata_has_one() {
+    let (dir, mut w) = setup("analysed-key");
+    add_folder(&mut w, &dir.join("music"));
+    let mut untagged = file(&dir.join("music/a.mp3"), "A", None);
+    untagged.tags.key = None;
+    scan(
+        &mut w,
+        &dir,
+        &[untagged, file(&dir.join("music/b.mp3"), "B", None)],
+    );
+    let key = |w: &mut Writer, title: &str| {
+        let t = library(w).into_iter().find(|t| t.title == title).unwrap();
+        let cols: (Option<i64>, Option<i64>) = w
+            .conn()
+            .query_row(
+                "SELECT key_pc, key_minor FROM tracks WHERE id = ?1",
+                [t.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        (t.id, t.key, cols)
+    };
+    let (a, none, cols) = key(&mut w, "A");
+    assert_eq!((none, cols), (None, (None, None)));
+
+    // A minor, found by analysis (on a deck load, say): Camelot 8A.
+    let found = [("key_pc", 9.0), ("key_minor", 1.0), ("key_confidence", 0.3)];
+    w.save_measured(a, &found).unwrap();
+    assert!(
+        w.take_events()
+            .iter()
+            .any(|e| matches!(e, StoreEvent::TracksChanged(t) if t[0].id == a)),
+        "the list hears of it"
+    );
+    assert_eq!(key(&mut w, "A").1.as_deref(), Some("8A"));
+    assert_eq!(key(&mut w, "A").2, (Some(9), Some(1)));
+    assert_eq!(
+        read::analysed_key(w.conn(), a)
+            .unwrap()
+            .map(|k| (k.n, k.minor)),
+        Some((8, true))
+    );
+    // It counts as the key analyser having run.
+    let ran: Vec<String> = read::analysis_results(w.conn(), a)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.analyser)
+        .collect();
+    assert!(ran.contains(&"key".to_string()), "{ran:?}");
+
+    // The user says otherwise: theirs shows; cleared, the analysed one is back.
+    w.set_meta(a, "key", "user", Some("5B")).unwrap();
+    assert_eq!(key(&mut w, "A").1.as_deref(), Some("5B"));
+    assert_eq!(key(&mut w, "A").2, (Some(3), Some(0)), "Eb major");
+    w.set_meta(a, "key", "user", None).unwrap();
+    assert_eq!(key(&mut w, "A").1.as_deref(), Some("8A"));
+    assert_eq!(key(&mut w, "A").2, (Some(9), Some(1)));
+
+    // A tagged track keeps its tag's key whatever analysis finds.
+    let (b, tagged, _) = key(&mut w, "B");
+    assert_eq!(tagged.as_deref(), Some("8A"));
+    w.save_measured(
+        b,
+        &[("key_pc", 0.0), ("key_minor", 0.0), ("key_confidence", 0.2)],
+    )
+    .unwrap();
+    assert_eq!(key(&mut w, "B").1.as_deref(), Some("8A"));
+}

@@ -152,6 +152,32 @@ fn a_bucket_is_added_browsed_and_downloaded_from_when_a_track_is_loaded() {
     assert!(!downloaded(&two.1) && !downloaded(&three.1));
     assert!(h.state().buckets.cache.usage() >= audio.len() as u64);
 
+    // Analysis always looks for the key: the folder's tracks, analysed at the start,
+    // have the key analyser's result.
+    {
+        let a = h.state();
+        let local = a
+            .index
+            .tracks()
+            .iter()
+            .find(|t| !t.path.starts_with("s3://"))
+            .unwrap();
+        let ran = a.lib.store.reader.analysis_results(local.id).unwrap();
+        assert!(ran.iter().any(|r| r.analyser == "key"), "{ran:?}");
+    }
+    // With a bucket, All tracks has the download column too (put in once).
+    {
+        use crate::ui::panels::library::table::{ColumnId, TableView};
+        let all = h
+            .state_mut()
+            .panels
+            .library
+            .tables
+            .get_mut(TableView::Library);
+        assert!(all.columns.iter().any(|c| c.0 == ColumnId::Download));
+        assert!(all.download_offered);
+    }
+
     // The list's download column knows which is which; a local track has no mark.
     let marks = |a: &EarshotApp| [one.0, two.0, three.0].map(|id| a.index.downloaded(id));
     assert_eq!(marks(h.state()), [Some(true), Some(false), Some(false)]);
