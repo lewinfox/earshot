@@ -223,6 +223,10 @@ its budget, with slow-callback and xrun counts. The footer is a MIDI monitor.
   smaller. How the layout works, for changing it: `docs/ui-layout.md`.
 - **Search** with free text plus `bpm:120-126` and `key:8A` (or `key:Am`). It searches
   within the selected folder.
+- **Keys**: a track's key is found whenever it's analysed or loaded onto a deck, and
+  shows unless its tags, another library or you say otherwise. Tracks analysed before
+  this have none until they're loaded or analysed again (*Settings → Analysis →
+  Re-analyse stale tracks* does them all).
 - **Beatgrids** are fixed in the grid editor (Prepare mode, or *GRID* on a deck): the
   red-over-white bar puts the 1 at the playhead, plus *BPM*, nudge, ÷2 and ×2. A tempo-lock
   `<file>.beats.json` sidecar next to a file is still used if there's no analysed grid.
@@ -252,10 +256,10 @@ as you like, each under its own name.
   it into the cache folder first (the status line shows how far it's got); from there
   it's a file like any other. Nothing ever plays off the network. Right-click tracks
   for *Download* and *Remove the download*.
-- **What's downloaded**: a bucket's own list has a column for it: a tick for a track
-  that's downloaded (it plays without a connection), a cloud for one that's only in
-  its bucket. Any other list can show it too: *Downloaded (bucket tracks)* in its
-  columns menu.
+- **What's downloaded**: a bucket's own list, and All tracks once there's a bucket,
+  have a column for it: a tick for a track that's downloaded (it plays without a
+  connection), a cloud for one that's only in its bucket. Any other list can show it
+  too: *Downloaded (bucket tracks)* in its columns menu.
 - **Keeping tracks for offline**: right-click a crate, playlist or folder of them →
   *Keep available offline* downloads its bucket tracks, now and as more are added to it, so a set
   never depends on the connection.
@@ -353,7 +357,11 @@ make packages    # the .deb and .rpm of it: target/packages
 
 ## Known gaps
 
-- No CLAP embeddings, key or energy analysis yet.
+- No CLAP embeddings or real energy analysis yet. The key is found by a simple method
+  (the track's notes against typical major and minor keys): right more often than
+  not, but it does mistake a key for a closely related one, and it gives a
+  percussion-only track a key too. A key in the file's tags, from another library
+  or typed in always wins over it.
 - Exports (Prepare's Export tab) write whole playlists; there's no two-way sync yet.
 - Whole tracks are decoded into memory (about 10 MB per stereo minute).
 - No controller LED feedback. Effects are Echo and Trans only, and the DDJ-400's FX

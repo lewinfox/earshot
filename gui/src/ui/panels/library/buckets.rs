@@ -39,7 +39,7 @@ struct Dialog {
 
 #[derive(Default)]
 pub struct BucketsUi {
-    /// The bucket sources, in the Store's order.
+    /// The bucket sources, by name.
     sources: Vec<Source>,
     dialog: Option<Dialog>,
     /// Being read through now.
@@ -153,6 +153,8 @@ impl BucketsUi {
             .filter(|s| s.kind.is_bucket() && s.enabled)
             .cloned()
             .collect();
+        // By the names the user gave them (not their URLs, as the Store lists them).
+        self.sources.sort_by_key(|s| (s.name.to_lowercase(), s.id));
         self.last
             .retain(|id, _| self.sources.iter().any(|s| s.id == *id));
     }

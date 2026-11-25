@@ -626,6 +626,13 @@ impl Shared {
             features.push(("energy", energy::energy(&audio)));
             ran(AnalyserId::Energy);
         }
+        if has(AnalyserId::Key) {
+            // (A track with no notes to speak of has none: it ran all the same.)
+            if let Some(k) = earshot_engine::key::key(&audio) {
+                features.extend(crate::core::keys::features(&k));
+            }
+            ran(AnalyserId::Key);
+        }
         // The worker's part: so far just the grid.
         let grid_req = todo
             .iter()

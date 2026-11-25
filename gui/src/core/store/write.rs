@@ -457,6 +457,9 @@ impl Writer {
         )?;
         let run = tx.last_insert_rowid();
         save_features(&tx, s.track, &s.features, Some(run))?;
+        if s.features.iter().any(|f| f.0 == "key_pc") {
+            refresh_key(&tx, s.track)?;
+        }
         for (analyser, version, error) in &s.results {
             put_result(
                 &tx,
@@ -559,7 +562,15 @@ impl Writer {
         for spec in registry::measured_by(&names) {
             put_result(&tx, track, spec.id.as_str(), spec.version, None, None)?;
         }
+        // A key found: it's the track's, unless its metadata has one.
+        let key = names.contains(&"key_pc");
+        if key {
+            refresh_key(&tx, track)?;
+        }
         tx.commit()?;
+        if key {
+            self.tracks_changed(&[track])?;
+        }
         Ok(())
     }
 
@@ -1338,8 +1349,9 @@ fn put_meta(
     Ok(())
 }
 
-/// Copy the track's key (the resolved `key` field, if it reads as one) into
-/// `tracks.key_pc` and `key_minor`, so queries can test it without parsing text.
+/// Copy the track's key (the resolved `key` field, if it reads as one; else the one
+/// analysis found) into `tracks.key_pc` and `key_minor`, so queries can test it
+/// without parsing text.
 fn refresh_key(c: &Connection, track: i64) -> Result<()> {
     let text: Option<String> = c
         .prepare_cached(
@@ -1347,7 +1359,10 @@ fn refresh_key(c: &Connection, track: i64) -> Result<()> {
         )?
         .query_row([track], |r| r.get(0))
         .optional()?;
-    let key = text.as_deref().and_then(parse_key);
+    let key = match text.as_deref().and_then(parse_key) {
+        Some(k) => Some(k),
+        None => read::analysed_key(c, track)?,
+    };
     c.prepare_cached("UPDATE tracks SET key_pc = ?2, key_minor = ?3 WHERE id = ?1")?
         .execute(params![
             track,

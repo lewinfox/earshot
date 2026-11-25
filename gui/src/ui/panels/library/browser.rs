@@ -582,6 +582,10 @@ impl LibraryUi {
         table: &mut TableState,
         out: &mut Vec<Command>,
     ) -> bool {
+        // With buckets, All tracks shows which of their tracks are downloaded.
+        if !self.buckets.is_empty() && self.scope == Scope::All {
+            table.offer_download();
+        }
         self.refresh(v, table);
         ui.horizontal(|ui| {
             ui.label(RichText::new(self.title(v)).strong());

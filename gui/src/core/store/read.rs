@@ -121,7 +121,7 @@ pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
         "SELECT track_id, field, source, value FROM track_meta WHERE field IN {LIST_FIELDS}"
     );
     let feat_sql = "SELECT track_id, name, value FROM track_features
-                    WHERE name IN ('energy', 'drifts')";
+                    WHERE name IN ('energy', 'drifts', 'key_pc', 'key_minor')";
     match ids {
         None => {
             let mut st = c.prepare(&format!(
@@ -201,7 +201,13 @@ pub fn tracks(c: &Connection, ids: Option<&[i64]>) -> Result<Vec<LibTrack>> {
                     title: take("title").unwrap_or(stem),
                     artist: take("artist").unwrap_or_default(),
                     tag_bpm: take("bpm").and_then(|b| b.trim().parse().ok()),
-                    key: take("key"),
+                    // What its tags, another library or the user says; else what
+                    // analysis found.
+                    key: take("key").or_else(|| {
+                        let pc = feats.get(&(id, "key_pc".into()))?;
+                        let minor = feats.get(&(id, "key_minor".into()))?;
+                        crate::core::keys::analysed(*pc, *minor).map(crate::core::keys::key_name)
+                    }),
                     album: take("album").unwrap_or_default(),
                     genre: take("genre").unwrap_or_default(),
                     comment: take("comment").unwrap_or_default(),
@@ -400,6 +406,15 @@ pub fn feature(c: &Connection, id: i64, name: &str) -> Result<Option<f64>> {
         |r| r.get(0),
     )
     .optional()?)
+}
+
+/// The key analysis found for a track (`track_features` key_pc, key_minor), if it
+/// has.
+pub fn analysed_key(c: &Connection, id: i64) -> Result<Option<crate::core::keys::Camelot>> {
+    let (Some(pc), Some(minor)) = (feature(c, id, "key_pc")?, feature(c, id, "key_minor")?) else {
+        return Ok(None);
+    };
+    Ok(crate::core::keys::analysed(pc, minor))
 }
 
 /// Where analysis found the track's beats start (s), if it has (grid analyser 3 on).
