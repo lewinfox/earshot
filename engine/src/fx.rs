@@ -55,7 +55,12 @@ pub(crate) const SILENT: f32 = 1e-5;
 /// How rounded Trans's wave is, at no level and at full: the level knob takes it
 /// from close to a sine (the volume swells and dips) to a square (it's chopped). It's
 /// the "smooth" of Mixxx's Tremolo, whose formula this is, swept by its ratio.
-const TRANS_SMOOTH: (f64, f64) = (2.0, 0.01);
+const TRANS_SMOOTH: (f64, f64) = (0.7, 0.01);
+/// How soon the level knob bites: the depth is short of full by this power of what's
+/// left of the turn (3: over half way down by a quarter level), and the wave hardens
+/// by this power of the turn (under 1: sooner).
+const TRANS_DEPTH_POWER: i32 = 3;
+const TRANS_SHARPEN_POWER: f64 = 0.7;
 /// Seconds for a Trans cut to open or close, so the edges don't click.
 const TRANS_EDGE_SECS: f64 = 0.0015;
 
@@ -465,12 +470,16 @@ impl Trans {
     }
 
     /// What the level knob sets: how far the volume comes down (1: to silence), and
-    /// how rounded the wave is ([`TRANS_SMOOTH`]). The depth comes up quickly, three
-    /// quarters by half way; the wave hardens steadily through the turn.
+    /// how rounded the wave is ([`TRANS_SMOOTH`]). Both come on early in the turn: by
+    /// a quarter level the volume dips more than half way and its edges are plain,
+    /// and from half level up it's all but a chop to near silence.
     fn shape(level: f64) -> (f64, f64) {
         let level = level.clamp(0.0, 1.0);
         let (soft, hard) = TRANS_SMOOTH;
-        (level * (2.0 - level), soft * (hard / soft).powf(level))
+        (
+            1.0 - (1.0 - level).powi(TRANS_DEPTH_POWER),
+            soft * (hard / soft).powf(level.powf(TRANS_SHARPEN_POWER)),
+        )
     }
 
     pub(crate) fn process(
@@ -807,9 +816,9 @@ mod tests {
             run(&mut u, (SR * 0.5) as usize, |_| 1.0)
         };
         let at = |out: &[f32], secs: f64| out[(secs * SR) as usize] as f64;
-        // How far down, in the middle of the down half: three quarters of the way
-        // by half level, all the way at full.
-        for (level, floor) in [(0.25, 0.5625), (0.5, 0.25), (1.0, 0.0)] {
+        // How far down, in the middle of the down half: more than half way by a
+        // quarter level, nearly all the way by half, all the way at full.
+        for (level, floor) in [(0.25, 0.4219), (0.5, 0.125), (1.0, 0.0)] {
             let out = wave(level);
             assert!((at(&out, 0.125) - 1.0).abs() < 0.01, "{level}: up");
             let low = at(&out, 0.375);
@@ -821,7 +830,7 @@ mod tests {
             let out = wave(level);
             (1.0 - at(&out, 0.25 + 0.03125)) / (1.0 - at(&out, 0.375))
         };
-        assert!(part(0.1) < 0.75, "a swell at low level: {}", part(0.1));
+        assert!(part(0.1) < 0.9, "a swell at low level: {}", part(0.1));
         assert!(part(0.5) > part(0.1), "sharper by half way");
         assert!(part(1.0) > 0.98, "a chop at full: {}", part(1.0));
     }
