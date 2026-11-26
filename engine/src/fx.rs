@@ -25,16 +25,23 @@ pub const MAX_BEATS: f64 = 16.0;
 /// The longest echo, seconds: 16 beats down to 80 BPM. Longer ones are cut to this.
 pub const MAX_ECHO_SECS: f64 = 12.0;
 
-/// Each echo repeat is this much quieter than the one before (-6 dB).
-const ECHO_FEEDBACK: f64 = 0.5;
+/// How much of each echo repeat goes round again, at no level and at full: the level
+/// knob turns the feedback up as well as the repeats, as the LEVEL/DEPTH of Pioneer's
+/// mixers does for their Echo. Each repeat is 4.5 dB quieter than the one before at
+/// the bottom of the knob, 3 dB at half and 1.5 dB at the top, where they go on for
+/// a long while.
+const ECHO_FEEDBACK: (f64, f64) = (0.596, 0.841);
+/// How much louder than the dry input (as power: 2 is +3 dB) the echo may make the
+/// whole before it's turned down.
+const ECHO_HEADROOM: f64 = 2.0;
 /// The repeats lose their lows and highs as they go, like a tape echo.
 const ECHO_LOW_CUT_HZ: f64 = 120.0;
 const ECHO_HIGH_CUT_HZ: f64 = 7000.0;
 /// Seconds for the echo time to follow a new length or tempo. It glides, so a change
 /// bends the repeats' pitch a little rather than clicking.
 const ECHO_GLIDE_SECS: f64 = 0.08;
-/// The echo keeps the mix no louder than the dry input: both are measured over about
-/// this long (seconds), and the whole output turned down to match when it's louder.
+/// The echo keeps the mix within [`ECHO_HEADROOM`] of the dry input: both are measured
+/// over about this long (seconds), and the whole output turned down when it's louder.
 /// Down quickly, back up slowly.
 const ECHO_MATCH_SECS: f64 = 0.4;
 const ECHO_DUCK_SECS: f64 = 0.05;
@@ -45,8 +52,15 @@ const ECHO_DRY_FLOOR: f64 = 1e-6;
 /// Below this the echo's tail counts as gone.
 pub(crate) const SILENT: f32 = 1e-5;
 
-/// The part of each Trans cycle that's open.
-const TRANS_DUTY: f64 = 0.5;
+/// How rounded Trans's wave is, at no level and at full: the level knob takes it
+/// from close to a sine (the volume swells and dips) to a square (it's chopped). It's
+/// the "smooth" of Mixxx's Tremolo, whose formula this is, swept by its ratio.
+const TRANS_SMOOTH: (f64, f64) = (0.7, 0.01);
+/// How soon the level knob bites: the depth is short of full by this power of what's
+/// left of the turn (3: over half way down by a quarter level), and the wave hardens
+/// by this power of the turn (under 1: sooner).
+const TRANS_DEPTH_POWER: i32 = 3;
+const TRANS_SHARPEN_POWER: f64 = 0.7;
 /// Seconds for a Trans cut to open or close, so the edges don't click.
 const TRANS_EDGE_SECS: f64 = 0.0015;
 
@@ -369,7 +383,11 @@ impl Echo {
         self.delay.target = delay_frames.clamp(1.0, self.max_delay());
         let mut peak = 0f32;
         for f in 0..n {
-            let (s, g) = c.next();
+            let (s, level) = c.next();
+            // The repeats come up quickly: three quarters of full by half way, so
+            // the first is as loud as the track well before the top of the knob.
+            let g = level * (2.0 - level);
+            let feedback = ECHO_FEEDBACK.0 + (ECHO_FEEDBACK.1 - ECHO_FEEDBACK.0) * level;
             let d = self.delay.next(self.glide);
             let mut mixed = [0.0; 2];
             let (mut dry_sq, mut out_sq) = (0.0, 0.0);
@@ -380,19 +398,20 @@ impl Echo {
                 let dull = self.high_cut.run(ch, wet);
                 let fb = dull - self.low_cut.run(ch, dull);
                 let w = 2 * (self.write & self.mask) + ch;
-                self.line[w] = (x * s + fb * ECHO_FEEDBACK) as f32;
+                self.line[w] = (x * s + fb * feedback) as f32;
                 peak = peak.max((wet * g).abs() as f32);
                 mixed[ch] = x + wet * g;
                 dry_sq += x * x;
                 out_sq += mixed[ch] * mixed[ch];
             }
-            // Repeats land on later beats and pile up: keep the whole no louder than
-            // the dry input (while there is one), so the echo is heard, not a jump in
-            // level.
+            // Repeats land on later beats and pile up: keep the whole from getting
+            // much louder than the dry input (while there is one). A little louder
+            // it may be: an echo that adds nothing to the level sounds weak.
             self.dry_ms += (dry_sq - self.dry_ms) * self.k_match;
             self.out_ms += (out_sq - self.out_ms) * self.k_match;
-            let target = if self.dry_ms > ECHO_DRY_FLOOR && self.out_ms > self.dry_ms {
-                (self.dry_ms / self.out_ms).sqrt()
+            let most = self.dry_ms * ECHO_HEADROOM;
+            let target = if self.dry_ms > ECHO_DRY_FLOOR && self.out_ms > most {
+                (most / self.out_ms).sqrt()
             } else {
                 1.0
             };
@@ -433,7 +452,9 @@ impl Echo {
 
 // ---- Trans ------------------------------------------------------------------------
 
-/// A gate on the beat: open for the first half of each cycle, cut for the second.
+/// The volume moved in time with the beat: up for the first half of each cycle, down
+/// for the second. The level sets how far down and how sharply: a shallow, smooth
+/// swell at the bottom of the knob, the sound chopped on and off at the top.
 pub(crate) struct Trans {
     /// The gain, easing between open and cut.
     pub(crate) gain: Smoothed,
@@ -446,6 +467,19 @@ impl Trans {
             gain: Smoothed::new(1.0),
             edge: dsp::ease_per_sample(TRANS_EDGE_SECS, sr),
         }
+    }
+
+    /// What the level knob sets: how far the volume comes down (1: to silence), and
+    /// how rounded the wave is ([`TRANS_SMOOTH`]). Both come on early in the turn: by
+    /// a quarter level the volume dips more than half way and its edges are plain,
+    /// and from half level up it's all but a chop to near silence.
+    fn shape(level: f64) -> (f64, f64) {
+        let level = level.clamp(0.0, 1.0);
+        let (soft, hard) = TRANS_SMOOTH;
+        (
+            1.0 - (1.0 - level).powi(TRANS_DEPTH_POWER),
+            soft * (hard / soft).powf(level.powf(TRANS_SHARPEN_POWER)),
+        )
     }
 
     pub(crate) fn process(
@@ -463,8 +497,11 @@ impl Trans {
         for f in 0..n {
             let phase = (clock.beat(f, n) / beats).rem_euclid(1.0);
             let (on, level) = c.next();
-            let depth = on * level;
-            self.gain.target = if phase < TRANS_DUTY { 1.0 } else { 1.0 - depth };
+            let (depth, smooth) = Trans::shape(level);
+            // -0.5 (down) to 0.5 (up): a sine pushed towards a square.
+            let wave = (std::f64::consts::TAU * phase).sin();
+            let up = (wave / smooth).atan() / (2.0 * (1.0 / smooth).atan());
+            self.gain.target = 1.0 - on * depth * (0.5 - up);
             let g = self.gain.next(self.edge) as f32;
             buf[2 * f] *= g;
             buf[2 * f + 1] *= g;
@@ -682,14 +719,14 @@ mod tests {
         assert!(peak > 0.1, "the tail went on: {peak}");
         assert!(u.busy());
         // Given long enough it dies away and stops running.
-        run(&mut u, (SR * 12.0) as usize, |_| 0.0);
+        run(&mut u, (SR * 60.0) as usize, |_| 0.0);
         assert!(!u.busy());
     }
 
     /// On music the repeats land on later beats and pile up; the echo turns the whole
-    /// down so it's no louder than the track without it.
+    /// down so it's never more than 3 dB louder than the track without it.
     #[test]
-    fn echo_doesnt_make_the_track_louder() {
+    fn echo_makes_the_track_only_a_little_louder() {
         let mut u = unit(FxKind::Echo, 1.0, 1.0);
         // A kick-like thump every beat (120 BPM), for 8 s.
         let beat = (SR * 0.5) as usize;
@@ -706,7 +743,11 @@ mod tests {
         // The last 4 s, once the repeats have built up.
         let dry = rms(&mut (n / 2..n).map(thump));
         let wet = rms(&mut out[n / 2..].iter().copied());
-        assert!(wet <= dry * 1.06, "{wet} vs dry {dry}");
+        assert!(
+            wet <= dry * 1.06 * ECHO_HEADROOM.sqrt() as f32,
+            "{wet} vs dry {dry}"
+        );
+        assert!(wet > dry * 1.2, "the echo adds to it: {wet} vs dry {dry}");
         // And the echo is still in it: it isn't just the dry.
         let diff = rms(&mut (n / 2..n).map(|f| out[f] - thump(f)));
         assert!(diff > dry * 0.1, "{diff}");
@@ -765,12 +806,33 @@ mod tests {
         assert!(at(0.6) < 0.01 && at(0.9) < 0.01, "cut through the second");
     }
 
+    /// The level sets how far the volume comes down and how sharply: a shallow swell
+    /// at the bottom of the knob, a chop at the top.
     #[test]
-    fn trans_level_sets_the_depth() {
-        let mut u = unit(FxKind::Trans, 1.0, 0.5);
-        let out = run(&mut u, (SR * 0.5) as usize, |_| 1.0);
-        // Cut from 0.25 s to 0.5 s, to half.
-        assert!((out[(SR * 0.4) as usize] - 0.5).abs() < 0.01);
+    fn trans_level_sets_the_depth_and_the_sharpness() {
+        // One-beat cycles at 120 BPM: up for 0..0.25 s, down for 0.25..0.5 s.
+        let wave = |level: f64| {
+            let mut u = unit(FxKind::Trans, 1.0, level);
+            run(&mut u, (SR * 0.5) as usize, |_| 1.0)
+        };
+        let at = |out: &[f32], secs: f64| out[(secs * SR) as usize] as f64;
+        // How far down, in the middle of the down half: more than half way by a
+        // quarter level, nearly all the way by half, all the way at full.
+        for (level, floor) in [(0.25, 0.4219), (0.5, 0.125), (1.0, 0.0)] {
+            let out = wave(level);
+            assert!((at(&out, 0.125) - 1.0).abs() < 0.01, "{level}: up");
+            let low = at(&out, 0.375);
+            assert!((low - floor).abs() < 0.01, "{level}: down to {low}");
+        }
+        // How sharply: an eighth of the way into the down half, a low level is still
+        // on its way down, and full level is already there.
+        let part = |level: f64| {
+            let out = wave(level);
+            (1.0 - at(&out, 0.25 + 0.03125)) / (1.0 - at(&out, 0.375))
+        };
+        assert!(part(0.1) < 0.9, "a swell at low level: {}", part(0.1));
+        assert!(part(0.5) > part(0.1), "sharper by half way");
+        assert!(part(1.0) > 0.98, "a chop at full: {}", part(1.0));
     }
 
     #[test]
@@ -809,7 +871,7 @@ mod tests {
             let tail = run(&mut u, (SR * 0.5) as usize, |_| 0.0);
             let peak = tail.iter().fold(0f32, |m, s| m.max(s.abs()));
             assert!(peak > 0.05, "{kind:?}'s release rang on: {peak}");
-            run(&mut u, (SR * 12.0) as usize, |_| 0.0);
+            run(&mut u, (SR * 60.0) as usize, |_| 0.0);
             assert!(!u.busy(), "{kind:?}'s tail ended");
         }
         // Off already: nothing to release.

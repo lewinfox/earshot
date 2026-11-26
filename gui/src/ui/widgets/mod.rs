@@ -160,6 +160,7 @@ mod tests {
             max: 4.0,
             default: 1.0,
             centre: Some(1.0),
+            taper: crate::core::bus::Taper::Linear,
             format: fmt_db,
         };
         assert_eq!(eq.to_pos(1.0), 0.5);

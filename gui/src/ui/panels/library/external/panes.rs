@@ -1,7 +1,7 @@
 //! Each place music comes from, as an icon in the library's left stack and the pane
 //! it opens: a DJ program's library (always listed: one not found has a button to
 //! say where it is), another library added by hand, each USB stick while it's
-//! plugged in, and Manage (the music folders, adding libraries).
+//! plugged in, and Manage (which adds sources: music folders, buckets, libraries).
 //!
 //! What a source can do shows only where it can: every library has its playlists
 //! and Import; a stick also has its light, Eject, its files and Convert, and takes
@@ -90,7 +90,7 @@ impl ExternalUi {
         let mut manage = StackItem::new(
             Pane::Manage,
             "+",
-            "Manage sources: music folders, other libraries",
+            "Add a source: a music folder, a bucket, another library",
         );
         manage.gap = true;
         out.push(manage);

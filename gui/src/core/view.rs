@@ -92,7 +92,8 @@ impl PadMode {
 /// from (`core::sources`), each with an icon of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Source {
-    /// Every track, with quick filters by analysis status.
+    /// The earshot library: every track, with quick filters by analysis status, and
+    /// where they're kept (the music folders on this computer, the buckets).
     #[serde(alias = "Browser")]
     AllTracks,
     /// Playlists and smart playlists, in folders.
@@ -110,7 +111,8 @@ pub enum Source {
     /// A bucket (`core::bucket`): its tracks, and its folders to narrow them by.
     Bucket(SourceId),
     /// Adding places music comes from: music folders, buckets, other libraries.
-    /// (Each bucket, library and stick then has an icon of its own.) (The streaming services' names are what older saved layouts called
+    /// It only adds: what's been added is browsed in the earshot library's Storage
+    /// tree, and each bucket, library and stick has an icon of its own. (The streaming services' names are what older saved layouts called
     /// panes that never were.)
     #[serde(alias = "Sources", alias = "Explorer", alias = "External")]
     #[serde(alias = "SoundCloud", alias = "Beatport", alias = "Spotify")]

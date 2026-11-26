@@ -38,30 +38,62 @@ pub struct Range {
     /// Double-click goes back here.
     pub default: f64,
     /// The value at the middle of the travel, for controls whose middle means "as is"
-    /// (EQ, filter, balance, headphone mix). The travel either side maps linearly to min..centre and
-    /// centre..max, and value arcs start from it.
+    /// (EQ, filter, balance, headphone mix), and where value arcs start from.
     pub centre: Option<f64>,
+    /// How the travel either side of the centre maps to min..centre and centre..max.
+    pub taper: Taper,
     pub format: fn(f64) -> String,
 }
+
+/// How a control's travel maps to its value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Taper {
+    /// Evenly.
+    Linear,
+    /// A gain with a centre, evenly in decibels, as Mixxx's EQ and gain knobs are
+    /// (its `ControlAudioTaperPot`): the top half of the travel goes from the centre
+    /// up to the maximum, the bottom half down [`AUDIO_TAPER_CUT_DB`], bent a little
+    /// so that the end of the travel is silence. A turn changes how loud it sounds
+    /// by about as much wherever the knob is.
+    Audio,
+}
+
+/// How far an [`Taper::Audio`] control's bottom half turns it down, before the bend
+/// that takes its end to silence.
+pub const AUDIO_TAPER_CUT_DB: f64 = -12.0;
 
 impl Range {
     /// Value to travel, 0..1.
     pub fn to_pos(&self, v: f64) -> f64 {
         let v = v.clamp(self.min, self.max);
-        match self.centre {
-            Some(c) if v < c => 0.5 * (v - self.min) / (c - self.min),
-            Some(c) => 0.5 + 0.5 * (v - c) / (self.max - c),
-            None => (v - self.min) / (self.max - self.min),
+        match (self.centre, self.taper) {
+            (Some(_), Taper::Audio) if v <= self.min => 0.0,
+            (Some(c), Taper::Audio) if v < c => {
+                let floor = ratio(AUDIO_TAPER_CUT_DB);
+                let db = decibels(v / c * (1.0 - floor) + floor);
+                0.5 * (1.0 - db / AUDIO_TAPER_CUT_DB)
+            }
+            (Some(c), Taper::Audio) => 0.5 + 0.5 * decibels(v / c) / decibels(self.max / c),
+            (Some(c), Taper::Linear) if v < c => 0.5 * (v - self.min) / (c - self.min),
+            (Some(c), Taper::Linear) => 0.5 + 0.5 * (v - c) / (self.max - c),
+            (None, _) => (v - self.min) / (self.max - self.min),
         }
     }
 
     /// Travel (0..1) to value.
     pub fn from_pos(&self, p: f64) -> f64 {
         let p = p.clamp(0.0, 1.0);
-        match self.centre {
-            Some(c) if p < 0.5 => self.min + (c - self.min) * p * 2.0,
-            Some(c) => c + (self.max - c) * (p - 0.5) * 2.0,
-            None => self.min + (self.max - self.min) * p,
+        match (self.centre, self.taper) {
+            (Some(_), Taper::Audio) if p <= 0.0 => self.min,
+            (Some(c), Taper::Audio) if p < 0.5 => {
+                let floor = ratio(AUDIO_TAPER_CUT_DB);
+                let db = AUDIO_TAPER_CUT_DB * (1.0 - p * 2.0);
+                c * (ratio(db) - floor) / (1.0 - floor)
+            }
+            (Some(c), Taper::Audio) => c * ratio(decibels(self.max / c) * (p - 0.5) * 2.0),
+            (Some(c), Taper::Linear) if p < 0.5 => self.min + (c - self.min) * p * 2.0,
+            (Some(c), Taper::Linear) => c + (self.max - c) * (p - 0.5) * 2.0,
+            (None, _) => self.min + (self.max - self.min) * p,
         }
     }
 
@@ -78,6 +110,14 @@ impl Range {
             (self.format)(self.default)
         )
     }
+}
+
+fn ratio(db: f64) -> f64 {
+    10f64.powf(db / 20.0)
+}
+
+fn decibels(ratio: f64) -> f64 {
+    20.0 * ratio.log10()
 }
 
 /// Linear gain as decibels.
@@ -129,6 +169,7 @@ pub const GAIN: Range = Range {
     max: 4.0,
     default: 1.0,
     centre: Some(1.0),
+    taper: Taper::Audio,
     format: fmt_db,
 };
 /// Low, mid, high, indexed by `EQ_LOW` etc.
@@ -152,6 +193,7 @@ pub const FILTER: Range = Range {
     max: 1.0,
     default: 0.0,
     centre: Some(0.0),
+    taper: Taper::Linear,
     format: fmt_filter,
 };
 pub const VOLUME: Range = Range {
@@ -160,6 +202,7 @@ pub const VOLUME: Range = Range {
     max: 1.0,
     default: 1.0,
     centre: None,
+    taper: Taper::Linear,
     format: fmt_percent,
 };
 pub const CROSSFADER: Range = Range {
@@ -168,6 +211,7 @@ pub const CROSSFADER: Range = Range {
     max: 1.0,
     default: 0.0,
     centre: Some(0.0),
+    taper: Taper::Linear,
     format: fmt_balance,
 };
 /// The master output: none to full, no boost, no centre.
@@ -177,6 +221,7 @@ pub const MASTER_GAIN: Range = Range {
     max: 1.0,
     default: 1.0,
     centre: None,
+    taper: Taper::Linear,
     format: fmt_db,
 };
 pub const BALANCE: Range = Range {
@@ -194,6 +239,7 @@ pub const HEAD_MIX: Range = Range {
     max: 1.0,
     default: 0.5,
     centre: Some(0.5),
+    taper: Taper::Linear,
     format: |v| format!("{:.0} % cue, {:.0} % master", (1.0 - v) * 100.0, v * 100.0),
 };
 /// The tempo fader, -1..1 across the deck's tempo range (minus at the top).
@@ -203,6 +249,7 @@ pub const TEMPO: Range = Range {
     max: 1.0,
     default: 0.0,
     centre: Some(0.0),
+    taper: Taper::Linear,
     format: |v| format!("{:+.0} % of the range", v * 100.0),
 };
 /// How far through the track, 0..1.
@@ -212,15 +259,18 @@ pub const POSITION: Range = Range {
     max: 1.0,
     default: 0.0,
     centre: None,
+    taper: Taper::Linear,
     format: fmt_percent,
 };
-/// An effect unit's level: how loud the echo's repeats are, how deep Trans cuts.
+/// An effect unit's level: how loud the echo's repeats are and how long they go on; how
+/// deep and how sharp Trans's dips are.
 pub const FX_LEVEL: Range = Range {
     name: "Effect level",
     min: 0.0,
     max: 1.0,
     default: 0.5,
     centre: None,
+    taper: Taper::Linear,
     format: fmt_percent,
 };
 /// A deck's key shift, in semitones.
@@ -230,6 +280,7 @@ pub const SEMITONES: Range = Range {
     max: earshot_engine::KEY_SHIFT_MAX,
     default: 0.0,
     centre: Some(0.0),
+    taper: Taper::Linear,
     format: |v| format!("{:+.0} semitones", v),
 };
 /// Beat jump and loop sizes, in beats.
@@ -239,6 +290,7 @@ pub const BEATS: Range = Range {
     max: 64.0,
     default: 4.0,
     centre: Some(4.0),
+    taper: Taper::Linear,
     format: fmt_beats,
 };
 
@@ -1805,6 +1857,34 @@ mod tests {
 
     fn deck(i: usize) -> DeckId {
         DeckId::new(i).unwrap()
+    }
+
+    /// The EQ and gain knobs turn as Mixxx's do: the same change in decibels for the
+    /// same turn, to a kill at the bottom and +12 dB at the top.
+    #[test]
+    fn eq_and_gain_knobs_are_even_in_decibels() {
+        let db = |p: f64| 20.0 * EQ[0].from_pos(p).log10();
+        assert_eq!(EQ[0].from_pos(0.0), 0.0);
+        assert_eq!(EQ[0].from_pos(0.5), 1.0);
+        assert!((EQ[0].from_pos(1.0) - 4.0).abs() < 1e-9);
+        // (travel, dB), as Mixxx's `ControlAudioTaperPot(-12, 12, 0.5)` gives.
+        for (p, want) in [
+            (0.1, -19.4),
+            (0.25, -9.5),
+            (0.4, -3.4),
+            (0.6, 2.4),
+            (0.75, 6.0),
+            (0.9, 9.6),
+        ] {
+            assert!((db(p) - want).abs() < 0.06, "{p}: {} for {want}", db(p));
+        }
+        // And back.
+        for i in 0..=100 {
+            let p = i as f64 / 100.0;
+            let back = EQ[0].to_pos(EQ[0].from_pos(p));
+            assert!((back - p).abs() < 1e-9, "{p} came back as {back}");
+        }
+        assert_eq!(GAIN.taper, Taper::Audio);
     }
 
     #[test]

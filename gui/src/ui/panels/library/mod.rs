@@ -1,6 +1,6 @@
 //! The library: one component, the same in both modes (and beside the Flow canvas).
-//! An icon stack on the left picks the source (what we're operating on: all tracks,
-//! playlists, crates, Flows, folders on disk, other libraries), shown in the pane
+//! An icon stack on the left picks the source (what we're operating on: earshot's
+//! library, playlists, crates, Flows, other libraries), shown in the pane
 //! beside it; the track table fills the middle; an icon stack on the right opens
 //! side panes such as the suggestions.
 //!
@@ -57,7 +57,7 @@ use crate::ui::widgets::{Opens, StackItem, icon_stack, icon_stack_with_menu};
 
 /// The left icon stack's views of earshot's own library (the other sources follow).
 const VIEWS: [StackItem<Source>; 4] = [
-    StackItem::new(Source::AllTracks, "🎵", "All tracks"),
+    StackItem::new(Source::AllTracks, "🎵", "earshot library"),
     StackItem::new(Source::Playlists, "☰", "Playlists and smart playlists"),
     StackItem::new(Source::Crates, "📦", "Crates"),
     StackItem::new(Source::Flows, "🔀", "Flows: sets planned on a canvas"),
@@ -499,7 +499,7 @@ impl LibraryPane {
                 if is_outside(track) {
                     return Some(format!("{what}, so it can't be shown."));
                 }
-                note = Some(format!("{what}: showing it in All tracks."));
+                note = Some(format!("{what}: showing it in the earshot library."));
                 (Some(Source::AllTracks), Scope::All)
             }
             Some(LoadedFrom::List { source, scope }) => (source, scope),
@@ -564,13 +564,31 @@ impl LibraryPane {
         match source {
             Source::AllTracks => {
                 let table = self.tables.get_mut(TableView::Library);
+                let before = self.browser.scope().clone();
                 // More views than the pane is tall: they scroll.
                 let clicked = egui::ScrollArea::vertical()
                     .auto_shrink(false)
                     .show(ui, |ui| {
-                        self.browser.all_tracks(ui, &cx.core, table, cx.out)
+                        let mut clicked = self.browser.all_tracks(ui, &cx.core, table, cx.out);
+                        // Where the tracks are kept: this computer's music folders,
+                        // then each bucket, with its folders inside it.
+                        ui.add_space(4.0);
+                        heading(ui, cx, "Storage");
+                        self.browser.storage_local(ui, &cx.core, cx.out);
+                        if let Some(scope) = self.buckets.storage(ui, &cx.core, &before) {
+                            self.browser.set_scope(scope);
+                        }
+                        ui.add_space(4.0);
+                        clicked |= self.browser.by_analysis(ui, &cx.core, table, cx.out);
+                        clicked
                     })
                     .inner;
+                // A folder was picked: it's what the middle lists now.
+                if *self.browser.scope() != before
+                    && matches!(self.browser.scope(), Scope::Folder(_))
+                {
+                    self.external.close();
+                }
                 if clicked && let Some(row) = self.browser.nav_cursor.clone() {
                     // Clicked: the knob is there.
                     self.level = Level::Tree;
@@ -614,15 +632,15 @@ impl LibraryPane {
         }
     }
 
-    /// Managing sources: the music folders (picking one lists its files in the
-    /// middle), buckets, and adding libraries.
+    /// Adding sources: a music folder, a bucket, another library. Nothing is listed
+    /// here: the music folders and the buckets are in the earshot library, under
+    /// Storage, and each bucket and library has an icon of its own.
     fn manage(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        let before = self.browser.scope().clone();
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
                 heading(ui, cx, "Music folders");
-                self.browser.folder_tree(ui, &cx.core, cx.out);
+                self.browser.add_folder(ui, cx.out);
                 ui.add_space(10.0);
                 heading(ui, cx, "Buckets");
                 self.buckets.manage(ui);
@@ -630,10 +648,6 @@ impl LibraryPane {
                 heading(ui, cx, "Other libraries");
                 self.external.manage(ui, cx.out);
             });
-        // A folder was picked: it's what the middle lists now.
-        if *self.browser.scope() != before && matches!(self.browser.scope(), Scope::Folder(_)) {
-            self.external.close();
-        }
     }
 
     /// A pane on the right, opened from its icon stack.
