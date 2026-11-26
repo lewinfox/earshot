@@ -52,8 +52,10 @@ const ECHO_DRY_FLOOR: f64 = 1e-6;
 /// Below this the echo's tail counts as gone.
 pub(crate) const SILENT: f32 = 1e-5;
 
-/// The part of each Trans cycle that's open.
-const TRANS_DUTY: f64 = 0.5;
+/// How rounded Trans's wave is, at no level and at full: the level knob takes it
+/// from close to a sine (the volume swells and dips) to a square (it's chopped). It's
+/// the "smooth" of Mixxx's Tremolo, whose formula this is, swept by its ratio.
+const TRANS_SMOOTH: (f64, f64) = (2.0, 0.01);
 /// Seconds for a Trans cut to open or close, so the edges don't click.
 const TRANS_EDGE_SECS: f64 = 0.0015;
 
@@ -445,7 +447,9 @@ impl Echo {
 
 // ---- Trans ------------------------------------------------------------------------
 
-/// A gate on the beat: open for the first half of each cycle, cut for the second.
+/// The volume moved in time with the beat: up for the first half of each cycle, down
+/// for the second. The level sets how far down and how sharply: a shallow, smooth
+/// swell at the bottom of the knob, the sound chopped on and off at the top.
 pub(crate) struct Trans {
     /// The gain, easing between open and cut.
     pub(crate) gain: Smoothed,
@@ -458,6 +462,15 @@ impl Trans {
             gain: Smoothed::new(1.0),
             edge: dsp::ease_per_sample(TRANS_EDGE_SECS, sr),
         }
+    }
+
+    /// What the level knob sets: how far the volume comes down (1: to silence), and
+    /// how rounded the wave is ([`TRANS_SMOOTH`]). The depth comes up quickly, three
+    /// quarters by half way; the wave hardens steadily through the turn.
+    fn shape(level: f64) -> (f64, f64) {
+        let level = level.clamp(0.0, 1.0);
+        let (soft, hard) = TRANS_SMOOTH;
+        (level * (2.0 - level), soft * (hard / soft).powf(level))
     }
 
     pub(crate) fn process(
@@ -475,8 +488,11 @@ impl Trans {
         for f in 0..n {
             let phase = (clock.beat(f, n) / beats).rem_euclid(1.0);
             let (on, level) = c.next();
-            let depth = on * level;
-            self.gain.target = if phase < TRANS_DUTY { 1.0 } else { 1.0 - depth };
+            let (depth, smooth) = Trans::shape(level);
+            // -0.5 (down) to 0.5 (up): a sine pushed towards a square.
+            let wave = (std::f64::consts::TAU * phase).sin();
+            let up = (wave / smooth).atan() / (2.0 * (1.0 / smooth).atan());
+            self.gain.target = 1.0 - on * depth * (0.5 - up);
             let g = self.gain.next(self.edge) as f32;
             buf[2 * f] *= g;
             buf[2 * f + 1] *= g;
@@ -781,12 +797,33 @@ mod tests {
         assert!(at(0.6) < 0.01 && at(0.9) < 0.01, "cut through the second");
     }
 
+    /// The level sets how far the volume comes down and how sharply: a shallow swell
+    /// at the bottom of the knob, a chop at the top.
     #[test]
-    fn trans_level_sets_the_depth() {
-        let mut u = unit(FxKind::Trans, 1.0, 0.5);
-        let out = run(&mut u, (SR * 0.5) as usize, |_| 1.0);
-        // Cut from 0.25 s to 0.5 s, to half.
-        assert!((out[(SR * 0.4) as usize] - 0.5).abs() < 0.01);
+    fn trans_level_sets_the_depth_and_the_sharpness() {
+        // One-beat cycles at 120 BPM: up for 0..0.25 s, down for 0.25..0.5 s.
+        let wave = |level: f64| {
+            let mut u = unit(FxKind::Trans, 1.0, level);
+            run(&mut u, (SR * 0.5) as usize, |_| 1.0)
+        };
+        let at = |out: &[f32], secs: f64| out[(secs * SR) as usize] as f64;
+        // How far down, in the middle of the down half: three quarters of the way
+        // by half level, all the way at full.
+        for (level, floor) in [(0.25, 0.5625), (0.5, 0.25), (1.0, 0.0)] {
+            let out = wave(level);
+            assert!((at(&out, 0.125) - 1.0).abs() < 0.01, "{level}: up");
+            let low = at(&out, 0.375);
+            assert!((low - floor).abs() < 0.01, "{level}: down to {low}");
+        }
+        // How sharply: an eighth of the way into the down half, a low level is still
+        // on its way down, and full level is already there.
+        let part = |level: f64| {
+            let out = wave(level);
+            (1.0 - at(&out, 0.25 + 0.03125)) / (1.0 - at(&out, 0.375))
+        };
+        assert!(part(0.1) < 0.75, "a swell at low level: {}", part(0.1));
+        assert!(part(0.5) > part(0.1), "sharper by half way");
+        assert!(part(1.0) > 0.98, "a chop at full: {}", part(1.0));
     }
 
     #[test]

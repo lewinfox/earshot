@@ -262,7 +262,8 @@ pub const POSITION: Range = Range {
     taper: Taper::Linear,
     format: fmt_percent,
 };
-/// An effect unit's level: how loud the echo's repeats are, how deep Trans cuts.
+/// An effect unit's level: how loud the echo's repeats are and how long they go on; how
+/// deep and how sharp Trans's dips are.
 pub const FX_LEVEL: Range = Range {
     name: "Effect level",
     min: 0.0,
