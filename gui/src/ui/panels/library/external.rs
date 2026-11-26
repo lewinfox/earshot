@@ -907,7 +907,7 @@ impl ExternalUi {
                 ui.label("Copy the files into:");
                 if self.music.is_empty() {
                     ui.add(Note::danger(
-                        "Add a music folder first (Sources › Folders).",
+                        "Add a music folder first (+ › Add a folder…).",
                     ));
                     ready = false;
                 } else {

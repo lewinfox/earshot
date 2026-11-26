@@ -136,6 +136,14 @@ fn a_bucket_is_added_browsed_and_downloaded_from_when_a_track_is_loaded() {
         h.state().panels.library.browser.shown().len(),
         TRACKS.len() + 3
     );
+    // The library's Storage tree has it too, after Local: picking it there lists its
+    // tracks, the library's pane still open.
+    h.get_by_label(&format!("Local  ({})", TRACKS.len()));
+    h.get_by_label("Gig box  (3)").click();
+    steps(&mut h, 3);
+    assert_eq!(h.state().prefs.layout().source, Some(Pane::AllTracks));
+    assert_eq!(h.state().panels.library.browser.shown().len(), 3);
+    render(&mut h, "bucket-in-storage");
     h.state_mut().dispatch(ViewCmd::Source(Some(pane)).into());
     steps(&mut h, 3);
     assert_eq!(h.state().prefs.layout().source, Some(pane));

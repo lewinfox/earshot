@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use egui::{RichText, TextEdit, Ui};
 
-use super::browser::Scope;
+use super::browser::{FolderCounts, Scope};
 use super::table::{ColumnId, TableState};
 use crate::core::bucket::{BucketCmd, BucketForm, Scan};
 use crate::core::command::Command;
@@ -48,9 +48,11 @@ pub struct BucketsUi {
     last: HashMap<SourceId, Result<Scan, String>>,
     /// The computer is offline: only downloaded tracks are listed.
     offline: bool,
-    /// The folders of the bucket whose pane is open, as of a library revision
-    /// ([`BucketsUi::folders`]).
-    tree: Option<(SourceId, u64, std::rc::Rc<Vec<String>>)>,
+    /// The folders of each bucket whose tree has been shown, as of a library
+    /// revision ([`BucketsUi::folders`]).
+    tree: HashMap<SourceId, (u64, std::rc::Rc<Vec<String>>)>,
+    /// How many tracks each bucket and folder shown in the Storage tree has.
+    counts: FolderCounts,
     /// The artists and genres of the bucket whose pane is open, as of a library
     /// revision ([`BucketsUi::facets`]).
     facets: Option<(SourceId, u64, Rc<Facets>)>,
@@ -275,6 +277,45 @@ impl BucketsUi {
         muted(ui, "Each bucket gets an icon of its own on the left.");
     }
 
+    /// The buckets in the earshot library's Storage tree, after *Local*: each by its
+    /// name, with its folders inside it. Picking a bucket lists all its tracks, a
+    /// folder those in it. Returns the scope picked, if one was.
+    pub fn storage(&mut self, ui: &mut Ui, v: &CoreView, scope: &Scope) -> Option<Scope> {
+        let mut picked = None;
+        for s in self.sources.clone() {
+            let Some(root) = s.bucket_url() else { continue };
+            let whole = matches!(scope, Scope::Folder(f) if *f == root);
+            let name = format!("{}  ({})", s.name, self.counts.of(v, &root));
+            let folders = self.folders(&s, &root, v);
+            let mut label = |ui: &mut Ui| {
+                let r = ui
+                    .selectable_label(whole, RichText::new(&name).strong())
+                    .on_hover_text(format!("A bucket: {root}"));
+                if r.clicked() {
+                    picked = Some(Scope::Folder(root.clone()));
+                }
+            };
+            // No folders in it: nothing to open, so no arrow.
+            if folders.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.add_space(ui.spacing().indent);
+                    label(ui);
+                });
+                continue;
+            }
+            let id = ui.make_persistent_id(("storage-bucket", s.id));
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+                .show_header(ui, label)
+                .body(|ui| {
+                    let mut counts = std::mem::take(&mut self.counts);
+                    let count = &mut |url: &str| Some(counts.of(v, url));
+                    self.folder_rows(ui, &root, "", &folders, scope, count, &mut picked);
+                    self.counts = counts;
+                });
+        }
+        picked
+    }
+
     /// A bucket's own pane: what it is, how much of it is downloaded, what can be
     /// done to it, and its folders (picking one narrows the list to it). Returns
     /// the scope picked, if one was.
@@ -420,7 +461,17 @@ impl BucketsUi {
                         ui,
                         ui.make_persistent_id(("bucket-folders", s.id)),
                         "Folders",
-                        |ui| self.folder_rows(ui, &root, "", &folders, scope, &mut folder),
+                        |ui| {
+                            self.folder_rows(
+                                ui,
+                                &root,
+                                "",
+                                &folders,
+                                scope,
+                                &mut |_| None,
+                                &mut folder,
+                            )
+                        },
                     );
                     if let Some(Scope::Folder(f)) = folder {
                         pick = Some(Pick::Folder(f));
@@ -465,8 +516,8 @@ impl BucketsUi {
     /// root and sorted: worked out again only when the library changes.
     fn folders(&mut self, s: &Source, root: &str, v: &CoreView) -> std::rc::Rc<Vec<String>> {
         let rev = v.lib.rev();
-        if let Some((id, at, folders)) = &self.tree
-            && (*id, *at) == (s.id, rev)
+        if let Some((at, folders)) = self.tree.get(&s.id)
+            && *at == rev
         {
             return folders.clone();
         }
@@ -485,12 +536,13 @@ impl BucketsUi {
             }
         }
         let folders = std::rc::Rc::new(set.into_iter().collect::<Vec<_>>());
-        self.tree = Some((s.id, rev, folders.clone()));
+        self.tree.insert(s.id, (rev, folders.clone()));
         folders
     }
 
     /// The folders directly in `parent` ("" for the bucket's root), each with its own
-    /// inside it.
+    /// inside it, and with how many tracks it has where `count` says (by its URL).
+    #[allow(clippy::too_many_arguments)]
     fn folder_rows(
         &self,
         ui: &mut Ui,
@@ -498,6 +550,7 @@ impl BucketsUi {
         parent: &str,
         folders: &[String],
         scope: &Scope,
+        count: &mut dyn FnMut(&str) -> Option<usize>,
         picked: &mut Option<Scope>,
     ) {
         let children = folders.iter().filter(|f| match f.rsplit_once('/') {
@@ -510,9 +563,13 @@ impl BucketsUi {
             let selected = matches!(scope, Scope::Folder(s) if *s == url);
             let prefix = format!("{f}/");
             let has_children = folders.iter().any(|o| o.starts_with(&prefix));
+            let text = match count(&url) {
+                Some(n) => format!("{name}  ({n})"),
+                None => name.to_string(),
+            };
             let mut label = |ui: &mut Ui| {
                 if ui
-                    .selectable_label(selected, name)
+                    .selectable_label(selected, &text)
                     .on_hover_text(&url)
                     .clicked()
                 {
@@ -529,7 +586,7 @@ impl BucketsUi {
             let id = ui.make_persistent_id(("bucket-folder", &url));
             egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
                 .show_header(ui, label)
-                .body(|ui| self.folder_rows(ui, root, f, folders, scope, picked));
+                .body(|ui| self.folder_rows(ui, root, f, folders, scope, count, picked));
         }
     }
 

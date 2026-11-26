@@ -1775,13 +1775,23 @@ fn browsing_with_the_knob() {
     assert_eq!(h.state().prefs.layout().source, Some(Source::Manage));
     nav(&mut h, ViewCmd::PaneStep(-1));
     assert_eq!(lib(&h).0, Level::Sources);
-    // All tracks: into its lists (all of them, then by analysis), not its tracks.
+    // The earshot library: into its lists (all of them, the duplicates, the History,
+    // then by analysis while that's open), not its tracks.
     use crate::ui::panels::library::browser::AllRow;
     nav(&mut h, ViewCmd::Source(Some(Source::AllTracks)));
     nav(&mut h, ViewCmd::PaneStep(1));
     let all = |h: &H| h.state().panels.library.tree_cursor.clone();
     assert_eq!(lib(&h).0, Level::Tree);
     assert_eq!(all(&h), Some(TreeKey::All(AllRow::All)));
+    nav(&mut h, ViewCmd::Browse(1));
+    assert_eq!(all(&h), Some(TreeKey::All(AllRow::Duplicates)));
+    // By analysis is shut: the History is the last row.
+    nav(&mut h, ViewCmd::Browse(5));
+    assert_eq!(all(&h), Some(TreeKey::All(AllRow::History)));
+    assert!(h.query_by_label_contains("Not analysed").is_none());
+    h.get_by_label("By analysis").click();
+    steps(&mut h, 3);
+    h.get_by_label_contains("Not analysed");
     nav(&mut h, ViewCmd::Browse(1));
     assert!(matches!(all(&h), Some(TreeKey::All(AllRow::Status(_)))));
     nav(&mut h, ViewCmd::PaneStep(1));
@@ -3393,4 +3403,35 @@ fn double_tap_on_load() {
         "a third press starts again"
     );
     assert!(!double_tap(&mut last, soon + DOUBLE_TAP * 2), "too slow");
+}
+
+/// The music folders are browsed in the earshot library, under Storage › Local; the
+/// + pane only adds sources, and lists none of them.
+#[test]
+fn folders_are_in_the_librarys_storage() {
+    use crate::core::view::Source;
+    use crate::ui::panels::library::browser::Scope;
+    let mut h = start("storage");
+    let all = h.state().index.tracks().len();
+    let music = h.state().panels.library.browser.folders[0].clone();
+    let name = music.rsplit('/').next().unwrap().to_string();
+
+    h.state_mut()
+        .dispatch(ViewCmd::Source(Some(Source::Manage)).into());
+    steps(&mut h, 3);
+    h.get_by_label("Add a folder…");
+    let row = format!("{name}  ({all})");
+    assert!(h.query_by_label(&row).is_none(), "+ lists no folders");
+
+    h.state_mut()
+        .dispatch(ViewCmd::Source(Some(Source::AllTracks)).into());
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Add a folder…").is_none());
+    h.get_by_label(&format!("Local  ({all})"));
+    h.get_by_label(&row).click();
+    steps(&mut h, 3);
+    let browser = &h.state().panels.library.browser;
+    assert_eq!(*browser.scope(), Scope::Folder(music));
+    assert_eq!(browser.shown().len(), all);
+    render(&mut h, "storage");
 }

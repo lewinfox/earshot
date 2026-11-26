@@ -19,7 +19,7 @@ use crate::core::library::{self, Subdir};
 use crate::core::query::{self, Expr, Query, Sort};
 use crate::core::selection::Selection;
 use crate::core::store::PlaySession;
-use crate::core::track::{Status, TrackId};
+use crate::core::track::{Status, Track, TrackId};
 use crate::ui::panels::CoreView;
 use crate::ui::theme::THEME;
 use crate::ui::widgets::muted;
@@ -39,6 +39,40 @@ pub enum Scope {
     History(Option<i64>),
 }
 
+/// How many tracks are in each folder shown (a music folder, a bucket, a folder in
+/// either), for the Storage tree's counts: counted when first asked for, and again
+/// only when the library changes.
+#[derive(Default)]
+pub struct FolderCounts {
+    rev: u64,
+    counts: HashMap<String, usize>,
+}
+
+impl FolderCounts {
+    /// The tracks in `folder` and the folders inside it.
+    pub fn of(&mut self, v: &CoreView, folder: &str) -> usize {
+        self.count(v, folder, |t| t.in_folder(folder))
+    }
+
+    /// The tracks in any of `folders`, each counted once; kept as `key`.
+    pub fn of_any(&mut self, v: &CoreView, key: &str, folders: &[String]) -> usize {
+        self.count(v, key, |t| folders.iter().any(|f| t.in_folder(f)))
+    }
+
+    fn count(&mut self, v: &CoreView, key: &str, inside: impl Fn(&Track) -> bool) -> usize {
+        if self.rev != v.lib.rev() {
+            self.rev = v.lib.rev();
+            self.counts.clear();
+        }
+        if let Some(n) = self.counts.get(key) {
+            return *n;
+        }
+        let n = v.lib.tracks().iter().filter(|t| inside(t)).count();
+        self.counts.insert(key.to_string(), n);
+        n
+    }
+}
+
 /// A row of All tracks' left pane, for the browse knob.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AllRow {
@@ -51,7 +85,15 @@ pub enum AllRow {
     Session(i64),
 }
 
-/// The order All tracks' pane lists the statuses in.
+/// The one status the list is filtered to, if it's filtered to just one.
+fn only_status(table: &TableState) -> Option<Status> {
+    match table.filters.iter().find(|(c, _)| *c == ColumnId::Status) {
+        Some((_, Filter::Status(s))) if s.len() == 1 => s.first().copied(),
+        _ => None,
+    }
+}
+
+/// The order *By analysis* lists the statuses in.
 const STATUSES: [Status; 5] = [
     Status::None,
     Status::Quick,
@@ -62,6 +104,10 @@ const STATUSES: [Status; 5] = [
 
 #[derive(Default)]
 pub struct LibraryUi {
+    /// *By analysis* is open, as of the last frame: its rows are the knob's then.
+    analysis_open: bool,
+    /// How many tracks each folder shown in the Storage tree has.
+    counts: FolderCounts,
     /// The browse knob's highlight in All tracks' pane, and whether it just moved.
     pub nav_cursor: Option<AllRow>,
     pub nav_scroll: bool,
@@ -166,17 +212,23 @@ impl LibraryUi {
         self.rev += 1;
     }
 
-    /// All tracks' pane's rows top to bottom, each with its folder (a session's is
-    /// the History, open while it shows).
+    /// The earshot library's pane's rows top to bottom, each with its folder (a
+    /// session's is the History, open while it shows). The statuses are last, and
+    /// only while *By analysis* is open. (The Storage tree, between, isn't the
+    /// knob's yet.)
     pub fn nav_rows(&self) -> Vec<(AllRow, Option<AllRow>)> {
-        let mut rows = vec![(AllRow::All, None)];
-        rows.extend(STATUSES.map(|s| (AllRow::Status(s), None)));
-        rows.push((AllRow::Duplicates, None));
-        rows.push((AllRow::History, None));
+        let mut rows = vec![
+            (AllRow::All, None),
+            (AllRow::Duplicates, None),
+            (AllRow::History, None),
+        ];
         if self.in_history() {
             for s in self.sessions.iter().flatten() {
                 rows.push((AllRow::Session(s.id), Some(AllRow::History)));
             }
+        }
+        if self.analysis_open {
+            rows.extend(STATUSES.map(|s| (AllRow::Status(s), None)));
         }
         rows
     }
@@ -363,25 +415,59 @@ impl LibraryUi {
     // ---- the Explorer -------------------------------------------------------------------
 
     /// The library folders on disk, as a tree.
-    /// The music folders, as a tree (the Sources pane's Folders section).
-    pub fn folder_tree(&mut self, ui: &mut Ui, v: &CoreView, out: &mut Vec<Command>) {
+    /// *Local* in the earshot library's Storage tree: the music folders on this
+    /// computer inside it, each a tree of its own.
+    pub fn storage_local(&mut self, ui: &mut Ui, v: &CoreView, out: &mut Vec<Command>) {
+        let id = ui.make_persistent_id("storage-local");
+        let state =
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
+        let mut clicked = false;
+        // Every track in a music folder, once (the folders list changing changes
+        // the library too, so the count is made again).
+        let folders = self.folders.clone();
+        let n = self.counts.of_any(v, "", &folders);
+        let mut header = state.show_header(ui, |ui| {
+            clicked = ui
+                .selectable_label(false, RichText::new(format!("Local  ({n})")).strong())
+                .on_hover_text("The music folders on this computer")
+                .clicked();
+        });
+        if clicked {
+            header.toggle();
+        }
+        header.body(|ui| self.folder_tree(ui, v, out));
+    }
+
+    /// The music folders, as a tree.
+    fn folder_tree(&mut self, ui: &mut Ui, v: &CoreView, out: &mut Vec<Command>) {
         if self.folders.is_empty() {
-            muted(ui, "No music folders yet.");
+            muted(ui, "No music folders yet: + (below) adds one.");
         }
         for root in self.folders.clone() {
             let name = root.rsplit('/').next().unwrap_or(&root).to_string();
+            // No folders inside it: nothing to open, so no arrow.
+            let has_children = !self
+                .subdirs
+                .entry(root.clone())
+                .or_insert_with(|| library::list_subdirs(&root).unwrap_or_default())
+                .is_empty();
             self.node(
                 ui,
                 &Subdir {
                     name,
                     path: root,
-                    has_children: true,
+                    has_children,
                 },
                 true,
                 v,
                 out,
             );
         }
+    }
+
+    /// The + pane's button that adds a music folder. (They're listed in the earshot
+    /// library, under Storage.)
+    pub fn add_folder(&mut self, ui: &mut Ui, out: &mut Vec<Command>) {
         if ui.button("Add a folder…").clicked() {
             out.push(LibraryCmd::PickRoots.into());
         }
@@ -389,11 +475,7 @@ impl LibraryUi {
 
     fn label(&mut self, ui: &mut Ui, d: &Subdir, root: bool, v: &CoreView, out: &mut Vec<Command>) {
         let selected = matches!(&self.scope, Scope::Folder(f) if *f == d.path);
-        let text = if root {
-            RichText::new(&d.name).strong()
-        } else {
-            RichText::new(&d.name)
-        };
+        let text = format!("{}  ({})", d.name, self.counts.of(v, &d.path));
         let r = ui.selectable_label(selected, text).on_hover_text(&d.path);
         if r.clicked() {
             self.set_scope(Scope::Folder(d.path.clone()));
@@ -427,9 +509,61 @@ impl LibraryUi {
 
     // ---- all tracks ------------------------------------------------------------------------
 
-    /// The All tracks source: every track, or only those with an analysis status
-    /// (it sets the status column's filter), or the duplicates. True when one was
-    /// clicked.
+    /// *By analysis*, at the foot of the earshot library's pane: a list that opens
+    /// onto each analysis status and how many tracks have it. Picking one lists only
+    /// those (it sets the status column's filter). True when one was clicked.
+    pub fn by_analysis(
+        &mut self,
+        ui: &mut Ui,
+        v: &CoreView,
+        table: &mut TableState,
+        out: &mut Vec<Command>,
+    ) -> bool {
+        let id = ui.make_persistent_id("library-by-analysis");
+        let state =
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+        let mut toggled = false;
+        let mut header = state.show_header(ui, |ui| {
+            toggled = ui
+                .selectable_label(false, RichText::new("By analysis").strong())
+                .on_hover_text("Only the tracks with one analysis status")
+                .clicked();
+        });
+        if toggled {
+            header.toggle();
+        }
+        self.analysis_open = header.is_open();
+        let mut picked = None;
+        header.body(|ui| {
+            let mut count = [0usize; Status::ALL.len()];
+            for t in v.lib.tracks() {
+                count[v.lib.status(t) as usize] += 1;
+            }
+            let all = self.scope == Scope::All;
+            let only = only_status(table);
+            for s in STATUSES {
+                let text = format!("{}  ({})", s.label(), count[s as usize]);
+                let r = ui
+                    .selectable_label(all && only == Some(s), text)
+                    .on_hover_text(format!(
+                        "Only tracks whose status is \"{}\" (in a search: status:{})",
+                        s.label(),
+                        s.name()
+                    ));
+                self.outline(ui, &r, &AllRow::Status(s));
+                if r.clicked() {
+                    picked = Some(AllRow::Status(s));
+                }
+            }
+        });
+        let Some(row) = picked else { return false };
+        self.show_row(&row, table, out);
+        self.nav_cursor = Some(row);
+        true
+    }
+
+    /// The top of the earshot library's pane: every track, then the duplicates and
+    /// the History. True when one was clicked.
     pub fn all_tracks(
         &mut self,
         ui: &mut Ui,
@@ -438,39 +572,15 @@ impl LibraryUi {
         out: &mut Vec<Command>,
     ) -> bool {
         let mut clicked = false;
-        let mut count = [0usize; Status::ALL.len()];
-        for t in v.lib.tracks() {
-            count[v.lib.status(t) as usize] += 1;
-        }
-        let only = match table.filters.iter().find(|(c, _)| *c == ColumnId::Status) {
-            Some((_, Filter::Status(s))) if s.len() == 1 => s.first().copied(),
-            _ => None,
-        };
         let all = self.scope == Scope::All;
         let mut picked = None;
         let r = ui.selectable_label(
-            all && only.is_none(),
+            all && only_status(table).is_none(),
             format!("All tracks  ({})", v.lib.tracks().len()),
         );
         self.outline(ui, &r, &AllRow::All);
         if r.clicked() {
             picked = Some(AllRow::All);
-        }
-        ui.add_space(4.0);
-        ui.label(RichText::new("BY ANALYSIS").size(10.0).color(THEME.muted));
-        for s in STATUSES {
-            let text = format!("{}  ({})", s.label(), count[s as usize]);
-            let r = ui
-                .selectable_label(all && only == Some(s), text)
-                .on_hover_text(format!(
-                    "Only tracks whose status is \"{}\" (in a search: status:{})",
-                    s.label(),
-                    s.name()
-                ));
-            self.outline(ui, &r, &AllRow::Status(s));
-            if r.clicked() {
-                picked = Some(AllRow::Status(s));
-            }
         }
         ui.add_space(4.0);
         ui.label(RichText::new("LIBRARY").size(10.0).color(THEME.muted));
