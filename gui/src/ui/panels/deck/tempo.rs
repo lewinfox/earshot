@@ -20,6 +20,7 @@ fn tempo_fader(range: TempoRange) -> (&'static Range, &'static [(f64, &'static s
             max: 1.0,
             default: 0.0,
             centre: Some(0.0),
+            taper: crate::core::bus::Taper::Linear,
             format,
         }
     }

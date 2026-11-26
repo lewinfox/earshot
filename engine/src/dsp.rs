@@ -178,12 +178,20 @@ impl Eq3 {
 
 /// Filter knob positions this close to the centre leave the sound alone.
 const FILTER_DEADZONE: f64 = 0.02;
-const FILTER_Q: f64 = 0.9;
+/// One 12 dB per octave stage with no resonance (Butterworth), as Mixxx's Filter
+/// effect comes.
+const FILTER_Q: f64 = BUTTERWORTH_Q;
+/// Where the low-pass starts and ends, and the power of the turn it's swept by
+/// (over 1 eases it in from the centre).
+const FILTER_LOW_PASS_HZ: (f64, f64) = (20_000.0, 150.0);
+const FILTER_LOW_PASS_EASE: f64 = 1.3;
+/// Where the high-pass starts and ends.
+const FILTER_HIGH_PASS_HZ: (f64, f64) = (20.0, 8_000.0);
 
 /// A one-knob DJ filter: -1..0 sweeps a low-pass down, 0..1 sweeps a high-pass up.
 #[derive(Clone, Copy, Debug)]
 pub struct DjFilter {
-    stages: [Biquad; 2],
+    stage: Biquad,
     /// -1 low-pass, 0 off, 1 high-pass: the mode the filter state belongs to.
     mode: i8,
     sr: f64,
@@ -192,22 +200,29 @@ pub struct DjFilter {
 impl DjFilter {
     pub fn new(sr: f64) -> DjFilter {
         DjFilter {
-            stages: [Biquad::new(Coeffs::lowpass(20_000.0, FILTER_Q, sr)); 2],
+            stage: Biquad::new(Coeffs::lowpass(20_000.0, FILTER_Q, sr)),
             mode: 0,
             sr,
         }
     }
 
-    /// Cut-off for knob position `v` (-1..1): low-pass from ~20 kHz down to 50 Hz,
-    /// high-pass from 20 Hz up to 10 kHz, swept exponentially by the square of the
-    /// turn, so it eases in from the centre (a quarter turn low-passes at ~14 kHz, a
-    /// half turn at ~4.5 kHz) and moves fastest towards the end.
+    /// Cut-off for knob position `v` (-1..1): the low-pass comes down from 20 kHz
+    /// to 150 Hz and the high-pass goes up from 20 Hz to 8 kHz, each exponentially
+    /// (by octaves) over its half of the knob, the low-pass easing in a little.
+    ///
+    /// Pioneer publishes no figures for its filter, so these are set by ear between
+    /// two curves that were tried: the square of the turn (hardly anything until
+    /// half way) and Mixxx's taper (hardly anything left past 9 and 3 o'clock). At
+    /// 10 and 2 o'clock (0.4) it's 4.5 kHz and 220 Hz, at 9 and 3 (0.6) 1.6 kHz and
+    /// 730 Hz, at three quarters 690 Hz and 1.8 kHz.
     pub fn cutoff(v: f64) -> f64 {
-        let a = v.abs().min(1.0).powi(2);
+        let turn = v.abs().min(1.0);
         if v < 0.0 {
-            20_000.0 * (50.0f64 / 20_000.0).powf(a)
+            let (top, bottom) = FILTER_LOW_PASS_HZ;
+            top * (bottom / top).powf(turn.powf(FILTER_LOW_PASS_EASE))
         } else {
-            20.0 * (10_000.0f64 / 20.0).powf(a)
+            let (bottom, top) = FILTER_HIGH_PASS_HZ;
+            bottom * (top / bottom).powf(turn)
         }
     }
 
@@ -221,9 +236,7 @@ impl DjFilter {
             1
         };
         if mode != self.mode {
-            for s in &mut self.stages {
-                s.reset();
-            }
+            self.stage.reset();
             self.mode = mode;
         }
         if mode == 0 {
@@ -235,9 +248,7 @@ impl DjFilter {
         } else {
             Coeffs::highpass(fc, FILTER_Q, self.sr)
         };
-        for s in &mut self.stages {
-            s.set(c);
-        }
+        self.stage.set(c);
     }
 
     pub fn active(&self) -> bool {
@@ -246,8 +257,7 @@ impl DjFilter {
 
     #[inline]
     pub fn run(&mut self, ch: usize, x: f64) -> f64 {
-        let y = self.stages[0].run(ch, x);
-        self.stages[1].run(ch, y)
+        self.stage.run(ch, x)
     }
 }
 
@@ -451,20 +461,39 @@ mod tests {
     }
 
     #[test]
-    fn the_filter_eases_in_from_the_centre() {
-        let near = |a: f64, b: f64| (a / b - 1.0).abs() < 0.05;
+    fn the_filter_sweeps_evenly_from_the_centre() {
+        // (the knob, the cut-off): low-pass to the left, high-pass to the right.
+        for (v, hz) in [
+            (-0.25, 8_930.0),
+            (-0.4, 4_520.0),
+            (-0.6, 1_610.0),
+            (-0.75, 692.0),
+            (-1.0, 150.0),
+            (0.25, 89.0),
+            (0.4, 220.0),
+            (0.6, 728.0),
+            (0.75, 1_789.0),
+            (1.0, 8_000.0),
+        ] {
+            let got = DjFilter::cutoff(v);
+            assert!((got / hz - 1.0).abs() < 0.01, "{v}: {got} for {hz}");
+        }
+        // Heard by 10 and 2 o'clock (0.4): the high-pass has thinned the bass and
+        // the low-pass dulled the top...
+        let through = |v: f64, hz: f64| {
+            let mut f = DjFilter::new(SR);
+            f.set(v);
+            db(rms_through(hz, |x| f.run(0, x)) / SINE_RMS)
+        };
+        assert!(through(0.4, 60.0) < -15.0, "{}", through(0.4, 60.0));
         assert!(
-            near(DjFilter::cutoff(-0.25), 13_800.0),
+            through(-0.4, 12_000.0) < -12.0,
             "{}",
-            DjFilter::cutoff(-0.25)
+            through(-0.4, 12_000.0)
         );
-        assert!(
-            near(DjFilter::cutoff(-0.5), 4_470.0),
-            "{}",
-            DjFilter::cutoff(-0.5)
-        );
-        assert!(near(DjFilter::cutoff(-1.0), 50.0));
-        assert!(near(DjFilter::cutoff(1.0), 10_000.0));
+        // ...and there's plenty left at 9 and 3 (0.6): the mids come through.
+        assert!(through(0.6, 2_000.0) > -1.0, "{}", through(0.6, 2_000.0));
+        assert!(through(-0.6, 500.0) > -1.0, "{}", through(-0.6, 500.0));
     }
 
     #[test]
